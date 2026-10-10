@@ -56,6 +56,11 @@ _HTML_HINT = re.compile(
 # 观察保留的高信号响应头（跳转目标/会话/指纹/鉴权）
 _OBS_HEADERS = ("location", "set-cookie", "server", "x-powered-by",
                 "content-type", "www-authenticate", "x-flag", "allow")
+# 解题思维流程（提示词层的方法引导，不限定具体动作；具体出牌仍由 LLM 按题决定）
+_METHODOLOGY = (
+    "解题流程：先信息收集（页面结构/注释/链接/表单/接口/响应头/报错/附件），"
+    "再基于已见证据推断攻击面并做针对性验证——每步能说出「看到了什么、"
+    "要验证什么」；信息不足时继续收集，不做无依据的爆破/注入/字典扫描。")
 
 
 def _challenge_text(ch: dict[str, Any]) -> str:
@@ -310,7 +315,10 @@ class CTFBaseAgent(SubAgent):
                 "返回 JSON：{\"angles\": [{\"name\": 英文短名(小写字母数字下划线), "
                 "\"angle\": 一句话调查角度}]}。角度必须针对本题的具体信息"
                 "（题面/附件/目标特征），互相不重叠，最多 slots 条；"
-                "题目信息不足以区分时给出 1 条即可。"),
+                + _METHODOLOGY +
+                " 角度先覆盖信息收集与目标理解，再考虑针对已见线索的深入利用；"
+                "不要以具体攻击技术（注入/爆破等）作为初始角度——除非题面信息"
+                "已明确指向它。题目信息不足以区分时给出 1 条即可。"),
         }, max_user_chars=8000, timeout_seconds=_SOLVER_TIMEOUT)
         raw_angles = (data or {}).get("angles")
         if not isinstance(raw_angles, list):
@@ -475,7 +483,8 @@ class CTFBaseAgent(SubAgent):
                 " 或 \"url\": \"完整URL\", \"params\": {...}, \"headers\": {...}, "
                 "\"data\": \"请求体\"}；analyze_text / analyze_attachments 无需参数；"
                 "conclude 带 {\"summary\": \"结论\"}。"
-                "规则：每步只做最有信息量的一件事；tried 中的动作禁止重复；"
+                + _METHODOLOGY +
+                " 规则：每步只做最有信息量的一件事；tried 中的动作禁止重复；"
                 "拿到疑似 Flag 线索先验证；信息耗尽或判断无解空间时 conclude。"),
             "attachments": [str(a)[:300] for a in ch.get("attachments", [])[:10]],
             "flags_found": state["flags"],
@@ -729,11 +738,12 @@ class CTFWebAgent(CTFBaseAgent):
     direction = "web"
     route_namespace = "ctf_web"
     direction_brief = (
-        "Web 题常见考点（按题面证据选用，不逐条硬套）：源码/备份泄露（.git、"
-        ".bak、www.zip）、robots.txt 与隐藏路径、参数注入（SQLi/命令注入/模板"
-        "注入——模板 canary 如 {{7*7}} 被求值为 49 即命中）、文件包含与路径穿越、"
-        "类型混淆与弱比较、反序列化、条件竞争、JWT 伪造、响应头/HTML 注释/JS "
-        "中的线索。先读题面页与响应内容，再按证据选方向。")
+        "先读入口页与响应内容（结构、注释、链接、表单、脚本、接口与响应头），"
+        "再按证据选方向；Web 题常见考点（在信息支撑下选用，不逐条硬套）：源码/"
+        "备份泄露（.git、.bak、www.zip）、robots.txt 与隐藏路径、参数注入"
+        "（SQLi/命令注入/模板注入——模板 canary 如 {{7*7}} 被求值为 49 即命中）、"
+        "文件包含与路径穿越、类型混淆与弱比较、反序列化、条件竞争、JWT 伪造、"
+        "响应头/HTML 注释/JS 中的线索。")
 
 
 # ================================================================ Crypto 专项
