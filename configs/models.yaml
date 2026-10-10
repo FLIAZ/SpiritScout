@@ -1,131 +1,76 @@
-# 模型注册表（设计书 4.9.4，硬约束 C9）——云端模型驱动。
-# 本系统的 Agent 只是框架：规划、决策、分析、payload 生成等大部分操作
-# 由这里配置的云端大模型完成；规则引擎只保留范围/合规/预算/裁决护栏。
-#
-# 接入方式：OpenAI 兼容（provider: openai_compatible）或 Anthropic 兼容
-# （provider: anthropic_compatible）端点，填 base_url + model + api_key 即启用。
-# api_key 只允许 ${ENV_VAR} 环境变量注入（合规 G8，禁止明文 key 落盘）。
-# 也可在 Web 控制台侧栏「模型」里图形化增删改，写回本文件。
-#
-# api_format 端点协议（默认 auto 按 provider 推导，一般不用填）：
-#   chat_completions   OpenAI 对话补全（messages/choices；方舟/DeepSeek/Qwen 等
-#                      绝大多数 OpenAI 兼容端点，auto 默认走这条）
-#   responses          OpenAI Responses 协议（input+instructions/output items；
-#                      仅 o 系/gpt-5 等原生 Responses 端点需显式指定）
-#   anthropic_messages Anthropic Messages 协议（Claude 系列，auto 自动选）
-#
-# tier 五档（4.9.1）：flagship 旗舰 / rigorous 严谨 / code 代码 / fast 快模 / light 轻量
-# 差异化分工是六协作模式（4.9.3）与级联升级（6.10）的基础，建议至少配 2 档。
-#
-# 未配置 key 前系统无法发起 LLM 调用；离线开发/测试请用 configs/models.mock.yaml。
-
+# 模型注册表（设计书 4.9.4，硬约束 C9：OpenAI/Anthropic 兼容 API）。
+# 本文件可被 Web 控制台「模型」面板写回（手写注释会被规范化；完整注释模板见
+# configs/models.example.yaml）。api_key 仅允许 ${ENV_VAR} 注入（合规 G8）。
 models:
-  # ========== 火山引擎方舟（Ark）==========
-  # OpenAI 兼容端点：https://ark.cn-beijing.volces.com/api/plan/v3
-  # Anthropic 兼容端点：https://ark.cn-beijing.volces.com/api/plan
-  # model 填模型名（如 ark-code-latest）或推理接入点 ID（ep-xxxxxxxx）。
-  # export SPIRITSCOUT_LLM_API_KEY=<你的 API Key>（无人值守部署用；
-  # 交互使用推荐在 Web「模型」页直填——仅存服务器内存，不落盘）
-  # 当前 5 个 tier 别名共用 ark-code-latest；有不同档位模型时改对应 model 即可。
-  - alias: ark-flagship
-    provider: openai_compatible
-    model: ark-code-latest          # ← 改成你的接入点/模型名
-    base_url: https://ark.cn-beijing.volces.com/api/plan/v3
-    api_key: ${SPIRITSCOUT_LLM_API_KEY}
-    tier: flagship
-    capabilities: [reasoning, code, chinese, security]
-    cost_input_per_mtok: 0.8                  # 元/百万token，仅用于预算治理
-    cost_output_per_mtok: 2.0
-    rate_limit_rpm: 300
-    quality_score: 1.0
-
-  - alias: ark-code
-    provider: openai_compatible
-    model: ark-code-latest              # 如 DeepSeek/豆包代码向接入点
-    base_url: https://ark.cn-beijing.volces.com/api/plan/v3
-    api_key: ${SPIRITSCOUT_LLM_API_KEY}
-    tier: code
-    capabilities: [code, chinese]
-    cost_input_per_mtok: 0.4
-    cost_output_per_mtok: 0.8
-    rate_limit_rpm: 300
-    quality_score: 0.95
-
-  - alias: ark-fast
-    provider: openai_compatible
-    model: ark-code-latest              # 如 doubao-lite/flash 类
-    base_url: https://ark.cn-beijing.volces.com/api/plan/v3
-    api_key: ${SPIRITSCOUT_LLM_API_KEY}
-    tier: fast
-    capabilities: [chinese]
-    cost_input_per_mtok: 0.1
-    cost_output_per_mtok: 0.2
-    rate_limit_rpm: 600
-    quality_score: 0.9
-
-  - alias: ark-rigorous
-    provider: openai_compatible
-    model: ark-code-latest         # 如 deepseek-r1 类强推理接入点
-    base_url: https://ark.cn-beijing.volces.com/api/plan/v3
-    api_key: ${SPIRITSCOUT_LLM_API_KEY}
-    tier: rigorous
-    capabilities: [reasoning, chinese, security]
-    cost_input_per_mtok: 0.5
-    cost_output_per_mtok: 1.5
-    rate_limit_rpm: 120
-    quality_score: 0.98
-
-  # 主备关系（4.9.2）：ark-fast 不可达时由本机另一个快模接入点顶替
-  - alias: ark-fast-backup
-    provider: openai_compatible
-    model: ark-code-latest
-    base_url: https://ark.cn-beijing.volces.com/api/plan/v3
-    api_key: ${SPIRITSCOUT_LLM_API_KEY}
-    tier: fast
-    capabilities: [chinese]
-    cost_input_per_mtok: 0.1
-    cost_output_per_mtok: 0.2
-    rate_limit_rpm: 600
-    quality_score: 0.85
-    is_fallback_for: [ark-fast]
-
-  # ============ 其他兼容端点示例（取消注释并改 alias/model 即可） ============
-  # DeepSeek：export DEEPSEEK_API_KEY=...
-  # - alias: deepseek-chat
-  #   provider: openai_compatible
-  #   model: deepseek-chat
-  #   base_url: https://api.deepseek.com/v1
-  #   api_key: ${DEEPSEEK_API_KEY}
-  #   tier: flagship
-  #   capabilities: [reasoning, code, chinese, security]
-  #   quality_score: 1.0
-  #
-  # 通义千问（DashScope 兼容模式）：export DASHSCOPE_API_KEY=...
-  # - alias: qwen-max
-  #   provider: openai_compatible
-  #   model: qwen-max
-  #   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-  #   api_key: ${DASHSCOPE_API_KEY}
-  #   tier: flagship
-  #   capabilities: [reasoning, code, chinese]
-  #   quality_score: 0.98
-  #
-  # OpenAI：export OPENAI_API_KEY=...
-  # - alias: gpt-4o
-  #   provider: openai_compatible
-  #   model: gpt-4o
-  #   base_url: https://api.openai.com/v1      # 或你的中转端点
-  #   api_key: ${OPENAI_API_KEY}
-  #   tier: flagship
-  #   capabilities: [reasoning, code, security]
-  #   quality_score: 1.0
-  #
-  # Claude（Anthropic 兼容）：export ANTHROPIC_API_KEY=...
-  # - alias: claude-sonnet
-  #   provider: anthropic_compatible
-  #   model: claude-sonnet-4-5
-  #   base_url: https://api.anthropic.com      # 或你的中转端点
-  #   api_key: ${ANTHROPIC_API_KEY}
-  #   tier: flagship
-  #   capabilities: [reasoning, code, security]
-  #   quality_score: 1.0
+- alias: ark-flagship
+  provider: openai_compatible
+  model: ark-code-latest
+  base_url: https://ark.cn-beijing.volces.com/api/plan/v3
+  api_key: ${SPIRITSCOUT_LLM_API_KEY}
+  tier: flagship
+  cost_input_per_mtok: 0.8
+  cost_output_per_mtok: 2
+  rate_limit_rpm: 300
+  quality_score: 1
+  capabilities:
+  - reasoning
+  - code
+  - chinese
+  - security
+  is_fallback_for: []
+- alias: ark-code
+  provider: openai_compatible
+  model: ark-code-latest
+  base_url: https://ark.cn-beijing.volces.com/api/plan/v3
+  api_key: ${SPIRITSCOUT_LLM_API_KEY}
+  tier: code
+  cost_input_per_mtok: 0.4
+  cost_output_per_mtok: 0.8
+  rate_limit_rpm: 300
+  quality_score: 0.95
+  capabilities:
+  - code
+  - chinese
+  is_fallback_for: []
+- alias: ark-fast
+  provider: openai_compatible
+  model: ark-code-latest
+  base_url: https://ark.cn-beijing.volces.com/api/plan/v3
+  api_key: ${SPIRITSCOUT_LLM_API_KEY}
+  tier: fast
+  cost_input_per_mtok: 0.1
+  cost_output_per_mtok: 0.2
+  rate_limit_rpm: 600
+  quality_score: 0.9
+  capabilities:
+  - chinese
+  is_fallback_for: []
+- alias: ark-rigorous
+  provider: openai_compatible
+  model: ark-code-latest
+  base_url: https://ark.cn-beijing.volces.com/api/plan/v3
+  api_key: ${SPIRITSCOUT_LLM_API_KEY}
+  tier: rigorous
+  cost_input_per_mtok: 0.5
+  cost_output_per_mtok: 1.5
+  rate_limit_rpm: 120
+  quality_score: 0.98
+  capabilities:
+  - reasoning
+  - chinese
+  - security
+  is_fallback_for: []
+- alias: ark-fast-backup
+  provider: openai_compatible
+  model: ark-code-latest
+  base_url: https://ark.cn-beijing.volces.com/api/plan/v3
+  api_key: ${SPIRITSCOUT_LLM_API_KEY}
+  tier: fast
+  cost_input_per_mtok: 0.1
+  cost_output_per_mtok: 0.2
+  rate_limit_rpm: 600
+  quality_score: 0.85
+  capabilities:
+  - chinese
+  is_fallback_for:
+  - ark-fast
