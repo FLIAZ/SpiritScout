@@ -28,7 +28,7 @@ from spiritscout.core.audit import AuditLogger
 from spiritscout.core.exceptions import RuleConflictError, SpiritScoutError
 from spiritscout.core.models import BlackboardLayer, RunMode
 from spiritscout.launch import LaunchRequest, prepare_launch
-from spiritscout.web import agentcfg, modelcfg
+from spiritscout.web import agentcfg, modelcfg, vault
 from spiritscout.web.events import stream_audit
 from spiritscout.web.sessions import TERMINAL_STATES, Session, SessionManager
 
@@ -141,6 +141,7 @@ def _read_state(session: Session) -> dict[str, Any]:
 
 def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                max_concurrent: int = 4) -> FastAPI:
+    vault.configure(cfg.workspace.root)   # 密钥库落在工作区（vault.db/vault.key）
     manager = SessionManager(cfg, models, max_concurrent=max_concurrent)
 
     @asynccontextmanager
@@ -338,7 +339,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
 
     def _models_view(entries: list[dict[str, Any]]) -> dict[str, Any]:
         return {"path": cfg.models_config_path,
-                "models": [{**e, **modelcfg.key_status(e)} for e in entries]}
+                "models": [{**e, **vault.key_status(e)} for e in entries]}
 
     @app.get("/api/models")
     async def list_models() -> dict[str, Any]:
@@ -350,7 +351,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         return HTTPException(status, msg)
 
     def _stash_key(alias: str, payload: dict[str, Any]) -> None:
-        """摘出 api_key_value 存内存保管库（G8：绝不进 YAML、不回传、留痕不含值）。
+        """摘出 api_key_value 加密存入密钥库（G8：绝不进 YAML、不回传、留痕不含值）。
 
         调用方必须先经本函数处理再把 payload 交给 upsert_entry——
         否则直填密钥会被当作普通字段写盘。
@@ -358,11 +359,11 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         if "api_key_value" not in payload:
             return
         value = str(payload.pop("api_key_value") or "").strip()
-        modelcfg.set_memory_key(alias, value)      # 空串 = 清除
+        vault.set_key(alias, value)                # 空串 = 清除
         AuditLogger(cfg.audit_log_path).log(
             "system.lifecycle", "modelcfg",
             {"action": "model_key_set" if value else "model_key_cleared",
-             "alias": alias, "source": "web_memory"})
+             "alias": alias, "source": "vault"})
 
     @app.post("/api/models", status_code=201)
     async def add_model(payload: dict[str, Any]) -> dict[str, Any]:
@@ -385,21 +386,8 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                 cfg.models_config_path, payload, original_alias=alias)
         except SpiritScoutError as exc:
             raise _model_error(exc) from exc
-        modelcfg.rename_memory_key(alias, new_alias)
+        vault.rename_key(alias, new_alias)
         return _models_view(entries)
-
-    @app.post("/api/models/{alias}/key")
-    async def set_model_key(alias: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """仅登记内存密钥（页面缓存在控制台重启后的自动恢复通道）。"""
-        entries = modelcfg.read_entries(cfg.models_config_path)
-        entry = next((e for e in entries if e.get("alias") == alias), None)
-        if entry is None:
-            raise HTTPException(404, f"模型不存在: {alias}")
-        value = str(payload.get("api_key_value") or "").strip()
-        if not value:
-            raise HTTPException(422, "api_key_value 不能为空")
-        _stash_key(alias, {"api_key_value": value})
-        return {"alias": alias, **modelcfg.key_status(entry)}
 
     @app.delete("/api/models/{alias}")
     async def delete_model(alias: str) -> dict[str, Any]:
@@ -407,7 +395,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             entries = modelcfg.delete_entry(cfg.models_config_path, alias)
         except SpiritScoutError as exc:
             raise _model_error(exc) from exc
-        modelcfg.drop_memory_key(alias)
+        vault.drop_key(alias)
         return _models_view(entries)
 
     @app.post("/api/models/test")
@@ -417,7 +405,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         from spiritscout.gateway import ModelGateway, ModelRegistry
 
         alias = str(payload.get("alias") or "")
-        entries = modelcfg.apply_memory_keys(
+        entries = vault.apply_keys(
             load_model_config(cfg.models_config_path))
         entry = next((e for e in entries if e.alias == alias), None)
         if entry is None:
@@ -425,7 +413,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         if not entry.api_key:
             return {"ok": False,
                     "error": "密钥未配置——在「模型」页编辑填入密钥"
-                             "（仅存内存，不落盘）或配置环境变量"}
+                             "（加密存入本机密钥库）或配置环境变量"}
         gateway = ModelGateway(
             ModelRegistry(entries),
             GatewayConfig(request_timeout_seconds=25),

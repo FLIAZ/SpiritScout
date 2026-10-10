@@ -439,7 +439,7 @@ dialog::backdrop { background: rgba(10, 14, 22, .45); }
     </select></label>
     <label><span>模型名 / 接入点 ID *</span><input id="m-model" placeholder="如 ark-code-latest 或 ep-xxx"></label>
     <label><span>API 地址</span><input id="m-baseurl" placeholder="https://..."></label>
-    <label><span>API Key（直填）</span><input id="m-keyval" type="password" placeholder="不落盘：服务器只存内存，本机浏览器缓存复用" autocomplete="new-password"></label>
+    <label><span>API Key（直填）</span><input id="m-keyval" type="password" placeholder="加密存入本机密钥库，不写回配置文件" autocomplete="new-password"></label>
     <label><span>或环境变量名</span><input id="m-keyenv" placeholder="如 SPIRITSCOUT_LLM_API_KEY（无人值守部署用）"></label>
     <div id="m-keystat" class="muted" style="grid-column:1/-1;font-size:11.5px"></div>
     <label><span>档位</span><select id="m-tier">
@@ -978,32 +978,12 @@ async function loadAgents() {
 }
 
 /* ================= 模型 ================= */
-/* 密钥页面缓存（localStorage）：用户本机浏览器侧保存，控制台重启后自动
-   回填到服务器内存——服务器侧密钥永不落盘（G8），用户免于重复填写。 */
-const keyCache = {
-  _read() { try { return JSON.parse(localStorage.getItem("spiritscout.modelkeys") || "{}"); } catch { return {}; } },
-  _write(m) { try { localStorage.setItem("spiritscout.modelkeys", JSON.stringify(m)); } catch {} },
-  get(alias) { return this._read()[alias] || ""; },
-  set(alias, key) { const m = this._read(); m[alias] = key; this._write(m); },
-  drop(alias) { const m = this._read(); delete m[alias]; this._write(m); },
-};
-async function restoreModelKeys() {
-  try {
-    const d = await api("/api/models");
-    const pending = d.models.filter(m => !m.key_configured && keyCache.get(m.alias));
-    for (const m of pending) {
-      await api(`/api/models/${encodeURIComponent(m.alias)}/key`,
-        { method: "POST", body: JSON.stringify({ api_key_value: keyCache.get(m.alias) }) });
-    }
-    if (pending.length) toast(`已从本机页面缓存恢复 ${pending.length} 个模型的密钥`);
-    return pending.length > 0;
-  } catch { return false; }
-}
+/* 密钥由服务端密钥库加密保管（工作区 vault.db），页面不缓存、不回传。 */
 async function loadModels() {
   try {
     const d = await api("/api/models");
     S.models = d;
-    $("#models-path").textContent = d.path + "（密钥不落盘：直填仅存服务器内存，本机浏览器缓存复用）";
+    $("#models-path").textContent = d.path + "（密钥加密存入本机密钥库，不写回本文件）";
     $("#models-list").innerHTML = d.models.length ? `<table class="list">
       <thead><tr><th>别名</th><th>模型</th><th>协议</th><th>档位</th><th>密钥</th><th>质量</th><th></th></tr></thead>
       <tbody>${d.models.map(m => `<tr>
@@ -1011,9 +991,9 @@ async function loadModels() {
         <td class="mono" style="font-size:12px">${esc(m.model || "—")}<br><span class="muted" style="font-size:11px">${esc(m.base_url || "")}</span></td>
         <td>${esc(m.provider)}</td>
         <td><span class="tag blue">${TIER_CN[m.tier] || esc(m.tier)}</span></td>
-        <td>${m.key_source === "memory" ? `<span class="tag green" title="Web 直填，服务器仅存内存；本机浏览器缓存会在重启后自动恢复">已就绪 · 内存</span>`
+        <td>${m.key_source === "vault" ? `<span class="tag green" title="已加密存入本机密钥库（vault.db），重启与更新均保留">已就绪 · 密钥库</span>`
             : m.key_source === "env" ? `<span class="tag green" title="环境变量 ${esc(m.key_env)}">已就绪 · 环境变量</span>`
-            : `<span class="tag red" title="编辑模型填入密钥（仅存内存），或配置环境变量">未配置</span>`}</td>
+            : `<span class="tag red" title="编辑模型填入密钥（加密存入本机密钥库），或配置环境变量">未配置</span>`}</td>
         <td>${m.quality_score}</td>
         <td style="white-space:nowrap">
           <button class="btn sm" onclick="modelTest('${esc(m.alias)}')">测试</button>
@@ -1043,7 +1023,7 @@ window.modelEdit = alias => {
   $("#m-keyenv").value = m.key_env || "";
   $("#m-keyval").value = "";
   $("#m-keystat").textContent =
-    m.key_source === "memory" ? "当前密钥：内存已配置（留空表示保持不变；重填即覆盖）"
+    m.key_source === "vault" ? "当前密钥：密钥库已配置（留空表示保持不变；重填即覆盖）"
     : m.key_source === "env" ? `当前密钥：环境变量 ${m.key_env} 已配置`
     : "当前密钥：未配置";
   $("#m-tier").value = m.tier || "fast";
@@ -1055,7 +1035,7 @@ window.modelEdit = alias => {
 };
 window.modelDel = async alias => {
   try { await api(`/api/models/${encodeURIComponent(alias)}`, { method: "DELETE" });
-    keyCache.drop(alias); toast(`已删除 ${alias}`); loadModels(); }
+    toast(`已删除 ${alias}`); loadModels(); }
   catch (e) { toast(e.message, true); }
 };
 $("#m-add").onclick = () => {
@@ -1081,14 +1061,16 @@ $("#m-save").onclick = async () => {
     rate_limit_rpm: +$("#m-rpm").value || 60, quality_score: +$("#m-quality").value || 1,
     capabilities: split($("#m-caps").value), is_fallback_for: split($("#m-fb").value),
   };
-  if (keyval) body.api_key_value = keyval;    // 直填：仅内存 + 本机页面缓存
+  // 直填：服务端加密存入密钥库；把环境变量改名/新填 = 切到环境变量模式，
+  // 顺带清掉库内直填密钥（否则库内密钥优先级更高，环境变量形同虚设）
+  const orig = S.medit ? (S.models.models || []).find(x => x.alias === S.medit) : null;
+  if (keyval) body.api_key_value = keyval;
+  else if (orig && orig.key_source === "vault" && env !== (orig.key_env || "")) body.api_key_value = "";
   if (!body.alias) { toast("别名必填", true); return; }
   try {
     if (S.medit) await api(`/api/models/${encodeURIComponent(S.medit)}`,
       { method: "PUT", body: JSON.stringify(body) });
     else await api("/api/models", { method: "POST", body: JSON.stringify(body) });
-    if (keyval) keyCache.set(body.alias, keyval);
-    else if (env) keyCache.drop(body.alias);  // 切到环境变量模式即清缓存
     $("#m-dlg").close(); toast("已保存，新会话即刻生效"); loadModels();
   } catch (e) { toast(e.message, true); }
 };
@@ -1132,7 +1114,6 @@ $("#rc-confirm").onclick = async () => {
 /* ================= 启动 ================= */
 (async function boot() {
   try { S.agents = await api("/api/agents"); } catch {}
-  await restoreModelKeys();
   fetch("/openapi.json").then(r => r.json()).then(j => { $("#ver").textContent = "v" + (j.info?.version || ""); }).catch(() => {});
   await refreshSessions();
   setInterval(refreshSessions, 5000);

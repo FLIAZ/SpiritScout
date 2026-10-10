@@ -27,7 +27,7 @@ from spiritscout.core.exceptions import SpiritScoutError
 from spiritscout.core.models import RunMode
 from spiritscout.launch import LaunchPlan, LaunchRequest, prepare_launch
 from spiritscout.policy.approvals import ApprovalBroker
-from spiritscout.web import agentcfg, modelcfg
+from spiritscout.web import agentcfg, vault
 
 
 async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
@@ -281,7 +281,7 @@ class SessionManager:
         # 热生效：Web 端改模型注册表后，新会话立即用新配置；
         # 加载失败显式报错（不静默退回旧配置）。先于建目录，失败不留痕。
         from spiritscout.config import load_model_config
-        models = modelcfg.apply_memory_keys(
+        models = vault.apply_keys(
             load_model_config(self._cfg.models_config_path))
         if not models:
             raise SpiritScoutError(

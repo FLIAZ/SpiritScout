@@ -1,10 +1,9 @@
 """模型注册表的文件读写（Web 模型管理）。
 
-安全边界（合规 G8）：密钥不落盘。落盘的 api_key 只允许 ``${ENV_VAR}``
-占位符形式；Web 直填的密钥只保存在本进程的内存保管库（控制台重启即
-失效，需重新填写——这是「不落盘」的代价，无人值守部署请用环境变量
-通道）。本模块读写给前端的永远是 YAML 原文（占位符不展开），已解析
-的密钥只存在于内存 ModelEntry 中，API 绝不回传。
+安全边界（合规 G8）：密钥不以明文落盘。YAML 里的 api_key 只允许
+``${ENV_VAR}`` 占位符；Web 直填的密钥加密存入本机密钥库（见 vault 模块），
+本模块读写给前端的永远是 YAML 原文（占位符不展开），已解析的密钥只存在
+于内存 ModelEntry 中，API 绝不回传。
 写回用 PyYAML 规范化（手写注释不保留），原子替换防半写损坏。
 """
 
@@ -42,58 +41,7 @@ def normalize_api_key(raw: str) -> str:
     raise SpiritScoutError(
         "api_key 只允许填环境变量名（如 SPIRITSCOUT_LLM_API_KEY）"
         "或 ${SPIRITSCOUT_LLM_API_KEY} 形式（G8）；"
-        "直填密钥请用 api_key_value 字段（仅存内存，不落盘）")
-
-
-# ------------------------------------------------------------ 内存密钥保管库
-# Web 直填的密钥只活在本 dict 里（按 alias 索引），永不写盘、API 永不回传
-_MEMORY_KEYS: dict[str, str] = {}
-
-
-def set_memory_key(alias: str, key: str) -> None:
-    """登记 Web 直填密钥（空串 = 清除）。"""
-    if key:
-        _MEMORY_KEYS[alias] = key
-    else:
-        _MEMORY_KEYS.pop(alias, None)
-
-
-def drop_memory_key(alias: str) -> None:
-    _MEMORY_KEYS.pop(alias, None)
-
-
-def rename_memory_key(old_alias: str, new_alias: str) -> None:
-    if old_alias != new_alias and old_alias in _MEMORY_KEYS:
-        _MEMORY_KEYS[new_alias] = _MEMORY_KEYS.pop(old_alias)
-
-
-def apply_memory_keys(models: list[ModelEntry]) -> list[ModelEntry]:
-    """内存密钥覆盖到加载后的注册表（内存直填优先于环境变量占位符）。"""
-    return [m.model_copy(update={"api_key": _MEMORY_KEYS[m.alias]})
-            if m.alias in _MEMORY_KEYS else m for m in models]
-
-
-def key_status(entry: dict[str, Any]) -> dict[str, Any]:
-    """从原始条目提取 key 状态（不展开、不回传密钥本身）。
-
-    key_source：memory（Web 直填，仅内存）/ env（环境变量）/ none（未配置）。
-    """
-    api_key = str(entry.get("api_key") or "")
-    m = _ENV_REF.match(api_key)
-    env = m.group(1) if m else ""
-    alias = str(entry.get("alias") or "")
-    if alias in _MEMORY_KEYS:
-        source = "memory"
-    elif env and os.environ.get(env):
-        source = "env"
-    else:
-        source = "none"
-    return {
-        "key_env": env,
-        "key_source": source,
-        "key_configured": source != "none",
-        "key_is_placeholder": bool(m) or not api_key,
-    }
+        "直填密钥请用 api_key_value 字段（加密存入本机密钥库）")
 
 
 def read_entries(path: str | Path) -> list[dict[str, Any]]:
