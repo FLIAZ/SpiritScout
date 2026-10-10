@@ -105,6 +105,7 @@ class Session:
     mode: str
     target: str
     workspace: Path
+    title: str = ""                                          # 会话名（可重命名；空 = 自动摘要）
     request: dict[str, Any] = field(default_factory=dict)   # 启动参数（展示用）
     status: str = "created"      # created/running/completed/failed/stopped/interrupted
     created_at: float = 0.0
@@ -146,9 +147,20 @@ class Session:
                             key=lambda p: p.stat().st_mtime, reverse=True)
         return candidates[0] if candidates else None
 
+    def display_title(self) -> str:
+        """会话名：用户重命名优先；否则取任务描述首行（无则退回目标）。"""
+        if self.title:
+            return self.title
+        mission = str(self.request.get("mission") or "").strip()
+        if mission:
+            first = mission.splitlines()[0].strip()
+            return first[:42] + ("…" if len(first) > 42 else "")
+        return self.target or self.session_id
+
     def brief(self, *, include_summary: bool = True) -> dict[str, Any]:
         out: dict[str, Any] = {
             "session_id": self.session_id, "mode": self.mode,
+            "title": self.display_title(), "renamed": bool(self.title),
             "target": self.target, "status": self.status,
             "created_at": self.created_at, "started_at": self.started_at,
             "finished_at": self.finished_at, "error": self.error,
@@ -194,6 +206,7 @@ class SessionManager:
             session = Session(
                 session_id=data["session_id"], mode=data["mode"],
                 target=data["target"], workspace=meta.parent,
+                title=data.get("title", ""),
                 request=data.get("request", {}),
                 status=data.get("status", "interrupted"),
                 created_at=data.get("created_at", 0.0),
@@ -210,7 +223,8 @@ class SessionManager:
     def _persist(self, session: Session) -> None:
         session.meta_path.write_text(json.dumps({
             "session_id": session.session_id, "mode": session.mode,
-            "target": session.target, "request": session.request,
+            "target": session.target, "title": session.title,
+            "request": session.request,
             "status": session.status, "created_at": session.created_at,
             "started_at": session.started_at, "finished_at": session.finished_at,
             "summary": session.summary, "error": session.error,
@@ -292,6 +306,7 @@ class SessionManager:
             session_id=session_id,
             mode=str(payload["mode"]), target=plan.target,
             workspace=self.root / session_id,
+            title=str(payload.get("title") or "").strip()[:80],
             request={k: v for k, v in payload.items()
                      if k not in ("challenges_yaml", "rules_yaml")},
             created_at=time.time(),
@@ -409,6 +424,15 @@ class SessionManager:
             session.status = "stopped"
             session.finished_at = time.time()
             self._persist(session)
+        return session
+
+    def rename(self, session_id: str, title: str) -> Session | None:
+        """重命名会话（任意状态可改；空串 = 恢复自动摘要名）。"""
+        session = self._sessions.get(session_id)
+        if session is None:
+            return None
+        session.title = title.strip()[:80]
+        self._persist(session)
         return session
 
     async def delete(self, session_id: str, *, confirm: bool = False) -> Session | None:

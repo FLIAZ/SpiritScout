@@ -177,7 +177,9 @@ class MasterAgent:
         tactic_map = ctx.tactic_map or TACTIC_AGENT_MAP
         task_objs: list[tuple[Task, str]] = []
         for node in dag.ready_nodes():
-            mapping = tactic_map.get(node.tactic)
+            # 重攻节点战术名带 @轮次 后缀（同题换角度再攻），按基名解析归属
+            mapping = (tactic_map.get(node.tactic)
+                       or tactic_map.get(node.tactic.split("@", 1)[0]))
             if mapping is None:
                 # 未映射战术（MVP 未装配对应子 Agent）：标记跳过，避免死锁
                 dag.mark(node.node_id, TaskStatus.CANCELLED)
@@ -220,11 +222,29 @@ class MasterAgent:
     async def _assign_route_budgets(self, task_objs: list[tuple[Task, str]]) -> None:
         """按任务复杂度/攻击面逐任务决策并发分支路线预算（1~8）。
 
+        CTF 解题任务例外：单线起步（简单题简单做）——解题是一条持久对话，
+        首轮不并行铺开分支；未破题由复盘轮次换角度重攻（ctf_plan_provider
+        的重攻节点）。其余任务仍由 LLM 逐任务决策。
+
         LLM 是预算建议者；规则引擎只做边界钳制（1~8 硬护栏，防扇出失控）。
         LLM 不可用/应答非法 → 保持未指定（子 Agent 按模板自然条数），留痕不静默。
         """
         ctx = self.ctx
         assert ctx.audit is not None
+        rest: list[tuple[Task, str]] = []
+        ctf_assigned: list[dict[str, Any]] = []
+        for t, nid in task_objs:
+            if t.task_type == "ctf_solve":
+                t.max_routes = 1
+                ctf_assigned.append({"task_id": t.task_id, "route_budget": 1,
+                                     "rationale": "CTF 单线起步，未破题由复盘轮换角度重攻"})
+            else:
+                rest.append((t, nid))
+        if ctf_assigned:
+            ctx.audit.log("decision.change", self.agent_id,
+                          {"action": "route_budget", "assigned": ctf_assigned})
+        if not rest:
+            return
         digest = [
             {"index": i, "task_type": t.task_type, "agent": t.agent_type.value,
              "target": t.target, "title": str(t.payload.get("node_title", "")),
@@ -232,7 +252,7 @@ class MasterAgent:
                            (t.payload.get("challenge") or {}).items()
                            if k in ("title", "direction", "category", "points",
                                     "description")}}
-            for i, (t, _) in enumerate(task_objs)]
+            for i, (t, _) in enumerate(rest)]
         try:
             resp = await ctx.gateway.chat(
                 [
@@ -270,7 +290,7 @@ class MasterAgent:
                 "reason": "LLM 应答无有效预算，保持模板自然条数"})
             return
         assigned = []
-        for i, (t, _) in enumerate(task_objs):
+        for i, (t, _) in enumerate(rest):
             if i in budgets:
                 t.max_routes, rationale = budgets[i]
                 assigned.append({"task_id": t.task_id, "route_budget": t.max_routes,

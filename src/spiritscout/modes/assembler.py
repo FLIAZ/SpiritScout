@@ -17,7 +17,7 @@ from spiritscout.agents.recon import ReconAgent
 from spiritscout.agents.sub.base import SubAgent, SubAgentContext
 from spiritscout.agents.webvuln import WebVulnAgent
 from spiritscout.competition import CompetitionEngine, CompetitionRules, ContestType
-from spiritscout.core.models import AgentType, RunMode
+from spiritscout.core.models import AgentType, RunMode, TaskStatus
 from spiritscout.ctf.agents import (
     CTFCryptoAgent,
     CTFMiscAgent,
@@ -77,19 +77,40 @@ def classify_challenge(challenge: dict[str, Any]) -> str:
     return "misc"
 
 
-def ctf_plan_provider(challenges: list[dict[str, Any]]) -> dict[str, Any]:
-    """CTF 元规划（规则化，5.2.1）：跳过侦察，按方向生成 DAG 节点。"""
-    nodes = []
+def ctf_plan_provider(challenges: list[dict[str, Any]], *,
+                      round_no: int = 0,
+                      solved: set[str] | None = None,
+                      pending: set[str] | None = None) -> dict[str, Any]:
+    """CTF 元规划（规则化，5.2.1）：跳过侦察，按方向生成 DAG 节点。
+
+    首轮：每题一个方向节点。重攻轮（round_no>0）：对尚未拿到 Flag 且本轮
+    尚无待发节点的题追加一个新节点（战术名带 @轮次 后缀，绕开「同战术不
+    重建」的去重），子 Agent 据此换角度重开一条全新解题对话——跨轮不重复
+    做功由环形台账与题级共享结论保证。
+    """
+    solved = solved or set()
+    pending = pending or set()
+    nodes: list[dict[str, Any]] = []
     for ch in challenges:
+        cid = str(ch.get("id") or ch.get("title") or "?")
+        if round_no > 0 and (cid in solved or cid in pending):
+            continue
         direction = classify_challenge(ch)
+        tactic = _DIRECTION_TO_TACTIC[direction]
+        title = f"[{direction}] {ch.get('title', cid)}"
+        meta_ch = {**ch, "direction": direction}
+        if round_no > 0:
+            tactic = f"{tactic}@{round_no}"
+            title = f"重攻 #{round_no} {title}"
+            meta_ch["retry_round"] = round_no
         nodes.append({
-            "tactic": _DIRECTION_TO_TACTIC[direction],
-            "title": f"[{direction}] {ch.get('title', ch.get('id', '?'))}",
-            "depends_on": [],
-            "meta": {"challenge": {**ch, "direction": direction}},
+            "tactic": tactic, "title": title, "depends_on": [],
+            "meta": {"challenge": meta_ch},
         })
-    return {"analysis": f"CTF 赛题分发：{len(nodes)} 题（跳过端口扫描，C7）",
-            "dag_nodes": nodes}
+    analysis = (f"CTF 赛题分发：{len(nodes)} 题（跳过端口扫描，C7）"
+                if round_no == 0 else
+                f"CTF 重攻轮 #{round_no}：{len(nodes)} 题未破，换角度再攻")
+    return {"analysis": analysis, "dag_nodes": nodes}
 
 
 class ModeAssembler:
@@ -149,14 +170,30 @@ class ModeAssembler:
             AgentType.CTF_CRYPTO: CTFCryptoAgent(self.ctx, flag_manager=flag_manager, **self.kw),
             AgentType.CTF_MISC: CTFMiscAgent(self.ctx, flag_manager=flag_manager, **self.kw),
         }
+
+        def _plan(state: dict[str, Any]) -> dict[str, Any]:
+            """CTF 元规划：首轮分发 + 未破题的重攻轮（Flag 状态驱动）。"""
+            solved = ({f.challenge_id for f in flag_manager.accepted_flags()}
+                      if flag_manager is not None else set())
+            pending: set[str] = set()
+            for node in (state.get("dag") or {}).values():
+                if str(node.get("status")) != TaskStatus.PENDING.value:
+                    continue
+                cid = ((node.get("meta") or {}).get("challenge") or {}).get("id")
+                if cid:
+                    pending.add(str(cid))
+            return ctf_plan_provider(
+                challenges, round_no=int(state.get("round_no", 0) or 0),
+                solved=solved, pending=pending)
+
         return ModeAssembly(
             mode=RunMode.CTF,
             agents=agents,
             tactic_map=dict(CTF_TACTIC_MAP),
-            plan_provider=lambda _views: ctf_plan_provider(challenges),
+            plan_provider=_plan,
             flag_manager=flag_manager,
             notes=[("CTF 模式：五方向专项，不启用端口扫描（C7）；"
-                    "赛题直接分发至专项子 Agent（5.2.1）")],
+                    "赛题直接分发至专项子 Agent（5.2.1）；未破题自动换角度重攻")],
         )
 
     # ------------------------------------------------------------ 渗透赛

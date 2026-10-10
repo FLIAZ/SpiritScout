@@ -256,6 +256,17 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         detail["request"] = session.request
         return detail
 
+    @app.patch("/api/sessions/{session_id}")
+    async def rename_session(session_id: str,
+                             payload: dict[str, Any]) -> dict[str, Any]:
+        """重命名会话（空标题 = 恢复自动摘要名）。"""
+        session = _require(session_id)
+        title = str(payload.get("title") or "")
+        if len(title.strip()) > 80:
+            raise HTTPException(422, "会话名过长（≤80 字）")
+        manager.rename(session_id, title)
+        return session.brief(include_summary=False)
+
     @app.get("/api/sessions/{session_id}/state")
     async def session_state(session_id: str) -> dict[str, Any]:
         return _read_state(_require(session_id))

@@ -15,7 +15,13 @@ from typing import Any
 from spiritscout.config.settings import GatewayConfig, ModelEntry
 from spiritscout.core.audit import AuditLogger, NullAuditLogger
 from spiritscout.core.exceptions import BudgetExceeded, SpiritScoutError
-from spiritscout.gateway.backends import ChatBackend, MockBackend, backend_for
+from spiritscout.gateway.backends import (
+    ChatBackend,
+    DeltaCallback,
+    MockBackend,
+    backend_for,
+    emit_delta,
+)
 from spiritscout.gateway.registry import ModelRegistry
 
 
@@ -29,6 +35,8 @@ class ChatResponse:
     latency_ms: float
     fallback_used: bool = False
     reasoning: str = ""          # 推理模型思考内容（reasoning_content/thinking）
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    finish_reason: str = ""
 
 
 @dataclass
@@ -105,7 +113,7 @@ class ModelGateway:
 
     async def chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         task_type: str = "execution",
         model_alias: str | None = None,
@@ -114,11 +122,16 @@ class ModelGateway:
         max_tokens: int = 4096,
         response_format: str | None = None,
         timeout_seconds: int | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | None = None,
+        on_delta: DeltaCallback | None = None,
     ) -> ChatResponse:
         """统一对话入口：路由（预算降级）→ 限流 → 调用（主备切换）→ 计量 → 审计。
 
         timeout_seconds：单次后端调用硬超时；缺省用网关配置。重推理角色
-        （如解题环）可放宽，避免长链推理被全局默认值中途掐死。"""
+        （如解题环）可放宽，避免长链推理被全局默认值中途掐死。
+        tools/on_delta：原生工具调用与流式增量（主备切换时若已吐出增量，
+        切换前投递 reset 让消费端清屏，避免两次尝试的文本叠加）。"""
         self.budget.check()
         degraded = (model_alias is None
                     and self.config.degrade_at_ratio < 1.0
@@ -137,17 +150,31 @@ class ModelGateway:
             )
         chain = [entry, *self.registry.fallback_of(entry.alias)]
 
+        # 流式增量与主备切换的衔接：已吐出的增量在切换前用 reset 清屏
+        emitted = False
+
+        async def _relay(kind: str, text: str) -> None:
+            nonlocal emitted
+            emitted = True
+            await emit_delta(on_delta, kind, text)
+
         last_exc: Exception | None = None
         for idx, candidate in enumerate(chain):
             try:
                 await self._rate_limit(candidate)
+                if idx > 0 and emitted:
+                    await emit_delta(on_delta, "reset", "")
+                    emitted = False
                 resp = await self._invoke(
                     candidate, messages,
                     temperature=temperature, max_tokens=max_tokens,
                     response_format=response_format,
                     timeout_seconds=timeout_seconds,
+                    tools=tools, tool_choice=tool_choice,
+                    on_delta=_relay if on_delta is not None else None,
                 )
                 if idx > 0:
+                    resp.fallback_used = True
                     self.audit.log(
                         "model.fallback", "gateway",
                         {"from": entry.alias, "to": candidate.alias, "reason": str(last_exc)},
@@ -165,12 +192,15 @@ class ModelGateway:
     async def _invoke(
         self,
         entry: ModelEntry,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         temperature: float,
         max_tokens: int,
         response_format: str | None,
         timeout_seconds: int | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | None = None,
+        on_delta: DeltaCallback | None = None,
     ) -> ChatResponse:
         backend: ChatBackend = backend_for(entry, self._mock)
         started = time.perf_counter()
@@ -179,6 +209,7 @@ class ModelGateway:
             temperature=temperature, max_tokens=max_tokens,
             timeout=timeout_seconds or self.config.request_timeout_seconds,
             response_format=response_format,
+            tools=tools, tool_choice=tool_choice, on_delta=on_delta,
         )
         latency = (time.perf_counter() - started) * 1000
         total_tokens = raw["prompt_tokens"] + raw["completion_tokens"]
@@ -190,7 +221,8 @@ class ModelGateway:
         self.audit.log(
             "model.call", "gateway",
             {"alias": entry.alias, "tier": entry.tier, "tokens": total_tokens,
-             "cost_usd": round(cost, 6), "latency_ms": round(latency, 1)},
+             "cost_usd": round(cost, 6), "latency_ms": round(latency, 1),
+             "tool_calls": [c.get("name") for c in raw.get("tool_calls", [])]},
         )
         return ChatResponse(
             content=raw["content"],
@@ -200,6 +232,8 @@ class ModelGateway:
             cost_usd=cost,
             latency_ms=latency,
             reasoning=str(raw.get("reasoning", "") or ""),
+            tool_calls=list(raw.get("tool_calls", []) or []),
+            finish_reason=str(raw.get("finish_reason", "") or ""),
         )
 
     async def _rate_limit(self, entry: ModelEntry) -> None:

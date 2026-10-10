@@ -1,6 +1,12 @@
 """模型后端：LiteLLM（真实云端）+ Mock（确定性测试后端）。
 
-Mock 后端用于全部单测与启动冒烟（合规自查 G10：研发验证不触碰真实 API）：
+统一能力面（Agent 工具环的地基）：
+- 原生工具调用：``tools`` 传 OpenAI 形态函数 schema，响应归一化为
+  ``tool_calls``（``{"id", "name", "arguments"(dict), "raw"(str)}``）；
+- 流式增量：``on_delta(kind, text)`` 回调（kind ∈ text/reasoning/tool_call/reset），
+  chat_completions 与 anthropic_messages 协议支持；responses 协议仅非流式。
+
+Mock 后端用于启动冒烟与离线演练（G10：研发验证不触碰真实 API）：
 - 规则化应答：按 system prompt 中的角色标记返回确定性 JSON；
 - 支持故障注入（fail_times），验证主备切换（4.9.3-5）。
 """
@@ -9,10 +15,72 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import inspect
 import json
+from collections.abc import Callable
 from typing import Any
 
 from spiritscout.config.settings import ModelEntry
+
+# 流式增量回调：(kind, text) -> None | Awaitable[None]
+DeltaCallback = Callable[[str, str], Any]
+
+
+async def emit_delta(on_delta: DeltaCallback | None, kind: str, text: str) -> None:
+    """投递一个流式增量（回调失败不影响主链——增量只是观感，不是数据）。"""
+    if on_delta is None or not text:
+        return
+    try:
+        out = on_delta(kind, text)
+        if inspect.isawaitable(out):
+            await out
+    except Exception:  # noqa: BLE001, S110 —— 前端断连等不应中断模型调用
+        pass
+
+
+def parse_tool_arguments(raw: Any) -> tuple[dict[str, Any], str]:
+    """工具入参解析：返回 (dict, 错误说明)。模型偶发产出非法 JSON——
+    不抛异常，把错误作为工具结果回灌给模型自纠（成熟客户端的通用做法）。"""
+    if isinstance(raw, dict):
+        return raw, ""
+    text = str(raw or "").strip()
+    if not text:
+        return {}, ""
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        return {}, f"arguments 不是合法 JSON: {exc}"
+    if not isinstance(data, dict):
+        return {"value": data}, ""
+    return data, ""
+
+
+def normalize_tool_calls(raw: Any) -> list[dict[str, Any]]:
+    """归一化各协议的工具调用：``[{"id", "name", "arguments", "raw"}]``。"""
+    out: list[dict[str, Any]] = []
+    for idx, tc in enumerate(raw or []):
+        if isinstance(tc, dict):
+            fn = tc.get("function") or {}
+            call_id = str(tc.get("id") or "")
+            name = str(fn.get("name") or "")
+            raw_args = fn.get("arguments")
+        else:
+            fn = getattr(tc, "function", None)
+            call_id = str(getattr(tc, "id", "") or "")
+            name = str(getattr(fn, "name", "") or "") if fn is not None else ""
+            raw_args = getattr(fn, "arguments", None) if fn is not None else None
+        args, err = parse_tool_arguments(raw_args)
+        call: dict[str, Any] = {
+            "id": call_id or f"call_{idx}",
+            "name": name,
+            "arguments": args,
+            "raw": raw_args if isinstance(raw_args, str) else json.dumps(
+                raw_args or {}, ensure_ascii=False),
+        }
+        if err:
+            call["parse_error"] = err
+        out.append(call)
+    return out
 
 
 class ChatBackend(abc.ABC):
@@ -20,14 +88,18 @@ class ChatBackend(abc.ABC):
     async def complete(
         self,
         entry: ModelEntry,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         temperature: float = 0.2,
         max_tokens: int = 4096,
         timeout: int = 120,
         response_format: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | None = None,
+        on_delta: DeltaCallback | None = None,
     ) -> dict[str, Any]:
-        """返回 {"content": str, "prompt_tokens": int, "completion_tokens": int}"""
+        """返回 {"content", "prompt_tokens", "completion_tokens",
+        "tool_calls": [{"id","name","arguments","raw"}], "finish_reason"}"""
 
 
 def extract_json(text: str) -> Any:
@@ -87,12 +159,15 @@ class LiteLLMBackend(ChatBackend):
     async def complete(
         self,
         entry: ModelEntry,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         temperature: float = 0.2,
         max_tokens: int = 4096,
         timeout: int = 120,
         response_format: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | None = None,
+        on_delta: DeltaCallback | None = None,
     ) -> dict[str, Any]:
         api_format = entry.api_format
         if api_format == "auto":
@@ -101,25 +176,30 @@ class LiteLLMBackend(ChatBackend):
         if api_format == "responses":
             return await self._complete_responses(
                 entry, messages,
-                temperature=temperature, max_tokens=max_tokens, timeout=timeout)
+                temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+                tools=tools, tool_choice=tool_choice)
         return await self._complete_chat(
             entry, messages,
             temperature=temperature, max_tokens=max_tokens, timeout=timeout,
             response_format=response_format,
-            anthropic=api_format == "anthropic_messages")
+            anthropic=api_format == "anthropic_messages",
+            tools=tools, tool_choice=tool_choice, on_delta=on_delta)
 
     # ------------------------------------------------------------ chat completions / anthropic
 
     async def _complete_chat(
         self,
         entry: ModelEntry,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         temperature: float,
         max_tokens: int,
         timeout: int,
         response_format: str | None,
         anthropic: bool,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | None = None,
+        on_delta: DeltaCallback | None = None,
     ) -> dict[str, Any]:
         import litellm  # 延迟导入
 
@@ -140,19 +220,40 @@ class LiteLLMBackend(ChatBackend):
                 and not entry.model.startswith("openai/")):
             # OpenAI 兼容端点：走 openai/ 前缀 + 自定义 base
             kwargs["model"] = f"openai/{entry.model}"
-        if response_format == "json":
+        if tools:
+            kwargs["tools"] = tools
+            if tool_choice:
+                kwargs["tool_choice"] = tool_choice
+        elif response_format == "json":
+            # 工具环与 JSON 模式互斥：有工具时由 schema 约束结构
             kwargs["response_format"] = {"type": "json_object"}
+        streaming = on_delta is not None
+        if streaming:
+            kwargs["stream"] = True
+            if not anthropic:
+                kwargs["stream_options"] = {"include_usage": True}
 
         try:
             resp = await litellm.acompletion(**kwargs)
         except Exception as exc:
-            # 部分端点（推理模型/国产兼容层）不支持 response_format：
-            # 回退无 JSON 模式重试一次（不静默——审计可经 calls 观察，且解析端有 extract_json 兜底）
-            if response_format == "json" and self._json_mode_unsupported(exc):
+            # 端点能力差异回退重试一次：stream_options 不被支持（部分兼容层）、
+            # response_format 不被支持（推理模型/国产兼容层）。重试是显式降级，
+            # 解析端有 extract_json 兜底，不静默。
+            retried = False
+            if kwargs.get("stream_options") and self._opt_unsupported(
+                    exc, "stream_options"):
+                kwargs.pop("stream_options", None)
+                retried = True
+            if not retried and response_format == "json" and self._json_mode_unsupported(exc):
                 kwargs.pop("response_format", None)
-                resp = await litellm.acompletion(**kwargs)
-            else:
+                retried = True
+            if not retried:
                 raise
+            resp = await litellm.acompletion(**kwargs)
+
+        if streaming:
+            return await self._consume_stream(resp, on_delta)
+
         choice = resp.choices[0]
         usage = getattr(resp, "usage", None)
         return {
@@ -160,6 +261,79 @@ class LiteLLMBackend(ChatBackend):
             "reasoning": str(getattr(choice.message, "reasoning_content", "") or ""),
             "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
             "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+            "tool_calls": normalize_tool_calls(
+                getattr(choice.message, "tool_calls", None)),
+            "finish_reason": str(getattr(choice, "finish_reason", "") or ""),
+        }
+
+    # ------------------------------------------------------------ 流式累积
+
+    async def _consume_stream(
+        self, stream: Any, on_delta: DeltaCallback,
+    ) -> dict[str, Any]:
+        """累积流式增量：文本/思考逐块投递回调，工具调用按 index 拼接分片。
+
+        流式只影响观感与首字延迟，最终产物与非流式路径同构（content /
+        tool_calls / usage / finish_reason），上层工具环无感知。
+        """
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tool_slots: dict[int, dict[str, Any]] = {}
+        usage: Any = None
+        finish_reason = ""
+        async for chunk in stream:
+            if getattr(chunk, "usage", None):
+                usage = chunk.usage
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            choice = choices[0]
+            if getattr(choice, "finish_reason", None):
+                finish_reason = str(choice.finish_reason)
+            delta = getattr(choice, "delta", None)
+            if delta is None:
+                continue
+            text = getattr(delta, "content", None)
+            if text:
+                content_parts.append(text)
+                await emit_delta(on_delta, "text", text)
+            think = (getattr(delta, "reasoning_content", None)
+                     or getattr(delta, "reasoning", None))
+            if think:
+                reasoning_parts.append(str(think))
+                await emit_delta(on_delta, "reasoning", str(think))
+            for tc in (getattr(delta, "tool_calls", None) or []):
+                idx = int(getattr(tc, "index", 0) or 0)
+                slot = tool_slots.setdefault(
+                    idx, {"id": "", "name": "", "arguments": ""})
+                if getattr(tc, "id", None):
+                    slot["id"] = str(tc.id)
+                fn = getattr(tc, "function", None)
+                if fn is None:
+                    continue
+                if getattr(fn, "name", None):
+                    slot["name"] = str(fn.name)
+                frag = getattr(fn, "arguments", None)
+                if frag:
+                    slot["arguments"] += str(frag)
+                    await emit_delta(on_delta, "tool_call", json.dumps(
+                        {"index": idx, "name": slot["name"], "fragment": str(frag)},
+                        ensure_ascii=False))
+        # 还原 OpenAI 工具调用外层结构，统一交给 normalize_tool_calls 解析
+        # （分片累积出的是扁平槽位；name/arguments 的解析与报错只此一处）
+        ordered = [
+            {"id": tool_slots[i]["id"],
+             "function": {"name": tool_slots[i]["name"],
+                          "arguments": tool_slots[i]["arguments"]}}
+            for i in sorted(tool_slots)
+        ]
+        return {
+            "content": "".join(content_parts),
+            "reasoning": "".join(reasoning_parts),
+            "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+            "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+            "tool_calls": normalize_tool_calls(ordered),
+            "finish_reason": finish_reason,
         }
 
     # ------------------------------------------------------------ OpenAI Responses 协议
@@ -167,11 +341,13 @@ class LiteLLMBackend(ChatBackend):
     async def _complete_responses(
         self,
         entry: ModelEntry,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         temperature: float,
         max_tokens: int,
         timeout: int,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | None = None,
     ) -> dict[str, Any]:
         import litellm  # 延迟导入
 
@@ -193,28 +369,44 @@ class LiteLLMBackend(ChatBackend):
             kwargs["api_base"] = entry.base_url
         if entry.api_key:
             kwargs["api_key"] = entry.api_key
+        if tools:
+            kwargs["tools"] = tools
+            if tool_choice:
+                kwargs["tool_choice"] = tool_choice
 
         resp = await litellm.aresponses(**kwargs)
-        # 响应结构：output items（message/reasoning/tool_call…），文本在
+        # 响应结构：output items（message/reasoning/function_call…），文本在
         # message 项的 content output_text 块；output_text 为便捷聚合属性
         content = str(getattr(resp, "output_text", "") or "")
         reasoning_parts: list[str] = []
-        if not content:
-            texts: list[str] = []
-            for item in (getattr(resp, "output", None) or []):
-                itype = getattr(item, "type", None) or (item.get("type") if isinstance(item, dict) else None)
-                if itype == "message":
-                    for block in (getattr(item, "content", None)
-                                  or (item.get("content") if isinstance(item, dict) else []) or []):
-                        btype = getattr(block, "type", None) or (block.get("type") if isinstance(block, dict) else None)
-                        if btype == "output_text":
-                            texts.append(str(getattr(block, "text", None)
+        raw_calls: list[dict[str, Any]] = []
+        texts: list[str] = []
+        for item in (getattr(resp, "output", None) or []):
+            itype = getattr(item, "type", None) or (item.get("type") if isinstance(item, dict) else None)
+            if itype == "message":
+                for block in (getattr(item, "content", None)
+                              or (item.get("content") if isinstance(item, dict) else []) or []):
+                    btype = getattr(block, "type", None) or (block.get("type") if isinstance(block, dict) else None)
+                    if btype == "output_text":
+                        texts.append(str(getattr(block, "text", None)
+                                       or (block.get("text") if isinstance(block, dict) else "") or ""))
+            elif itype == "reasoning":
+                for block in (getattr(item, "summary", None)
+                              or (item.get("summary") if isinstance(item, dict) else []) or []):
+                    reasoning_parts.append(str(getattr(block, "text", None)
                                            or (block.get("text") if isinstance(block, dict) else "") or ""))
-                elif itype == "reasoning":
-                    for block in (getattr(item, "summary", None)
-                                  or (item.get("summary") if isinstance(item, dict) else []) or []):
-                        reasoning_parts.append(str(getattr(block, "text", None)
-                                               or (block.get("text") if isinstance(block, dict) else "") or ""))
+            elif itype == "function_call":
+                raw_calls.append({
+                    "id": str(getattr(item, "call_id", None)
+                              or (item.get("call_id") if isinstance(item, dict) else "") or ""),
+                    "function": {
+                        "name": str(getattr(item, "name", None)
+                                    or (item.get("name") if isinstance(item, dict) else "") or ""),
+                        "arguments": str(getattr(item, "arguments", None)
+                                         or (item.get("arguments") if isinstance(item, dict) else "") or ""),
+                    },
+                })
+        if not content:
             content = "".join(texts)
         usage = getattr(resp, "usage", None)
         return {
@@ -223,7 +415,15 @@ class LiteLLMBackend(ChatBackend):
             # Responses 协议 usage 字段名是 input_tokens/output_tokens
             "prompt_tokens": int(getattr(usage, "input_tokens", 0) or 0),
             "completion_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+            "tool_calls": normalize_tool_calls(raw_calls),
+            "finish_reason": str(getattr(resp, "status", "") or ""),
         }
+
+    @staticmethod
+    def _opt_unsupported(exc: Exception, opt: str) -> bool:
+        msg = str(exc).lower()
+        return opt in msg and any(k in msg for k in (
+            "not support", "unsupported", "unknown", "invalid", "unexpected"))
 
     @staticmethod
     def _json_mode_unsupported(exc: Exception) -> bool:
@@ -242,7 +442,8 @@ class MockBackend(ChatBackend):
     - ROLE: vuln_analyst    → 按用户消息中是否含漏洞线索返回判定 JSON
     - ROLE: mode_router     → 回显用户消息中的 fallback_guess 模式
     - ROLE: route_budget    → 每任务固定预算 6 的 JSON
-    - ROLE: ctf_solver      → 固定提议 http_request 定向 /flag.txt；已见 Flag 则收尾
+    - ROLE: ctf_solver      → 有工具时按工具环应答（先 http_request /flag.txt，
+                              见到工具结果即收尾）；无工具时回退旧 JSON 动作
     - 默认                  → 回显摘要文本
     可通过 ``script`` 注入精确应答队列（先进先出），用于精细化测试。
     """
@@ -255,33 +456,56 @@ class MockBackend(ChatBackend):
     async def complete(
         self,
         entry: ModelEntry,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         temperature: float = 0.2,
         max_tokens: int = 4096,
         timeout: int = 120,
         response_format: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | None = None,
+        on_delta: DeltaCallback | None = None,
     ) -> dict[str, Any]:
-        self.calls.append({"alias": entry.alias, "messages": messages})
+        self.calls.append({"alias": entry.alias, "messages": messages,
+                           "tools": [t.get("function", {}).get("name") for t in tools or []]})
         if self.fail_times > 0:
             self.fail_times -= 1
             raise TimeoutError("MockBackend 故障注入：模拟主模型超时")
         await asyncio.sleep(0)  # 保持异步语义
 
+        tool_calls: list[dict[str, Any]] = []
         if self.script:
             content = self.script.pop(0)
+        elif tools:
+            content, tool_calls = self._rule_based_tools(messages)
         else:
             content = self._rule_based(messages)
+        if on_delta is not None and content:
+            await emit_delta(on_delta, "text", content)
 
-        prompt_chars = sum(len(m.get("content", "")) for m in messages)
+        prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
         return {
             "content": content,
+            "tool_calls": tool_calls,
+            "finish_reason": "tool_calls" if tool_calls else "stop",
             "prompt_tokens": max(1, prompt_chars // 4),
             "completion_tokens": max(1, len(content) // 4),
         }
 
     @staticmethod
-    def _rule_based(messages: list[dict[str, str]]) -> str:
+    def _rule_based_tools(
+        messages: list[dict[str, Any]],
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """工具环的确定性应答：无工具结果 → 定向 /flag.txt；有结果 → 收尾。"""
+        seen_result = any(m.get("role") == "tool" for m in messages)
+        if seen_result:
+            return "mock：已获取工具结果，调查结束。", []
+        return "", [{"id": "call_mock_1", "name": "http_request",
+                     "arguments": {"method": "GET", "path": "/flag.txt"},
+                     "raw": '{"method": "GET", "path": "/flag.txt"}'}]
+
+    @staticmethod
+    def _rule_based(messages: list[dict[str, Any]]) -> str:
         system = next((m["content"] for m in messages if m.get("role") == "system"), "")
         user = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
         role = ""

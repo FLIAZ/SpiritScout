@@ -97,13 +97,39 @@ nav button svg { flex: none; }
 #sess-list { flex: 1; overflow-y: auto; padding: 0 10px 10px; display: flex; flex-direction: column; gap: 3px; }
 .sess-item {
   border: 1px solid transparent; background: none; border-radius: 8px;
-  padding: 8px 10px; text-align: left; width: 100%;
+  padding: 8px 10px; text-align: left; width: 100%; cursor: pointer;
+  position: relative;
 }
 .sess-item:hover { background: var(--surface-2); }
 .sess-item.on { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
 .sess-item .t { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 7px; }
 .sess-item .s { color: var(--ink-3); font-size: 11.5px; margin-top: 2px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sess-item .name { flex: 1; min-width: 0; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.sess-item .ops { position: absolute; right: 6px; top: 6px; display: none; gap: 2px; }
+.sess-item:hover .ops, .sess-item.on .ops { display: flex; }
+.sess-item .ops button {
+  border: 0; background: var(--surface); color: var(--ink-3); border-radius: 6px;
+  width: 22px; height: 22px; font-size: 12px; line-height: 1; cursor: pointer;
+  box-shadow: 0 0 0 1px var(--line);
+}
+.sess-item .ops button:hover { color: var(--ink); }
+.sess-item .ops button.danger:hover { color: var(--danger, #e5484d); }
+.sess-item .ops button.armed { width: auto; padding: 0 6px; color: #fff; background: #e5484d; }
+.sess-item input.rename {
+  flex: 1; min-width: 0; font: inherit; font-weight: 600; font-size: 13px;
+  border: 1px solid var(--accent); border-radius: 6px; padding: 1px 6px;
+  background: var(--surface); color: var(--ink);
+}
+.title-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.title-row h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#op-rename { border: 0; background: none; color: var(--ink-3); cursor: pointer;
+  font-size: 14px; padding: 2px 6px; border-radius: 6px; flex: none; }
+#op-rename:hover { color: var(--ink); background: var(--surface-2); }
+.title-row input.rename { font: inherit; font-weight: 700; font-size: 19px;
+  border: 1px solid var(--accent); border-radius: 8px; padding: 2px 10px;
+  background: var(--surface); color: var(--ink); min-width: 280px; }
 .side-foot { padding: 12px 18px; border-top: 1px solid var(--line);
   display: flex; justify-content: space-between; align-items: center; color: var(--ink-3); font-size: 11.5px; }
 #btn-theme { border: 1px solid var(--line); background: var(--surface); color: var(--ink-2);
@@ -149,6 +175,7 @@ main { min-width: 0; padding: 22px 26px 40px; }
 .btn.danger { color: var(--bad); }
 .btn.danger:hover { border-color: var(--bad); background: var(--bad-soft); }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn.armed { background: var(--bad); border-color: var(--bad); color: #fff; }
 .btn.sm { padding: 4px 10px; font-size: 12px; }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
 .muted { color: var(--ink-3); }
@@ -195,16 +222,39 @@ main { min-width: 0; padding: 22px 26px 40px; }
 .tabs button:hover { color: var(--ink); }
 .tabs button.on { color: var(--accent-ink); border-bottom-color: var(--accent); }
 
-/* ================= 拓扑画布（签名元素） ================= */
-.topo { position: relative; overflow-x: auto; padding: 34px 22px 30px; min-height: 320px; }
-.topo svg.edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-.topo svg.edges path { fill: none; stroke: var(--line); stroke-width: 1.6; }
-.topo svg.edges path.done { stroke: var(--ok); opacity: .55; }
+/* ================= 拓扑画布（签名元素：左→右分层 DAG，可平移缩放） ================= */
+.topo {
+  position: relative; overflow: hidden; padding: 0; min-height: 380px;
+  height: clamp(380px, 66vh, 760px); cursor: grab; touch-action: none;
+  background:
+    radial-gradient(ellipse 70% 60% at 16% 50%, color-mix(in srgb, var(--accent) 5%, transparent), transparent),
+    var(--surface);
+}
+.topo.grabbing { cursor: grabbing; }
+.topo > .empty-note { position: absolute; inset: 0; display: flex;
+  align-items: center; justify-content: center; }
+#topo-stage {
+  position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform;
+  background-image: radial-gradient(circle, color-mix(in srgb, var(--ink-3) 20%, transparent) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+.topo svg.edges { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
+.topo svg.edges path { fill: none; stroke: color-mix(in srgb, var(--ink-3) 55%, transparent); stroke-width: 1.6; }
+.topo svg.edges path.done { stroke: var(--ok); opacity: .6; }
 .topo svg.edges path.active { stroke: var(--accent); stroke-dasharray: 5 5; animation: flow 1s linear infinite; }
+.topo svg.edges path.pending { stroke-dasharray: 2 6; }
 @keyframes flow { to { stroke-dashoffset: -10; } }
-.topo .col { position: relative; display: flex; flex-direction: column; align-items: center; gap: 30px; min-width: 460px; }
+.topo-tools { position: absolute; right: 12px; top: 12px; z-index: 6; display: flex; gap: 6px; }
+.topo-tools button {
+  width: 28px; height: 28px; border-radius: 8px; border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 88%, transparent); color: var(--ink-2);
+  font-size: 13px; line-height: 1; cursor: pointer;
+}
+.topo-tools button:hover { color: var(--ink); border-color: var(--ink-3); }
+.topo-hint { position: absolute; right: 12px; bottom: 10px; z-index: 5;
+  font-size: 10.5px; color: var(--ink-3); pointer-events: none; }
 .hub {
-  position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 2px;
+  position: absolute; left: 0; top: 0; z-index: 2; display: flex; flex-direction: column; align-items: center; gap: 2px;
   background: var(--surface); border: 1.5px solid var(--accent); color: var(--ink);
   border-radius: 14px; padding: 10px 26px; box-shadow: var(--shadow);
 }
@@ -217,10 +267,10 @@ main { min-width: 0; padding: 22px 26px 40px; }
 .hub.live::before { animation: radar 2.4s ease-out infinite; }
 .hub.live::after { animation: radar 2.4s ease-out 1.2s infinite; }
 @keyframes radar { 0% { opacity: .7; transform: scale(1); } 100% { opacity: 0; transform: scale(1.35); } }
-.tlayer { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; position: relative; z-index: 1; }
 .tnode {
+  position: absolute; left: 0; top: 0; width: 292px;
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
-  padding: 10px 12px; width: 250px; box-shadow: var(--shadow);
+  padding: 10px 12px; box-shadow: var(--shadow);
   display: flex; flex-direction: column; gap: 8px;
 }
 .tnode.active { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
@@ -254,7 +304,11 @@ main { min-width: 0; padding: 22px 26px 40px; }
 .tcard .rt-pct { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--ink-3); flex: none; }
 .tcard .rt-note { font-size: 10.5px; color: var(--ink-3); line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .tcard .prog.fail i { background: var(--bad); }
-.steer { display: flex; flex-direction: column; gap: 6px; max-width: 560px; position: relative; z-index: 1; }
+.steer { display: flex; flex-direction: column; gap: 6px; max-width: 560px; }
+.topo-steer { position: absolute; left: 12px; bottom: 12px; z-index: 5;
+  display: flex; flex-direction: column; gap: 6px; max-width: 380px;
+  max-height: 46%; overflow-y: auto; pointer-events: none; }
+.topo-steer > .steer { pointer-events: auto; }
 .steer-meta { font-size: 10.5px; color: var(--ink-3); text-align: center; }
 .steer-item {
   background: color-mix(in srgb, var(--accent) 6%, var(--surface));
@@ -289,6 +343,45 @@ table.list tr:last-child td { border-bottom: 0; }
 .ev .ac { color: var(--ink-2); }
 .ev .de { color: var(--ink-2); word-break: break-all; }
 @media (max-width: 700px) { .ev { grid-template-columns: 70px 1fr; } .ev .ac, .ev .de { grid-column: 2; } }
+
+/* ================= 解题轨迹（Agent 工作台实录） ================= */
+.trace { display: flex; flex-direction: column; gap: 10px; max-height: 66vh; overflow-y: auto;
+  padding: 4px 2px 20px; scroll-behavior: smooth; }
+.trace .empty-note { padding: 40px 0; }
+.tr-agent { border: 1px solid var(--line); border-radius: 12px; background: var(--surface);
+  box-shadow: var(--shadow); overflow: hidden; }
+.tr-agent > .h { display: flex; align-items: center; gap: 8px; padding: 8px 13px;
+  border-bottom: 1px solid var(--line); background: var(--surface-2); font-size: 12.5px; }
+.tr-agent > .h b { font-size: 13px; }
+.tr-agent > .h .muted { margin-left: auto; font-size: 11px; }
+.tr-turn { padding: 10px 13px; border-top: 1px dashed color-mix(in srgb, var(--ink-3) 26%, transparent); }
+.tr-turn:first-of-type { border-top: 0; }
+.tr-turn > .th { font-size: 10.5px; color: var(--ink-3); margin-bottom: 6px;
+  display: flex; gap: 8px; align-items: baseline; }
+.tr-think { font-size: 11.5px; color: var(--ink-3); line-height: 1.6; white-space: pre-wrap;
+  border-left: 2px solid color-mix(in srgb, var(--ink-3) 35%, transparent);
+  padding: 2px 0 2px 10px; margin: 4px 0; max-height: 180px; overflow-y: auto; }
+.tr-text { font-size: 12.5px; line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
+.tr-text:empty { display: none; }
+.tr-call { margin: 7px 0 0; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+.tr-call > .ch { display: flex; align-items: center; gap: 8px; padding: 6px 10px; font-size: 12px;
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface)); cursor: pointer; }
+.tr-call > .ch .nm { font-family: var(--mono); font-weight: 700; color: var(--accent-ink); }
+.tr-call > .ch .ar { color: var(--ink-3); font-family: var(--mono); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.tr-call > .ch .ok { font-size: 10.5px; flex: none; }
+.tr-call > .ch .ok.y { color: var(--ok); } .tr-call > .ch .ok.n { color: var(--bad); }
+.tr-call > .bd { display: none; border-top: 1px solid var(--line); }
+.tr-call.open > .bd { display: block; }
+.tr-call > .bd pre { margin: 0; padding: 8px 10px; font-size: 11.5px; line-height: 1.6;
+  white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow-y: auto;
+  background: var(--surface-2); font-family: var(--mono); }
+.tr-conclude { margin-top: 8px; padding: 9px 12px; border-radius: 9px; font-size: 12.5px;
+  line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+  background: color-mix(in srgb, var(--ok) 8%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--ok) 35%, var(--line)); }
+.tr-note { font-size: 11px; color: var(--ink-3); text-align: center; padding: 1px 0; }
+.tr-err { color: var(--bad); font-size: 12px; }
 
 /* ================= 报告 ================= */
 .report { padding: 22px 26px; max-width: 860px; }
@@ -380,7 +473,8 @@ dialog::backdrop { background: rgba(10, 14, 22, .45); }
     <section id="view-session" hidden>
       <div class="sess-head">
         <div style="min-width:0">
-          <h2 id="s-title"></h2>
+          <div class="title-row"><h2 id="s-title"></h2>
+            <button id="op-rename" title="重命名会话">✎</button></div>
           <div class="meta" id="s-meta"></div>
         </div>
         <div class="ops" id="s-ops"></div>
@@ -390,6 +484,7 @@ dialog::backdrop { background: rgba(10, 14, 22, .45); }
       <div class="chips" id="s-chips"></div>
       <div class="tabs" id="s-tabs">
         <button data-tab="topo" class="on">拓扑</button>
+        <button data-tab="trace">轨迹</button>
         <button data-tab="tasks">任务</button>
         <button data-tab="vulns">漏洞</button>
         <button data-tab="flags">Flag</button>
@@ -397,6 +492,7 @@ dialog::backdrop { background: rgba(10, 14, 22, .45); }
         <button data-tab="report">报告</button>
       </div>
       <div id="tab-topo"><div class="card topo" id="topo"></div></div>
+      <div id="tab-trace" hidden><div class="trace" id="trace-box"></div></div>
       <div id="tab-tasks" hidden></div>
       <div id="tab-vulns" hidden></div>
       <div id="tab-flags" hidden></div>
@@ -477,7 +573,8 @@ dialog::backdrop { background: rgba(10, 14, 22, .45); }
 /* ================= 基础 ================= */
 const $ = s => document.querySelector(s);
 const S = { view: "home", cur: null, tab: "topo", sessions: [], state: null,
-            agents: null, models: null, evSeen: 0, es: null, poll: null, medit: null };
+            agents: null, models: null, evSeen: 0, es: null, poll: null, medit: null,
+            topoView: null };
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
 async function api(path, opt = {}) {
@@ -514,6 +611,13 @@ function agentName(key) {
   if (!S.agents) return key || "—";
   const a = S.agents.roster.find(x => x.key === key);
   return a ? a.name : (key || "—");
+}
+/* 审计 actor 形如 ctf-web-094cd1652967（键+实例短码）：还原为编队显示名 */
+function actorName(actor) {
+  const base = String(actor || "").replace(/-[0-9a-f]{8,}$/i, "").replace(/-/g, "_");
+  if (!S.agents) return actor || "—";
+  const a = S.agents.roster.find(x => x.key === base || x.key === actor);
+  return a ? a.name : (actor || "—");
 }
 function fmtDur(a, b) {
   if (!a) return "—";
@@ -567,28 +671,101 @@ async function refreshSessions() {
 }
 function renderSessions() {
   const box = $("#sess-list");
+  if (box.querySelector("input.rename")) return;   // 正在重命名：不打断输入
   if (!S.sessions.length) {
     box.innerHTML = `<div class="empty-note" style="padding:22px 8px">还没有会话</div>`;
     return;
   }
   box.innerHTML = S.sessions.map(s => `
-    <button class="sess-item ${s.session_id === S.cur ? "on" : ""}" data-id="${s.session_id}">
+    <div class="sess-item ${s.session_id === S.cur ? "on" : ""}" data-id="${s.session_id}">
       <div class="t"><span class="pill ${s.status}" style="padding:1px 7px;font-size:10.5px">${STATUS_CN[s.status] || s.status}</span>
-        <span class="mono" style="font-size:11px">${esc(s.session_id.slice(5, 13))}</span></div>
-      <div class="s">${esc(s.target || s.session_id)}</div>
-    </button>`).join("");
-  box.querySelectorAll(".sess-item").forEach(b =>
-    b.onclick = () => openSession(b.dataset.id));
+        <span class="name" title="${esc(s.title)}">${esc(s.title)}</span></div>
+      <div class="s">${esc(s.target || s.session_id)} · <span class="mono">${esc(s.session_id.slice(5, 13))}</span></div>
+      <div class="ops">
+        <button data-act="rename" title="重命名">✎</button>
+        <button data-act="del" class="danger" title="删除会话">✕</button>
+      </div>
+    </div>`).join("");
+  box.querySelectorAll(".sess-item").forEach(el => {
+    el.onclick = (ev) => {
+      if (!ev.target.closest(".ops") && !ev.target.closest("input"))
+        openSession(el.dataset.id);
+    };
+    el.querySelector('[data-act="rename"]').onclick = (ev) => {
+      ev.stopPropagation(); startRename(el.dataset.id, el.querySelector(".name"));
+    };
+    el.querySelector('[data-act="del"]').onclick = (ev) => {
+      ev.stopPropagation(); armDelete(ev.currentTarget, el.dataset.id);
+    };
+  });
+}
+
+/* 重命名：就地编辑，回车提交 / Esc 取消；清空提交 = 恢复自动命名。
+   输入框以兄弟节点浮出、原名隐藏，避免破坏被隐藏节点的既有渲染逻辑。 */
+function startRename(id, host) {
+  if (!host || host.parentElement.querySelector("input.rename")) return;
+  const cur = S.sessions.find(s => s.session_id === id) || {};
+  const input = document.createElement("input");
+  input.className = "rename";
+  input.value = cur.title || "";
+  input.placeholder = cur.title || "会话名";
+  input.title = "回车保存；清空并回车恢复自动命名";
+  host.style.display = "none";
+  host.after(input);
+  input.focus(); input.select();
+  let settled = false;
+  const restore = () => { input.remove(); host.style.display = ""; };
+  const commit = async () => {
+    if (settled) return; settled = true;
+    const next = input.value.trim();
+    restore();
+    try {
+      await api(`/api/sessions/${id}`, {
+        method: "PATCH", body: JSON.stringify({ title: next }) });
+      toast(next ? "已重命名" : "已恢复自动命名");
+    } catch (e) { toast(e.message, true); }
+    await refreshSessions();
+    if (S.cur === id) refreshState();
+  };
+  input.onkeydown = (ev) => {
+    if (ev.key === "Enter") { ev.preventDefault(); commit(); }
+    else if (ev.key === "Escape") {
+      settled = true; restore(); renderSessions();
+      if (S.cur === id) refreshState();
+    }
+  };
+  input.onblur = commit;
+  input.onclick = (ev) => ev.stopPropagation();
+}
+
+/* 删除：两段式确认（首击变「删除?」，3 秒内再击生效） */
+function armDelete(btn, id) {
+  if (btn.dataset.armed) { delete btn.dataset.armed; doDelete(id); return; }
+  btn.dataset.armed = "1"; btn.classList.add("armed");
+  const old = btn.textContent; btn.textContent = "删除?";
+  setTimeout(() => {
+    if (btn.dataset.armed) {
+      delete btn.dataset.armed; btn.classList.remove("armed"); btn.textContent = old;
+    }
+  }, 3000);
+}
+async function doDelete(id) {
+  try {
+    await api(`/api/sessions/${id}?confirm=true`, { method: "DELETE" });
+    toast("会话已删除");
+    if (S.cur === id) { S.cur = null; show("home"); }
+    refreshSessions();
+  } catch (e) { toast(e.message, true); }
 }
 
 /* ================= 会话详情 ================= */
 function openSession(id) {
-  S.cur = id; S.tab = "topo"; S.evSeen = 0;
+  S.cur = id; S.tab = "topo"; S.evSeen = 0; S.topoView = null;
   show("session");
   renderSessions();
   document.querySelectorAll("#s-tabs button").forEach(b =>
     b.classList.toggle("on", b.dataset.tab === "topo"));
-  for (const t of ["topo", "tasks", "vulns", "flags", "events", "report"])
+  for (const t of ["topo", "trace", "tasks", "vulns", "flags", "events", "report"])
     $("#tab-" + t).hidden = t !== "topo";
   refreshState();
   startStreams();
@@ -596,7 +773,7 @@ function openSession(id) {
 document.querySelectorAll("#s-tabs button").forEach(b => b.onclick = () => {
   S.tab = b.dataset.tab;
   document.querySelectorAll("#s-tabs button").forEach(x => x.classList.toggle("on", x === b));
-  for (const t of ["topo", "tasks", "vulns", "flags", "events", "report"])
+  for (const t of ["topo", "trace", "tasks", "vulns", "flags", "events", "report"])
     $("#tab-" + t).hidden = t !== S.tab;
   if (S.tab === "topo") drawTopo();
   if (S.tab === "report") loadReport();
@@ -638,7 +815,9 @@ function renderApprovals() {
 
 function renderSessionHead() {
   const s = S.state.session;
-  $("#s-title").textContent = s.target || s.session_id;
+  $("#s-title").textContent = s.title || s.target || s.session_id;
+  $("#s-title").title = s.target || "";
+  $("#op-rename").onclick = () => startRename(S.cur, $("#s-title"));
   $("#s-meta").innerHTML = [
     `<span class="pill ${s.status}">${STATUS_CN[s.status] || s.status}</span>`,
     `<span class="tag blue">${MODE_CN[s.mode] || s.mode}</span>`,
@@ -656,11 +835,7 @@ function renderSessionHead() {
     try { await api(`/api/sessions/${S.cur}/stop`, { method: "POST", body: "{}" });
       toast("已发送停止"); refreshState(); } catch (e) { toast(e.message, true); }
   };
-  $("#op-del").onclick = async () => {
-    try { await api(`/api/sessions/${S.cur}?confirm=true`, { method: "DELETE" });
-      toast("会话已删除"); S.cur = null; show("home"); refreshSessions(); }
-    catch (e) { toast(e.message, true); }
-  };
+  $("#op-del").onclick = (ev) => armDelete(ev.currentTarget, S.cur);
 }
 
 function renderChips() {
@@ -711,6 +886,49 @@ function topoModel() {
 const nodeStatus = s => ({ done: "done", completed: "done", active: "active",
                            running: "active" }[String(s || "").toLowerCase()] || "pending");
 
+/* 左→右分层 DAG 布局（dagre 式）：层内重心排序减少交叉，逐层错落堆叠 */
+const TOPO_GEO = { NODE_W: 292, GAP_X: 96, GAP_Y: 24, PAD: 40, HUB_GAP: 64 };
+
+function topoReorder(layerIds, preds, succs) {
+  const order = new Map();
+  const reindex = () => layerIds.forEach(arr => arr.forEach((id, i) => order.set(id, i)));
+  reindex();
+  for (let pass = 0; pass < 4; pass++) {
+    const down = pass % 2 === 0;                     // 下行走前驱、上行走后继
+    const seq = down ? layerIds.slice(1) : layerIds.slice(0, -1).reverse();
+    for (const arr of seq) {
+      const bc = new Map(arr.map(id => {
+        const rel = ((down ? preds.get(id) : succs.get(id)) || [])
+          .map(x => order.get(x)).filter(v => v !== undefined);
+        return [id, rel.length ? rel.reduce((a, b) => a + b, 0) / rel.length : order.get(id)];
+      }));
+      arr.sort((a, b) => bc.get(a) - bc.get(b));
+      arr.forEach((id, i) => order.set(id, i));
+    }
+  }
+  return layerIds;
+}
+
+function topoApplyView(box, v) {
+  const stage = box.querySelector("#topo-stage");
+  if (stage) stage.style.transform = `translate(${v.tx}px, ${v.ty}px) scale(${v.s})`;
+}
+function topoFit(box, w, h) {
+  const vw = Math.max(box.clientWidth, 240), vh = Math.max(box.clientHeight, 240);
+  const s = Math.min(vw / (w + 28), vh / (h + 28), 1.2);
+  return { s, tx: (vw - w * s) / 2, ty: (vh - h * s) / 2 };
+}
+function topoZoom(box, k) {
+  const v = S.topoView;
+  if (!v) return;
+  const cx = box.clientWidth / 2, cy = box.clientHeight / 2;
+  const ns = Math.min(2.4, Math.max(0.3, v.s * k));
+  v.tx = cx - (cx - v.tx) * (ns / v.s);
+  v.ty = cy - (cy - v.ty) * (ns / v.s);
+  v.s = ns;
+  topoApplyView(box, v);
+}
+
 function drawTopo() {
   const box = $("#topo");
   if (!S.state) { box.innerHTML = ""; return; }
@@ -742,76 +960,177 @@ function drawTopo() {
       ${(t.routes || []).length ? `<div class="rts">${t.routes.map(routeRow).join("")}</div>` : ""}
     </div>`;
   };
-  const steerItems = Object.entries(ring.steering || {});
-  let html = `<svg class="edges"></svg><div class="col">
-    <div class="hub ${running ? "live" : ""}" id="topo-hub"><b>灵枢</b><small>主 Agent · 集中决策</small></div>
-    ${(steerItems.length || ring.attempts) ? `<div class="steer">
-      ${ring.attempts ? `<div class="steer-meta">环形共享 · 已尝试登记 ${ring.attempts} 条——同伴无产出的入口自动避让</div>` : ""}
-      ${steerItems.map(([k, v]) => `<div class="steer-item"><b>灵枢 → ${esc(agentName(k))}</b><span>${esc(v.hint || "")}</span>${v.rationale ? `<small title="${esc(v.rationale)}">${esc(v.rationale)}</small>` : ""}</div>`).join("")}
-    </div>` : ""}`;
-  const depths = [...layers.keys()].sort((a, b) => a - b);
-  for (const d of depths) {
-    html += `<div class="tlayer">` + layers.get(d).map(n => {
-      const st = nodeStatus(n.status);
-      return `<div class="tnode ${st === "active" ? "active" : ""}" data-node="${esc(n.node_id)}">
-        <div class="tact"><span class="dot ${st}"></span><b>${esc(n.title || n.tactic)}</b>
-          <span class="tac">${esc(n.tactic || "")}</span></div>
-        <div class="tcards">${cardsOf(n).map(taskCard).join("")}</div>
-      </div>`;
-    }).join("") + `</div>`;
-  }
-  if (orphans.length) {
-    html += `<div class="tlayer"><div class="tnode" data-node="__orphan__">
-      <div class="tact"><span class="dot ${running ? "active" : "done"}"></span><b>下发任务</b></div>
-      <div class="tcards">${orphans.map(taskCard).join("")}</div></div></div>`;
-  }
-  if (!nodes.length && !orphans.length) {
-    html += `<div class="empty-note">等待灵枢规划——任务拓扑将在此实时展开</div>`;
-  }
-  html += `</div>`;
-  box.innerHTML = html;
-  requestAnimationFrame(() => drawEdges(box, nodes));
-}
 
-function drawEdges(box, nodes) {
-  const svg = box.querySelector("svg.edges");
-  const hub = box.querySelector("#topo-hub");
-  if (!svg || !hub) return;
-  const br = box.getBoundingClientRect();
-  svg.setAttribute("viewBox", `0 0 ${box.scrollWidth} ${box.scrollHeight}`);
-  const ctr = el => {
-    const r = el.getBoundingClientRect();
-    return { x: r.left - br.left + box.scrollLeft + r.width / 2,
-             top: r.top - br.top + box.scrollTop,
-             bot: r.bottom - br.top + box.scrollTop };
-  };
-  const hc = ctr(hub);
-  const byId = new Map(nodes.map(n => [n.node_id, n]));
-  let paths = "";
-  const link = (x1, y1, x2, y2, cls) => {
-    const my = (y1 + y2) / 2;
-    paths += `<path class="${cls}" d="M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}"/>`;
-  };
+  // ---- 渲染节点集合：DAG 节点按深度分层，孤儿任务挂首层伪节点
+  const depths = [...layers.keys()].sort((a, b) => a - b);
+  const layerIds = [], depthIndex = new Map();
+  depths.forEach(d => {
+    const arr = layers.get(d).map(n => n.node_id);
+    arr.forEach(id => depthIndex.set(id, layerIds.length));
+    layerIds.push(arr);
+  });
+  const ORPHAN = "__orphan__";
+  if (orphans.length) {
+    if (!layerIds.length) layerIds.push([]);
+    layerIds[0].push(ORPHAN);
+    depthIndex.set(ORPHAN, 0);
+  }
+  const ids = [...depthIndex.keys()];
+  if (!ids.length) {
+    box.innerHTML = `<div class="empty-note">等待灵枢规划——任务拓扑将在此实时展开</div>`;
+    return;
+  }
+  const nodeOf = new Map(nodes.map(n => [n.node_id, n]));
+  const preds = new Map(ids.map(id => [id, []])), succs = new Map(ids.map(id => [id, []]));
   for (const n of nodes) {
-    const el = box.querySelector(`[data-node="${CSS.escape(n.node_id)}"]`);
-    if (!el) continue;
-    const c = ctr(el), st = nodeStatus(n.status);
-    const deps = (n.depends_on || []).filter(d => byId.has(d));
-    if (!deps.length) link(hc.x, hc.bot, c.x, c.top, st === "pending" ? "" : st);
-    for (const d of deps) {
-      const de = box.querySelector(`[data-node="${CSS.escape(d)}"]`);
-      if (!de) continue;
-      const dc = ctr(de);
-      link(dc.x, dc.bot, c.x, c.top, st === "pending" ? "" : st);
+    if (!depthIndex.has(n.node_id)) continue;
+    for (const dep of (n.depends_on || [])) {
+      if (!depthIndex.has(dep)) continue;
+      preds.get(n.node_id).push(dep);
+      succs.get(dep).push(n.node_id);
     }
   }
-  const orph = box.querySelector('[data-node="__orphan__"]');
-  if (orph && !nodes.length) {
-    const c = ctr(orph);
-    link(hc.x, hc.bot, c.x, c.top, "active");
+  topoReorder(layerIds, preds, succs);
+
+  const cardHtml = n => {
+    const st = nodeStatus(n.status);
+    return `<div class="tnode ${st === "active" ? "active" : ""}" data-node="${esc(n.node_id)}"
+      style="visibility:hidden">
+      <div class="tact"><span class="dot ${st}"></span><b>${esc(n.title || n.tactic)}</b>
+        <span class="tac">${esc(n.tactic || "")}</span></div>
+      <div class="tcards">${cardsOf(n).map(taskCard).join("")}</div></div>`;
+  };
+  const orphanCard = `<div class="tnode" data-node="${ORPHAN}" style="visibility:hidden">
+      <div class="tact"><span class="dot ${running ? "active" : "done"}"></span><b>下发任务</b></div>
+      <div class="tcards">${orphans.map(taskCard).join("")}</div></div>`;
+  const steerItems = Object.entries(ring.steering || {});
+  const steerHtml = (steerItems.length || ring.attempts) ? `<div class="topo-steer"><div class="steer">
+      ${ring.attempts ? `<div class="steer-meta">环形共享 · 已尝试登记 ${ring.attempts} 条——同伴无产出的入口自动避让</div>` : ""}
+      ${steerItems.map(([k, v]) => `<div class="steer-item"><b>灵枢 → ${esc(agentName(k))}</b><span>${esc(v.hint || "")}</span>${v.rationale ? `<small title="${esc(v.rationale)}">${esc(v.rationale)}</small>` : ""}</div>`).join("")}
+    </div></div>` : "";
+
+  box.innerHTML = `<div id="topo-stage">
+      <svg class="edges"></svg>
+      <div class="hub ${running ? "live" : ""}" id="topo-hub" style="visibility:hidden"><b>灵枢</b><small>主 Agent · 集中决策</small></div>
+      ${ids.filter(id => id !== ORPHAN).map(id => cardHtml(nodeOf.get(id))).join("")}
+      ${orphans.length ? orphanCard : ""}
+    </div>
+    <div class="topo-tools">
+      <button id="topo-zin" title="放大">＋</button>
+      <button id="topo-zout" title="缩小">－</button>
+      <button id="topo-fit" title="适应窗口">⤢</button>
+    </div>
+    <div class="topo-hint">滚轮缩放 · 拖拽平移 · 双击复位</div>
+    ${steerHtml}`;
+
+  // ---- 先隐藏渲染量高，再按层堆叠定位（节点高度随路线卡片数变化）
+  const stage = box.querySelector("#topo-stage");
+  const hubEl = box.querySelector("#topo-hub");
+  const elOf = new Map(ids.map(id =>
+    [id, stage.querySelector(`[data-node="${CSS.escape(id)}"]`)]));
+  const heights = new Map(ids.map(id => [id, elOf.get(id).offsetHeight]));
+  const hubH = hubEl.offsetHeight, hubW = hubEl.offsetWidth;
+  const layerH = layerIds.map(arr =>
+    arr.reduce((a, id) => a + heights.get(id), 0) + TOPO_GEO.GAP_Y * Math.max(arr.length - 1, 0));
+  const totalH = Math.max(...layerH);
+  const xOf = new Map(), yOf = new Map();
+  let cx = TOPO_GEO.PAD + hubW + TOPO_GEO.HUB_GAP;
+  layerIds.forEach((arr, i) => {
+    let y = TOPO_GEO.PAD + (totalH - layerH[i]) / 2;
+    for (const id of arr) {
+      xOf.set(id, cx);
+      yOf.set(id, y);
+      y += heights.get(id) + TOPO_GEO.GAP_Y;
+    }
+    cx += TOPO_GEO.NODE_W + TOPO_GEO.GAP_X;
+  });
+  const stageW = cx - TOPO_GEO.GAP_X + TOPO_GEO.PAD;
+  const stageH = totalH + TOPO_GEO.PAD * 2;
+  for (const id of ids) {
+    const el = elOf.get(id);
+    el.style.transform = `translate(${xOf.get(id)}px, ${yOf.get(id)}px)`;
+    el.style.visibility = "";
+  }
+  hubEl.style.transform =
+    `translate(${TOPO_GEO.PAD}px, ${TOPO_GEO.PAD + totalH / 2 - hubH / 2}px)`;
+  hubEl.style.visibility = "";
+  stage.style.width = stageW + "px";
+  stage.style.height = stageH + "px";
+
+  // ---- 连线：源右缘 → 目标左缘，水平三次贝塞尔（缩放随画布同步）
+  const svg = stage.querySelector("svg.edges");
+  svg.setAttribute("width", stageW);
+  svg.setAttribute("height", stageH);
+  svg.setAttribute("viewBox", `0 0 ${stageW} ${stageH}`);
+  const hubX = TOPO_GEO.PAD + hubW, hubY = TOPO_GEO.PAD + totalH / 2;
+  const link = (x1, y1, x2, y2, cls) => {
+    const dx = Math.max(30, (x2 - x1) * 0.42);
+    return `<path class="${cls}" d="M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}"/>`;
+  };
+  const midY = id => yOf.get(id) + heights.get(id) / 2;
+  let paths = "";
+  for (const n of nodes) {
+    const id = n.node_id;
+    if (!xOf.has(id)) continue;
+    const st = nodeStatus(n.status);
+    const deps = preds.get(id) || [];
+    if (!deps.length) paths += link(hubX, hubY, xOf.get(id), midY(id), st);
+    for (const d of deps) {
+      paths += link(xOf.get(d) + TOPO_GEO.NODE_W, midY(d), xOf.get(id), midY(id), st);
+    }
+  }
+  if (orphans.length) {
+    paths += link(hubX, hubY, xOf.get(ORPHAN), midY(ORPHAN), running ? "active" : "done");
   }
   svg.innerHTML = paths;
+
+  // ---- 视图：首次进入自动适应，此后保留用户平移/缩放
+  if (!S.topoView) S.topoView = topoFit(box, stageW, stageH);
+  topoApplyView(box, S.topoView);
+  box.querySelector("#topo-zin").onclick = () => topoZoom(box, 1.25);
+  box.querySelector("#topo-zout").onclick = () => topoZoom(box, 0.8);
+  box.querySelector("#topo-fit").onclick = () => {
+    S.topoView = topoFit(box, stageW, stageH);
+    topoApplyView(box, S.topoView);
+  };
 }
+
+/* 画布手势：滚轮以指针为中心缩放、按住拖拽平移、双击复位（绑定一次） */
+(function bindTopoGestures() {
+  const box = $("#topo");
+  box.addEventListener("wheel", (ev) => {
+    if (!S.topoView || S.tab !== "topo") return;
+    ev.preventDefault();
+    const r = box.getBoundingClientRect();
+    const mx = ev.clientX - r.left, my = ev.clientY - r.top, v = S.topoView;
+    const ns = Math.min(2.4, Math.max(0.3, v.s * Math.exp(-ev.deltaY * 0.0015)));
+    v.tx = mx - (mx - v.tx) * (ns / v.s);
+    v.ty = my - (my - v.ty) * (ns / v.s);
+    v.s = ns;
+    topoApplyView(box, v);
+  }, { passive: false });
+  let drag = null;
+  box.addEventListener("pointerdown", (ev) => {
+    if (ev.button !== 0 || !S.topoView || ev.target.closest(".topo-tools")) return;
+    drag = { x: ev.clientX, y: ev.clientY, tx: S.topoView.tx, ty: S.topoView.ty };
+    box.setPointerCapture(ev.pointerId);
+    box.classList.add("grabbing");
+  });
+  box.addEventListener("pointermove", (ev) => {
+    if (!drag) return;
+    S.topoView.tx = drag.tx + ev.clientX - drag.x;
+    S.topoView.ty = drag.ty + ev.clientY - drag.y;
+    topoApplyView(box, S.topoView);
+  });
+  const stop = () => { drag = null; box.classList.remove("grabbing"); };
+  box.addEventListener("pointerup", stop);
+  box.addEventListener("pointercancel", stop);
+  box.addEventListener("dblclick", (ev) => {
+    if (ev.target.closest(".topo-tools")) return;
+    S.topoView = null;
+    drawTopo();
+  });
+})();
 window.addEventListener("resize", () => { if (S.tab === "topo" && S.state) drawTopo(); });
 
 /* ================= 任务/漏洞/Flag ================= */
@@ -862,22 +1181,150 @@ function evLine(e) {
   return `<div class="ev"><span class="ts">${esc(t)}</span><span class="ty">${esc(e.type || "")}</span>
     <span class="ac">${esc(e.actor || "")}</span><span class="de">${esc(de.slice(0, 220))}</span></div>`;
 }
+
+/* ---- 解题轨迹：把审计事件流还原成 Agent 工作实录（对话式） ---- */
+function traceReset() { $("#trace-box").innerHTML = ""; }
+function traceScroll(force) {
+  const box = $("#trace-box");
+  if (force || box.scrollTop + box.clientHeight >= box.scrollHeight - 80)
+    box.scrollTop = box.scrollHeight;
+}
+function traceAgent(actor) {
+  const box = $("#trace-box");
+  const empty = box.querySelector(".empty-note");
+  if (empty) empty.remove();
+  let el = box.querySelector(`.tr-agent[data-agent="${CSS.escape(actor)}"]`);
+  if (!el) {
+    box.insertAdjacentHTML("beforeend", `<div class="tr-agent" data-agent="${esc(actor)}">
+      <div class="h"><b>${esc(actorName(actor))}</b>
+        <span class="mono muted" style="font-size:10.5px">${esc(actor)}</span>
+        <span class="muted" data-role="st"></span></div></div>`);
+    el = box.lastElementChild;
+  }
+  return el;
+}
+function traceTurn(actor, turn, meta) {
+  const host = traceAgent(actor);
+  let el = host.querySelector(`.tr-turn[data-turn="${turn}"]`);
+  if (!el) {
+    host.insertAdjacentHTML("beforeend", `<div class="tr-turn" data-turn="${esc(turn)}">
+      <div class="th"><span>第 ${esc(turn)} 回合</span>${meta ? `<span>${esc(meta)}</span>` : ""}</div>
+      <div class="tr-text"></div></div>`);
+    el = host.lastElementChild;
+  }
+  return el;
+}
+function tracePush(e) {
+  const box = $("#trace-box");
+  if (!box) return;
+  const d = (typeof e.detail === "object" && e.detail) || {};
+  const actor = e.actor || "";
+  switch (e.type) {
+    case "task.start": {
+      box.insertAdjacentHTML("beforeend",
+        `<div class="tr-note">▶ 下发任务 ${esc(d.type || "")} · ${esc(actorName(actor))}</div>`);
+      traceScroll(); break;
+    }
+    case "agent.turn": {
+      traceTurn(actor, d.turn, `${d.budget || ""}${d.forced_finish ? " · 强制收尾" : ""}`);
+      traceScroll(); break;
+    }
+    case "agent.delta": {
+      const kind = d.kind || "text";
+      const host = box.querySelector(`.tr-agent[data-agent="${CSS.escape(actor)}"]`);
+      if (kind === "reset") {                  // 主备切换重试：清掉半截文本
+        host?.querySelector(".tr-turn:last-of-type .tr-text")?.replaceChildren();
+        break;
+      }
+      if (kind === "tool_call") break;         // 工具调用有独立事件，不重复渲染
+      const turn = host?.querySelector(".tr-turn:last-of-type");
+      if (!turn) break;
+      let el = turn.querySelector(kind === "reasoning" ? ".tr-think" : ".tr-text");
+      if (!el) {
+        turn.insertAdjacentHTML("afterbegin",
+          `<div class="${kind === "reasoning" ? "tr-think" : "tr-text"}"></div>`);
+        el = turn.firstElementChild;
+      }
+      el.textContent += d.text || "";
+      traceScroll(); break;
+    }
+    case "agent.tool_call": {
+      const turn = box.querySelector(
+        `.tr-agent[data-agent="${CSS.escape(actor)}"] .tr-turn:last-of-type`);
+      if (!turn) break;
+      for (const c of (d.calls || [])) {
+        turn.insertAdjacentHTML("beforeend", `<div class="tr-call" data-id="${esc(c.id || "")}">
+          <div class="ch"><span class="nm">${esc(c.name || "?")}</span>
+            <span class="ar">${esc(JSON.stringify(c.arguments ?? {}))}</span>
+            <span class="ok">…</span></div>
+          <div class="bd"><pre></pre></div></div>`);
+      }
+      turn.querySelectorAll(".tr-call").forEach(el => el.querySelector(".ch").onclick =
+        () => el.classList.toggle("open"));
+      traceScroll(); break;
+    }
+    case "agent.tool_result": {
+      const sel = `.tr-agent[data-agent="${CSS.escape(actor)}"] .tr-call[data-id="${CSS.escape(d.id || "")}"]`;
+      const el = box.querySelector(sel) ||
+        box.querySelector(`.tr-agent[data-agent="${CSS.escape(actor)}"] .tr-call:last-of-type`);
+      if (!el) break;
+      const ok = el.querySelector(".ok");
+      ok.textContent = d.ok ? "完成" : "失败";
+      ok.className = "ok " + (d.ok ? "y" : "n");
+      el.querySelector(".bd pre").textContent = String(d.result ?? "");
+      if (!d.ok) el.classList.add("open");
+      traceScroll(); break;
+    }
+    case "agent.conclude": {
+      const turn = box.querySelector(
+        `.tr-agent[data-agent="${CSS.escape(actor)}"] .tr-turn:last-of-type`);
+      (turn || traceAgent(actor)).insertAdjacentHTML("beforeend",
+        `<div class="tr-conclude">${esc(d.summary || "")}</div>`);
+      traceScroll(); break;
+    }
+    case "agent.error": {
+      const turn = box.querySelector(
+        `.tr-agent[data-agent="${CSS.escape(actor)}"] .tr-turn:last-of-type`);
+      (turn || traceAgent(actor)).insertAdjacentHTML("beforeend",
+        `<div class="tr-err">⚠ ${esc(d.error || "")}</div>`);
+      traceScroll(); break;
+    }
+    case "flag.extracted": {
+      box.insertAdjacentHTML("beforeend",
+        `<div class="tr-note" style="color:var(--ok);font-weight:700">⚑ 捕获 Flag：${esc(d.value_preview || "")}</div>`);
+      traceScroll(); break;
+    }
+    case "task.done": {
+      const st = traceAgent(actor).querySelector('[data-role="st"]');
+      if (st) st.textContent = "已完成";
+      box.insertAdjacentHTML("beforeend",
+        `<div class="tr-note">■ ${esc(actorName(actor))} 任务结束</div>`);
+      traceScroll(); break;
+    }
+  }
+}
 function startStreams() {
   stopStreams();
   if (!S.cur) return;
+  traceReset();
   const es = new EventSource(`/api/sessions/${S.cur}/events`);
   S.es = es;
-  es.onmessage = m => {
+  // 审计帧是具名事件（event: audit），onmessage 收不到——必须按事件名监听
+  es.addEventListener("audit", m => {
     try {
       const e = JSON.parse(m.data);
       if (e.seq <= S.evSeen) return;
       S.evSeen = e.seq;
-      const box = $("#events");
-      box.insertAdjacentHTML("afterbegin", evLine(e));
-      while (box.children.length > 250) box.lastChild.remove();
+      tracePush(e);
+      if (e.type !== "agent.delta") {       // 流式文本进轨迹，原始事件面板不刷屏
+        const box = $("#events");
+        box.insertAdjacentHTML("afterbegin", evLine(e));
+        while (box.children.length > 250) box.lastChild.remove();
+      }
       if (/task\.|decision\.|vuln\.|flag\.|system\./.test(e.type || "")) refreshState();
     } catch {}
-  };
+  });
+  es.addEventListener("done", () => { refreshState(); });
   es.onerror = () => {};
   S.poll = setInterval(() => { refreshState(); refreshSessions(); }, 3000);
 }
