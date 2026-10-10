@@ -110,6 +110,9 @@ class SubAgent(abc.ABC):
     # LLM 增广路线允许编排的确定性动作白名单：action → 必填字符串字段；
     # 空表 = 本 Agent 不接受 LLM 增广（预算只起截断作用）
     llm_route_actions: ClassVar[dict[str, list[str]]] = {}
+    # 健康度剪枝开关：默认开启（低分路线让位高分路线）；逐轮探索型子 Agent
+    # 置 False——起步阶段进展分被步数顶摊薄，剪枝会误杀在途调查
+    health_prune_enabled: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -332,7 +335,7 @@ class SubAgent(abc.ABC):
         total_steps = max(len(plan.steps), 1)
         for step in plan.steps:
             # 健康度剪枝门（每步评估；宽限期内不剪，见 BranchHealthManager）
-            if self.health_mgr.should_prune(route):
+            if self.health_prune_enabled and self.health_mgr.should_prune(route):
                 self.health_mgr.prune(route, f"健康度 {route.health:.2f} 低于阈值")
                 self.ctx.audit.log("route.pruned", self.agent_id,
                                    {"route": route.name, "health": round(route.health, 3)})

@@ -20,7 +20,10 @@ from spiritscout.core.audit import AuditLogger, NullAuditLogger
 from spiritscout.core.ids import new_id
 from spiritscout.core.models import Event, FlagCandidate
 
-DEFAULT_FLAG_PATTERNS = [r"flag\{[^}\s]{1,128}\}", r"FLAG\{[^}\s]{1,128}\}"]
+DEFAULT_FLAG_PATTERNS = [
+    r"(?i)\b[a-z0-9_]{0,32}flag\{[^}\s]{1,128}\}",   # flag{...} 及带前缀变体
+    r"(?i)\b[a-z0-9_]{0,32}ctf\{[^}\s]{1,128}\}",    # 赛事前缀变体（PKWCTF/SCTF…）
+]
 # 赛方「频率限制」类应答的关键词（触发退避）
 _RATE_LIMIT_HINTS = ("频率", "太快", "rate limit", "too fast", "too many", "slow down")
 

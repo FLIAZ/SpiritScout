@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import binascii
 import codecs
+import html
 import json
 import re
 import urllib.parse
@@ -36,6 +37,9 @@ from spiritscout.ctf.flags import FlagManager
 _MIN_BLOB_LEN = 12
 # 喂给 LLM 的单条观察摘录上限（控制 token 扇出）
 _OBS_EXCERPT_CAP = 3000
+# 调查上下文（喂给 LLM 的 JSON）总字符预算：工具/约束等契约字段永不截断，
+# 观察与已试动作按剩余空间回填（新步优先）
+_CTX_MAX_CHARS = 14000
 # 调查环步数安全顶（每步一次 LLM 决策；到顶即收尾，防无限空转）
 _INVESTIGATE_MAX_STEPS = 24
 # 连续重复动作告警/熔断线（同一动作签名连续出现；告警先提示，再犯即收）
@@ -45,6 +49,13 @@ _DOOM_STOP_AT = 5
 _SOLVER_TIMEOUT = 420
 # HTTP 动作参数上限（上下文保护，非行为限制；目标范围由 ScopeGuard 把关）
 _HTTP_METHODS = ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS")
+# HTML 结构探测：响应首段命中常见标签即按 HTML 摘要处理
+_HTML_HINT = re.compile(
+    r"<\s*(?:!doctype|html|head|body|div|span|a|p|form|table|script|style|title)\b",
+    re.IGNORECASE)
+# 观察保留的高信号响应头（跳转目标/会话/指纹/鉴权）
+_OBS_HEADERS = ("location", "set-cookie", "server", "x-powered-by",
+                "content-type", "www-authenticate", "x-flag", "allow")
 
 
 def _challenge_text(ch: dict[str, Any]) -> str:
@@ -78,22 +89,121 @@ def _decode_blobs(text: str) -> list[str]:
     return out
 
 
-def _challenge_view(ch: dict[str, Any]) -> dict[str, Any]:
-    """赛题载荷的 LLM 上下文视图：全字段透传（截断），附件单列不走此口。"""
+def _challenge_view(ch: dict[str, Any], *, total_cap: int = 6000) -> dict[str, Any]:
+    """赛题载荷的 LLM 上下文视图：全字段透传（截断），附件单列不走此口。
+
+    总长超预算时逐档收紧单字段上限——视图整体可入上下文，调用侧不触发截断。
+    """
     view: dict[str, Any] = {}
-    for key, value in list(ch.items())[:20]:
-        if key == "attachments":
-            continue
-        if isinstance(value, str):
-            view[key] = value[:1500]
-        elif isinstance(value, (int, float, bool)) or value is None:
-            view[key] = value
-        elif isinstance(value, list):
-            view[key] = [str(x)[:200] for x in value[:10]]
-        elif isinstance(value, dict):
-            view[key] = {str(kk)[:40]: str(vv)[:200]
-                         for kk, vv in list(value.items())[:10]}
+    for per_field in (1500, 700, 300, 120):
+        view = {}
+        for key, value in list(ch.items())[:20]:
+            if key == "attachments":
+                continue
+            if isinstance(value, str):
+                view[key] = value[:per_field]
+            elif isinstance(value, (int, float, bool)) or value is None:
+                view[key] = value
+            elif isinstance(value, list):
+                view[key] = [str(x)[: min(per_field, 200)] for x in value[:10]]
+            elif isinstance(value, dict):
+                view[key] = {str(kk)[:40]: str(vv)[: min(per_field, 200)]
+                             for kk, vv in list(value.items())[:10]}
+        if len(json.dumps(view, ensure_ascii=False)) <= total_cap:
+            break
     return view
+
+
+def _collapse(text: str) -> str:
+    """空白折叠（多行 HTML 片段 → 单行可读文本）。"""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _html_digest(body: str) -> str | None:
+    """HTML 响应 → 结构化观察摘要（纯机械提取，不做判断）。
+
+    样式/脚本块剔除（内联 CSS 会把真正的入口信息挤出上下文）；注释单列且
+    靠前——开发备注类线索（接口地址、口令提示）常藏于此；另提取标题、表单、
+    输入字段、链接、脚本引用与内联脚本。非 HTML 返回 None（回退原文截断）。
+    """
+    if not _HTML_HINT.search(body[:4000]):
+        return None
+    m = re.search(r"<title[^>]*>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
+    title = _collapse(m.group(1))[:150] if m else ""
+    script_srcs = list(dict.fromkeys(
+        s[:150] for s in re.findall(
+            r"<script\b[^>]*\bsrc=[\"']([^\"']+)[\"']", body, re.IGNORECASE)))
+    inline_js = [s for s in (_collapse(x) for x in re.findall(
+        r"<script\b(?![^>]*\bsrc=)[^>]*>(.*?)</script\s*>", body,
+        re.IGNORECASE | re.DOTALL)) if s]
+    stripped = re.sub(r"<(style|script|noscript)\b[^>]*>.*?</\1\s*>", " ",
+                      body, flags=re.IGNORECASE | re.DOTALL)
+    comments = [c for c in (_collapse(x) for x in re.findall(
+        r"<!--(.*?)-->", stripped, re.DOTALL)) if c and not c.startswith("[if")]
+    stripped = re.sub(r"<!--.*?-->", " ", stripped, flags=re.DOTALL)
+    forms: list[str] = []
+    for tag in re.findall(r"<form\b[^>]*>", stripped, re.IGNORECASE)[:5]:
+        action = re.search(r"\baction=[\"']([^\"']*)[\"']", tag, re.IGNORECASE)
+        method = re.search(r"\bmethod=[\"']([^\"']*)[\"']", tag, re.IGNORECASE)
+        forms.append(f"{method.group(1).upper() if method else 'GET'} "
+                     f"{action.group(1) if action else ''}".strip())
+    field_bits: list[str] = []
+    for attrs in re.findall(r"<input\b([^>]*)>", stripped, re.IGNORECASE)[:10]:
+        nm = re.search(r"\bname=[\"']([^\"']+)[\"']", attrs, re.IGNORECASE)
+        if not nm:
+            continue
+        val = re.search(r"\bvalue=[\"']([^\"']*)[\"']", attrs, re.IGNORECASE)
+        field_bits.append(
+            f"{nm.group(1)}={val.group(1)[:60]}" if val else nm.group(1))
+    links: list[str] = []
+    for href in re.findall(
+            r"<(?:a|link|area)\b[^>]*\bhref=[\"']([^\"']+)[\"']",
+            stripped, re.IGNORECASE):
+        if href.startswith(("#", "javascript:", "mailto:", "data:")) or href in links:
+            continue
+        links.append(href[:200])
+        if len(links) >= 25:
+            break
+    text = _collapse(html.unescape(re.sub(r"<[^>]+>", " ", stripped)))
+    parts = [f"[HTML 摘要] 样式/脚本块已剔除（原文 {len(body)} 字符）"]
+    if title:
+        parts.append(f"[标题] {title}")
+    if comments:
+        parts.append("[注释] " + " ｜ ".join(c[:500] for c in comments[:5])[:1200])
+    if links:
+        parts.append("[链接] " + " ".join(links)[:500])
+    if forms:
+        parts.append("[表单] " + " ｜ ".join(forms)[:300])
+    if field_bits:
+        parts.append("[输入字段] " + ", ".join(field_bits[:10])[:300])
+    if script_srcs:
+        parts.append("[脚本引用] " + " ".join(script_srcs)[:250])
+    if inline_js:
+        parts.append("[内联脚本] " + " ｜ ".join(inline_js[:3])[:600])
+    if text:
+        parts.append("[可见文本] " + text[:1000])
+    return "\n".join(parts)[:_OBS_EXCERPT_CAP]
+
+
+def _http_observation(desc: str, res: Any, url: str,
+                      flags: list[str]) -> dict[str, Any]:
+    """HTTP 结果 → 观察条目：状态/跳转/高信号响应头/正文摘要（HTML 结构化）。"""
+    parsed = res.parsed if isinstance(res.parsed, dict) else {}
+    obs: dict[str, Any] = {"action": desc,
+                           "status": parsed.get("status_code", 0)}
+    final = str(parsed.get("final_url") or "")
+    if final and final.rstrip("/") != url.rstrip("/"):
+        obs["final_url"] = final[:300]
+    headers = {str(k).lower(): str(v)
+               for k, v in (parsed.get("headers") or {}).items()}
+    picked = {k: headers[k][:300] for k in _OBS_HEADERS if k in headers}
+    if picked:
+        obs["headers"] = picked
+    body = res.stdout or ""
+    obs["excerpt"] = _html_digest(body) or body[:_OBS_EXCERPT_CAP]
+    if flags:
+        obs["flags"] = flags
+    return obs
 
 
 class CTFBaseAgent(SubAgent):
@@ -110,6 +220,9 @@ class CTFBaseAgent(SubAgent):
     }
     # 方向方法论（思路启发，不是步骤；LLM 按题面证据自选方向）
     direction_brief: ClassVar[str] = ""
+    # 调查路线的安全顶是步数上限与重复空转熔断；健康度剪枝面向多路线资源
+    # 再分配场景，逐轮探索的起步进展分天然低于阈值，会误杀在途调查——豁免
+    health_prune_enabled: ClassVar[bool] = False
 
     def __init__(self, ctx, *, flag_manager: FlagManager | None = None, **kw):
         super().__init__(ctx, **kw)
@@ -189,7 +302,7 @@ class CTFBaseAgent(SubAgent):
         ch = self.challenge_of(task)
         data = await self._llm_chat_json("route_planner", {
             "challenge": _challenge_view(ch),
-            "attachments": ch.get("attachments", [])[:10],
+            "attachments": [str(a)[:300] for a in ch.get("attachments", [])[:10]],
             "slots": k,
             "tools": self.investigate_tools,
             "direction_brief": self.direction_brief,
@@ -275,7 +388,7 @@ class CTFBaseAgent(SubAgent):
 
         decision = await self._llm_chat_json(
             "ctf_solver", self._inv_context(task, plan, state),
-            max_user_chars=14000, timeout_seconds=_SOLVER_TIMEOUT)
+            max_user_chars=_CTX_MAX_CHARS, timeout_seconds=_SOLVER_TIMEOUT)
         if decision is None:
             state["stall"] = "LLM 不可用，调查停摆（无模板兜底，等待重试）"
             self._save_inv_state(task, route, state)
@@ -343,17 +456,15 @@ class CTFBaseAgent(SubAgent):
                           ensure_ascii=False)[:400]
 
     def _inv_context(self, task: Task, plan: RoutePlan, state: dict[str, Any]) -> dict[str, Any]:
-        """喂给 LLM 的调查上下文：题面 + 本路线角度 + 观察 + 同伴结论 + 工具目录。"""
+        """喂给 LLM 的调查上下文：题面 + 本路线角度 + 观察 + 同伴结论 + 工具目录。
+
+        分区预算：工具/约束等契约字段永在；观察与已试动作按剩余空间回填
+        （新步优先，装不下的旧观察丢弃）——整体不触发调用侧截断，契约不被切尾。
+        """
         ch = self.challenge_of(task)
-        return {
+        ctx: dict[str, Any] = {
             "challenge": _challenge_view(ch),
-            "attachments": ch.get("attachments", [])[:10],
             "route_angle": plan.strategy,
-            "observations": state["observations"][-8:],
-            "flags_found": state["flags"],
-            "tried": state["tried"][-15:],
-            "sibling_conclusions": self._shared_conclusions(task),
-            "step_budget": f"{len(state['tried'])}/{_INVESTIGATE_MAX_STEPS}",
             "tools": self.investigate_tools,
             "direction_brief": self.direction_brief,
             "constraints": (
@@ -366,7 +477,34 @@ class CTFBaseAgent(SubAgent):
                 "conclude 带 {\"summary\": \"结论\"}。"
                 "规则：每步只做最有信息量的一件事；tried 中的动作禁止重复；"
                 "拿到疑似 Flag 线索先验证；信息耗尽或判断无解空间时 conclude。"),
+            "attachments": [str(a)[:300] for a in ch.get("attachments", [])[:10]],
+            "flags_found": state["flags"],
+            "step_budget": f"{len(state['tried'])}/{_INVESTIGATE_MAX_STEPS}",
+            "sibling_conclusions": [str(c)[:200]
+                                    for c in self._shared_conclusions(task)[-6:]],
+            "observations": [],
+            "tried": [],
         }
+        # 余量 800：覆盖调用侧注入的督导建议等附加上下文
+        budget = _CTX_MAX_CHARS - len(json.dumps(ctx, ensure_ascii=False)) - 800
+        observations: list[dict[str, Any]] = []
+        for obs in reversed(state["observations"][-8:]):
+            cost = len(json.dumps(obs, ensure_ascii=False)) + 2
+            if cost > budget:
+                continue
+            observations.append(obs)
+            budget -= cost
+        ctx["observations"] = list(reversed(observations))
+        tried: list[str] = []
+        for sig in reversed(state["tried"][-15:]):
+            item = str(sig)[:200]
+            cost = len(json.dumps(item, ensure_ascii=False)) + 2
+            if cost > budget:
+                continue
+            tried.append(item)
+            budget -= cost
+        ctx["tried"] = list(reversed(tried))
+        return ctx
 
     # ------------------------------------------------------------ 首轮感知
 
@@ -402,8 +540,7 @@ class CTFBaseAgent(SubAgent):
             status = res.parsed.get("status_code", 0)
             state["flags"].extend(accepted)
             state["observations"].append(
-                {"action": f"GET {url}", "status": status,
-                 "excerpt": res.stdout[:_OBS_EXCERPT_CAP], "flags": accepted})
+                _http_observation(f"GET {url}", res, url, accepted))
             value = (0.3 if status < 400 else 0.05) + 0.6 * len(accepted)
             if self.ctx.ring is not None:
                 self.ctx.ring.record_attempt(
@@ -527,9 +664,7 @@ class CTFBaseAgent(SubAgent):
         accepted = await self._harvest_http(res.stdout, task, f"llm:{desc[:40]}")
         status = res.parsed.get("status_code", 0)
         state["flags"].extend(accepted)
-        state["observations"].append(
-            {"action": desc, "status": status,
-             "excerpt": res.stdout[:_OBS_EXCERPT_CAP], "flags": accepted})
+        state["observations"].append(_http_observation(desc, res, url, accepted))
         value = (0.25 if status < 400 else 0.05) + 0.6 * len(accepted)
         if self.ctx.ring is not None:
             self.ctx.ring.record_attempt(
