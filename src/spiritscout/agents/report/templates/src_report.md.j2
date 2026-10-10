@@ -1,0 +1,86 @@
+# 灵探 SpiritScout 安全测试报告
+
+> 目标：`{{ target }}` ｜ 模式：{{ auth.mode.value }} ｜ 生成时间：{{ generated_at }}
+
+---
+
+## 一、测试概述
+
+| 项目 | 内容 |
+| --- | --- |
+| 授权编号 | {{ auth.auth_id }} |
+| 测试模式 | {{ auth.mode.value }}{% if auth.src_platform %}（平台：{{ auth.src_platform }}）{% endif %} |
+| 目标描述 | {{ auth.target_description or target }} |
+| 执行轮次 | {{ run_summary.get("rounds_executed", "-") }} |
+| 停止原因 | {{ run_summary.get("stop_reason", "-") }} |
+| 分发任务数 | {{ run_summary.get("tasks_dispatched", task_count) }} |
+| 侦察线索 | {{ clue_count }} 条 |
+
+**收录统计**：严重 {{ severity_counts.critical }} ｜ 高危 {{ severity_counts.high }} ｜ 中危 {{ severity_counts.medium }} ｜ 低危 {{ severity_counts.low }}
+
+## 二、资产清单
+
+| 类型 | 标识 | 端口/服务 | 指纹 |
+| --- | --- | --- | --- |
+{% for a in assets -%}
+| {{ a.asset_type }} | `{{ a.value }}` | {{ a.port or "-" }}/{{ a.service or "-" }} | {{ a.fingerprint | tojson if a.fingerprint else "-" }} |
+{% endfor %}
+
+## 三、漏洞详情（收录池）
+
+{% if pool %}
+{% for v in pool %}
+### {{ loop.index }}. {{ v.title }}
+
+- **类型**：{{ v.vuln_type }} ｜ **等级**：{{ v.severity.value }}{% if v.cvss_score %}（CVSS {{ "%.1f" | format(v.cvss_score) }} — `{{ v.cvss_vector }}`）{% endif %}
+- **位置**：`{{ v.target }}{{ v.endpoint }}`{% if v.parameter %}，参数 `{{ v.parameter }}`{% endif %}
+- **状态**：全链路核验通过（初筛 → {{ v.reproductions | length }} 种方式交叉复现 → 误报排查 → 合规判定 → PoC 实测）
+
+**证据链**
+
+{% for e in v.evidence %}
+- 方法 `{{ e.method }}`：{% if e.url %}`{{ e.url }}`{% endif %}{% if e.payload %} 载荷 `{{ e.payload }}`{% endif %}{% if e.pattern %} 命中特征 `{{ e.pattern }}`{% endif %}{% if e.response %} 响应摘录 `{{ e.response }}`{% endif %}
+{% endfor %}
+
+**复现记录**
+
+{% for r in v.reproductions %}
+- {{ r.method }}：{{ "成功" if r.ok else "失败" }}
+{% endfor %}
+
+{% if v.poc_code %}
+**PoC（已实测通过）**
+
+{{ v.poc_code }}
+{% endif %}
+
+**修复建议**：{{ fix_suggestions.get(v.vuln_type, "按最小权限与安全开发规范整改。") }}
+
+---
+{% endfor %}
+{% else %}
+本次测试无达到收录标准（中危及以上且实际可利用）的漏洞。
+{% endif %}
+
+## 四、合规声明
+
+1. 本次测试在授权范围内进行，授权编号 {{ auth.auth_id }}{% if auth.human_confirmed %}，授权信息经人工确认{% endif %}；
+2. 测试过程遵循数据最小化原则：未拖取数据库、未批量导出用户数据、未进行破坏性操作与 DoS 类测试；
+3. 本报告由 AI 多智能体系统（灵探 SpiritScout）自动生成；全部漏洞均经 ≥2 种方式自动化交叉复现与 PoC 实测，**建议提交前由人工按上述复现步骤再次核验**（AI 生成内容可能存在偏差）；
+4. 报告中的个人信息（手机号/身份证/邮箱）已自动脱敏。
+
+## 五、附录
+
+### 5.1 未收录发现统计（仅记录，不输出详情）
+
+| 状态 | 数量 |
+| --- | --- |
+{% for status, count in rejected_stats.items() -%}
+| {{ status }} | {{ count }} |
+{% endfor %}
+
+### 5.2 运行摘要
+
+```json
+{{ run_summary | tojson(indent=2) }}
+```

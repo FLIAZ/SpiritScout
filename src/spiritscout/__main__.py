@@ -1,0 +1,65 @@
+"""灵探（SpiritScout）Web 控制台启动入口。
+
+用法::
+
+    python -m spiritscout [--config configs/system.yaml] [--host 127.0.0.1] [--port 8000]
+
+会话创建、拓扑观测、编队与模型管理、报告与审计导出均在浏览器内完成。
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+
+from spiritscout import __version__
+from spiritscout.config import load_model_config, load_system_config
+from spiritscout.core.exceptions import SpiritScoutError
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="spiritscout",
+        description="灵探（SpiritScout）渗透测试智能体系统 · Web 控制台")
+    parser.add_argument("--version", action="version",
+                        version=f"%(prog)s {__version__}")
+    parser.add_argument("--config", default="configs/system.yaml",
+                        help="系统配置 YAML 路径")
+    parser.add_argument("--host", default=None,
+                        help="绑定地址（默认取配置 web.host=127.0.0.1）")
+    parser.add_argument("--port", type=int, default=None,
+                        help="端口（默认取配置 web.port=8000）")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        cfg = load_system_config(args.config)
+        models = load_model_config(cfg.models_config_path)
+    except SpiritScoutError as exc:
+        print(f"[错误] {exc}", file=sys.stderr)
+        return 2
+
+    import uvicorn
+
+    from spiritscout.web import create_app
+
+    host = args.host or cfg.web.host
+    port = args.port or cfg.web.port
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        # 非回环绑定：控制台无鉴权，显著警告而非静默放行
+        print("⚠⚠ [警告] Web 控制台绑定非回环地址 "
+              f"{host}:{port}——任何可达网络的用户均可创建/停止渗透会话。\n"
+              "   请确认暴露面已获得授权方认可，或加前置反向代理认证。",
+              file=sys.stderr)
+    app = create_app(cfg, models,
+                     max_concurrent=cfg.web.max_concurrent_sessions)
+    print(f"灵探 Web 控制台: http://{host}:{port}  "
+          f"(并发上限 {cfg.web.max_concurrent_sessions}，Ctrl+C 停止)")
+    uvicorn.run(app, host=host, port=port, log_level="warning")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

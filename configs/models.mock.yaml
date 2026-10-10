@@ -1,0 +1,51 @@
+# Mock 模型注册表——仅供研发/测试（合规 G10：测试不触网）。
+# 真实使用请改 configs/models.yaml（云端模型模板），
+# 或 spiritscout --config <system.yaml> 中 models_config_path 指向本文件做离线开发。
+# Mock 后端是确定性应答（支持故障注入），不消耗真实 API、不产生真实智能。
+
+models:
+  - alias: mock-flagship
+    provider: mock
+    tier: flagship
+    capabilities: [reasoning, code, chinese, security]
+    cost_input_per_mtok: 0.0
+    cost_output_per_mtok: 0.0
+    rate_limit_rpm: 600
+    quality_score: 1.0
+
+  - alias: mock-fast
+    provider: mock
+    tier: fast
+    capabilities: [chinese]
+    cost_input_per_mtok: 0.0
+    cost_output_per_mtok: 0.0
+    rate_limit_rpm: 600
+    quality_score: 0.9
+
+  - alias: mock-code
+    provider: mock
+    tier: code
+    capabilities: [code]
+    cost_input_per_mtok: 0.0
+    cost_output_per_mtok: 0.0
+    rate_limit_rpm: 600
+    quality_score: 0.95
+
+  - alias: mock-rigorous
+    provider: mock
+    tier: rigorous
+    capabilities: [reasoning, chinese, security]
+    cost_input_per_mtok: 0.0
+    cost_output_per_mtok: 0.0
+    rate_limit_rpm: 600
+    quality_score: 0.98
+
+  - alias: mock-backup
+    provider: mock
+    tier: fast
+    capabilities: [chinese]
+    cost_input_per_mtok: 0.0
+    cost_output_per_mtok: 0.0
+    rate_limit_rpm: 600
+    quality_score: 0.8
+    is_fallback_for: [mock-fast]

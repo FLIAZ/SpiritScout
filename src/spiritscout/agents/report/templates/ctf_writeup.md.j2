@@ -1,0 +1,48 @@
+# 灵探 SpiritScout CTF WriteUp
+
+> 生成时间：{{ generated_at }}{% if context.contest_type %} ｜ 赛制：{{ context.contest_type }}{% endif %}
+
+**Flag 统计**：提取 {{ context.flag_stats.get("extracted", 0) }} ｜ 提交 {{ context.flag_stats.get("submitted", 0) }} ｜ 正确 {{ context.flag_stats.get("accepted", 0) }} ｜ 错误 {{ context.flag_stats.get("rejected", 0) }}
+
+{% if context.notes %}
+**装配说明**
+{% for n in context.notes %}
+- {{ n }}
+{% endfor %}
+{% endif %}
+
+---
+
+{% for ch in challenges %}
+## {{ loop.index }}. {{ ch.title or ch.id }}{% if ch.direction or ch.points %}（{{ ch.direction or "?" }}{% if ch.points %} / {{ ch.points }} 分{% endif %}）{% endif %}
+
+{% if ch.category %}- **考点**：{{ ch.category }}
+{% endif %}- **入口**：{% if ch.url %}`{{ ch.url }}`{% else %}附件/题面{% endif %}
+{% set flags = flags_by_challenge.get(ch.id|string, []) %}
+{% if flags %}
+{% for f in flags %}
+- **Flag**：`{{ f.value }}` — {{ "✅ 正确" if f.accepted else ("❌ 错误" if f.accepted is sameas false else "⏳ 未判定") }}{% if f.submit_response %}（{{ f.submit_response[:80] }}）{% endif %}
+{% endfor %}
+{% else %}
+- **Flag**：未提取到候选
+{% endif %}
+
+{% endfor %}
+
+---
+
+## 解题过程记录
+
+{% for ts in task_states %}
+### {{ ts.task.task_type }} — {{ ts.task.payload.get("node_title", ts.task.task_id) }}
+
+{% for r in ts.routes %}
+- 路线 `{{ r.name }}`：{{ r.status }}（健康度 {{ "%.2f" | format(r.health) }}，{{ r.steps_executed }} 步）
+{% for note in r.notes[:5] %}
+  - {{ note }}
+{% endfor %}
+{% endfor %}
+
+{% endfor %}
+
+> 本 WriteUp 由 AI 多智能体系统自动生成（G6），解题步骤建议人工复核后引用。

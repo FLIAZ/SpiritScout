@@ -1,0 +1,69 @@
+# 灵探（SpiritScout）系统配置示例
+# 复制为 configs/system.yaml 后修改；亦可用 SPIRITSCOUT_<段>__<键> 环境变量覆盖。
+
+mode: src                      # src / ctf / competition（三模式， 完整启用）
+
+workspace:
+  root: .spiritscout           # 工作区（SQLite/审计/报告）
+
+bus:                           # 环形数据总线（适配器决策 A1）
+  backend: inprocess           # inprocess（默认）/ redis / nats
+  redis_url: redis://127.0.0.1:6379/0
+  nats_url: nats://127.0.0.1:4222
+  queue_maxsize: 10000
+  rate_limit_per_second: 1000  # 总线流量控制
+
+blackboard:
+  sqlite_path: .spiritscout/blackboard.db
+
+gateway:                       # 多模型网关（模型在 models.yaml 注册）
+  default_tier: fast
+  budget_tokens: 2000000       # token 预算硬顶（超顶熔断）
+  budget_usd: 20.0
+  mode_budget_tokens:          # 按运行模式的 token 硬顶（4.9.4，可留空仅全局）
+    src: 2000000
+    ctf: 1000000
+    competition: 1500000
+  degrade_at_ratio: 0.8        # 用量达预算 80% 自动降级低档模型（4.9.4）
+  cascade_confidence_threshold: 0.8
+  vote_min_models: 2
+  request_timeout_seconds: 300  # 重推理模型单次调用可达数分钟，过短会中途掐死解题环
+  max_retries: 2
+
+executor:                      # 工具执行器（CLI/Docker/MCP 三态）
+  backend: local               # local / docker
+  docker_image: kalilinux/kali-rolling:latest
+  default_timeout_seconds: 300
+  max_output_chars: 20000      # 输出窗口截断（防上下文污染）
+  ctf_network_isolation: true  # CTF 模式网络隔离（硬约束）
+  docker_memory_mb: 512        # Docker 沙箱加固：资源硬限额
+  docker_cpus: 1.0
+  docker_pids_limit: 256
+  docker_read_only: true       # 只读根文件系统 + 受限 tmpfs
+  docker_tmpfs: "/tmp:rw,noexec,nosuid,size=64m"
+  docker_user: ""              # 空 = 镜像默认用户；可配 "65534:65534" 降权
+
+knowledge:                     # 五库 + 两经验库
+  sqlite_path: .spiritscout/knowledge.db
+  chroma_path: .spiritscout/chroma
+  embedding_provider: hash     # hash（零依赖默认）/ openai_compatible
+  embedding_base_url: ""
+  embedding_api_key: ${EMBEDDING_API_KEY}
+  embedding_model: ""
+
+report:
+  template: src_standard       # 报告模板（4.6.2）
+  output_format: markdown
+  output_dir: .spiritscout/reports
+
+web:                            # Web 控制台：spiritscout web 启动
+  host: 127.0.0.1               # 仅回环（无鉴权；改非回环启动时会有显著警告）
+  port: 8000
+  max_concurrent_sessions: 4    # 并发会话上限
+
+models_config_path: configs/models.yaml
+audit_log_path: .spiritscout/audit.jsonl
+
+max_routes_per_agent: 8        # 分支数硬上限（防分支爆炸）
+default_routes_per_agent: 3    # 默认 3 条差异化路线（硬约束 C2）
+iteration_max_rounds: 20
