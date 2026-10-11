@@ -682,7 +682,7 @@ dialog::backdrop { background: rgba(10, 14, 22, .45); }
   <h3 id="p-dlg-title" style="margin:0">添加供应商</h3>
   <p class="muted" style="font-size:12px;margin:9px 0 0;line-height:1.7">
     一个供应商 = 一个 API 地址 + 一把密钥，它下面的模型共用这套接入信息。
-    保存后点「获取模型列表」从云端勾选启用；端点不提供列表接口时用「手动添加模型」。</p>
+    保存后点「获取模型列表」从云端勾选启用；服务未提供模型列表时用「手动添加模型」。</p>
   <div class="dlg-grid">
     <div class="dlg-sec" id="p-presets-sec">厂商预设</div>
     <div class="preset-grid" id="p-presets"></div>
@@ -694,7 +694,7 @@ dialog::backdrop { background: rgba(10, 14, 22, .45); }
     </select></label>
     <label class="wide"><span>API 地址 *</span><input id="p-baseurl" placeholder="https://api.example.com/v1"></label>
     <div class="dlg-sec">密钥</div>
-    <label class="wide"><span>API Key</span><input id="p-keyval" type="password" placeholder="加密存入本机密钥库，不写回配置文件" autocomplete="new-password"></label>
+    <label class="wide"><span>API Key</span><input id="p-keyval" type="password" placeholder="加密保存在本机，不会明文写入任何文件" autocomplete="new-password"></label>
     <div id="p-keystat" class="muted" style="grid-column:1/-1;font-size:11.5px"></div>
   </div>
   <div class="dlg-ops">
@@ -719,11 +719,12 @@ dialog::backdrop { background: rgba(10, 14, 22, .45); }
     <label><span>模型 ID *</span><input id="m-model" placeholder="如 ark-code-latest 或 ep-xxx"></label>
     <label><span>归属供应商</span><select id="m-pref"></select></label>
     <label><span>档位</span><select id="m-tier">
-      <option>flagship</option><option>rigorous</option><option>code</option>
-      <option selected>fast</option><option>light</option>
+      <option value="flagship">旗舰档</option><option value="rigorous">严谨档</option>
+      <option value="code">代码档</option>
+      <option value="fast" selected>快速档</option><option value="light">轻量档</option>
     </select></label>
     <div class="dlg-sec">能力画像</div>
-    <label><span>上下文窗口（token）</span><input id="m-ctx" type="number" value="0" min="0" step="1000" placeholder="0 = 未声明"></label>
+    <label><span>上下文窗口（token）</span><input id="m-ctx" type="number" value="0" min="0" step="1000" placeholder="0 表示未知"></label>
     <div class="eff-field"><span>思考强度取值（点选；各模型支持的档位不同，不确定就留空）</span>
       <div class="eff-chips" id="m-eff-chips"></div>
       <div class="eff-add"><input id="m-eff-custom" placeholder="自定义取值，如 4096（Anthropic 思考预算）">
@@ -737,8 +738,8 @@ dialog::backdrop { background: rgba(10, 14, 22, .45); }
     <label><span>速率上限 RPM</span><input id="m-rpm" type="number" value="60" min="1"></label>
     <label><span>质量分（0~1）</span><input id="m-quality" type="number" value="1" min="0" max="1" step="0.01"></label>
     <div class="muted" style="grid-column:1/-1;font-size:11.5px;line-height:1.6">
-      思考强度按模型实际支持的档位填（如某模型支持 ultra 就写 ultra）——灵枢只会从这里挑，
-      留空则该模型不发送思考强度。密钥随供应商，不在这里填。</div>
+      按该模型实际支持的思考档位选择（不确定就留空，不影响正常使用）。
+      密钥在所属供应商里填，不在这里填。</div>
   </div>
   <div class="dlg-ops">
     <button class="btn" id="m-cancel">取消</button>
@@ -1647,8 +1648,8 @@ const M_ICONS = {
 
 function keyLed(p) {
   if (p.key_source === "vault")
-    return `<span class="led ok" title="密钥已加密存入本机密钥库（vault.db），重启与更新均保留"></span><span class="pb-key ok">密钥已就绪 · 密钥库</span>`;
-  return `<span class="led bad" title="编辑该供应商填入密钥（加密存入本机密钥库）"></span><span class="pb-key bad">密钥未配置</span>`;
+    return `<span class="led ok" title="密钥已加密保存在本机，重启后仍然有效"></span><span class="pb-key ok">密钥已就绪</span>`;
+  return `<span class="led bad" title="编辑该供应商填入密钥"></span><span class="pb-key bad">密钥未配置</span>`;
 }
 
 function modelTile(m) {
@@ -1664,7 +1665,7 @@ function modelTile(m) {
     </div>
     <div class="mt-eff"><span class="k">思考强度</span>${eff.length
       ? eff.map(e => `<span class="eff-pill">${esc(e)}</span>`).join("")
-      : `<span class="muted" style="font-size:11.5px">端点默认档</span>`}</div>
+      : `<span class="muted" style="font-size:11.5px">默认档</span>`}</div>
     ${(m.is_fallback_for || []).length ? `<div class="mt-fb">备：${esc(m.is_fallback_for.join("、"))}</div>` : ""}
     <div class="mt-ops">
       <button onclick='modelTest(${jsArg(m.model)})'>测试</button>
@@ -1679,12 +1680,12 @@ async function loadModels() {
     const [pv, md] = await Promise.all([api("/api/providers"), api("/api/models"),
                                         loadPresets()]);
     S.providers = pv.providers; S.models = md;
-    $("#models-path").innerHTML = `${M_ICONS.file}<span>${esc(md.path)} · 密钥加密存入本机密钥库，不写回本文件</span>`;
+    $("#models-path").innerHTML = `${M_ICONS.file}<span>${esc(md.path)} · 密钥加密保存在本机</span>`;
     const box = $("#providers-list");
     if (!pv.providers.length) {
       box.innerHTML = `<div class="mempty">${M_ICONS.hub}
         <div class="t">还没有供应商</div>
-        <div class="s">供应商 = 一个 API 地址 + 一把密钥。添加后点「获取模型列表」从云端勾选启用；<br>端点不提供列表接口时，在供应商里手动填模型 ID。</div>
+        <div class="s">供应商 = 一个 API 地址 + 一把密钥。添加后点「获取模型列表」从云端勾选启用；<br>服务未提供模型列表时，在供应商里手动填模型 ID。</div>
         <button class="btn primary" onclick="providerAdd()">+ 添加供应商</button></div>`;
       return;
     }
@@ -1825,7 +1826,7 @@ window.providerEdit = name => {
   $("#p-baseurl").value = p.base_url || "";
   $("#p-keyval").value = "";
   $("#p-keystat").textContent =
-    p.key_source === "vault" ? "当前密钥：密钥库已配置（留空表示保持不变；重填即覆盖）"
+    p.key_source === "vault" ? "当前密钥：已保存（留空表示保持不变；重填即覆盖）"
     : "当前密钥：未配置";
   $("#p-presets-sec").hidden = true; $("#p-presets").hidden = true;   // 编辑已有供应商不带预设
   $("#p-dlg").showModal();
@@ -1926,7 +1927,7 @@ window.providerFetch = async name => {
       $("#fm-body").innerHTML = `<div class="empty-note" style="padding:14px 0;text-align:left">
         未能自动获取模型列表：${esc(d.error || "未知错误")}
         ${(d.tried || []).length ? `<br><span class="muted" style="font-size:11.5px">已尝试：${esc((d.tried || []).join("　"))}</span>` : ""}
-        <br>该端点可能没有模型列表接口——关掉本窗口，用「手动添加模型」直接填模型 ID 即可。</div>`;
+        <br>该服务可能未提供模型列表——关掉本窗口，用「手动添加模型」直接填模型 ID 即可。</div>`;
       return;
     }
     const known = new Set((S.models.models || []).map(x => x.model));
