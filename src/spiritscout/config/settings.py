@@ -128,6 +128,25 @@ class WebConfig(BaseModel):
     max_concurrent_sessions: int = Field(default=4, description="并发会话上限（信号量）")
 
 
+class McpServerConfig(BaseModel):
+    """外部 MCP 服务器接入（工具以 mcp__<名>__<工具> 并入智能体工具目录）。
+
+    transport=stdio：本地子进程（如 ida-pro-mcp 的 `uv run idalib-mcp --stdio`）；
+    transport=http：Streamable HTTP 端点（如 Yakit 内置 MCP Server、
+    ida-pro-mcp 的 --transport http://...）。
+    """
+
+    name: str
+    transport: Literal["stdio", "http"] = "stdio"
+    command: str = ""                     # stdio：可执行命令
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    url: str = ""                         # http：MCP 端点
+    headers: dict[str, str] = Field(default_factory=dict)
+    timeout: float = 180.0                # 单次工具调用硬顶（秒）
+    enabled: bool = True
+
+
 class SystemConfig(BaseModel):
     """系统总配置。"""
 
@@ -140,6 +159,9 @@ class SystemConfig(BaseModel):
     knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
     report: ReportConfig = Field(default_factory=ReportConfig)
     web: WebConfig = Field(default_factory=WebConfig)
+    mcp_servers: list[McpServerConfig] = Field(
+        default_factory=list,
+        description="外部 MCP 服务器（stdio/http），工具并入智能体工具目录")
     models_config_path: str = "configs/models.yaml"
     agent_models_path: str = "configs/agent_models.yaml"   # 按 Agent 模型分配表
     audit_log_path: str = ".spiritscout/audit.jsonl"

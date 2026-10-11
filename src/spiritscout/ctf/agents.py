@@ -440,6 +440,21 @@ class CTFBaseAgent(SubAgent):
             "POST /api/exec，命令放 cmd 参数」）。有值得同伴接力的发现时写一条。",
             {"text": {"type": "string", "description": "要共享的发现，一句话"}},
             required=["text"]),
+        _fn("kb_search",
+            "检索本地经验知识库：敏感路径/备份文件清单、PHP 弱类型等平台特性"
+            "事实、模板注入 canary、隐写与提权检查点、攻击路径模板与核验方法。"
+            "遇到不熟悉的平台特性或想核对常见检查点时用它；它是参考资料，"
+            "采纳与否由你基于现场证据判断。",
+            {"query": {"type": "string",
+                       "description": "检索词，如：备份文件 / PHP 弱类型 / "
+                                      "隐写 / 提权 / 模板注入"}},
+            required=["query"]),
+        _fn("probe_paths",
+            "对入口站点批量探测常见敏感路径（robots/.git/.env/备份包/调试面/"
+            "管理面等清单，也可传自定义 paths 列表），返回命中状态与线索。"
+            "拿到 Web 入口、想快速过一遍常见泄露面时用它；全 404 就放下清单。",
+            {"paths": {"type": "array", "items": {"type": "string"},
+                       "description": "自定义路径列表（以 / 开头）；缺省用内置清单"}}),
     ]
     # 方向知识（思路启发，不是步骤；LLM 按题面证据自选方向）
     direction_brief: ClassVar[str] = ""
@@ -450,6 +465,24 @@ class CTFBaseAgent(SubAgent):
     def __init__(self, ctx, *, flag_manager: FlagManager | None = None, **kw):
         super().__init__(ctx, **kw)
         self.flag_manager = flag_manager
+        # 外部 MCP 工具并入实例工具目录（类级目录保持不变；有 MCP 时逐
+        # 实例扩展，schema 原样透传服务器的 inputSchema）
+        mcp = getattr(ctx, "mcp_tools", None) or {}
+        if mcp:
+            extra: list[dict[str, Any]] = []
+            for prefix, entry in mcp.items():
+                schema = entry.get("schema") or {}
+                extra.append({
+                    "type": "function",
+                    "function": {
+                        "name": prefix,
+                        "description": (f"[MCP:{entry.get('server')}] "
+                                        f"{schema.get('description') or entry.get('tool')}"),
+                        "parameters": schema.get("inputSchema") or {
+                            "type": "object", "properties": {}},
+                    },
+                })
+            self.tool_schemas = [*type(self).tool_schemas, *extra]
 
     # ------------------------------------------------------------ 赛题载荷
 
@@ -866,6 +899,12 @@ class CTFBaseAgent(SubAgent):
                 out = await self._tool_analyze_text(task)
             elif name == "analyze_attachments":
                 out = await self._tool_analyze_attachments(task)
+            elif name == "kb_search":
+                out = await self._tool_kb_search(args)
+            elif name == "probe_paths":
+                out = await self._tool_probe_paths(task, route, state, args)
+            elif name.startswith("mcp__"):
+                out = await self._tool_mcp(task, name, args)
             else:
                 out = await self._direction_tool(task, route, state, name, args)
                 if out is None:
@@ -878,6 +917,140 @@ class CTFBaseAgent(SubAgent):
             self.ctx.audit.log("agent.error", self.agent_id,
                                {"tool": name, "error": str(exc)[:200]})
         return out
+
+    # ------------------------------------------------------------ 知识库 / 路径探测 / MCP
+
+    _PROBE_PATHS: ClassVar[tuple[str, ...]] = (
+        "/robots.txt", "/sitemap.xml", "/.git/HEAD", "/.svn/entries", "/.env",
+        "/.env.bak", "/config.php.bak", "/backup.zip", "/www.zip", "/web.rar",
+        "/backup.tar.gz", "/index.php.bak", "/.DS_Store", "/composer.json",
+        "/package.json", "/phpinfo.php", "/info.php", "/test.php", "/debug",
+        "/console", "/actuator", "/swagger", "/api-docs", "/.well-known/",
+        "/server-status", "/flag.txt", "/flag", "/readme.txt", "/README.md",
+    )
+
+    async def _tool_probe_paths(self, task: Task, route, state,
+                                args: dict[str, Any]) -> _ToolOutcome:
+        """敏感路径批量探测：逐条复用 http_probe 通道（授权门/限速/审计不变）。"""
+        ch = self.challenge_of(task)
+        base = str(ch.get("url") or task.target or "").rstrip("/")
+        if not base.startswith(("http://", "https://")):
+            return _ToolOutcome(ok=False, text="probe_paths 需要题面有 HTTP 入口。")
+        raw = args.get("paths") if isinstance(args.get("paths"), list) else []
+        paths = [str(p) for p in raw if str(p).startswith("/")] \
+            or list(self._PROBE_PATHS)
+        paths = paths[:40]
+        hits: list[str] = []
+        failed = 0
+        for p in paths:
+            res = await self.ctx.tools.call(
+                "http_probe", {"url": base + p}, **self.ctx.builtin_ctx)
+            if not res.ok:
+                failed += 1
+                continue
+            parsed = res.parsed if isinstance(res.parsed, dict) else {}
+            code = parsed.get("status_code", "?")
+            if code in (404, "404"):
+                continue
+            title = str(parsed.get("title", "")).strip()[:40]
+            size = parsed.get("content_length", len(res.stdout or ""))
+            hits.append(f"{p} → {code} len={size}" + (f" title={title}" if title else ""))
+        accepted = await self._harvest("\n".join(hits), task, "probe_paths")
+        if not hits:
+            return _ToolOutcome(ok=True, value=0.05,
+                                note=f"敏感路径探测 {len(paths)} 条未命中",
+                                text=(f"探测了 {len(paths)} 条常见敏感路径"
+                                      f"（{failed} 条请求失败），其余 404——清单之外，"
+                                      "回到页面功能本身找线索。"))
+        body = "命中:\n" + "\n".join(hits[:20]) + f"\n（共 {len(hits)}/{len(paths)} 命中）"
+        return _ToolOutcome(ok=True, value=min(0.2 + 0.15 * len(hits), 0.9),
+                            findings=[{"type": "flag", "value": f} for f in accepted],
+                            note=f"敏感路径探测命中 {len(hits)}/{len(paths)}",
+                            text=body[:_TOOL_RESULT_CAP])
+
+    async def _tool_kb_search(self, args: dict[str, Any]) -> _ToolOutcome:
+        """经验知识库检索：检查清单/攻击路径/狩猎模板/平台规则（参考资料）。"""
+        query = str(args.get("query", "") or "").strip()
+        if not query:
+            return _ToolOutcome(ok=False, text="kb_search 需要 query 检索词。")
+        kb = self.ctx.knowledge
+        if kb is None:
+            return _ToolOutcome(ok=False, text="经验知识库未装配。")
+        try:
+            hits = kb.search(query, limit=6)
+        except Exception as exc:  # noqa: BLE001 —— 检索失败作为结果回灌
+            return _ToolOutcome(ok=False, text=f"知识库检索失败: {exc}")
+        if not hits:
+            return _ToolOutcome(ok=False, text=(
+                f"经验库没有命中「{query[:60]}」——按你收集到的信息自行分析。"))
+        blocks: list[str] = []
+        for h in hits:
+            entry = kb.get_entry(h["base"], h["entry_key"])
+            if entry:
+                blocks.append(self._kb_entry_digest(h["base"], entry))
+        titles = "、".join(str(h.get("title", ""))[:24] for h in hits[:4])
+        return _ToolOutcome(ok=True, value=0.15,
+                            note=f"经验库命中 {len(blocks)} 条: {titles}",
+                            text=("\n\n".join(blocks)[:_TOOL_RESULT_CAP]
+                                  or "（条目内容为空）"))
+
+    @staticmethod
+    def _kb_entry_digest(base: str, e: dict[str, Any]) -> str:
+        """条目 → 给模型看的紧凑摘要（检查点/命令/命中信号/转向）。"""
+        if base == "redteam_entries":
+            lines = [f"【{e.get('title')}】(entry_id={e.get('entry_id')})"]
+            for s in e.get("steps", []):
+                lines.append(f"- {s.get('action')}｜做法: {s.get('command')}"
+                             f"｜命中信号: {s.get('expected')}")
+            if e.get("verify_method"):
+                lines.append(f"核验: {e['verify_method']}")
+            if e.get("fail_handling"):
+                lines.append(f"不适用时: {e['fail_handling']}")
+            return "\n".join(lines)
+        if base == "attack_paths":
+            lines = [(f"【路径模板】{e.get('scenario')}"
+                      f"｜入口条件: {e.get('entry_conditions')}")]
+            for s in e.get("step_sequence", [])[:10]:
+                lines.append(f"- {s.get('step')} {s.get('action')}"
+                             f"（{s.get('tools')}）→ {s.get('verify')}")
+            if e.get("decision_points"):
+                lines.append(f"分支: {e['decision_points']}")
+            return "\n".join(lines)
+        if base == "hunt_templates":
+            return "\n".join([
+                f"【狩猎模板】{e.get('scene')}｜前置: {e.get('precondition')}",
+                "步骤: " + " → ".join(str(s) for s in e.get("step_sequence", [])[:8]),
+                f"常见坑: {e.get('common_pitfall')}"])
+        parts = [f"【{e.get(k)}】" for k in
+                 ("verify_method", "include_condition", "note", "operation",
+                  "representative_scene", "rules", "name", "desc", "data")
+                 if e.get(k)]
+        return "｜".join(parts[:3]) or json.dumps(e, ensure_ascii=False)[:300]
+
+    async def _tool_mcp(self, task: Task, name: str,
+                        args: dict[str, Any]) -> _ToolOutcome:
+        """外部 MCP 工具调用：结果作为观察回灌，照常过 Flag 提取。"""
+        entry = (getattr(self.ctx, "mcp_tools", None) or {}).get(name)
+        if entry is None:
+            return _ToolOutcome(ok=False,
+                                text=f"MCP 工具 {name} 不在当前会话工具目录。")
+        try:
+            res = await entry["client"].call(
+                entry["tool"], args, timeout=entry.get("timeout"))
+        except Exception as exc:  # noqa: BLE001 —— MCP 失败回灌，模型自行调整
+            return _ToolOutcome(ok=False,
+                                text=f"MCP 调用失败: {str(exc)[:300]}")
+        text = str(res.get("text", ""))
+        accepted = await self._harvest(text, task, name)
+        note = f"MCP {entry['server']}/{entry['tool']}"
+        if accepted:
+            note += f" flag={len(accepted)}"
+        return _ToolOutcome(ok=not res.get("is_error"),
+                            value=0.2 + 0.5 * len(accepted),
+                            findings=[{"type": "flag", "value": f}
+                                      for f in accepted],
+                            note=note[:120],
+                            text=text[:_TOOL_RESULT_CAP] or "（无输出）")
 
     def _resolve_http(self, task: Task, args: dict[str, Any]
                       ) -> tuple[str, dict[str, str] | None,
@@ -1185,6 +1358,11 @@ class CTFBaseAgent(SubAgent):
             "工作方式：工具就是你的手——需要看什么就用工具去拿，不要凭空猜测"
             "页面内容或响应。每一轮可以调用一个或多个工具：互不依赖的请求放在"
             "同一轮并发发出，省时间。\n"
+            "环境与知识：工具库封装在运行环境内（pwntools/pycryptodome/PIL/"
+            "sympy/z3/scapy/binwalk/sqlmap 等开箱即用），列表里的工具与"
+            "mcp__ 前缀的外部工具都是你的手；经验库里的检查清单与平台特性"
+            "事实用 kb_search 检索——它们是参考资料，采纳与否由你基于现场"
+            "证据判断。\n"
             "动手能力：要跑命令用 shell，要写代码用 python——它们在隔离沙箱里"
             "执行（系统文件只读、你的工作区可写、联网仅限授权目标）。"
             "WebSocket/socket 等协议交互、数据计算、脚本化构造请求，"

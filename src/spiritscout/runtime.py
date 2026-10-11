@@ -102,11 +102,19 @@ class _Infra:
     agent_models: dict[str, str] = field(default_factory=dict)  # 按 Agent 绑定模型
     ring: Any = None            # RingLedger 环形台账（主/子 Agent 共持，随会话消亡）
     shared_cache: Any = None    # LocalSharedCache 环形共享缓存（同题并行 Agent 共持）
+    mcp_clients: list[Any] = field(default_factory=list)   # MCP 客户端（关停回收）
+    mcp_tools: dict[str, dict[str, Any]] = field(
+        default_factory=dict)   # mcp__<server>__<tool> → {client, server, tool, timeout}
 
     async def close(self) -> None:
         await self.bus.stop()
         self.blackboard.close()
         self.knowledge.close()
+        for client in self.mcp_clients:
+            try:
+                await client.close()
+            except Exception:  # noqa: S110, BLE001 —— 关停回收失败不阻断收尾
+                pass
 
 
 async def _build_infra(
@@ -194,6 +202,31 @@ async def _build_infra(
         "allowed_dirs": [str(attachments)],
         "workspace_root": str(workspace),
     }
+    # 外部 MCP 服务器：握手 + 工具清单并入智能体工具目录（失败留痕跳过，
+    # 不阻断开工——MCP 是增益能力而非主链依赖）
+    mcp_clients: list[Any] = []
+    mcp_tools: dict[str, dict[str, Any]] = {}
+    for spec in cfg.mcp_servers:
+        if not spec.enabled:
+            continue
+        try:
+            from spiritscout.tools.mcp_client import build_client
+
+            client = build_client(spec)
+            tools = await client.start()
+            mcp_clients.append(client)
+            for t in tools:
+                mcp_tools[f"mcp__{spec.name}__{t['name']}"] = {
+                    "client": client, "server": spec.name,
+                    "tool": t["name"], "timeout": float(spec.timeout),
+                    "schema": t}
+            audit.log("system.lifecycle", "runtime", {
+                "action": "mcp_server_ready", "server": spec.name,
+                "transport": spec.transport, "tools": [t["name"] for t in tools]})
+        except Exception as exc:  # noqa: BLE001 —— 服务器不可达：留痕后继续
+            audit.log("system.lifecycle", "runtime", {
+                "action": "mcp_server_failed", "server": spec.name,
+                "error": str(exc)[:300]})
     for name, fn in (("http_probe", http_probe), ("dns_resolve", dns_resolve),
                      ("file_analyze", file_analyze), ("sandbox_exec", sandbox_exec)):
         registry.register_builtin(name, fn, BUILTIN_SPECS[name])
@@ -214,6 +247,7 @@ async def _build_infra(
         builtin_ctx=builtin_ctx, workspace=workspace, knowledge=knowledge,
         agent_models=bound, ring=ring if ring is not None else RingLedger(audit),
         shared_cache=LocalSharedCache(default_ttl_seconds=3600),
+        mcp_clients=mcp_clients, mcp_tools=mcp_tools,
     )
 
 
@@ -227,6 +261,7 @@ def _sub_ctx(infra: _Infra) -> SubAgentContext:
         agent_models=infra.agent_models,   # 子 Agent 初始化时按名册绑定
         ring=infra.ring,             # 环形台账共持（避让登记 + 督导消费）
         shared_cache=infra.shared_cache,   # 环形共享缓存共持（同题现场/笔记/Flag）
+        mcp_tools=infra.mcp_tools,   # 外部 MCP 工具（mcp__<server>__<tool>）
     )
 
 

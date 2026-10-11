@@ -23,6 +23,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+toolkit = [
+    "pwntools>=4.12",       # 交互/构造/exploit 基建
+    "pycryptodome>=3.20",   # 现代密码学原语
+    "pillow>=10.0",         # 图像解析与 LSB 隐写
+    "sympy>=1.13",          # 数学求解（RSA/离散结构）
+    "gmpy2>=2.1",           # 大整数快速运算
+    "z3-solver>=4.13",      # 约束求解（逆向/密码）
+    "scapy>=2.6",           # 流量构造与解析
+    "exifread>=3.0",        # 图片元数据
+    "stegano>=0.11",        # LSB 隐写
+    "olefile>=0.46",        # Office 文档结构
+    "binwalk>=2.1",         # 固件/文件嵌入扫描
+    "sqlmap>=1.8",          # SQL 注入自动化
+]
 redis = ["redis>=5.0"]
 nats = ["nats-py>=2.6"]
 chroma = ["chromadb>=1.0"]

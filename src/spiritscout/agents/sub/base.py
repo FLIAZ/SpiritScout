@@ -86,6 +86,9 @@ class SubAgentContext:
     # 环形共享缓存：同题并行 Agent 的共享现场（已探入口/共享笔记/已夺 Flag）
     # 按命名空间隔离；会话内共持一份，for_agent 的 replace 共享同一引用
     shared_cache: LocalSharedCache | None = None
+    # 外部 MCP 工具（mcp__<server>__<tool> → {client, server, tool, schema}）；
+    # 会话基建建立时握手拉取，智能体初始化时并入自身工具目录
+    mcp_tools: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.audit is None:

@@ -6,8 +6,9 @@ CTF 解题需要真实动手能力——协议交互（WebSocket/socket）、数
 
 隔离边界（bwrap，最小权限）：
 - 文件系统整机只读挂载；用户主目录以 tmpfs 遮蔽（~/.ssh、密钥库、浏览器
-  数据在沙箱内不可见），仅回挂用户 Python 库目录（~/.local/lib，pwntools
-  等装在这里）与会话工作区；
+  数据在沙箱内不可见），工具库来自项目自带 .venv（只读回挂，pwntools/
+  pycryptodome/PIL/sympy/z3/scapy 等封装于项目内，不依赖用户系统安装），
+  另加会话工作区；
 - 会话工作区可写——脚本与产物落在这里，附件工具可继续分析；
 - 环境变量清零后仅注入 PATH/HOME/LANG/PYTHONPATH；HOME 指向本次运行目录
   （脚本写 ~ 不会碰到真实主目录）；
@@ -41,14 +42,27 @@ def sandbox_available() -> bool:
     return shutil.which(_BWRAP) is not None
 
 
-def _user_site_dirs() -> list[str]:
-    """用户级 Python 库目录（pip --user 装的 pwntools 等在此）。"""
-    return [str(p) for p in sorted(
-        (Path.home() / ".local" / "lib").glob("python*/site-packages"))]
+def _project_venv() -> Path | None:
+    """项目自带虚拟环境（工具库全部封装于此，不依赖用户系统安装）。
+
+    沙箱路径：src/spiritscout/tools/sandbox.py → 项目根/.venv。
+    """
+    root = Path(__file__).resolve().parents[3]
+    venv = root / ".venv"
+    return venv if (venv / "bin" / "python3").exists() or \
+        (venv / "bin" / "python").exists() else None
+
+
+def _venv_site_dirs(venv: Path) -> list[str]:
+    return [str(p) for p in sorted(venv.glob("lib/python*/site-packages"))]
 
 
 def _build_argv(workspace: Path, rundir: Path, inner: list[str]) -> list[str]:
-    """bwrap 参数：整机只读 + 主目录遮蔽 + 工作区可写 + 干净环境。"""
+    """bwrap 参数：整机只读 + 主目录遮蔽 + 工作区可写 + 干净环境。
+
+    工具来源：项目内 .venv（只读回挂并入 PATH/PYTHONPATH）——用户主目录
+    与其个人安装（~/.local 等）一律不进沙箱，智能体调不到。
+    """
     home = Path.home()
     argv = [
         _BWRAP,
@@ -58,21 +72,24 @@ def _build_argv(workspace: Path, rundir: Path, inner: list[str]) -> list[str]:
         "--tmpfs", "/tmp",
         "--tmpfs", str(home),          # 主目录遮蔽：.ssh / 密钥库不可见
     ]
-    user_lib = home / ".local" / "lib"
-    if user_lib.is_dir():
-        argv += ["--ro-bind", str(user_lib), str(user_lib)]
+    venv = _project_venv()
+    path_dirs = ["/usr/local/bin", "/usr/bin", "/bin"]
+    site_dirs: list[str] = []
+    if venv is not None:
+        argv += ["--ro-bind", str(venv), str(venv)]
+        path_dirs = [str(venv / "bin"), *path_dirs]
+        site_dirs = _venv_site_dirs(venv)
     argv += [
         "--bind", str(workspace), str(workspace),
         "--chdir", str(rundir),
         "--die-with-parent",
         "--clearenv",
-        "--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin",
+        "--setenv", "PATH", ":".join(path_dirs),
         "--setenv", "HOME", str(rundir),
         "--setenv", "LANG", "C.UTF-8",
     ]
-    sites = _user_site_dirs()
-    if sites:
-        argv += ["--setenv", "PYTHONPATH", ":".join(sites)]
+    if site_dirs:
+        argv += ["--setenv", "PYTHONPATH", ":".join(site_dirs)]
     return [*argv, *inner]
 
 
@@ -163,7 +180,9 @@ async def sandbox_exec(
     if lang == "python":
         script = rundir / f"run_{int(time.time() * 1000)}_{os.urandom(3).hex()}.py"
         script.write_text(code, encoding="utf-8")
-        inner = ["python3", str(script)]
+        venv = _project_venv()
+        py = str(venv / "bin" / "python3") if venv is not None else "python3"
+        inner = [py, str(script)]
     else:
         inner = ["bash", "-c", code]
 
