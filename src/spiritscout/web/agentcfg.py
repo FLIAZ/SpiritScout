@@ -1,9 +1,9 @@
 """Agent 模型分配表读写：Web 编队页 → configs/agent_models.yaml。
 
 分配语义：key = AgentType 值（master/recon/web_vuln/...），value = 模型注册表
-alias；空表/缺 key = 跟随网关档位路由（4.9.1，现状行为）。
-校验：alias 必须在注册表中存在（Web 编队页给出下拉，服务端仍独立校验，
-不静默接受失效别名——失效别名在运行期会导致路由失败且原因难查）。
+里的模型 ID；空表/缺 key = 跟随网关档位路由（4.9.1，现状行为）。
+校验：模型 ID 必须在注册表中存在（Web 编队页给出下拉，服务端仍独立校验，
+不静默接受失效模型——失效模型在运行期会导致路由失败且原因难查）。
 写回：tmp + os.replace 原子替换（与 modelcfg 同约定）。
 """
 
@@ -46,17 +46,17 @@ def write_assignments(path: str | Path, assignments: dict[str, str]) -> None:
     os.replace(tmp, p)
 
 
-def set_assignment(path: str | Path, agent_key: str, alias: str,
-                   valid_aliases: set[str]) -> dict[str, str]:
-    """设置/清除一个 Agent 的模型分配，返回新表。alias 为空串 = 清除。"""
+def set_assignment(path: str | Path, agent_key: str, model: str,
+                   valid_models: set[str]) -> dict[str, str]:
+    """设置/清除一个 Agent 的模型分配，返回新表。模型为空串 = 清除。"""
     if agent_key not in _VALID_KEYS:
         raise SpiritScoutError(f"未知 Agent: {agent_key}")
-    if alias and alias not in valid_aliases:
+    if model and model not in valid_models:
         raise SpiritScoutError(
-            f"模型别名不存在: {alias}（请先在「模型配置」页注册）")
+            f"模型不存在: {model}（请先在「模型」页注册）")
     table = read_assignments(path)
-    if alias:
-        table[agent_key] = alias
+    if model:
+        table[agent_key] = model
     else:
         table.pop(agent_key, None)
     write_assignments(path, table)

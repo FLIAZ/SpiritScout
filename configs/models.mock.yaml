@@ -3,47 +3,61 @@
 # 或 spiritscout --config <system.yaml> 中 models_config_path 指向本文件做离线开发。
 # Mock 后端是确定性应答（支持故障注入），不消耗真实 API、不产生真实智能。
 
-models:
-  - alias: mock-flagship
+providers:
+  - name: mock
     provider: mock
+
+models:
+  - model: mock-flagship
+    provider_ref: mock
     tier: flagship
     capabilities: [reasoning, code, chinese, security]
+    context_window: 200000
+    reasoning_effort_levels: [low, medium, high]
     cost_input_per_mtok: 0.0
     cost_output_per_mtok: 0.0
     rate_limit_rpm: 600
     quality_score: 1.0
 
-  - alias: mock-fast
-    provider: mock
+  - model: mock-fast
+    provider_ref: mock
     tier: fast
     capabilities: [chinese]
+    context_window: 128000
+    reasoning_effort_levels: [low, high]
     cost_input_per_mtok: 0.0
     cost_output_per_mtok: 0.0
     rate_limit_rpm: 600
     quality_score: 0.9
 
-  - alias: mock-code
-    provider: mock
+  - model: mock-code
+    provider_ref: mock
     tier: code
     capabilities: [code]
+    context_window: 128000
+    reasoning_effort_levels: []
     cost_input_per_mtok: 0.0
     cost_output_per_mtok: 0.0
     rate_limit_rpm: 600
     quality_score: 0.95
 
-  - alias: mock-rigorous
-    provider: mock
+  - model: mock-rigorous
+    provider_ref: mock
     tier: rigorous
     capabilities: [reasoning, chinese, security]
+    context_window: 200000
+    reasoning_effort_levels: [low, medium, high, ultra]
     cost_input_per_mtok: 0.0
     cost_output_per_mtok: 0.0
     rate_limit_rpm: 600
     quality_score: 0.98
 
-  - alias: mock-backup
-    provider: mock
+  - model: mock-backup
+    provider_ref: mock
     tier: fast
     capabilities: [chinese]
+    context_window: 128000
+    reasoning_effort_levels: []
     cost_input_per_mtok: 0.0
     cost_output_per_mtok: 0.0
     rate_limit_rpm: 600

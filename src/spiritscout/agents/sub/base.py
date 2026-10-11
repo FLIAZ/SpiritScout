@@ -95,16 +95,16 @@ class SubAgentContext:
             self.shared_cache = LocalSharedCache(default_ttl_seconds=3600)
 
     def for_agent(self, agent_key: str) -> SubAgentContext:
-        """按 Agent 绑定模型：该 Agent 有分配 → 网关包装注入别名；
+        """按 Agent 绑定模型：该 Agent 有分配 → 网关包装注入模型 ID；
         无分配 → 原样返回（共享上下文零开销，维持档位路由）。"""
-        alias = self.agent_models.get(agent_key, "")
-        if not alias:
+        model = self.agent_models.get(agent_key, "")
+        if not model:
             return self
         import dataclasses
 
         from spiritscout.gateway import AgentBoundGateway
         return dataclasses.replace(
-            self, gateway=AgentBoundGateway(self.gateway, alias))
+            self, gateway=AgentBoundGateway(self.gateway, model))
 
 
 class SubAgent(abc.ABC):
@@ -137,6 +137,12 @@ class SubAgent(abc.ABC):
         # 环形共享现场（ctf_shared 等）因此跨 Agent 可见
         self.cache = self.ctx.shared_cache or LocalSharedCache(default_ttl_seconds=3600)
         self.agent_id = new_id(self.agent_type.value.replace("_", "-"))
+
+    @staticmethod
+    def task_effort(task: Task) -> str:
+        """任务的思考强度（灵枢按复杂度裁定，取值来自模型自己声明的档位；
+        空 = 该任务模型未声明思考强度，用端点默认档）。"""
+        return str(getattr(task, "reasoning_effort", "") or "")
 
     # ------------------------------------------------------------ 主流程
 
@@ -215,6 +221,7 @@ class SubAgent(abc.ABC):
                     }, ensure_ascii=False)},
                 ],
                 task_type="execution", response_format="json",
+                reasoning_effort=self.task_effort(task),
             )
             data = extract_json(resp.content)
         except Exception as exc:  # noqa: BLE001 —— 增广失败保持模板路线
@@ -322,6 +329,7 @@ class SubAgent(abc.ABC):
                     }, ensure_ascii=False)},
                 ],
                 task_type="execution", response_format="json",
+                reasoning_effort=self.task_effort(task),
             )
             data = extract_json(resp.content)
             hints = {r.get("name"): r for r in data.get("routes", []) if isinstance(r, dict)}
@@ -496,7 +504,8 @@ class SubAgent(abc.ABC):
 
     async def _llm_chat_json(self, role: str, user_obj: dict[str, Any],
                              *, max_user_chars: int = 6000,
-                             timeout_seconds: int | None = None) -> dict[str, Any] | None:
+                             timeout_seconds: int | None = None,
+                             reasoning_effort: str = "") -> dict[str, Any] | None:
         """云端 LLM 决策调用（JSON 应答）；不可用/解析失败 → None（调用方回退规则）。
 
         统一的降级语义：LLM 是操作建议的主路径，规则模板是骨架与兜底；
@@ -521,6 +530,7 @@ class SubAgent(abc.ABC):
                 ],
                 task_type="execution", response_format="json",
                 timeout_seconds=timeout_seconds,
+                reasoning_effort=reasoning_effort,
             )
             data = extract_json(resp.content)
             return data if isinstance(data, dict) else None

@@ -195,16 +195,16 @@ async def _build_infra(
     for name, fn in (("http_probe", http_probe), ("dns_resolve", dns_resolve),
                      ("file_analyze", file_analyze)):
         registry.register_builtin(name, fn, BUILTIN_SPECS[name])
-    # 按 Agent 绑定的模型分配——失效别名（注册表已删）剔除并留痕，
+    # 按 Agent 绑定的模型分配——失效模型（注册表已删）剔除并留痕，
     # 不静默绑定到不存在的模型导致路由期失败
     bound = dict(agent_models or {})
-    aliases = {m.alias for m in models}
-    stale = {k: v for k, v in bound.items() if v not in aliases}
+    known = {m.model for m in models}
+    stale = {k: v for k, v in bound.items() if v not in known}
     if stale:
         audit.log("system.lifecycle", "runtime", {
             "action": "agent_model_binding_dropped", "stale": stale,
-            "reason": "别名不在模型注册表，按档位路由"})
-        bound = {k: v for k, v in bound.items() if v in aliases}
+            "reason": "模型不在注册表，按档位路由"})
+        bound = {k: v for k, v in bound.items() if v in known}
     return _Infra(
         cfg=cfg, authorization=authorization, audit=audit, guard=guard,
         policy=policy, limiter=limiter, bus=bus, blackboard=blackboard,

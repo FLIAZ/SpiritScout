@@ -215,10 +215,12 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     def _agents_view() -> dict[str, Any]:
         from spiritscout.agents.roster import roster_view
         from spiritscout.config import load_model_config
-        aliases = [m.alias for m in load_model_config(cfg.models_config_path)]
+        models = [{"model": m.model, "tier": m.tier, "capabilities": list(m.capabilities),
+                   "context_window": m.context_window}
+                  for m in load_model_config(cfg.models_config_path)]
         return {"roster": roster_view(),
                 "assignments": agentcfg.read_assignments(cfg.agent_models_path),
-                "models": aliases,
+                "models": models,
                 "path": cfg.agent_models_path}
 
     @app.get("/api/agents")
@@ -230,10 +232,10 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                                  payload: dict[str, Any]) -> dict[str, Any]:
         """给 Agent 分配模型（空串 = 清除分配，回到档位路由）。"""
         from spiritscout.config import load_model_config
-        alias = str(payload.get("model") or "").strip()
-        valid = {m.alias for m in load_model_config(cfg.models_config_path)}
+        model = str(payload.get("model") or "").strip()
+        valid = {m.model for m in load_model_config(cfg.models_config_path)}
         try:
-            agentcfg.set_assignment(cfg.agent_models_path, agent_key, alias, valid)
+            agentcfg.set_assignment(cfg.agent_models_path, agent_key, model, valid)
         except SpiritScoutError as exc:
             raise HTTPException(422, str(exc)) from exc
         return _agents_view()
@@ -348,65 +350,144 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
 
     # ------------------------------------------------------------ 模型管理
 
-    def _models_view(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    def _providers_view() -> dict[str, Any]:
+        providers = modelcfg.read_providers(cfg.models_config_path)
         return {"path": cfg.models_config_path,
-                "models": [{**e, **vault.key_status(e)} for e in entries]}
+                "providers": [{**p, **vault.key_status(p, str(p.get("name") or ""))}
+                              for p in providers]}
 
-    @app.get("/api/models")
-    async def list_models() -> dict[str, Any]:
-        return _models_view(modelcfg.read_entries(cfg.models_config_path))
+    def _models_view(entries: list[dict[str, Any]]) -> dict[str, Any]:
+        return {"path": cfg.models_config_path, "models": entries}
+
+    @app.get("/api/providers")
+    async def list_providers() -> dict[str, Any]:
+        return _providers_view()
 
     def _model_error(exc: SpiritScoutError) -> HTTPException:
         msg = str(exc)
         status = 409 if "已存在" in msg else 404 if "不存在" in msg else 422
         return HTTPException(status, msg)
 
-    def _stash_key(alias: str, payload: dict[str, Any]) -> None:
+    def _stash_key(name: str, payload: dict[str, Any]) -> None:
         """摘出 api_key_value 加密存入密钥库（G8：绝不进 YAML、不回传、留痕不含值）。
 
-        调用方必须先经本函数处理再把 payload 交给 upsert_entry——
+        密钥属于供应商：同一端点下的模型共用一条记录。
+        调用方必须先经本函数处理再把 payload 交给写盘函数——
         否则直填密钥会被当作普通字段写盘。
         """
         if "api_key_value" not in payload:
             return
         value = str(payload.pop("api_key_value") or "").strip()
-        vault.set_key(alias, value)                # 空串 = 清除
+        vault.set_key(name, value)                 # 空串 = 清除
         AuditLogger(cfg.audit_log_path).log(
             "system.lifecycle", "modelcfg",
             {"action": "model_key_set" if value else "model_key_cleared",
-             "alias": alias, "source": "vault"})
+             "provider": name, "source": "vault"})
+
+    @app.post("/api/providers", status_code=201)
+    async def add_provider(payload: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(payload)
+        _stash_key(str(payload.get("name") or ""), payload)
+        try:
+            modelcfg.upsert_provider(cfg.models_config_path, payload)
+        except SpiritScoutError as exc:
+            raise _model_error(exc) from exc
+        return _providers_view()
+
+    @app.put("/api/providers/{name}")
+    async def update_provider(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(payload)
+        new_name = str(payload.get("name") or name)
+        _stash_key(new_name, payload)
+        try:
+            modelcfg.upsert_provider(cfg.models_config_path, payload,
+                                     original_name=name)
+        except SpiritScoutError as exc:
+            raise _model_error(exc) from exc
+        vault.rename_key(name, new_name)
+        return _providers_view()
+
+    @app.delete("/api/providers/{name}")
+    async def delete_provider(name: str) -> dict[str, Any]:
+        try:
+            modelcfg.delete_provider(cfg.models_config_path, name)
+        except SpiritScoutError as exc:
+            raise _model_error(exc) from exc
+        vault.drop_key(name)
+        return _providers_view()
+
+    @app.post("/api/providers/{name}/models")
+    async def fetch_provider_models(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """从供应商端点拉取可用模型列表（用户点击触发；未保存的编辑也可先拉）。
+
+        端点没有实现模型列表接口是常态——失败时如实回报试过的地址与错误，
+        用户改用手动填模型 ID（同一入口）。
+        """
+        from spiritscout.web.provider_api import fetch_model_list
+
+        providers = {str(p.get("name")): p for p in
+                     modelcfg.read_providers(cfg.models_config_path)}
+        stored = providers.get(name, {})
+        payload = dict(payload or {})
+        key_value = str(payload.pop("api_key_value", "") or "").strip()
+        spec = {
+            "name": name,
+            "provider": str(payload.get("provider") or stored.get("provider")
+                            or "openai_compatible"),
+            "base_url": str(payload.get("base_url") or stored.get("base_url") or ""),
+            "api_key": key_value or vault.get_key(name)
+            or str(stored.get("api_key") or ""),
+        }
+        result = await fetch_model_list(spec)
+        AuditLogger(cfg.audit_log_path).log("system.lifecycle", "modelcfg", {
+            "action": "provider_model_list", "provider": name,
+            "ok": result.get("ok"), "count": len(result.get("models") or []),
+            "error": str(result.get("error", ""))[:200]})
+        return result
+
+    @app.post("/api/models/batch", status_code=201)
+    async def add_models_batch(payload: dict[str, Any]) -> dict[str, Any]:
+        """批量启用供应商下的模型（从拉取的列表里勾选）。"""
+        provider_ref = str(payload.get("provider_ref") or "")
+        ids = [str(x) for x in (payload.get("models") or []) if str(x).strip()]
+        tier = str(payload.get("tier") or "fast")
+        try:
+            entries, added = modelcfg.add_entries(
+                cfg.models_config_path, provider_ref, ids, tier=tier)
+        except SpiritScoutError as exc:
+            raise _model_error(exc) from exc
+        return {**_models_view(entries), "added": added}
+
+    @app.get("/api/models")
+    async def list_models() -> dict[str, Any]:
+        return _models_view(modelcfg.read_entries(cfg.models_config_path))
 
     @app.post("/api/models", status_code=201)
     async def add_model(payload: dict[str, Any]) -> dict[str, Any]:
+        """手动添加单个模型（自动拉取失败或列表里没有时的入口）。"""
         payload = dict(payload)
-        alias = str(payload.get("alias") or "")
-        _stash_key(alias, payload)
         try:
             entries = modelcfg.upsert_entry(cfg.models_config_path, payload)
         except SpiritScoutError as exc:
             raise _model_error(exc) from exc
         return _models_view(entries)
 
-    @app.put("/api/models/{alias}")
-    async def update_model(alias: str, payload: dict[str, Any]) -> dict[str, Any]:
+    @app.put("/api/models/{model}")
+    async def update_model(model: str, payload: dict[str, Any]) -> dict[str, Any]:
         payload = dict(payload)
-        new_alias = str(payload.get("alias") or alias)
-        _stash_key(new_alias, payload)
         try:
             entries = modelcfg.upsert_entry(
-                cfg.models_config_path, payload, original_alias=alias)
+                cfg.models_config_path, payload, original_model=model)
         except SpiritScoutError as exc:
             raise _model_error(exc) from exc
-        vault.rename_key(alias, new_alias)
         return _models_view(entries)
 
-    @app.delete("/api/models/{alias}")
-    async def delete_model(alias: str) -> dict[str, Any]:
+    @app.delete("/api/models/{model}")
+    async def delete_model(model: str) -> dict[str, Any]:
         try:
-            entries = modelcfg.delete_entry(cfg.models_config_path, alias)
+            entries = modelcfg.delete_entry(cfg.models_config_path, model)
         except SpiritScoutError as exc:
             raise _model_error(exc) from exc
-        vault.drop_key(alias)
         return _models_view(entries)
 
     @app.post("/api/models/test")
@@ -415,15 +496,14 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         from spiritscout.config import load_model_config
         from spiritscout.gateway import ModelGateway, ModelRegistry
 
-        alias = str(payload.get("alias") or "")
-        entries = vault.apply_keys(
-            load_model_config(cfg.models_config_path))
-        entry = next((e for e in entries if e.alias == alias), None)
+        model = str(payload.get("model") or "")
+        entries = vault.apply_keys(load_model_config(cfg.models_config_path))
+        entry = next((e for e in entries if e.model == model), None)
         if entry is None:
-            raise HTTPException(404, f"模型不存在: {alias}")
+            raise HTTPException(404, f"模型不存在: {model}")
         if not entry.api_key:
             return {"ok": False,
-                    "error": "密钥未配置——在「模型」页编辑填入密钥"
+                    "error": "密钥未配置——在该模型所属供应商里填入密钥"
                              "（加密存入本机密钥库）或配置环境变量"}
         gateway = ModelGateway(
             ModelRegistry(entries),
@@ -432,7 +512,8 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         try:
             resp = await gateway.chat(
                 [{"role": "user", "content": "连通性测试：请只回复 ok"}],
-                model_alias=alias, max_tokens=16)
+                model=model, max_tokens=16,
+                reasoning_effort=str(payload.get("reasoning_effort") or ""))
             return {"ok": True, "latency_ms": round(resp.latency_ms),
                     "sample": resp.content[:80],
                     "has_reasoning": bool(resp.reasoning)}

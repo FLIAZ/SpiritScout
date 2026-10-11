@@ -4,11 +4,12 @@
 - 密文：Fernet（cryptography 标准实现，AES-128-CBC + HMAC 完整性校验）；
 - 主密钥：工作区 ``vault.key``（首次写入自动生成，权限 0600）；
   无人值守部署可用环境变量 ``SPIRITSCOUT_VAULT_KEY`` 注入（Fernet 格式）；
-- 数据库：工作区 ``vault.db``（SQLite，secrets 表：alias 主键 + 密文 + 时间）。
+- 数据库：工作区 ``vault.db``（SQLite，secrets 表：供应商名主键 + 密文 + 时间）。
 
 安全边界：明文密钥只在本进程内存中短暂存在（解析后的 ModelEntry），
 API 永不回传、审计不含值；``models.yaml`` 里只出现 ``${ENV_VAR}`` 占位符。
-密钥库条目按 alias 覆盖环境变量占位符（库内直填优先）。
+密钥库条目按供应商名覆盖环境变量占位符（库内直填优先）——
+同一供应商下的模型共用一条密钥记录。
 """
 
 from __future__ import annotations
@@ -83,16 +84,23 @@ def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(db, timeout=5)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS secrets ("
-        "alias TEXT PRIMARY KEY, ciphertext BLOB NOT NULL, updated_at REAL NOT NULL)")
+        "name TEXT PRIMARY KEY, ciphertext BLOB NOT NULL, updated_at REAL NOT NULL)")
+    # 早期版本以 alias / model 为主键列，就地改名（现按供应商名保管密钥）
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(secrets)").fetchall()}
+    if "name" not in cols:
+        legacy = "alias" if "alias" in cols else "model" if "model" in cols else ""
+        if legacy:
+            conn.execute(f"ALTER TABLE secrets RENAME COLUMN {legacy} TO name")
+            conn.commit()
     return conn
 
 
 # ------------------------------------------------------------ 读写
 
-def set_key(alias: str, key: str) -> None:
+def set_key(name: str, key: str) -> None:
     """写入/覆盖（空串 = 清除）。只落密文；明文不落任何文件。"""
     if not key:
-        drop_key(alias)
+        drop_key(name)
         return
     token = _cipher().encrypt(key.encode("utf-8"))
     with _lock:
@@ -100,46 +108,52 @@ def set_key(alias: str, key: str) -> None:
         try:
             with conn:
                 conn.execute(
-                    "INSERT INTO secrets(alias, ciphertext, updated_at) VALUES(?,?,?) "
-                    "ON CONFLICT(alias) DO UPDATE SET ciphertext=excluded.ciphertext, "
+                    "INSERT INTO secrets(name, ciphertext, updated_at) VALUES(?,?,?) "
+                    "ON CONFLICT(name) DO UPDATE SET ciphertext=excluded.ciphertext, "
                     "updated_at=excluded.updated_at",
-                    (alias, token, time.time()))
+                    (name, token, time.time()))
         finally:
             conn.close()
 
 
-def drop_key(alias: str) -> None:
+def drop_key(name: str) -> None:
     with _lock:
         conn = _connect()
         try:
             with conn:
-                conn.execute("DELETE FROM secrets WHERE alias=?", (alias,))
+                conn.execute("DELETE FROM secrets WHERE name=?", (name,))
         finally:
             conn.close()
 
 
-def rename_key(old_alias: str, new_alias: str) -> None:
-    if old_alias == new_alias:
+def rename_key(old_name: str, new_name: str) -> None:
+    """供应商改名时密钥跟着走。"""
+    if old_name == new_name:
         return
     with _lock:
         conn = _connect()
         try:
             with conn:
-                conn.execute("UPDATE OR REPLACE secrets SET alias=? WHERE alias=?",
-                             (new_alias, old_alias))
+                conn.execute("UPDATE OR REPLACE secrets SET name=? WHERE name=?",
+                             (new_name, old_name))
         finally:
             conn.close()
 
 
-def has_key(alias: str) -> bool:
+def has_key(name: str) -> bool:
     if not _db_path().exists():
         return False
     conn = _connect()
     try:
-        row = conn.execute("SELECT 1 FROM secrets WHERE alias=?", (alias,)).fetchone()
+        row = conn.execute("SELECT 1 FROM secrets WHERE name=?", (name,)).fetchone()
         return row is not None
     finally:
         conn.close()
+
+
+def get_key(name: str) -> str:
+    """单个条目的明文密钥（仅服务器内部使用：拉取模型列表等；API 绝不回传）。"""
+    return _load_all().get(name, "")
 
 
 def _load_all() -> dict[str, str]:
@@ -148,26 +162,29 @@ def _load_all() -> dict[str, str]:
         return {}
     conn = _connect()
     try:
-        rows = conn.execute("SELECT alias, ciphertext FROM secrets").fetchall()
+        rows = conn.execute("SELECT name, ciphertext FROM secrets").fetchall()
     finally:
         conn.close()
     out: dict[str, str] = {}
-    for alias, blob in rows:
+    for name, blob in rows:
         try:
-            out[str(alias)] = _cipher().decrypt(bytes(blob)).decode("utf-8")
+            out[str(name)] = _cipher().decrypt(bytes(blob)).decode("utf-8")
         except (InvalidToken, ValueError):
             continue
     return out
 
 
 def apply_keys(models: list[ModelEntry]) -> list[ModelEntry]:
-    """密钥库覆盖到加载后的注册表（库内密钥优先于环境变量占位符）。"""
+    """密钥库覆盖到加载后的注册表（库内密钥优先于环境变量占位符）。
+
+    模型不单独存密钥——按所属供应商取（provider_ref）。
+    """
     keys = _load_all()
-    return [m.model_copy(update={"api_key": keys[m.alias]})
-            if m.alias in keys else m for m in models]
+    return [m.model_copy(update={"api_key": keys[m.provider_ref]})
+            if m.provider_ref and m.provider_ref in keys else m for m in models]
 
 
-def key_status(entry: dict[str, Any]) -> dict[str, Any]:
+def key_status(entry: dict[str, Any], name: str) -> dict[str, Any]:
     """从原始条目提取 key 状态（不展开、不回传密钥本身）。
 
     key_source：vault（密钥库已配置）/ env（环境变量）/ none（未配置）。
@@ -175,8 +192,7 @@ def key_status(entry: dict[str, Any]) -> dict[str, Any]:
     api_key = str(entry.get("api_key") or "")
     m = _ENV_REF.match(api_key)
     env = m.group(1) if m else ""
-    alias = str(entry.get("alias") or "")
-    if has_key(alias):
+    if has_key(name):
         source = "vault"
     elif env and os.environ.get(env):
         source = "env"

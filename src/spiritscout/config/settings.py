@@ -154,12 +154,16 @@ class SystemConfig(BaseModel):
         return v
 
 
-class ModelEntry(BaseModel):
-    """模型注册表条目（4.9.4：能力画像/成本/速率/质量评分）。"""
+class ProviderEntry(BaseModel):
+    """模型供应商（接入端点）：一个 base_url + 一把密钥，下挂若干模型。
 
-    alias: str
+    密钥属于供应商而非单个模型——同一端点的多个模型共用一条密钥记录；
+    Web「模型」页先添加供应商（可一键从云端拉取可用模型列表），再从列表里
+    勾选启用哪些模型，不用逐个模型重复填 base_url 与密钥。
+    """
+
+    name: str                             # 供应商名（主键，用户自取，如 ark / deepseek）
     provider: str = "openai_compatible"   # openai_compatible / anthropic_compatible（Web 端仅此两类；mock 仅供离线开发经 YAML 装载）
-    model: str = ""
     base_url: str = ""
     api_key: str = ""                     # 经 ${ENV_VAR} 展开而来；mock 后端可为空
     # 端点协议：chat completions、OpenAI Responses、Anthropic Messages
@@ -168,23 +172,64 @@ class ModelEntry(BaseModel):
     # （anthropic_compatible→anthropic_messages，其余→chat_completions）；
     # 仅 o 系/gpt-5 等原生 Responses 端点需显式指定 responses
     api_format: Literal["auto", "chat_completions", "responses", "anthropic_messages"] = "auto"
+
+    @field_validator("name")
+    @classmethod
+    def _name_nonempty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("供应商名不能为空")
+        return v.strip()
+
+
+class ModelEntry(BaseModel):
+    """模型注册表条目（4.9.4：能力画像/成本/速率/质量评分）。
+
+    模型 ID 即身份：注册表、编队指派、审计与预算都以它为主键；接入信息
+    （provider/base_url/api_key/api_format）来自所属供应商，装载时合并进来。
+    """
+
+    model: str                            # 模型 ID（主键，也是发给端点的模型名）
+    provider_ref: str = ""                # 归属供应商名（ProviderEntry.name）
+    provider: str = "openai_compatible"   # 由供应商合并而来
+    base_url: str = ""
+    api_key: str = ""                     # 由供应商合并而来（经 ${ENV_VAR} 展开或密钥库覆盖）
+    api_format: Literal["auto", "chat_completions", "responses", "anthropic_messages"] = "auto"
     tier: str = "fast"                    # flagship / fast / code / rigorous / light
     capabilities: list[str] = Field(default_factory=list)  # reasoning/code/chinese/security
+    context_window: int = 0               # 上下文窗口（token）；0 = 未声明
+    # 思考强度取值：由每个模型自行声明（如 low/medium/high，或某模型特有的
+    # ultra）——不设固定枚举，也不假设各模型档位一致；空 = 该模型不吃思考强度。
+    reasoning_effort_levels: list[str] = Field(default_factory=list)
     cost_input_per_mtok: float = 0.0
     cost_output_per_mtok: float = 0.0
     rate_limit_rpm: int = 60
     quality_score: float = 1.0            # 基准评测动态更新
-    is_fallback_for: list[str] = Field(default_factory=list, description="主备关系：作为哪些 alias 的备")
+    is_fallback_for: list[str] = Field(default_factory=list, description="主备关系：作为哪些模型的备（模型 ID）")
 
-    @field_validator("alias")
+    @field_validator("model")
     @classmethod
-    def _alias_nonempty(cls, v: str) -> str:
+    def _model_nonempty(cls, v: str) -> str:
         if not v.strip():
-            raise ValueError("模型 alias 不能为空")
+            raise ValueError("模型 ID 不能为空")
+        return v.strip()
+
+    @field_validator("context_window")
+    @classmethod
+    def _ctx_nonnegative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("context_window 不能为负")
         return v
+
+    @field_validator("reasoning_effort_levels")
+    @classmethod
+    def _levels_clean(cls, v: list[str]) -> list[str]:
+        return [s.strip() for s in v if s.strip()]
 
 
 class ModelConfigFile(BaseModel):
+    """模型配置文件：供应商（接入端点）+ 模型（能力画像）两段。"""
+
+    providers: list[ProviderEntry] = Field(default_factory=list)
     models: list[ModelEntry]
 
 
@@ -213,13 +258,36 @@ def load_system_config(path: str | Path) -> SystemConfig:
         raise ConfigurationError(f"系统配置校验失败: {exc}") from exc
 
 
+def _merge_providers(cfg: ModelConfigFile) -> list[ModelEntry]:
+    """把供应商的接入信息合并进每个模型（模型条目本身不重复存 base_url/key）。"""
+    providers = {p.name: p for p in cfg.providers}
+    out: list[ModelEntry] = []
+    for m in cfg.models:
+        ref = m.provider_ref
+        if ref and ref not in providers:
+            raise ConfigurationError(
+                f"模型 {m.model} 引用了不存在的供应商: {ref}（请先在供应商里添加）")
+        p = providers.get(ref)
+        out.append(m.model_copy(update={
+            "provider": p.provider if p else m.provider,
+            "base_url": p.base_url if p else m.base_url,
+            "api_key": p.api_key if p else m.api_key,
+            "api_format": (p.api_format if p and p.api_format != "auto" else m.api_format),
+        }))
+    return out
+
+
 def load_model_config(path: str | Path) -> list[ModelEntry]:
+    """装载模型注册表（供应商接入信息已合并进各模型）。"""
     data = _expand_env(_load_yaml(path))
     try:
         cfg = ModelConfigFile.model_validate(data)
     except Exception as exc:
         raise ConfigurationError(f"模型配置校验失败: {exc}") from exc
-    aliases = [m.alias for m in cfg.models]
-    if len(set(aliases)) != len(aliases):
-        raise ConfigurationError("模型 alias 存在重复")
-    return cfg.models
+    ids = [m.model for m in cfg.models]
+    if len(set(ids)) != len(ids):
+        raise ConfigurationError("模型 ID 存在重复")
+    names = [p.name for p in cfg.providers]
+    if len(set(names)) != len(names):
+        raise ConfigurationError("供应商名存在重复")
+    return _merge_providers(cfg)

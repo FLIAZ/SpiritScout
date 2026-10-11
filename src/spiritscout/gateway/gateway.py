@@ -28,7 +28,7 @@ from spiritscout.gateway.registry import ModelRegistry
 @dataclass
 class ChatResponse:
     content: str
-    model_alias: str
+    model: str
     prompt_tokens: int
     completion_tokens: int
     cost_usd: float
@@ -79,10 +79,10 @@ class BudgetTracker:
                           / max(self.mode_budgets[self.mode], 1))
         return min(max(ratios), 1.0)
 
-    def record(self, alias: str, tokens: int, usd: float) -> None:
+    def record(self, model: str, tokens: int, usd: float) -> None:
         self.used_tokens += tokens
         self.used_usd += usd
-        self.per_model_tokens[alias] = self.per_model_tokens.get(alias, 0) + tokens
+        self.per_model_tokens[model] = self.per_model_tokens.get(model, 0) + tokens
         if self.mode:
             self.per_mode_tokens[self.mode] = self.per_mode_tokens.get(self.mode, 0) + tokens
 
@@ -116,7 +116,7 @@ class ModelGateway:
         messages: list[dict[str, Any]],
         *,
         task_type: str = "execution",
-        model_alias: str | None = None,
+        model: str | None = None,
         required_capability: str | None = None,
         temperature: float = 0.2,
         max_tokens: int = 4096,
@@ -125,15 +125,18 @@ class ModelGateway:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | None = None,
         on_delta: DeltaCallback | None = None,
+        reasoning_effort: str = "",
     ) -> ChatResponse:
         """统一对话入口：路由（预算降级）→ 限流 → 调用（主备切换）→ 计量 → 审计。
 
         timeout_seconds：单次后端调用硬超时；缺省用网关配置。重推理角色
         （如解题环）可放宽，避免长链推理被全局默认值中途掐死。
         tools/on_delta：原生工具调用与流式增量（主备切换时若已吐出增量，
-        切换前投递 reset 让消费端清屏，避免两次尝试的文本叠加）。"""
+        切换前投递 reset 让消费端清屏，避免两次尝试的文本叠加）。
+        reasoning_effort：思考强度取值，按候选模型各自声明的档位把关
+        （未声明的取值不下发，见 _resolve_effort）。"""
         self.budget.check()
-        degraded = (model_alias is None
+        degraded = (model is None
                     and self.config.degrade_at_ratio < 1.0
                     and self.budget.pressure() >= self.config.degrade_at_ratio)
         if degraded:
@@ -141,14 +144,14 @@ class ModelGateway:
             entry = self.registry.route_degraded(
                 task_type, required_capability=required_capability)
             self.audit.log("model.degraded", "gateway", {
-                "task_type": task_type, "to_alias": entry.alias, "to_tier": entry.tier,
+                "task_type": task_type, "to_model": entry.model, "to_tier": entry.tier,
                 "pressure": round(self.budget.pressure(), 3)})
         else:
             entry = self.registry.route(
-                task_type, prefer_alias=model_alias,
+                task_type, prefer_model=model,
                 required_capability=required_capability,
             )
-        chain = [entry, *self.registry.fallback_of(entry.alias)]
+        chain = [entry, *self.registry.fallback_of(entry.model)]
 
         # 流式增量与主备切换的衔接：已吐出的增量在切换前用 reset 清屏
         emitted = False
@@ -172,12 +175,14 @@ class ModelGateway:
                     timeout_seconds=timeout_seconds,
                     tools=tools, tool_choice=tool_choice,
                     on_delta=_relay if on_delta is not None else None,
+                    # 思考强度按每个候选模型各自声明的档位把关（主备档位可能不同）
+                    reasoning_effort=self._resolve_effort(candidate, reasoning_effort),
                 )
                 if idx > 0:
                     resp.fallback_used = True
                     self.audit.log(
                         "model.fallback", "gateway",
-                        {"from": entry.alias, "to": candidate.alias, "reason": str(last_exc)},
+                        {"from": entry.model, "to": candidate.model, "reason": str(last_exc)},
                     )
                 return resp
             except BudgetExceeded:
@@ -188,6 +193,26 @@ class ModelGateway:
         raise SpiritScoutError(f"模型调用全链失败（主备均不可用）: {last_exc}")
 
     # ------------------------------------------------------------ 内部
+
+    def _resolve_effort(self, entry: ModelEntry, requested: str) -> str:
+        """思考强度把关：只下发该模型自己声明过的取值。
+
+        各模型支持的思考强度并不一致（有的 low/medium/high，有的另有 ultra），
+        所以档位由每个模型条目自行声明，后端不设固定候选；请求值不在声明内
+        时不下发并留痕（不猜、不代填、不静默改档）。
+        """
+        want = (requested or "").strip()
+        if not want:
+            return ""
+        if want in entry.reasoning_effort_levels:
+            return want
+        self.audit.log("model.effort_ignored", "gateway", {
+            "model": entry.model, "requested": want,
+            "declared": list(entry.reasoning_effort_levels),
+            "reason": ("该模型未声明此思考强度取值" if entry.reasoning_effort_levels
+                       else "该模型未声明思考强度"),
+        })
+        return ""
 
     async def _invoke(
         self,
@@ -201,6 +226,7 @@ class ModelGateway:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | None = None,
         on_delta: DeltaCallback | None = None,
+        reasoning_effort: str = "",
     ) -> ChatResponse:
         backend: ChatBackend = backend_for(entry, self._mock)
         started = time.perf_counter()
@@ -210,6 +236,7 @@ class ModelGateway:
             timeout=timeout_seconds or self.config.request_timeout_seconds,
             response_format=response_format,
             tools=tools, tool_choice=tool_choice, on_delta=on_delta,
+            reasoning_effort=reasoning_effort,
         )
         latency = (time.perf_counter() - started) * 1000
         total_tokens = raw["prompt_tokens"] + raw["completion_tokens"]
@@ -217,16 +244,17 @@ class ModelGateway:
             raw["prompt_tokens"] / 1e6 * entry.cost_input_per_mtok
             + raw["completion_tokens"] / 1e6 * entry.cost_output_per_mtok
         )
-        self.budget.record(entry.alias, total_tokens, cost)
+        self.budget.record(entry.model, total_tokens, cost)
         self.audit.log(
             "model.call", "gateway",
-            {"alias": entry.alias, "tier": entry.tier, "tokens": total_tokens,
+            {"model": entry.model, "tier": entry.tier, "tokens": total_tokens,
              "cost_usd": round(cost, 6), "latency_ms": round(latency, 1),
+             "effort": reasoning_effort,
              "tool_calls": [c.get("name") for c in raw.get("tool_calls", [])]},
         )
         return ChatResponse(
             content=raw["content"],
-            model_alias=entry.alias,
+            model=entry.model,
             prompt_tokens=raw["prompt_tokens"],
             completion_tokens=raw["completion_tokens"],
             cost_usd=cost,
@@ -239,7 +267,7 @@ class ModelGateway:
     async def _rate_limit(self, entry: ModelEntry) -> None:
         """按模型 RPM 限流（注册表 rate_limit_rpm）。"""
         rpm = max(entry.rate_limit_rpm, 1)
-        window = self._rate_state.setdefault(entry.alias, [])
+        window = self._rate_state.setdefault(entry.model, [])
         now = time.monotonic()
         while True:
             window[:] = [t for t in window if now - t < 60.0]
@@ -267,19 +295,19 @@ class ModelGateway:
 class AgentBoundGateway:
     """按 Agent 绑定模型的网关包装（Web 编队页分配）。
 
-    chat 未显式给 model_alias 时注入该 Agent 的分配别名；别名为空 = 不干预
+    chat 未显式给 model 时注入该 Agent 被指派的模型；模型为空 = 不干预
     （维持档位路由现状）。其余属性（budget/usage_report/...）全部透传内层网关，
     预算计量、限流、主备切换、降级语义不变——本包装只改「谁来答」，不改治理。
     """
 
-    def __init__(self, inner: ModelGateway, alias: str = "") -> None:
+    def __init__(self, inner: ModelGateway, model: str = "") -> None:
         self._inner = inner
-        self._alias = alias
+        self._model = model
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 
     async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> ChatResponse:
-        if self._alias and not kwargs.get("model_alias"):
-            kwargs["model_alias"] = self._alias
+        if self._model and not kwargs.get("model"):
+            kwargs["model"] = self._model
         return await self._inner.chat(messages, **kwargs)

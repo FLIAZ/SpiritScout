@@ -97,9 +97,13 @@ class ChatBackend(abc.ABC):
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | None = None,
         on_delta: DeltaCallback | None = None,
+        reasoning_effort: str = "",
     ) -> dict[str, Any]:
         """返回 {"content", "prompt_tokens", "completion_tokens",
-        "tool_calls": [{"id","name","arguments","raw"}], "finish_reason"}"""
+        "tool_calls": [{"id","name","arguments","raw"}], "finish_reason"}
+
+        reasoning_effort：思考强度取值（该模型自己声明的档位，见 ModelEntry）；
+        空 = 不下发，由端点用默认档。"""
 
 
 def extract_json(text: str) -> Any:
@@ -168,6 +172,7 @@ class LiteLLMBackend(ChatBackend):
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | None = None,
         on_delta: DeltaCallback | None = None,
+        reasoning_effort: str = "",
     ) -> dict[str, Any]:
         api_format = entry.api_format
         if api_format == "auto":
@@ -177,13 +182,14 @@ class LiteLLMBackend(ChatBackend):
             return await self._complete_responses(
                 entry, messages,
                 temperature=temperature, max_tokens=max_tokens, timeout=timeout,
-                tools=tools, tool_choice=tool_choice)
+                tools=tools, tool_choice=tool_choice, reasoning_effort=reasoning_effort)
         return await self._complete_chat(
             entry, messages,
             temperature=temperature, max_tokens=max_tokens, timeout=timeout,
             response_format=response_format,
             anthropic=api_format == "anthropic_messages",
-            tools=tools, tool_choice=tool_choice, on_delta=on_delta)
+            tools=tools, tool_choice=tool_choice, on_delta=on_delta,
+            reasoning_effort=reasoning_effort)
 
     # ------------------------------------------------------------ chat completions / anthropic
 
@@ -200,6 +206,7 @@ class LiteLLMBackend(ChatBackend):
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | None = None,
         on_delta: DeltaCallback | None = None,
+        reasoning_effort: str = "",
     ) -> dict[str, Any]:
         import litellm  # 延迟导入
 
@@ -220,6 +227,7 @@ class LiteLLMBackend(ChatBackend):
                 and not entry.model.startswith("openai/")):
             # OpenAI 兼容端点：走 openai/ 前缀 + 自定义 base
             kwargs["model"] = f"openai/{entry.model}"
+        self._apply_effort(kwargs, reasoning_effort, anthropic=anthropic)
         if tools:
             kwargs["tools"] = tools
             if tool_choice:
@@ -348,6 +356,7 @@ class LiteLLMBackend(ChatBackend):
         timeout: int,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | None = None,
+        reasoning_effort: str = "",
     ) -> dict[str, Any]:
         import litellm  # 延迟导入
 
@@ -373,6 +382,10 @@ class LiteLLMBackend(ChatBackend):
             kwargs["tools"] = tools
             if tool_choice:
                 kwargs["tool_choice"] = tool_choice
+        if reasoning_effort:
+            # Responses 协议的思考强度走 reasoning.effort
+            kwargs["reasoning"] = {"effort": reasoning_effort}
+            kwargs.pop("temperature", None)  # 推理档与采样温度互斥
 
         resp = await litellm.aresponses(**kwargs)
         # 响应结构：output items（message/reasoning/function_call…），文本在
@@ -420,6 +433,30 @@ class LiteLLMBackend(ChatBackend):
         }
 
     @staticmethod
+    def _apply_effort(kwargs: dict[str, Any], effort: str, *, anthropic: bool) -> None:
+        """思考强度下发（取值只来自该模型条目自己声明的档位）。
+
+        - chat completions：``reasoning_effort`` 原样透传，端点自行裁决——litellm
+          对未收录的模型名就是透传，端点不认会明确报错，不会被悄悄吞掉；
+        - anthropic messages：纯数字取值按原生 token 预算发 ``thinking``（Anthropic
+          开思考时 temperature 必须为 1、max_tokens 必须大于预算，这里一并满足）；
+          其余取值走 ``reasoning_effort`` 由 litellm 翻译成思考预算，翻译不了的
+          档位由 litellm 报错——错误如实上报，不静默降级。
+        """
+        if not effort:
+            return
+        if not anthropic:
+            kwargs["reasoning_effort"] = effort
+            return
+        kwargs["temperature"] = 1
+        if effort.isdigit():
+            budget = int(effort)
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            kwargs["max_tokens"] = max(int(kwargs.get("max_tokens") or 0), budget + 1024)
+        else:
+            kwargs["reasoning_effort"] = effort
+
+    @staticmethod
     def _opt_unsupported(exc: Exception, opt: str) -> bool:
         msg = str(exc).lower()
         return opt in msg and any(k in msg for k in (
@@ -465,8 +502,10 @@ class MockBackend(ChatBackend):
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | None = None,
         on_delta: DeltaCallback | None = None,
+        reasoning_effort: str = "",
     ) -> dict[str, Any]:
-        self.calls.append({"alias": entry.alias, "messages": messages,
+        self.calls.append({"model": entry.model, "messages": messages,
+                           "effort": reasoning_effort,
                            "tools": [t.get("function", {}).get("name") for t in tools or []]})
         if self.fail_times > 0:
             self.fail_times -= 1

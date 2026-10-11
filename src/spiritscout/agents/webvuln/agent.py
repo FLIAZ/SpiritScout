@@ -165,7 +165,7 @@ class WebVulnAgent(SubAgent):
                 f"\"rationale\": str}}。可在骨架候选上裁剪/修改/新增；每条 ≤{LLM_PAYLOAD_MAXLEN} 字符"
                 + (f"且必须原样包含探测标记 {require_token}" if require_token else "")
                 + "；不构造取数/拖库/破坏性载荷（G4）。"),
-        })
+        }, reasoning_effort=self.task_effort(task))
         if data is None:
             return None
         out: list[str] = []
@@ -207,7 +207,7 @@ class WebVulnAgent(SubAgent):
                 "\"signal_type\": str, \"confidence\": 0~1, \"rationale\": str, "
                 "\"evidence_quote\": str}]}。evidence_quote 必须逐字摘自对应响应 "
                 "digest，不得杜撰；无把握不输出信号。"),
-        })
+        }, reasoning_effort=self.task_effort(task))
         if data is None:
             return []
         bodies = {(o["param"], o["payload"]): o["_body"] for o in observations}

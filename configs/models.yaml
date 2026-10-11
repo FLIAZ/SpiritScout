@@ -1,76 +1,28 @@
 # 模型注册表（设计书 4.9.4，硬约束 C9：OpenAI/Anthropic 兼容 API）。
 # 本文件可被 Web 控制台「模型」面板写回（手写注释会被规范化；完整注释模板见
 # configs/models.example.yaml）。api_key 仅允许 ${ENV_VAR} 注入（合规 G8）。
-models:
-- alias: ark-flagship
+#
+# providers = 供应商（一个 base_url + 一把密钥）；models = 供应商下启用的模型。
+# 模型 ID 即身份：编队指派、审计与预算都按它对应，同一个模型 ID 不能注册两次。
+providers:
+- name: ark
   provider: openai_compatible
-  model: ark-code-latest
   base_url: https://ark.cn-beijing.volces.com/api/plan/v3
   api_key: ${SPIRITSCOUT_LLM_API_KEY}
+  api_format: auto
+models:
+- model: ark-code-latest
+  provider_ref: ark
   tier: flagship
+  capabilities:
+  - reasoning
+  - code
+  - chinese
+  - security
+  context_window: 0
+  reasoning_effort_levels: []
   cost_input_per_mtok: 0.8
   cost_output_per_mtok: 2
   rate_limit_rpm: 300
   quality_score: 1
-  capabilities:
-  - reasoning
-  - code
-  - chinese
-  - security
   is_fallback_for: []
-- alias: ark-code
-  provider: openai_compatible
-  model: ark-code-latest
-  base_url: https://ark.cn-beijing.volces.com/api/plan/v3
-  api_key: ${SPIRITSCOUT_LLM_API_KEY}
-  tier: code
-  cost_input_per_mtok: 0.4
-  cost_output_per_mtok: 0.8
-  rate_limit_rpm: 300
-  quality_score: 0.95
-  capabilities:
-  - code
-  - chinese
-  is_fallback_for: []
-- alias: ark-fast
-  provider: openai_compatible
-  model: ark-code-latest
-  base_url: https://ark.cn-beijing.volces.com/api/plan/v3
-  api_key: ${SPIRITSCOUT_LLM_API_KEY}
-  tier: fast
-  cost_input_per_mtok: 0.1
-  cost_output_per_mtok: 0.2
-  rate_limit_rpm: 600
-  quality_score: 0.9
-  capabilities:
-  - chinese
-  is_fallback_for: []
-- alias: ark-rigorous
-  provider: openai_compatible
-  model: ark-code-latest
-  base_url: https://ark.cn-beijing.volces.com/api/plan/v3
-  api_key: ${SPIRITSCOUT_LLM_API_KEY}
-  tier: rigorous
-  cost_input_per_mtok: 0.5
-  cost_output_per_mtok: 1.5
-  rate_limit_rpm: 120
-  quality_score: 0.98
-  capabilities:
-  - reasoning
-  - chinese
-  - security
-  is_fallback_for: []
-- alias: ark-fast-backup
-  provider: openai_compatible
-  model: ark-code-latest
-  base_url: https://ark.cn-beijing.volces.com/api/plan/v3
-  api_key: ${SPIRITSCOUT_LLM_API_KEY}
-  tier: fast
-  cost_input_per_mtok: 0.1
-  cost_output_per_mtok: 0.2
-  rate_limit_rpm: 600
-  quality_score: 0.85
-  capabilities:
-  - chinese
-  is_fallback_for:
-  - ark-fast

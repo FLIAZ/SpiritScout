@@ -2,12 +2,22 @@
 # 本系统的 Agent 只是框架：规划、决策、分析、payload 生成等大部分操作
 # 由这里配置的云端大模型完成；规则引擎只保留范围/合规/预算/裁决护栏。
 #
-# 接入方式：OpenAI 兼容（provider: openai_compatible）或 Anthropic 兼容
-# （provider: anthropic_compatible）端点，填 base_url + model + api_key 即启用。
-# api_key 只允许 ${ENV_VAR} 环境变量注入（合规 G8，禁止明文 key 落盘）。
-# 也可在 Web 控制台侧栏「模型」里图形化增删改，写回本文件。
+# 两段结构：
+#   providers = 供应商（一个 base_url + 一把密钥 + 协议类型），如 ark / deepseek；
+#   models    = 供应商下启用的模型（能力画像/档位/思考强度），用 provider_ref 归属。
+# 同一个供应商下的多个模型共用接入信息与密钥，不用逐个模型重复填。
+# 也可在 Web 控制台侧栏「模型」里图形化维护：添加供应商 → 一键「获取模型列表」
+# 从云端拉取可用模型并勾选启用；端点没有模型列表接口时，在供应商内手动填模型 ID。
 #
-# api_format 端点协议（默认 auto 按 provider 推导，一般不用填）：
+# api_key 只允许 ${ENV_VAR} 环境变量注入（合规 G8，禁止明文 key 落盘）；
+# Web 直填的密钥加密存入本机密钥库（按供应商保管，不落明文）。
+#
+# 模型 ID 即身份：编队页直接把模型 ID 指派给 Agent，密钥、审计与预算也按它
+# 对应；同一个模型 ID 不能注册两次（同一端点要配两种参数时，请用端点侧不同
+# 的模型名/接入点 ID）。
+#
+# provider（供应商类型）：openai_compatible / anthropic_compatible。
+# api_format 端点协议（默认 auto 按类型推导，一般不用填）：
 #   chat_completions   OpenAI 对话补全（messages/choices；方舟/DeepSeek/Qwen 等
 #                      绝大多数 OpenAI 兼容端点，auto 默认走这条）
 #   responses          OpenAI Responses 协议（input+instructions/output items；
@@ -17,115 +27,95 @@
 # tier 五档（4.9.1）：flagship 旗舰 / rigorous 严谨 / code 代码 / fast 快模 / light 轻量
 # 差异化分工是六协作模式（4.9.3）与级联升级（6.10）的基础，建议至少配 2 档。
 #
+# context_window：模型上下文窗口（token），填 0 或省略表示未声明。
+#
+# reasoning_effort_levels：该模型支持的思考强度取值——**由各模型自己声明，
+# 没有统一枚举**（有的模型是 low/medium/high，有的另有 ultra 之类，有的完全
+# 不吃这一项）。灵枢下发任务时只能从这个列表里挑，列表为空则该模型不发送
+# 思考强度、用端点默认档。取值会原样下发：
+#   - OpenAI 兼容端点：作为 reasoning_effort 字段发给端点，端点不认会明确报错；
+#   - Anthropic 兼容端点：纯数字（如 4096）按原生思考预算 thinking.budget_tokens
+#     发送；档位名（如 high）由底层翻译成思考预算。
+# 拿不准端点支持哪些档位时留空最稳（不发送 = 不会因参数被拒而调用失败）。
+#
 # 未配置 key 前系统无法发起 LLM 调用；离线开发/测试请用 configs/models.mock.yaml。
 
-models:
+providers:
   # ========== 火山引擎方舟（Ark）==========
   # OpenAI 兼容端点：https://ark.cn-beijing.volces.com/api/plan/v3
   # Anthropic 兼容端点：https://ark.cn-beijing.volces.com/api/plan
-  # model 填模型名（如 ark-code-latest）或推理接入点 ID（ep-xxxxxxxx）。
   # export SPIRITSCOUT_LLM_API_KEY=<你的 API Key>（无人值守部署用；
-  # 交互使用推荐在 Web「模型」页直填——仅存服务器内存，不落盘）
-  # 当前 5 个 tier 别名共用 ark-code-latest；有不同档位模型时改对应 model 即可。
-  - alias: ark-flagship
+  # 交互使用推荐在 Web「模型」页直填——加密存入本机密钥库，不落明文）
+  - name: ark                        # 供应商名（自取，模型用 provider_ref 引用）
     provider: openai_compatible
-    model: ark-code-latest          # ← 改成你的接入点/模型名
     base_url: https://ark.cn-beijing.volces.com/api/plan/v3
     api_key: ${SPIRITSCOUT_LLM_API_KEY}
+    api_format: auto
+
+  # 其他供应商示例（取消注释即可；模型侧用 provider_ref 引用供应商名）
+  # - name: deepseek
+  #   provider: openai_compatible
+  #   base_url: https://api.deepseek.com/v1
+  #   api_key: ${DEEPSEEK_API_KEY}
+  # - name: qwen
+  #   provider: openai_compatible
+  #   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  #   api_key: ${DASHSCOPE_API_KEY}
+  # - name: openai
+  #   provider: openai_compatible
+  #   base_url: https://api.openai.com/v1          # 或你的中转端点
+  #   api_key: ${OPENAI_API_KEY}
+  # - name: anthropic
+  #   provider: anthropic_compatible
+  #   base_url: https://api.anthropic.com          # 或你的中转端点
+  #   api_key: ${ANTHROPIC_API_KEY}
+
+models:
+  # model 填模型名（如 ark-code-latest）或推理接入点 ID（ep-xxxxxxxx）
+  - model: ark-code-latest
+    provider_ref: ark
     tier: flagship
     capabilities: [reasoning, code, chinese, security]
-    cost_input_per_mtok: 0.8                  # 元/百万token，仅用于预算治理
+    context_window: 0               # 0 = 未声明；按端点文档填实际窗口
+    reasoning_effort_levels: []     # 端点支持的档位（如 [low, medium, high]）；不确定就留空
+    cost_input_per_mtok: 0.8        # 元/百万 token，仅用于预算治理
     cost_output_per_mtok: 2.0
     rate_limit_rpm: 300
     quality_score: 1.0
 
-  - alias: ark-code
-    provider: openai_compatible
-    model: ark-code-latest              # 如 DeepSeek/豆包代码向接入点
-    base_url: https://ark.cn-beijing.volces.com/api/plan/v3
-    api_key: ${SPIRITSCOUT_LLM_API_KEY}
-    tier: code
-    capabilities: [code, chinese]
-    cost_input_per_mtok: 0.4
-    cost_output_per_mtok: 0.8
-    rate_limit_rpm: 300
-    quality_score: 0.95
+  # 主备关系（4.9.2）：is_fallback_for 列出「本模型作为谁的备机」——主模型
+  # 连续失败时网关自动切到备机（审计留痕 model.fallback）。
+  # - model: ark-code-backup
+  #   provider_ref: ark
+  #   tier: fast
+  #   capabilities: [chinese]
+  #   is_fallback_for: [ark-code-latest]
 
-  - alias: ark-fast
-    provider: openai_compatible
-    model: ark-code-latest              # 如 doubao-lite/flash 类
-    base_url: https://ark.cn-beijing.volces.com/api/plan/v3
-    api_key: ${SPIRITSCOUT_LLM_API_KEY}
-    tier: fast
-    capabilities: [chinese]
-    cost_input_per_mtok: 0.1
-    cost_output_per_mtok: 0.2
-    rate_limit_rpm: 600
-    quality_score: 0.9
-
-  - alias: ark-rigorous
-    provider: openai_compatible
-    model: ark-code-latest         # 如 deepseek-r1 类强推理接入点
-    base_url: https://ark.cn-beijing.volces.com/api/plan/v3
-    api_key: ${SPIRITSCOUT_LLM_API_KEY}
-    tier: rigorous
-    capabilities: [reasoning, chinese, security]
-    cost_input_per_mtok: 0.5
-    cost_output_per_mtok: 1.5
-    rate_limit_rpm: 120
-    quality_score: 0.98
-
-  # 主备关系（4.9.2）：ark-fast 不可达时由本机另一个快模接入点顶替
-  - alias: ark-fast-backup
-    provider: openai_compatible
-    model: ark-code-latest
-    base_url: https://ark.cn-beijing.volces.com/api/plan/v3
-    api_key: ${SPIRITSCOUT_LLM_API_KEY}
-    tier: fast
-    capabilities: [chinese]
-    cost_input_per_mtok: 0.1
-    cost_output_per_mtok: 0.2
-    rate_limit_rpm: 600
-    quality_score: 0.85
-    is_fallback_for: [ark-fast]
-
-  # ============ 其他兼容端点示例（取消注释并改 alias/model 即可） ============
-  # DeepSeek：export DEEPSEEK_API_KEY=...
-  # - alias: deepseek-chat
-  #   provider: openai_compatible
-  #   model: deepseek-chat
-  #   base_url: https://api.deepseek.com/v1
-  #   api_key: ${DEEPSEEK_API_KEY}
+  # 其他模型示例
+  # - model: deepseek-chat
+  #   provider_ref: deepseek
   #   tier: flagship
   #   capabilities: [reasoning, code, chinese, security]
+  #   context_window: 128000
+  #   reasoning_effort_levels: []     # deepseek-reasoner 类由端点自管思考，不必填
   #   quality_score: 1.0
-  #
-  # 通义千问（DashScope 兼容模式）：export DASHSCOPE_API_KEY=...
-  # - alias: qwen-max
-  #   provider: openai_compatible
-  #   model: qwen-max
-  #   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-  #   api_key: ${DASHSCOPE_API_KEY}
+  # - model: qwen-max
+  #   provider_ref: qwen
   #   tier: flagship
   #   capabilities: [reasoning, code, chinese]
+  #   context_window: 131072
   #   quality_score: 0.98
-  #
-  # OpenAI：export OPENAI_API_KEY=...
-  # - alias: gpt-4o
-  #   provider: openai_compatible
-  #   model: gpt-4o
-  #   base_url: https://api.openai.com/v1      # 或你的中转端点
-  #   api_key: ${OPENAI_API_KEY}
+  # - model: gpt-4o
+  #   provider_ref: openai
   #   tier: flagship
   #   capabilities: [reasoning, code, security]
+  #   context_window: 128000
+  #   reasoning_effort_levels: [minimal, low, medium, high]
   #   quality_score: 1.0
-  #
-  # Claude（Anthropic 兼容）：export ANTHROPIC_API_KEY=...
-  # - alias: claude-sonnet
-  #   provider: anthropic_compatible
-  #   model: claude-sonnet-4-5
-  #   base_url: https://api.anthropic.com      # 或你的中转端点
-  #   api_key: ${ANTHROPIC_API_KEY}
+  # - model: claude-sonnet-4-5
+  #   provider_ref: anthropic
   #   tier: flagship
   #   capabilities: [reasoning, code, security]
+  #   context_window: 200000
+  #   reasoning_effort_levels: [1024, 4096, 16384]   # 数字 = 原生思考预算（token）
   #   quality_score: 1.0

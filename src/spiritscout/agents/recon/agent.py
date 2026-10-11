@@ -241,7 +241,7 @@ class ReconAgent(SubAgent):
                 "返回 JSON：{\"paths\": [str], \"rationale\": str}。仅站内相对路径"
                 "（以 / 开头），不要重复已探测清单；针对观测到的技术栈给出"
                 "高价值信息泄露面（配置/备份/调试端点），不猜测业务接口。"),
-        })
+        }, reasoning_effort=self.task_effort(task))
         if data is None:
             return StepResult(ok=True, value=0.0,
                               note="LLM 路径建议不可用（内置字典已兜底）")

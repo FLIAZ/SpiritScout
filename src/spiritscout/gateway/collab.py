@@ -55,7 +55,7 @@ class JudgeResult:
     confidence: float = 0.0
     reason: str = ""
     raw: str = ""
-    model_alias: str = ""
+    model: str = ""
 
 
 @dataclass
@@ -69,7 +69,7 @@ class VoteResult:
 
     @property
     def models_used(self) -> list[str]:
-        return [v.model_alias for v in self.votes]
+        return [v.model for v in self.votes]
 
 
 @dataclass
@@ -80,7 +80,7 @@ class DebateResult:
     converged: bool                  # 两方自行收敛（未动用仲裁）
     rounds: int
     transcript: list[dict[str, Any]] = field(default_factory=list)
-    arbiter_alias: str = ""
+    arbiter_model: str = ""
 
 
 @dataclass
@@ -90,11 +90,11 @@ class CascadeResult:
     response: ChatResponse           # 最终采用的应答
     escalated: bool
     confidence: float                # 首棒模型自报置信度
-    first_alias: str
-    final_alias: str
+    first_model: str
+    final_model: str
 
 
-def parse_judgment(text: str, model_alias: str = "") -> JudgeResult:
+def parse_judgment(text: str, model: str = "") -> JudgeResult:
     """解析判定输出：优先 JSON（嵌套/fence 容错），退化关键词扫描（字段不臆造）。"""
     from spiritscout.gateway.backends import extract_json
 
@@ -110,7 +110,7 @@ def parse_judgment(text: str, model_alias: str = "") -> JudgeResult:
                 verdict=verdict,
                 confidence=min(max(float(data.get("confidence", 0.0)), 0.0), 1.0),
                 reason=str(data.get("reason", ""))[:300],
-                raw=raw, model_alias=model_alias,
+                raw=raw, model=model,
             )
     lowered = raw.lower()
     if any(k in lowered for k in ("reject", "拒绝", "误报", "不通过")):
@@ -121,7 +121,7 @@ def parse_judgment(text: str, model_alias: str = "") -> JudgeResult:
         verdict = "pass"
     else:
         verdict = "review"           # 无法解析 → 复核（保守默认，不臆断）
-    return JudgeResult(verdict=verdict, raw=raw, model_alias=model_alias)
+    return JudgeResult(verdict=verdict, raw=raw, model=model)
 
 
 class CollabGateway:
@@ -210,7 +210,7 @@ class CollabGateway:
                 )
                 last[label] = argument
                 transcript.append({
-                    "round": round_no, "side": label, "model": entry.alias,
+                    "round": round_no, "side": label, "model": entry.model,
                     "verdict": argument.verdict, "confidence": argument.confidence,
                     "argument": argument.reason,
                 })
@@ -220,23 +220,23 @@ class CollabGateway:
                 self.gateway.audit.log("model.debate", "collab", {
                     "decision": result.decision, "converged": True,
                     "rounds": round_no,
-                    "models": [side_a.alias, side_b.alias]})
+                    "models": [side_a.model, side_b.model]})
                 return result
 
         # 不收敛：第三方仲裁（无第三方 → 直接人工复核，不强行二选一）
         if arbiter is not None:
             ruling = await self._arbitrate(arbiter, subject, context, transcript)
             decision = ruling.verdict
-            arbiter_alias = arbiter.alias
+            arbiter_model = arbiter.model
         else:
-            decision, arbiter_alias = "review", ""
+            decision, arbiter_model = "review", ""
         result = DebateResult(decision=decision, converged=False,
                               rounds=max_rounds, transcript=transcript,
-                              arbiter_alias=arbiter_alias)
+                              arbiter_model=arbiter_model)
         self.gateway.audit.log("model.debate", "collab", {
             "decision": decision, "converged": False, "rounds": max_rounds,
-            "arbiter": arbiter_alias,
-            "models": [side_a.alias, side_b.alias]})
+            "arbiter": arbiter_model,
+            "models": [side_a.model, side_b.model]})
         return result
 
     # ------------------------------------------------------------ 级联（4.9.3-4）
@@ -253,30 +253,30 @@ class CollabGateway:
                      if confidence_threshold is not None
                      else self.cfg.cascade_confidence_threshold)
         first = self.registry.cheapest_for("simple")
-        resp = await self.gateway.chat(messages, model_alias=first.alias,
+        resp = await self.gateway.chat(messages, model=first.model,
                                        task_type=task_type)
         confidence = parse_judgment(resp.content).confidence
         if confidence >= threshold:
             self.gateway.audit.log("model.cascade", "collab", {
-                "escalated": False, "confidence": confidence, "alias": first.alias})
+                "escalated": False, "confidence": confidence, "model": first.model})
             return CascadeResult(response=resp, escalated=False,
                                  confidence=confidence,
-                                 first_alias=first.alias, final_alias=first.alias)
+                                 first_model=first.model, final_model=first.model)
         # 升级旗舰复判（带上首棒结论供参考，不盲从）
         flagship = self.registry.route("meta_planning")
         escalated_messages = list(messages) + [{
             "role": "user",
-            "content": f"初级模型({first.alias})给出的低置信度结论（confidence="
+            "content": f"初级模型({first.model})给出的低置信度结论（confidence="
                        f"{confidence:.2f}），请独立复判并给出最终结论：\n{resp.content[:2000]}",
         }]
         final = await self.gateway.chat(escalated_messages,
-                                        model_alias=flagship.alias,
+                                        model=flagship.model,
                                         task_type="meta_planning")
         self.gateway.audit.log("model.cascade", "collab", {
             "escalated": True, "confidence": confidence,
-            "from": first.alias, "to": flagship.alias})
+            "from": first.model, "to": flagship.model})
         return CascadeResult(response=final, escalated=True, confidence=confidence,
-                             first_alias=first.alias, final_alias=flagship.alias)
+                             first_model=first.model, final_model=flagship.model)
 
     # ------------------------------------------------------------ 异构角色（4.9.3-6）
 
@@ -302,9 +302,9 @@ class CollabGateway:
             {"role": "user", "content": json.dumps(
                 {"subject": subject, "context": context or {}}, ensure_ascii=False)},
         ]
-        resp = await self.gateway.chat(messages, model_alias=entry.alias,
+        resp = await self.gateway.chat(messages, model=entry.model,
                                        task_type="verification")
-        return parse_judgment(resp.content, entry.alias)
+        return parse_judgment(resp.content, entry.model)
 
     async def _argue(
         self, entry: ModelEntry, subject: str, context: dict[str, Any] | None,
@@ -320,8 +320,8 @@ class CollabGateway:
         resp = await self.gateway.chat(
             [{"role": "system", "content": _JUDGE_SYSTEM},
              {"role": "user", "content": json.dumps(user, ensure_ascii=False)}],
-            model_alias=entry.alias, task_type="verification")
-        return parse_judgment(resp.content, entry.alias)
+            model=entry.model, task_type="verification")
+        return parse_judgment(resp.content, entry.model)
 
     async def _arbitrate(
         self, entry: ModelEntry, subject: str, context: dict[str, Any] | None,
@@ -335,5 +335,5 @@ class CollabGateway:
                                 "证据不足一律 review。",
                  "transcript": transcript,
              }, ensure_ascii=False)}],
-            model_alias=entry.alias, task_type="meta_planning")
-        return parse_judgment(resp.content, entry.alias)
+            model=entry.model, task_type="meta_planning")
+        return parse_judgment(resp.content, entry.model)

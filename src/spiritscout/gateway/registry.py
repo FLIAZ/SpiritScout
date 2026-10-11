@@ -29,32 +29,32 @@ class ModelRegistry:
     def __init__(self, entries: list[ModelEntry]):
         if not entries:
             raise ConfigurationError("模型注册表为空：请先在 Web 控制台「模型」页配置至少一个模型")
-        self._by_alias: dict[str, ModelEntry] = {e.alias: e for e in entries}
+        self._by_model: dict[str, ModelEntry] = {e.model: e for e in entries}
         self._by_tier: dict[str, list[ModelEntry]] = {}
         for e in entries:
             self._by_tier.setdefault(e.tier, []).append(e)
 
-    def get(self, alias: str) -> ModelEntry:
+    def get(self, model: str) -> ModelEntry:
         try:
-            return self._by_alias[alias]
+            return self._by_model[model]
         except KeyError as exc:
-            raise ConfigurationError(f"未注册的模型 alias: {alias}") from exc
+            raise ConfigurationError(f"未注册的模型: {model}") from exc
 
-    def has(self, alias: str) -> bool:
-        return alias in self._by_alias
+    def has(self, model: str) -> bool:
+        return model in self._by_model
 
     def find_by_tier(self, tier: str) -> list[ModelEntry]:
         return list(self._by_tier.get(tier, []))
 
-    def fallback_of(self, alias: str) -> list[ModelEntry]:
-        """主备关系：返回声明为 alias 备机的条目（4.9.3-5 主备切换）。"""
-        return [e for e in self._by_alias.values() if alias in e.is_fallback_for]
+    def fallback_of(self, model: str) -> list[ModelEntry]:
+        """主备关系：返回声明为该模型备机的条目（4.9.3-5 主备切换）。"""
+        return [e for e in self._by_model.values() if model in e.is_fallback_for]
 
     def all(self) -> list[ModelEntry]:
-        return list(self._by_alias.values())
+        return list(self._by_model.values())
 
     def route(
-        self, task_type: str, *, prefer_alias: str | None = None,
+        self, task_type: str, *, prefer_model: str | None = None,
         required_capability: str | None = None,
     ) -> ModelEntry:
         """路由模式（4.9.3-1 + 6.10 模型选择公式的工程化简化）：
@@ -63,8 +63,8 @@ class ModelRegistry:
         选择 = argmax( quality_score / max(单位成本, ε) )，质量优先、成本调节。
         （预算降级走 route_degraded，不在此混入档位强制。）
         """
-        if prefer_alias:
-            return self.get(prefer_alias)
+        if prefer_model:
+            return self.get(prefer_model)
         tier = TASK_TIER_MAP.get(task_type, "fast")
         candidates = self.find_by_tier(tier) or self.all()
         if required_capability:

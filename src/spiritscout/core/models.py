@@ -210,6 +210,9 @@ class Task(BaseModel):
     # 并发分支路线预算：主 Agent 按任务复杂度逐任务决策（1~8）；
     # None = 未指定，子 Agent 按模板自然条数执行
     max_routes: int | None = None
+    # 思考强度：灵枢下发时按任务复杂度裁定，取值必须落在该任务所用模型
+    # 自己声明的档位内（各模型档位不同，空 = 用端点默认档）
+    reasoning_effort: str = ""
     timeout_seconds: int = 1800
     created_at: datetime = Field(default_factory=utcnow)
     result_summary: dict[str, Any] = Field(default_factory=dict)

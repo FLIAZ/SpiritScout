@@ -504,7 +504,8 @@ class CTFBaseAgent(SubAgent):
                 " 角度先覆盖完整体验与目标理解，再考虑针对已见线索的深入利用；"
                 "不要以具体攻击技术（注入/爆破等）作为初始角度——除非题面信息"
                 "已明确指向它。题目信息不足以区分时给出 1 条即可。"),
-        }, max_user_chars=8000, timeout_seconds=_SOLVER_TIMEOUT)
+        }, max_user_chars=8000, timeout_seconds=_SOLVER_TIMEOUT,
+            reasoning_effort=self.task_effort(task))
         raw_angles = (data or {}).get("angles")
         if not isinstance(raw_angles, list):
             return []
@@ -712,7 +713,8 @@ class CTFBaseAgent(SubAgent):
                 max_tokens=_SOLVER_MAX_TOKENS, timeout_seconds=_SOLVER_TIMEOUT,
                 tools=None if forced else self.tool_schemas,
                 tool_choice=None if forced else "auto",
-                on_delta=emitter)
+                on_delta=emitter,
+                reasoning_effort=self.task_effort(task))
         except Exception as exc:  # noqa: BLE001 —— 单次调用失败允许下一回合重试
             emitter.flush()
             state["llm_failures"] += 1

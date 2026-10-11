@@ -413,6 +413,18 @@ dialog::backdrop { background: rgba(10, 14, 22, .45); }
 .dlg-grid label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; font-weight: 600; color: var(--ink-2); }
 .dlg-grid .wide { grid-column: 1 / -1; }
 .dlg-ops { display: flex; justify-content: flex-end; gap: 8px; }
+.pcard { margin-bottom: 14px; }
+.pcard .h { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.pcard .h b { font-size: 15px; }
+.pcard .pops { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 11px; }
+.pcard table.list { margin-top: 12px; border: 1px solid var(--line); border-radius: 9px; }
+.pcard table.list td:first-child { border-top-left-radius: 9px; }
+.fm-list { max-height: 46vh; overflow-y: auto; border: 1px solid var(--line); border-radius: 9px; }
+.fm-row { display: flex; align-items: center; gap: 9px; padding: 8px 12px; font-size: 13px;
+  border-bottom: 1px solid var(--line); cursor: pointer; }
+.fm-row:last-child { border-bottom: 0; }
+.fm-row:hover { background: var(--surface-2); }
+.fm-row input { accent-color: var(--accent); }
 
 /* ================= Toast ================= */
 #toasts { position: fixed; bottom: 18px; right: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 99; }
@@ -519,39 +531,67 @@ dialog::backdrop { background: rgba(10, 14, 22, .45); }
     <section id="view-models" hidden>
       <div class="models-head">
         <div>
-          <h2 style="margin:0 0 4px;font-size:19px">模型注册表</h2>
+          <h2 style="margin:0 0 4px;font-size:19px">模型</h2>
           <span class="muted" style="font-size:12.5px" id="models-path"></span>
         </div>
-        <button class="btn primary" id="m-add">+ 注册模型</button>
+        <button class="btn primary" id="p-add">+ 添加供应商</button>
       </div>
-      <div id="models-list"></div>
+      <div id="providers-list"></div>
     </section>
   </main>
 </div>
 
-<dialog id="m-dlg">
-  <h3 id="m-dlg-title" style="margin:0">注册模型</h3>
+<dialog id="p-dlg">
+  <h3 id="p-dlg-title" style="margin:0">添加供应商</h3>
+  <p class="muted" style="font-size:12px;margin:9px 0 0;line-height:1.7">
+    一个供应商 = 一个 API 地址 + 一把密钥，它下面的模型共用这套接入信息。
+    保存后点「获取模型列表」从云端勾选启用；端点不提供列表接口时用「手动添加模型」。</p>
   <div class="dlg-grid">
-    <label><span>别名 *</span><input id="m-alias" placeholder="如 ark-flagship"></label>
-    <label><span>协议</span><select id="m-provider">
-      <option value="openai_compatible">openai_compatible（OpenAI 对话补全兼容）</option>
-      <option value="anthropic_compatible">anthropic_compatible（Anthropic Messages 兼容）</option>
+    <label><span>供应商名 *</span><input id="p-name" placeholder="自取，如 ark / deepseek"></label>
+    <label><span>协议</span><select id="p-type">
+      <option value="openai_compatible">OpenAI 兼容</option>
+      <option value="anthropic_compatible">Anthropic 兼容</option>
     </select></label>
-    <label><span>模型名 / 接入点 ID *</span><input id="m-model" placeholder="如 ark-code-latest 或 ep-xxx"></label>
-    <label><span>API 地址</span><input id="m-baseurl" placeholder="https://..."></label>
-    <label><span>API Key（直填）</span><input id="m-keyval" type="password" placeholder="加密存入本机密钥库，不写回配置文件" autocomplete="new-password"></label>
-    <label><span>或环境变量名</span><input id="m-keyenv" placeholder="如 SPIRITSCOUT_LLM_API_KEY（无人值守部署用）"></label>
-    <div id="m-keystat" class="muted" style="grid-column:1/-1;font-size:11.5px"></div>
+    <label class="wide"><span>API 地址 *</span><input id="p-baseurl" placeholder="如 https://ark.cn-beijing.volces.com/api/plan/v3"></label>
+    <label><span>API Key（直填）</span><input id="p-keyval" type="password" placeholder="加密存入本机密钥库，不写回配置文件" autocomplete="new-password"></label>
+    <label><span>或环境变量名</span><input id="p-keyenv" placeholder="如 SPIRITSCOUT_LLM_API_KEY（无人值守部署用）"></label>
+    <div id="p-keystat" class="muted" style="grid-column:1/-1;font-size:11.5px"></div>
+  </div>
+  <div class="dlg-ops">
+    <button class="btn" id="p-cancel">取消</button>
+    <button class="btn primary" id="p-save">保存</button>
+  </div>
+</dialog>
+
+<dialog id="fm-dlg">
+  <h3 style="margin:0">获取模型列表</h3>
+  <div id="fm-body" style="margin:14px 0;font-size:13px;line-height:1.7"></div>
+  <div class="dlg-ops">
+    <button class="btn" id="fm-cancel">关闭</button>
+    <button class="btn primary" id="fm-add" disabled>启用所选模型</button>
+  </div>
+</dialog>
+
+<dialog id="m-dlg">
+  <h3 id="m-dlg-title" style="margin:0">添加模型</h3>
+  <div class="dlg-grid">
+    <label><span>模型 ID *</span><input id="m-model" placeholder="如 ark-code-latest 或 ep-xxx"></label>
+    <label><span>归属供应商</span><select id="m-pref"></select></label>
     <label><span>档位</span><select id="m-tier">
       <option>flagship</option><option>rigorous</option><option>code</option>
       <option selected>fast</option><option>light</option>
     </select></label>
+    <label><span>上下文窗口（token）</span><input id="m-ctx" type="number" value="0" min="0" step="1000" placeholder="0 = 未声明"></label>
+    <label class="wide"><span>思考强度取值（逗号分隔，各模型不同）</span><input id="m-eff" placeholder="如 low,medium,high；不确定就留空"></label>
+    <label class="wide"><span>能力标签（逗号分隔）</span><input id="m-caps" placeholder="reasoning,code,chinese,security"></label>
     <label><span>输入单价（元/百万 token）</span><input id="m-ci" type="number" value="0" min="0" step="0.01"></label>
     <label><span>输出单价（元/百万 token）</span><input id="m-co" type="number" value="0" min="0" step="0.01"></label>
     <label><span>速率上限 RPM</span><input id="m-rpm" type="number" value="60" min="1"></label>
     <label><span>质量分（0~1）</span><input id="m-quality" type="number" value="1" min="0" max="1" step="0.01"></label>
-    <label><span>能力标签（逗号分隔）</span><input id="m-caps" placeholder="reasoning,code,chinese,security"></label>
-    <label><span>作为哪些别名的备（逗号分隔）</span><input id="m-fb" placeholder="可空"></label>
+    <label class="wide"><span>作为哪些模型的备（逗号分隔）</span><input id="m-fb" placeholder="可空"></label>
+    <div class="muted" style="grid-column:1/-1;font-size:11.5px;line-height:1.6">
+      思考强度按模型实际支持的档位填（如某模型支持 ultra 就写 ultra）——灵枢只会从这里挑，
+      留空则该模型不发送思考强度。密钥随供应商，不在这里填。</div>
   </div>
   <div class="dlg-ops">
     <button class="btn" id="m-cancel">取消</button>
@@ -578,6 +618,7 @@ dialog::backdrop { background: rgba(10, 14, 22, .45); }
 const $ = s => document.querySelector(s);
 const S = { view: "home", cur: null, tab: "topo", sessions: [], state: null,
             agents: null, models: null, evSeen: 0, es: null, poll: null, medit: null,
+            providers: null, pedit: null, fprov: "",
             topoView: null };
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
@@ -1418,7 +1459,8 @@ async function loadAgents() {
         <div class="bind">
           <select data-agent="${esc(a.key)}">
             <option value="">按档位路由（默认）</option>
-            ${S.agents.models.map(m => `<option value="${esc(m)}" ${m === bound ? "selected" : ""}>${esc(m)}</option>`).join("")}
+            ${S.agents.models.map(m => `<option value="${esc(m.model)}" ${m.model === bound ? "selected" : ""}>${esc(m.model)}（${TIER_CN[m.tier] || esc(m.tier)}）</option>`).join("")}
+            ${S.agents.models.length ? "" : `<option value="" disabled>（「模型」页还没有启用模型）</option>`}
           </select>
           <button class="btn sm save-agent" data-agent="${esc(a.key)}" disabled>保存</button>
         </div>
@@ -1441,100 +1483,241 @@ async function loadAgents() {
 }
 
 /* ================= 模型 ================= */
-/* 密钥由服务端密钥库加密保管（工作区 vault.db），页面不缓存、不回传。 */
+/* 供应商（一个 API 地址 + 一把密钥）下挂模型，模型 ID 即身份。密钥由服务端
+   密钥库加密保管（工作区 vault.db），页面不缓存、不回传。 */
+const PROVIDER_CN = { openai_compatible: "OpenAI 兼容", anthropic_compatible: "Anthropic 兼容", mock: "离线演练" };
+const fmtCtx = n => n > 0 ? (n >= 1000 ? Math.round(n / 1000) + "k" : String(n)) : "—";
+/* 内联 onclick 里的字符串实参：JSON 转义 + 去掉能提前闭合属性的字符 */
+const jsArg = s => JSON.stringify(String(s ?? "")).replace(/'/g, "\\u0027").replace(/</g, "\\u003c");
+
+function keyTag(p) {
+  return p.key_source === "vault"
+    ? `<span class="tag green" title="已加密存入本机密钥库（vault.db），重启与更新均保留">密钥已就绪 · 密钥库</span>`
+    : p.key_source === "env"
+      ? `<span class="tag green" title="环境变量 ${esc(p.key_env)}">密钥已就绪 · 环境变量</span>`
+      : `<span class="tag red" title="编辑该供应商填入密钥（加密存入本机密钥库），或配置环境变量">密钥未配置</span>`;
+}
+
+function modelRow(m) {
+  const caps = (m.capabilities || []).map(c => `<span class="tag">${esc(c)}</span>`).join(" ");
+  const eff = (m.reasoning_effort_levels || []).length
+    ? esc(m.reasoning_effort_levels.join(" / ")) : `<span class="muted">—</span>`;
+  return `<tr>
+    <td><b class="mono" style="font-size:12.5px">${esc(m.model)}</b>
+      ${(m.is_fallback_for || []).length ? `<br><span class="tag">备：${esc(m.is_fallback_for.join(", "))}</span>` : ""}</td>
+    <td><span class="tag blue">${TIER_CN[m.tier] || esc(m.tier)}</span></td>
+    <td>${caps || `<span class="muted">—</span>`}</td>
+    <td style="font-size:12.5px">${fmtCtx(m.context_window)}</td>
+    <td style="font-size:12.5px">${eff}</td>
+    <td style="font-size:12.5px">${m.quality_score ?? "—"}</td>
+    <td style="white-space:nowrap">
+      <button class="btn sm" onclick='modelTest(${jsArg(m.model)})'>测试</button>
+      <button class="btn sm" onclick='modelEdit(${jsArg(m.model)})'>编辑</button>
+      <button class="btn sm danger" onclick='modelDel(${jsArg(m.model)})'>删除</button>
+    </td></tr>`;
+}
+
 async function loadModels() {
   try {
-    const d = await api("/api/models");
-    S.models = d;
-    $("#models-path").textContent = d.path + "（密钥加密存入本机密钥库，不写回本文件）";
-    $("#models-list").innerHTML = d.models.length ? `<table class="list">
-      <thead><tr><th>别名</th><th>模型</th><th>协议</th><th>档位</th><th>密钥</th><th>质量</th><th></th></tr></thead>
-      <tbody>${d.models.map(m => `<tr>
-        <td><b>${esc(m.alias)}</b>${(m.is_fallback_for || []).length ? `<br><span class="tag">备：${esc(m.is_fallback_for.join(", "))}</span>` : ""}</td>
-        <td class="mono" style="font-size:12px">${esc(m.model || "—")}<br><span class="muted" style="font-size:11px">${esc(m.base_url || "")}</span></td>
-        <td>${esc(m.provider)}</td>
-        <td><span class="tag blue">${TIER_CN[m.tier] || esc(m.tier)}</span></td>
-        <td>${m.key_source === "vault" ? `<span class="tag green" title="已加密存入本机密钥库（vault.db），重启与更新均保留">已就绪 · 密钥库</span>`
-            : m.key_source === "env" ? `<span class="tag green" title="环境变量 ${esc(m.key_env)}">已就绪 · 环境变量</span>`
-            : `<span class="tag red" title="编辑模型填入密钥（加密存入本机密钥库），或配置环境变量">未配置</span>`}</td>
-        <td>${m.quality_score}</td>
-        <td style="white-space:nowrap">
-          <button class="btn sm" onclick="modelTest('${esc(m.alias)}')">测试</button>
-          <button class="btn sm" onclick='modelEdit(${JSON.stringify(m.alias)})'>编辑</button>
-          <button class="btn sm danger" onclick="modelDel('${esc(m.alias)}')">删除</button>
-        </td></tr>`).join("")}</tbody></table>`
-      : `<div class="empty-note">注册表为空——添加一个云端模型开始使用</div>`;
+    const [pv, md] = await Promise.all([api("/api/providers"), api("/api/models")]);
+    S.providers = pv.providers; S.models = md;
+    $("#models-path").textContent = md.path + "（密钥加密存入本机密钥库，不写回本文件）";
+    const box = $("#providers-list");
+    if (!pv.providers.length) {
+      box.innerHTML = `<div class="empty-note">还没有供应商——添加一个（填 API 地址与密钥），再一键获取可用模型列表</div>`;
+      return;
+    }
+    box.innerHTML = pv.providers.map(p => {
+      const mine = md.models.filter(m => (m.provider_ref || "") === p.name);
+      return `<div class="card pcard">
+        <div class="h"><b>${esc(p.name)}</b>
+          <span class="tag">${PROVIDER_CN[p.provider] || esc(p.provider)}</span>
+          ${keyTag(p)}
+          <span class="muted" style="margin-left:auto;font-size:12px">${mine.length} 个模型</span></div>
+        <div class="muted mono" style="font-size:11.5px;margin-top:5px">${esc(p.base_url || "（未填 API 地址）")}</div>
+        <div class="pops">
+          <button class="btn sm" onclick='providerFetch(${jsArg(p.name)})'>获取模型列表</button>
+          <button class="btn sm" onclick='modelAddTo(${jsArg(p.name)})'>手动添加模型</button>
+          <button class="btn sm" onclick='providerEdit(${jsArg(p.name)})'>编辑供应商</button>
+          <button class="btn sm danger" onclick='providerDel(${jsArg(p.name)})'>删除供应商</button>
+        </div>
+        ${mine.length ? `<table class="list">
+          <thead><tr><th>模型 ID</th><th>档位</th><th>能力</th><th>上下文</th><th>思考强度</th><th>质量</th><th></th></tr></thead>
+          <tbody>${mine.map(modelRow).join("")}</tbody></table>`
+        : `<div class="empty-note" style="padding:20px 0">该供应商下还没有启用模型</div>`}
+      </div>`;
+    }).join("");
   } catch (e) { toast(e.message, true); }
 }
-window.modelTest = async alias => {
-  toast(`正在测试 ${alias} …`);
+
+window.modelTest = async model => {
+  toast(`正在测试 ${model} …`);
   try {
-    const d = await api("/api/models/test", { method: "POST", body: JSON.stringify({ alias }) });
+    const d = await api("/api/models/test", { method: "POST", body: JSON.stringify({ model }) });
     if (d.ok) toast(d.note || `连通正常 · ${d.latency_ms}ms${d.sample ? " · " + d.sample : ""}`);
     else toast(d.error || "测试失败", true);
   } catch (e) { toast(e.message, true); }
 };
-window.modelEdit = alias => {
-  const m = S.models.models.find(x => x.alias === alias);
+
+function fillPrefs(sel) {
+  $("#m-pref").innerHTML = (S.providers || []).map(p =>
+    `<option value="${esc(p.name)}" ${p.name === sel ? "selected" : ""}>${esc(p.name)}</option>`).join("");
+}
+
+window.modelEdit = model => {
+  const m = (S.models.models || []).find(x => x.model === model);
   if (!m) return;
-  S.medit = alias;
-  $("#m-dlg-title").textContent = `编辑模型 ${alias}`;
-  $("#m-alias").value = m.alias;
-  $("#m-provider").value = m.provider === "anthropic_compatible"
-    ? "anthropic_compatible" : "openai_compatible";
-  $("#m-model").value = m.model || ""; $("#m-baseurl").value = m.base_url || "";
-  $("#m-keyenv").value = m.key_env || "";
-  $("#m-keyval").value = "";
-  $("#m-keystat").textContent =
-    m.key_source === "vault" ? "当前密钥：密钥库已配置（留空表示保持不变；重填即覆盖）"
-    : m.key_source === "env" ? `当前密钥：环境变量 ${m.key_env} 已配置`
-    : "当前密钥：未配置";
+  S.medit = model;
+  $("#m-dlg-title").textContent = `编辑模型 ${model}`;
+  $("#m-model").value = m.model || "";
+  fillPrefs(m.provider_ref || "");
   $("#m-tier").value = m.tier || "fast";
+  $("#m-ctx").value = m.context_window || 0;
+  $("#m-eff").value = (m.reasoning_effort_levels || []).join(",");
+  $("#m-caps").value = (m.capabilities || []).join(",");
   $("#m-ci").value = m.cost_input_per_mtok || 0; $("#m-co").value = m.cost_output_per_mtok || 0;
   $("#m-rpm").value = m.rate_limit_rpm || 60; $("#m-quality").value = m.quality_score ?? 1;
-  $("#m-caps").value = (m.capabilities || []).join(",");
   $("#m-fb").value = (m.is_fallback_for || []).join(",");
   $("#m-dlg").showModal();
 };
-window.modelDel = async alias => {
-  try { await api(`/api/models/${encodeURIComponent(alias)}`, { method: "DELETE" });
-    toast(`已删除 ${alias}`); loadModels(); }
-  catch (e) { toast(e.message, true); }
-};
-$("#m-add").onclick = () => {
+
+window.modelAddTo = ref => {
   S.medit = null;
-  $("#m-dlg-title").textContent = "注册模型";
-  for (const id of ["m-alias", "m-model", "m-baseurl", "m-keyenv", "m-keyval", "m-caps", "m-fb"]) $("#" + id).value = "";
-  $("#m-keystat").textContent = "";
-  $("#m-provider").value = "openai_compatible"; $("#m-tier").value = "fast";
+  $("#m-dlg-title").textContent = "手动添加模型";
+  for (const id of ["m-model", "m-eff", "m-caps", "m-fb"]) $("#" + id).value = "";
+  fillPrefs(ref);
+  $("#m-tier").value = "fast"; $("#m-ctx").value = 0;
   $("#m-ci").value = 0; $("#m-co").value = 0; $("#m-rpm").value = 60; $("#m-quality").value = 1;
   $("#m-dlg").showModal();
 };
+
+window.modelDel = async model => {
+  try { await api(`/api/models/${encodeURIComponent(model)}`, { method: "DELETE" });
+    toast(`已删除 ${model}`); loadModels(); }
+  catch (e) { toast(e.message, true); }
+};
+
 $("#m-cancel").onclick = () => $("#m-dlg").close();
 $("#m-save").onclick = async () => {
   const split = s => s.split(",").map(x => x.trim()).filter(Boolean);
-  const env = $("#m-keyenv").value.trim();
-  const keyval = $("#m-keyval").value.trim();
   const body = {
-    alias: $("#m-alias").value.trim(), provider: $("#m-provider").value,
-    model: $("#m-model").value.trim(), base_url: $("#m-baseurl").value.trim(),
-    api_key: env ? `\${${env}}` : "",
-    tier: $("#m-tier").value,
+    model: $("#m-model").value.trim(), provider_ref: $("#m-pref").value,
+    tier: $("#m-tier").value, context_window: +$("#m-ctx").value || 0,
+    reasoning_effort_levels: split($("#m-eff").value),
+    capabilities: split($("#m-caps").value),
     cost_input_per_mtok: +$("#m-ci").value || 0, cost_output_per_mtok: +$("#m-co").value || 0,
     rate_limit_rpm: +$("#m-rpm").value || 60, quality_score: +$("#m-quality").value || 1,
-    capabilities: split($("#m-caps").value), is_fallback_for: split($("#m-fb").value),
+    is_fallback_for: split($("#m-fb").value),
   };
-  // 直填：服务端加密存入密钥库；把环境变量改名/新填 = 切到环境变量模式，
-  // 顺带清掉库内直填密钥（否则库内密钥优先级更高，环境变量形同虚设）
-  const orig = S.medit ? (S.models.models || []).find(x => x.alias === S.medit) : null;
-  if (keyval) body.api_key_value = keyval;
-  else if (orig && orig.key_source === "vault" && env !== (orig.key_env || "")) body.api_key_value = "";
-  if (!body.alias) { toast("别名必填", true); return; }
+  if (!body.model) { toast("模型 ID 必填", true); return; }
   try {
     if (S.medit) await api(`/api/models/${encodeURIComponent(S.medit)}`,
       { method: "PUT", body: JSON.stringify(body) });
     else await api("/api/models", { method: "POST", body: JSON.stringify(body) });
     $("#m-dlg").close(); toast("已保存，新会话即刻生效"); loadModels();
+  } catch (e) { toast(e.message, true); }
+};
+
+/* ---------- 供应商 ---------- */
+window.providerEdit = name => {
+  const p = (S.providers || []).find(x => x.name === name);
+  if (!p) return;
+  S.pedit = name;
+  $("#p-dlg-title").textContent = `编辑供应商 ${name}`;
+  $("#p-name").value = p.name;
+  $("#p-type").value = p.provider === "anthropic_compatible" ? "anthropic_compatible" : "openai_compatible";
+  $("#p-baseurl").value = p.base_url || "";
+  $("#p-keyenv").value = p.key_env || ""; $("#p-keyval").value = "";
+  $("#p-keystat").textContent =
+    p.key_source === "vault" ? "当前密钥：密钥库已配置（留空表示保持不变；重填即覆盖）"
+    : p.key_source === "env" ? `当前密钥：环境变量 ${p.key_env} 已配置`
+    : "当前密钥：未配置";
+  $("#p-dlg").showModal();
+};
+
+window.providerDel = async name => {
+  try { await api(`/api/providers/${encodeURIComponent(name)}`, { method: "DELETE" });
+    toast(`已删除供应商 ${name}`); loadModels(); }
+  catch (e) { toast(e.message, true); }
+};
+
+$("#p-add").onclick = () => {
+  S.pedit = null;
+  $("#p-dlg-title").textContent = "添加供应商";
+  for (const id of ["p-name", "p-baseurl", "p-keyenv", "p-keyval"]) $("#" + id).value = "";
+  $("#p-keystat").textContent = "";
+  $("#p-type").value = "openai_compatible";
+  $("#p-dlg").showModal();
+};
+$("#p-cancel").onclick = () => $("#p-dlg").close();
+$("#p-save").onclick = async () => {
+  const name = $("#p-name").value.trim();
+  const env = $("#p-keyenv").value.trim(), keyval = $("#p-keyval").value.trim();
+  if (!name) { toast("供应商名必填", true); return; }
+  const body = { name, provider: $("#p-type").value, base_url: $("#p-baseurl").value.trim(),
+                 api_key: env ? `\${${env}}` : "" };
+  // 直填：服务端加密存入密钥库；把环境变量改名/新填 = 切到环境变量模式，
+  // 顺带清掉库内直填密钥（否则库内密钥优先级更高，环境变量形同虚设）
+  const orig = S.pedit ? (S.providers || []).find(x => x.name === S.pedit) : null;
+  if (keyval) body.api_key_value = keyval;
+  else if (orig && orig.key_source === "vault" && env !== (orig.key_env || "")) body.api_key_value = "";
+  try {
+    if (S.pedit) await api(`/api/providers/${encodeURIComponent(S.pedit)}`,
+      { method: "PUT", body: JSON.stringify(body) });
+    else await api("/api/providers", { method: "POST", body: JSON.stringify(body) });
+    $("#p-dlg").close(); toast("供应商已保存"); loadModels();
+  } catch (e) { toast(e.message, true); }
+};
+
+/* ---------- 拉取云端模型列表 ---------- */
+window.providerFetch = async name => {
+  S.fprov = name;
+  $("#fm-body").innerHTML = `<span class="muted">正在从「${esc(name)}」拉取可用模型…</span>`;
+  $("#fm-add").disabled = true;
+  $("#fm-dlg").showModal();
+  try {
+    const d = await api(`/api/providers/${encodeURIComponent(name)}/models`,
+      { method: "POST", body: "{}" });
+    if (!d.ok) {
+      $("#fm-body").innerHTML = `<div class="empty-note" style="padding:14px 0;text-align:left">
+        未能自动获取模型列表：${esc(d.error || "未知错误")}
+        ${(d.tried || []).length ? `<br><span class="muted" style="font-size:11.5px">已尝试：${esc((d.tried || []).join("　"))}</span>` : ""}
+        <br>该端点可能没有模型列表接口——关掉本窗口，用「手动添加模型」直接填模型 ID 即可。</div>`;
+      return;
+    }
+    const known = new Set((S.models.models || []).map(x => x.model));
+    $("#fm-body").innerHTML = `
+      <div class="muted" style="font-size:12px;margin-bottom:9px">来自 ${esc(d.url)}，共 ${d.models.length} 个可用模型。
+        勾选后按下面的档位批量启用，之后可在模型行里逐个调整画像。</div>
+      <div class="fm-list">${d.models.map(x => {
+        const on = known.has(x.id);
+        return `<label class="fm-row"><input type="checkbox" value="${esc(x.id)}" ${on ? "disabled" : "checked"}>
+          <span class="mono" style="font-size:12.5px">${esc(x.id)}</span>
+          ${x.display_name && x.display_name !== x.id ? `<span class="muted" style="font-size:11.5px">${esc(x.display_name)}</span>` : ""}
+          ${on ? `<span class="tag green" style="margin-left:auto">已启用</span>` : ""}</label>`;
+      }).join("")}</div>
+      <label style="display:flex;gap:9px;align-items:center;margin-top:11px;font-size:12px;font-weight:600;color:var(--ink-2)">
+        批量档位 <select id="fm-tier" style="width:auto">
+          <option>flagship</option><option>rigorous</option><option>code</option>
+          <option selected>fast</option><option>light</option></select></label>`;
+    const boxes = [...$("#fm-body").querySelectorAll("input[type=checkbox]:not(:disabled)")];
+    const sync = () => { $("#fm-add").disabled = !boxes.some(b => b.checked); };
+    boxes.forEach(b => b.onchange = sync); sync();
+  } catch (e) {
+    $("#fm-body").innerHTML = `<div class="empty-note" style="padding:14px 0">${esc(e.message)}</div>`;
+  }
+};
+$("#fm-cancel").onclick = () => $("#fm-dlg").close();
+$("#fm-add").onclick = async () => {
+  const ids = [...$("#fm-body").querySelectorAll("input[type=checkbox]")]
+    .filter(b => b.checked && !b.disabled).map(b => b.value);
+  if (!ids.length) return;
+  try {
+    const d = await api("/api/models/batch", { method: "POST",
+      body: JSON.stringify({ provider_ref: S.fprov, models: ids, tier: $("#fm-tier").value }) });
+    $("#fm-dlg").close();
+    toast(`已启用 ${d.added.length} 个模型${d.added.length < ids.length ? `（${ids.length - d.added.length} 个已存在，跳过）` : ""}`);
+    loadModels();
   } catch (e) { toast(e.message, true); }
 };
 

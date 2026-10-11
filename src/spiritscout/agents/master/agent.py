@@ -36,6 +36,7 @@ from spiritscout.core.models import (
 )
 from spiritscout.gateway import ModelGateway
 from spiritscout.gateway.backends import extract_json
+from spiritscout.gateway.registry import TASK_TIER_MAP
 from spiritscout.policy.engine import PolicyEngine
 
 # 战术 → 子 Agent 映射（3.3.6 子Agent↔战术映射；MVP 装配 recon/web_vuln）
@@ -214,9 +215,9 @@ class MasterAgent:
             dag.mark(node.node_id, TaskStatus.RUNNING)
             task_objs.append((task, node.node_id))
 
-        # 灵枢按任务复杂度逐任务决策并发分支数（LLM 主路径，规则只做钳制）
+        # 灵枢按任务复杂度逐任务决策并发分支数与思考强度（LLM 主路径，规则只做钳制）
         if task_objs and ctx.enable_llm_planning:
-            await self._assign_route_budgets(task_objs)
+            await self._assign_dispatch_plan(task_objs)
         tasks = [{"task": t.model_dump(mode="json"), "node_id": nid}
                  for t, nid in task_objs]
 
@@ -241,84 +242,135 @@ class MasterAgent:
             return next(iter(found.values()))
         return {}
 
-    async def _assign_route_budgets(self, task_objs: list[tuple[Task, str]]) -> None:
-        """按任务复杂度/攻击面逐任务决策并发分支路线预算（1~8）。
+    def _effort_options(self, task: Task) -> list[str]:
+        """该任务可用的思考强度取值——按实际会用到的模型各自声明的档位算。
 
-        CTF 解题任务例外：单线起步（简单题简单做）——解题是一条持久对话，
-        首轮不并行铺开分支；未破题由复盘轮次换角度重攻（ctf_plan_provider
-        的重攻节点）。其余任务仍由 LLM 逐任务决策。
+        绑定模型的 Agent 取其声明；未绑定时取该任务路由档位内全部模型声明值
+        的并集。各模型的档位并不一致（有的 low/medium/high，有的另有 ultra），
+        所以候选只能由模型自己声明，后端不预设任何固定枚举。
+        """
+        registry = getattr(self.ctx.gateway, "registry", None)
+        if registry is None:
+            return []
+        agent = self.ctx.agents.get(task.agent_type)
+        bound = ""
+        if agent is not None:
+            bound = str(getattr(agent.ctx, "agent_models", {}).get(
+                task.agent_type.value, "") or "")
+        if bound and registry.has(bound):
+            return list(registry.get(bound).reasoning_effort_levels)
+        entries = (registry.find_by_tier(TASK_TIER_MAP.get("execution", "fast"))
+                   or registry.all())
+        out: list[str] = []
+        for e in entries:
+            for level in e.reasoning_effort_levels:
+                if level not in out:
+                    out.append(level)
+        return out
 
-        LLM 是预算建议者；规则引擎只做边界钳制（1~8 硬护栏，防扇出失控）。
-        LLM 不可用/应答非法 → 保持未指定（子 Agent 按模板自然条数），留痕不静默。
+    async def _assign_dispatch_plan(self, task_objs: list[tuple[Task, str]]) -> None:
+        """下发前决策（灵枢）：按任务复杂度裁定并发分支路线预算与思考强度。
+
+        路线预算 1~8：LLM 建议，规则只做边界钳制（防扇出失控）。CTF 解题任务
+        的路线预算固定为 1（单线起步，未破题由复盘轮换角度重攻）——但思考
+        强度仍由 LLM 裁定，解题环正是 token 消耗大头。
+        思考强度：取值必须落在该任务可用模型自己声明的档位内（见
+        _effort_options；各模型档位不同，后端不预设候选）；模型没声明就只能
+        留空（用端点默认档），裁定结果非法则丢弃并留痕，不猜、不代填。
+        LLM 不可用/应答非法 → 保持未指定（子 Agent 按模板自然条数、端点默认
+        思考档），留痕不静默。
         """
         ctx = self.ctx
         assert ctx.audit is not None
-        rest: list[tuple[Task, str]] = []
-        ctf_assigned: list[dict[str, Any]] = []
-        for t, nid in task_objs:
+        digest = []
+        options: dict[int, list[str]] = {}
+        for i, (t, _) in enumerate(task_objs):
             if t.task_type == "ctf_solve":
-                t.max_routes = 1
-                ctf_assigned.append({"task_id": t.task_id, "route_budget": 1,
-                                     "rationale": "CTF 单线起步，未破题由复盘轮换角度重攻"})
-            else:
-                rest.append((t, nid))
-        if ctf_assigned:
-            ctx.audit.log("decision.change", self.agent_id,
-                          {"action": "route_budget", "assigned": ctf_assigned})
-        if not rest:
-            return
-        digest = [
-            {"index": i, "task_type": t.task_type, "agent": t.agent_type.value,
-             "target": t.target, "title": str(t.payload.get("node_title", "")),
-             "challenge": {k: v for k, v in
-                           (t.payload.get("challenge") or {}).items()
-                           if k in ("title", "direction", "category", "points",
-                                    "description")}}
-            for i, (t, _) in enumerate(rest)]
+                t.max_routes = 1          # 单线起步是策略，不是复杂度判断
+            levels = self._effort_options(t)
+            options[i] = levels
+            digest.append({
+                "index": i, "task_type": t.task_type, "agent": t.agent_type.value,
+                "target": t.target, "title": str(t.payload.get("node_title", "")),
+                "route_budget_fixed": 1 if t.task_type == "ctf_solve" else None,
+                "effort_options": levels,
+                "challenge": {k: v for k, v in (t.payload.get("challenge") or {}).items()
+                              if k in ("title", "direction", "category", "points",
+                                       "description")},
+            })
         try:
             resp = await ctx.gateway.chat(
                 [
                     {"role": "system", "content": self._system_prompt()
-                      + "\nROLE: route_budget"},
+                      + "\nROLE: dispatch_plan"},
                     {"role": "user", "content": json.dumps({
                         "tasks": digest,
                         "constraints": (
-                            "返回 JSON：{\"budgets\": [{\"index\": int, "
-                            "\"route_budget\": 1~8 的整数, \"rationale\": str}]}。"
-                            "按每个任务的复杂度、攻击面与潜在价值独立决定并发分支"
-                            "路线数：复杂/高价值目标 5~8，常规 3~4，简单/窄面 1~2。"
-                            "每个任务都必须给出预算。"),
+                            "先判断每个任务的复杂度，再据此给出：并发分支路线预算"
+                            " route_budget（1~8 的整数；复杂/高价值目标 5~8，常规 "
+                            "3~4，简单/窄面 1~2；route_budget_fixed 非空的任务此项"
+                            "固定，不用给）与思考强度 reasoning_effort。"
+                            "reasoning_effort 只能从该任务自己的 effort_options 里"
+                            "原样挑一个——各模型支持的档位不同，选项就是该任务可用"
+                            "模型的真实档位，列表为空表示该模型不吃思考强度，此时"
+                            "必须留空字符串。简单机械的任务选低档省 token，需要多步"
+                            "推理、试错与自我纠偏的任务选高档。"
+                            "返回 JSON：{\"tasks\": [{\"index\": int, "
+                            "\"route_budget\": int, \"reasoning_effort\": str, "
+                            "\"complexity\": \"low\"|\"medium\"|\"high\", "
+                            "\"rationale\": str}]}，每个任务都必须给出。"),
                     }, ensure_ascii=False)},
                 ],
                 task_type="meta_planning", response_format="json",
             )
             data = extract_json(resp.content)
-        except Exception as exc:  # noqa: BLE001 —— 预算决策失败不阻断任务下发
+        except Exception as exc:  # noqa: BLE001 —— 决策失败不阻断任务下发
             ctx.audit.log("decision.change", self.agent_id, {
-                "action": "route_budget_fallback",
-                "reason": f"LLM 预算决策不可用: {str(exc)[:160]}"})
+                "action": "dispatch_plan_fallback",
+                "reason": f"LLM 下发决策不可用: {str(exc)[:160]}"})
             return
-        budgets: dict[int, tuple[int, str]] = {}
-        for b in (data or {}).get("budgets") or []:
+        decided: dict[int, dict[str, Any]] = {}
+        for item in (data or {}).get("tasks") or (data or {}).get("budgets") or []:
             try:
-                budgets[int(b["index"])] = (
-                    max(1, min(int(b["route_budget"]), 8)),
-                    str(b.get("rationale", ""))[:80])
+                decided[int(item["index"])] = item
             except (KeyError, TypeError, ValueError):
                 continue
-        if not budgets:
+        if not decided:
             ctx.audit.log("decision.change", self.agent_id, {
-                "action": "route_budget_fallback",
-                "reason": "LLM 应答无有效预算，保持模板自然条数"})
+                "action": "dispatch_plan_fallback",
+                "reason": "LLM 应答无有效决策，保持模板自然条数与默认思考档"})
             return
-        assigned = []
-        for i, (t, _) in enumerate(rest):
-            if i in budgets:
-                t.max_routes, rationale = budgets[i]
-                assigned.append({"task_id": t.task_id, "route_budget": t.max_routes,
-                                 "rationale": rationale})
+        assigned: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        for i, (t, _) in enumerate(task_objs):
+            item = decided.get(i)
+            if item is None:
+                continue
+            record: dict[str, Any] = {"task_id": t.task_id}
+            if t.task_type != "ctf_solve":
+                try:
+                    t.max_routes = max(1, min(int(item["route_budget"]), 8))
+                    record["route_budget"] = t.max_routes
+                except (KeyError, TypeError, ValueError):
+                    record["route_budget"] = None
+            else:
+                record["route_budget"] = t.max_routes
+            want = str(item.get("reasoning_effort") or "").strip()
+            if want and want in options[i]:
+                t.reasoning_effort = want
+            elif want:
+                rejected.append({"task_id": t.task_id, "requested": want,
+                                 "declared": options[i]})
+            record["reasoning_effort"] = t.reasoning_effort
+            record["complexity"] = str(item.get("complexity", ""))[:16]
+            record["rationale"] = str(item.get("rationale", ""))[:80]
+            assigned.append(record)
         ctx.audit.log("decision.change", self.agent_id,
-                      {"action": "route_budget", "assigned": assigned})
+                      {"action": "dispatch_plan", "assigned": assigned})
+        if rejected:
+            ctx.audit.log("decision.change", self.agent_id,
+                          {"action": "effort_rejected", "rejected": rejected,
+                           "reason": "思考强度不在该任务可用模型声明的档位内，按默认档执行"})
 
     # ------------------------------------------------------------ 拓扑快照（Web 可视化）
 
