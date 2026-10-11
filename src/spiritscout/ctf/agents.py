@@ -1334,13 +1334,9 @@ class CTFWebAgent(CTFBaseAgent):
     route_namespace = "ctf_web"
     direction_brief = (
         "先把入口页当用户界面用起来：按页面引导点开各个功能、提交表单、走完"
-        "它的正常业务流程，同时从响应内容（结构、注释、链接、表单、脚本、接口"
-        "与响应头）读懂这个应用是做什么的、有哪些功能与角色，再按证据选方向；"
-        "Web 题常见考点（在信息支撑下选用，不逐条硬套）：源码/"
-        "备份泄露（.git、.bak、www.zip）、robots.txt 与隐藏路径、参数注入"
-        "（SQLi/命令注入/模板注入——模板 canary 如 {{7*7}} 被求值为 49 即命中）、"
-        "文件包含与路径穿越、类型混淆与弱比较、反序列化、条件竞争、JWT 伪造、"
-        "响应头/HTML 注释/JS 中的线索。")
+        "它的正常业务流程，同时从响应内容里读懂这个应用是做什么的、有哪些"
+        "功能与角色。没有任何预设考点清单——信息由你自行收集，解题计划由你"
+        "从收集到的证据里分析得出。")
 
 
 # ================================================================ Crypto 专项
@@ -1357,10 +1353,10 @@ class CTFCryptoAgent(CTFBaseAgent):
     direction = "crypto"
     route_namespace = "ctf_crypto"
     direction_brief = (
-        "Crypto 题：先看题面/附件里的密文与算法描述。编码题用 decode_chain "
-        "逐层剥；纯字母密文可试 caesar_brute（全位移）与 rail_fence（定栏还原）；"
-        "现代密码（RSA/AES/ECC）先做结构分析——参数提取、小指数、共模、已知"
-        "明文、padding 线索——把结构结论与卡点写进结论。")
+        "Crypto 题：先完整读题面与附件——密文长什么样、有没有算法描述与提示，"
+        "信息由你自行收集。本方向的解码/爆破工具与 shell/python 都是你可用的"
+        "手，怎么用、用不用由你依据证据决定；超出工具能力的数学结构，把你的"
+        "结构分析与卡点写进结论。")
     tool_schemas: ClassVar[list[dict[str, Any]]] = [
         *CTFBaseAgent.tool_schemas,
         _fn("decode_chain", "对指定串做 Base64/Hex/URL/Rot13 递归解码。",
@@ -1432,9 +1428,9 @@ class CTFMiscAgent(CTFBaseAgent):
     direction = "misc"
     route_namespace = "ctf_misc"
     direction_brief = (
-        "Misc 题：附件魔数与元信息、strings 深挖、题面零宽字符与编码串是主要"
-        "线索面。文件尾部附加数据、多余分块、时间戳异常等隐写信号若超出工具"
-        "能力，把观察与假设写进结论，供复盘换工具方向。")
+        "Misc 题：线索面由你自行勘察——附件（魔数/元信息/字符串）与题面里的"
+        "一切可见形态都值得先看一遍。工具与 shell/python 由你按观察到的形态"
+        "自行选择；超出工具能力的部分，把观察与假设写进结论，供复盘换方向。")
     tool_schemas: ClassVar[list[dict[str, Any]]] = [
         *CTFBaseAgent.tool_schemas,
         _fn("deep_strings",
@@ -1482,10 +1478,9 @@ class CTFReverseAgent(CTFBaseAgent):
     direction = "reverse"
     route_namespace = "ctf_reverse"
     direction_brief = (
-        "Reverse 题：先 analyze_attachments 拿魔数/架构/strings，再用 algo_hints "
-        "归纳算法线索（xor/rc4/aes/tea 等）；从字符串里找校验比较串与自定义表；"
-        "题面描述算法时按其步骤手工推演，把中间结论写进观察。需要动态调试或"
-        "符号执行（超出工具能力）时，把线索与卡点写进结论。")
+        "Reverse 题：先用 analyze_attachments 认识附件（魔数/架构/字符串），"
+        "之后算法与校验逻辑由你从收集到的信息自行归纳推演；需要动态调试或"
+        "符号执行时，把线索与卡点写进结论。")
     tool_schemas: ClassVar[list[dict[str, Any]]] = [
         *CTFBaseAgent.tool_schemas,
         _fn("algo_hints",
@@ -1529,10 +1524,9 @@ class CTFPwnAgent(CTFBaseAgent):
     direction = "pwn"
     route_namespace = "ctf_pwn"
     direction_brief = (
-        "Pwn 题：analyze_attachments 拿 ELF 识别；checksec 归纳保护机制（字符串"
-        "级静态信号）；danger_funcs 提取危险函数线索（gets/strcpy/system 等）"
-        "与漏洞类假设；结合题面远程入口（nc 地址/协议）把利用思路与卡点写进"
-        "结论。")
+        "Pwn 题：先用 analyze_attachments/checksec/danger_funcs 认识二进制与"
+        "题面远程入口（nc 地址/协议），利用思路由你从收集到的证据出发自行形成；"
+        "需要构造与发送利用脚本时用 shell/python（pwntools 可直接导入）。")
     tool_schemas: ClassVar[list[dict[str, Any]]] = [
         *CTFBaseAgent.tool_schemas,
         _fn("checksec",

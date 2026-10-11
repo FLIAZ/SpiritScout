@@ -85,6 +85,11 @@ class MasterContext:
 class MasterAgent:
     """主 Agent（元规划决策层）。"""
 
+    # 灵枢自身的思考强度：固定取最高档，不做动态裁定（动态裁定只用于
+    # 子 Agent——见 _assign_dispatch_plan）。模型未声明该档位时按端点
+    # 默认档执行（网关门禁忽略未声明值，不猜不代填）
+    _MASTER_EFFORT = "max"
+
     def __init__(self, ctx: MasterContext):
         self.ctx = ctx
         self.agent_id = new_id("master")
@@ -613,6 +618,7 @@ class MasterAgent:
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],
                 task_type="meta_planning", response_format="json",
+                reasoning_effort=self._MASTER_EFFORT,
             )
             data = extract_json(resp.content) or {}
             items = data.get("steering")
@@ -827,6 +833,7 @@ class MasterAgent:
                     }, ensure_ascii=False)[:8000]},
                 ],
                 task_type="meta_planning", response_format="json",
+                reasoning_effort=self._MASTER_EFFORT,
             )
             data = extract_json(resp.content)
             if not isinstance(data, dict) or "dag_nodes" not in data:
@@ -911,6 +918,7 @@ class MasterAgent:
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],
                 task_type="meta_planning", response_format="json",
+                reasoning_effort=self._MASTER_EFFORT,
             )
             data = extract_json(resp.content)
             if feed:
