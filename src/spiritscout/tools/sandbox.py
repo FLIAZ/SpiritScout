@@ -1,0 +1,213 @@
+"""沙箱执行工具（sandbox_exec）：bubblewrap 隔离下运行 shell 命令 / Python 脚本。
+
+CTF 解题需要真实动手能力——协议交互（WebSocket/socket）、数据计算、
+脚本化构造请求，http_probe 一条 HTTP 通道远远不够。本工具给子 Agent
+一双在受控沙箱里干活的手。
+
+隔离边界（bwrap，最小权限）：
+- 文件系统整机只读挂载；用户主目录以 tmpfs 遮蔽（~/.ssh、密钥库、浏览器
+  数据在沙箱内不可见），仅回挂用户 Python 库目录（~/.local/lib，pwntools
+  等装在这里）与会话工作区；
+- 会话工作区可写——脚本与产物落在这里，附件工具可继续分析；
+- 环境变量清零后仅注入 PATH/HOME/LANG/PYTHONPATH；HOME 指向本次运行目录
+  （脚本写 ~ 不会碰到真实主目录）；
+- 进程组独立 + 超时强杀；输出流式读取限幅（脚本无限输出也不会撑爆内存）。
+
+网络保持放行（CTF 赛题交互必需）。脚本内的网络访问无法被 ScopeGuard
+逐请求拦截——限于授权目标由 Agent 纪律与审计留痕约束（已知边界）。
+bwrap 不可用时明确报错，不静默降级为宿主直跑。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import shutil
+import signal
+import time
+from pathlib import Path
+from typing import Any
+
+from spiritscout.tools.spec import ToolResult
+
+_BWRAP = "bwrap"
+_MIN_TIMEOUT = 5.0
+_MAX_TIMEOUT = 300.0
+_READ_CHUNK = 65536
+
+
+def sandbox_available() -> bool:
+    """bwrap 可用性探测（工具调用与装配提示共用）。"""
+    return shutil.which(_BWRAP) is not None
+
+
+def _user_site_dirs() -> list[str]:
+    """用户级 Python 库目录（pip --user 装的 pwntools 等在此）。"""
+    return [str(p) for p in sorted(
+        (Path.home() / ".local" / "lib").glob("python*/site-packages"))]
+
+
+def _build_argv(workspace: Path, rundir: Path, inner: list[str]) -> list[str]:
+    """bwrap 参数：整机只读 + 主目录遮蔽 + 工作区可写 + 干净环境。"""
+    home = Path.home()
+    argv = [
+        _BWRAP,
+        "--ro-bind", "/", "/",
+        "--dev", "/dev",
+        "--proc", "/proc",
+        "--tmpfs", "/tmp",
+        "--tmpfs", str(home),          # 主目录遮蔽：.ssh / 密钥库不可见
+    ]
+    user_lib = home / ".local" / "lib"
+    if user_lib.is_dir():
+        argv += ["--ro-bind", str(user_lib), str(user_lib)]
+    argv += [
+        "--bind", str(workspace), str(workspace),
+        "--chdir", str(rundir),
+        "--die-with-parent",
+        "--clearenv",
+        "--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin",
+        "--setenv", "HOME", str(rundir),
+        "--setenv", "LANG", "C.UTF-8",
+    ]
+    sites = _user_site_dirs()
+    if sites:
+        argv += ["--setenv", "PYTHONPATH", ":".join(sites)]
+    return [*argv, *inner]
+
+
+async def _read_capped(stream: asyncio.StreamReader | None,
+                       cap: int) -> tuple[bytes, int]:
+    """流式读取并限幅：保留头尾，返回（保留字节, 实际总量）。"""
+    if stream is None:
+        return b"", 0
+    head_cap = cap * 3 // 4
+    tail_cap = cap - head_cap
+    head = bytearray()
+    tail = bytearray()
+    total = 0
+    while True:
+        chunk = await stream.read(_READ_CHUNK)
+        if not chunk:
+            break
+        total += len(chunk)
+        if len(head) < head_cap:
+            take = min(head_cap - len(head), len(chunk))
+            head.extend(chunk[:take])
+            chunk = chunk[take:]
+        if chunk and tail_cap:
+            tail.extend(chunk)
+            if len(tail) > tail_cap:
+                del tail[:-tail_cap]
+    return bytes(head + tail), total
+
+
+def _kill_group(proc: asyncio.subprocess.Process) -> None:
+    """杀整个进程组（bwrap 与沙箱内全部子进程）。"""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _decode(data: bytes, total: int, cap: int) -> str:
+    """解码限幅输出；被截断时在保留的头尾之间标明丢弃量。"""
+    if total <= cap:
+        return data.decode(errors="replace")
+    head_cap = cap * 3 // 4
+    dropped = total - len(data)
+    return (data[:head_cap].decode(errors="replace")
+            + f"\n...[输出超限，已丢弃 {dropped} 字节]...\n"
+            + data[head_cap:].decode(errors="replace"))
+
+
+async def sandbox_exec(
+    code: str,
+    *,
+    language: str = "shell",
+    timeout: float = 60.0,
+    workspace_root: str | None = None,
+    max_output_chars: int = 20000,
+    **_: Any,
+) -> ToolResult:
+    """沙箱执行：language=shell 跑 ``bash -c``；language=python 落盘后 ``python3`` 运行。
+
+    ok 语义：进程正常结束（任何退出码）即 ok=True——退出码非零是结果不是
+    工具故障；只有沙箱不可用 / 启动失败 / 超时被终止才 ok=False。
+    """
+    started = time.perf_counter()
+    code = str(code or "")
+    if not code.strip():
+        return ToolResult(tool="sandbox_exec", ok=False, returncode=-1,
+                          error="执行内容为空")
+    if not sandbox_available():
+        return ToolResult(tool="sandbox_exec", ok=False, returncode=-1, error=(
+            "沙箱不可用：未找到 bubblewrap（bwrap）。请安装 bubblewrap 后重试"
+            "（不静默降级为宿主直跑）。"))
+    if not workspace_root:
+        return ToolResult(tool="sandbox_exec", ok=False, returncode=-1,
+                          error="缺少工作区配置（workspace_root）")
+    try:
+        timeout = max(_MIN_TIMEOUT, min(float(timeout), _MAX_TIMEOUT))
+    except (TypeError, ValueError):
+        timeout = 60.0
+    lang = "python" if str(language).lower() == "python" else "shell"
+    workspace = Path(workspace_root).resolve()
+    try:
+        workspace.mkdir(parents=True, exist_ok=True)
+        rundir = workspace / ".sandbox"
+        rundir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return ToolResult(tool="sandbox_exec", ok=False, returncode=-1,
+                          error=f"沙箱工作区不可用: {exc}")
+    if lang == "python":
+        script = rundir / f"run_{int(time.time() * 1000)}_{os.urandom(3).hex()}.py"
+        script.write_text(code, encoding="utf-8")
+        inner = ["python3", str(script)]
+    else:
+        inner = ["bash", "-c", code]
+
+    argv = _build_argv(workspace, rundir, inner)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            start_new_session=True)
+    except OSError as exc:
+        return ToolResult(tool="sandbox_exec", ok=False, returncode=-1,
+                          error=f"沙箱启动失败: {exc}")
+
+    cap = max(1000, int(max_output_chars))
+    out_task = asyncio.create_task(_read_capped(proc.stdout, cap))
+    err_task = asyncio.create_task(_read_capped(proc.stderr, cap))
+    timed_out = False
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+    except TimeoutError:
+        timed_out = True
+        _kill_group(proc)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except TimeoutError:
+            pass
+    try:
+        (out_b, out_total), (err_b, err_total) = await asyncio.wait_for(
+            asyncio.gather(out_task, err_task), timeout=5)
+    except TimeoutError:
+        out_task.cancel()
+        err_task.cancel()
+        await asyncio.gather(out_task, err_task, return_exceptions=True)
+        out_b = err_b = b""
+        out_total = err_total = 0
+    rc = proc.returncode if proc.returncode is not None else -1
+
+    duration = (time.perf_counter() - started) * 1000
+    stdout = _decode(out_b, out_total, max_output_chars)
+    stderr = _decode(err_b, err_total, max_output_chars)
+    return ToolResult(
+        tool="sandbox_exec", ok=not timed_out, returncode=rc,
+        stdout=stdout, stderr=stderr, timed_out=timed_out,
+        parsed={"language": lang, "exit_code": rc,
+                "duration_ms": round(duration, 1)},
+        error=(f"执行超时（{timeout:.0f}s），进程已终止" if timed_out else ""),
+        duration_ms=duration,
+    )

@@ -16,6 +16,8 @@
   --bad: #d64343; --bad-soft: #fcebeb;
   --gold: #a87f00; --gold-soft: #faf3d7;
   --violet: #7a5af8; --violet-soft: #efecfe;
+  --agent-1: #2a78d6; --agent-2: #eb6834; --agent-3: #1baf7a; --agent-4: #eda100;
+  --agent-5: #e87ba4; --agent-6: #008300; --agent-7: #6250d6; --agent-8: #e34948;
   --shadow: 0 1px 2px rgba(22,27,38,.05), 0 4px 16px rgba(22,27,38,.06);
   --shadow-raise: 0 2px 4px rgba(22,27,38,.07), 0 10px 26px rgba(22,27,38,.1);
   --radius: 10px;
@@ -33,6 +35,8 @@
     --bad: #f06a6a; --bad-soft: #3b1b1b;
     --gold: #d9b64f; --gold-soft: #352e14;
     --violet: #9a86ff; --violet-soft: #251e47;
+    --agent-1: #3987e5; --agent-2: #d95926; --agent-3: #199e70; --agent-4: #c98500;
+    --agent-5: #d55181; --agent-6: #008300; --agent-7: #9085e9; --agent-8: #e66767;
     --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
     --shadow-raise: 0 2px 4px rgba(0,0,0,.35), 0 10px 26px rgba(0,0,0,.3);
     color-scheme: dark;
@@ -47,6 +51,9 @@
   --warn: #d9a04f; --warn-soft: #372917;
   --bad: #f06a6a; --bad-soft: #3b1b1b;
   --gold: #d9b64f; --gold-soft: #352e14;
+  --violet: #9a86ff; --violet-soft: #251e47;
+  --agent-1: #3987e5; --agent-2: #d95926; --agent-3: #199e70; --agent-4: #c98500;
+  --agent-5: #d55181; --agent-6: #008300; --agent-7: #9085e9; --agent-8: #e66767;
   --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
   color-scheme: dark;
 }
@@ -348,48 +355,104 @@ table.list tr:last-child td { border-bottom: 0; }
 .ev .de { color: var(--ink-2); word-break: break-all; }
 @media (max-width: 700px) { .ev { grid-template-columns: 70px 1fr; } .ev .ac, .ev .de { grid-column: 2; } }
 
-/* ================= 解题轨迹（Agent 工作台实录） ================= */
-.trace { display: flex; flex-direction: column; gap: 10px; max-height: 66vh; overflow-y: auto;
-  padding: 4px 2px 20px; scroll-behavior: smooth; }
-.trace .empty-note { padding: 40px 0; }
-.tr-agent { border: 1px solid var(--line); border-radius: 12px; background: var(--surface);
-  box-shadow: var(--shadow); overflow: hidden; }
-.tr-agent > .h { display: flex; align-items: center; gap: 8px; padding: 8px 13px;
-  border-bottom: 1px solid var(--line); background: var(--surface-2); font-size: 12.5px; }
-.tr-agent > .h b { font-size: 13px; }
-.tr-agent > .h .muted { margin-left: auto; font-size: 11px; }
-.tr-turn { padding: 10px 13px; border-top: 1px dashed color-mix(in srgb, var(--ink-3) 26%, transparent); }
-.tr-turn:first-of-type { border-top: 0; }
-.tr-turn > .th { font-size: 10.5px; color: var(--ink-3); margin-bottom: 6px;
-  display: flex; gap: 8px; align-items: baseline; }
-.tr-think { font-size: 11.5px; color: var(--ink-3); line-height: 1.6; white-space: pre-wrap;
-  border-left: 2px solid color-mix(in srgb, var(--ink-3) 35%, transparent);
-  padding: 2px 0 2px 10px; margin: 4px 0; max-height: 180px; overflow-y: auto; }
-.tr-text { font-size: 12.5px; line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
-.tr-text:empty { display: none; }
-.tr-call { margin: 7px 0 0; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
-.tr-call > .ch { display: flex; align-items: center; gap: 8px; padding: 6px 10px; font-size: 12px;
-  background: color-mix(in srgb, var(--accent) 5%, var(--surface)); cursor: pointer; }
-.tr-call > .ch .nm { font-family: var(--mono); font-weight: 700; color: var(--accent-ink); }
-.tr-call > .ch .ar { color: var(--ink-3); font-family: var(--mono); font-size: 11px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-.tr-call > .ch .ok { font-size: 10.5px; flex: none; }
-.tr-call > .ch .ok.y { color: var(--ok); } .tr-call > .ch .ok.n { color: var(--bad); }
-.tr-call > .bd { display: none; border-top: 1px solid var(--line); }
-.tr-call.open > .bd { display: block; }
-.tr-call > .bd pre { margin: 0; padding: 8px 10px; font-size: 11.5px; line-height: 1.6;
-  white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow-y: auto;
-  background: var(--surface-2); font-family: var(--mono); }
-.tr-conclude { margin-top: 8px; padding: 9px 12px; border-radius: 9px; font-size: 12.5px;
-  line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+/* ================= 解题轨迹（单列时间线） ================= */
+.trace-wrap { position: relative; }
+.trace { max-height: 66vh; overflow-y: auto; padding: 8px 6px 16px 0; }
+.trace .empty-note { padding: 44px 0; }
+#trace-jump { position: absolute; right: 16px; bottom: 14px; z-index: 5;
+  padding: 6px 13px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line));
+  background: var(--surface); color: var(--accent-ink); box-shadow: var(--shadow-raise); }
+#trace-jump:hover { background: var(--accent-soft); }
+
+/* 一条时间线：左列时刻，右列内容；每个智能体占用固定色槽 */
+.tl { display: grid; grid-template-columns: 54px minmax(0, 1fr); column-gap: 11px;
+  --ag: var(--ink-3); }
+.tl.ag-1 { --ag: var(--agent-1); } .tl.ag-2 { --ag: var(--agent-2); }
+.tl.ag-3 { --ag: var(--agent-3); } .tl.ag-4 { --ag: var(--agent-4); }
+.tl.ag-5 { --ag: var(--agent-5); } .tl.ag-6 { --ag: var(--agent-6); }
+.tl.ag-7 { --ag: var(--agent-7); } .tl.ag-8 { --ag: var(--agent-8); }
+.tl.tl-sys { --ag: var(--ink-3); }
+.tl.tl-flag { --ag: var(--gold); }
+.tl > .t { grid-column: 1; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3);
+  text-align: right; padding-top: 4px; white-space: nowrap; }
+.tl > .b { grid-column: 2; min-width: 0; position: relative; padding: 0 0 16px 15px;
+  border-left: 2px solid color-mix(in srgb, var(--ag) 22%, var(--line)); }
+.tl:last-child > .b { padding-bottom: 2px; }
+.tl > .b::before { content: ""; position: absolute; left: -5px; top: 6px; width: 8px; height: 8px;
+  border-radius: 50%; background: var(--ag); box-shadow: 0 0 0 3px var(--bg); }
+.tl .hd { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.tl .hd .who { font-size: 13px; font-weight: 700; color: var(--ink); }
+.tl .hd .k { font-size: 10.5px; color: var(--ink-3); }
+.tl .ang { font-size: 11px; color: var(--ink-3); line-height: 1.5; margin-top: 2px;
+  overflow-wrap: anywhere; }
+.tl-sys .m { font-size: 11.5px; color: var(--ink-3); }
+.tl-flag .m { font-size: 12px; color: var(--gold); font-weight: 700; }
+.tl .flow { display: flex; flex-direction: column; gap: 6px; margin-top: 7px; }
+.tl .flow:empty { display: none; }
+
+.tl-say { font-size: 12.5px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
+.tl-say:empty { display: none; }
+
+/* 思考过程：默认收起，流式期间以呼吸点提示 */
+.tl-think > summary { display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+  list-style: none; font-size: 11px; color: var(--ink-3); padding: 2px 9px; border-radius: 999px;
+  border: 1px dashed color-mix(in srgb, var(--ink-3) 42%, transparent); }
+.tl-think > summary::-webkit-details-marker { display: none; }
+.tl-think > summary::before { content: "✦"; font-size: 10px; }
+.tl-think[open] > summary { color: var(--ink-2); border-style: solid; }
+.tl-think.live > summary::after { content: ""; width: 5px; height: 5px; border-radius: 50%;
+  background: currentColor; animation: tl-pulse 1.1s ease-in-out infinite; }
+@keyframes tl-pulse { 50% { opacity: .2; } }
+@media (prefers-reduced-motion: reduce) { .tl-think.live > summary::after { animation: none; } }
+.tl-think > .bd { font-size: 11.5px; color: var(--ink-2); line-height: 1.65; white-space: pre-wrap;
+  word-break: break-word; padding: 7px 0 2px 11px; margin-top: 4px; max-height: 260px;
+  overflow-y: auto; border-left: 2px solid color-mix(in srgb, var(--ink-3) 28%, transparent); }
+
+/* 动作行：工具名 + 一句话参数 + 结果摘要，点开看原始输出 */
+.tl-act { border: 1px solid var(--line); border-radius: 9px; overflow: hidden;
+  background: color-mix(in srgb, var(--surface-2) 55%, var(--surface)); }
+.tl-act > .hd { padding: 6px 10px; cursor: pointer; align-items: baseline; }
+.tl-act > button.hd { width: 100%; border: 0; border-radius: 0; background: transparent;
+  color: inherit; text-align: left; font: inherit; }
+.tl-act > button.hd:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.tl-act > button.hd:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tl-act > .hd .nm { flex: none; font-family: var(--mono); font-size: 11.5px; font-weight: 700;
+  color: var(--accent-ink); }
+.tl-act > .hd .ar { flex: 1; min-width: 0; font-family: var(--mono); font-size: 11px;
+  color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-act > .hd .st { flex: none; font-size: 10.5px; color: var(--ink-3); }
+.tl-act > .hd .st.y { color: var(--ok); } .tl-act > .hd .st.n { color: var(--bad); }
+.tl-act > .hd .cv { flex: none; font-size: 9px; color: var(--ink-3); transition: transform .15s; }
+.tl-act.open > .hd .cv { transform: rotate(180deg); }
+.tl-act > .nt { padding: 0 10px 7px; font-size: 11.5px; color: var(--ink-2);
+  word-break: break-word; }
+.tl-act > .nt:empty { display: none; }
+.tl-act > pre { display: none; margin: 0; padding: 8px 10px; border-top: 1px solid var(--line);
+  background: var(--surface-2); font-family: var(--mono); font-size: 11.5px; line-height: 1.6;
+  white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; }
+.tl-act.open > pre { display: block; }
+
+.tl-concl { padding: 8px 12px; border-radius: 9px; font-size: 12.5px; line-height: 1.65;
+  white-space: pre-wrap; word-break: break-word;
   background: color-mix(in srgb, var(--ok) 8%, var(--surface));
-  border: 1px solid color-mix(in srgb, var(--ok) 35%, var(--line)); }
-.tr-note { font-size: 11px; color: var(--ink-3); text-align: center; padding: 1px 0; }
-.tr-err { color: var(--bad); font-size: 12px; }
-.tr-share { margin-top: 7px; padding: 7px 11px; border-radius: 9px; font-size: 12px;
-  line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: var(--ink-2);
+  border: 1px solid color-mix(in srgb, var(--ok) 30%, var(--line)); }
+.tl-concl::before { content: "结论"; display: block; font-size: 10px; font-weight: 700;
+  letter-spacing: .1em; color: var(--ok); margin-bottom: 3px; }
+.tl-share { padding: 7px 11px; border-radius: 9px; font-size: 12px; line-height: 1.6;
+  white-space: pre-wrap; word-break: break-word; color: var(--ink-2);
   background: color-mix(in srgb, var(--accent) 7%, var(--surface));
-  border: 1px dashed color-mix(in srgb, var(--accent) 32%, var(--line)); }
+  border: 1px dashed color-mix(in srgb, var(--accent) 30%, var(--line)); }
+.tl-share::before { content: "共享笔记"; display: block; font-size: 10px; font-weight: 700;
+  letter-spacing: .1em; color: var(--accent-ink); margin-bottom: 3px; }
+.tl-err { padding: 7px 11px; border-radius: 9px; font-size: 12px; line-height: 1.6;
+  white-space: pre-wrap; word-break: break-word; color: var(--bad);
+  background: color-mix(in srgb, var(--bad) 8%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--bad) 28%, var(--line)); }
+@media (max-width: 700px) {
+  .tl { grid-template-columns: 0 minmax(0, 1fr); column-gap: 0; }
+  .tl > .t { display: none; }
+}
 
 /* ================= 报告 ================= */
 .report { padding: 22px 26px; max-width: 860px; }
@@ -667,7 +730,10 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
         <button data-tab="report">报告</button>
       </div>
       <div id="tab-topo"><div class="card topo" id="topo"></div></div>
-      <div id="tab-trace" hidden><div class="trace" id="trace-box"></div></div>
+      <div id="tab-trace" hidden><div class="trace-wrap">
+        <div class="trace" id="trace-box"></div>
+        <button id="trace-jump" type="button" hidden aria-label="回到最新轨迹" title="回到最新轨迹">↓ 回到最新</button>
+      </div></div>
       <div id="tab-tasks" hidden></div>
       <div id="tab-vulns" hidden></div>
       <div id="tab-flags" hidden></div>
@@ -1410,134 +1476,214 @@ function evLine(e) {
     <span class="ac">${esc(e.actor || "")}</span><span class="de">${esc(de.slice(0, 220))}</span></div>`;
 }
 
-/* ---- 解题轨迹：把审计事件流还原成 Agent 工作实录（对话式） ---- */
-function traceReset() { $("#trace-box").innerHTML = ""; }
-function traceScroll(force) {
+/* ---- 解题轨迹：按真实发生顺序还原成一条可读时间线 ---- */
+let traceStick = true;
+const TRACE_AGENT_SLOTS = new Map();
+function traceReset() {
+  $("#trace-box").innerHTML = '<div class="empty-note">等待智能体开始工作</div>';
+  TRACE_AGENT_SLOTS.clear();
+  traceStick = true;
+  $("#trace-jump").hidden = true;
+}
+function traceClock(ts) {
+  const raw = String(ts || "");
+  const m = raw.match(/T?(\d{2}:\d{2}:\d{2})/);
+  return m ? m[1] : "";
+}
+function traceActorSlot(actor) {
+  actor = String(actor || "unknown");
+  if (!TRACE_AGENT_SLOTS.has(actor))
+    TRACE_AGENT_SLOTS.set(actor, (TRACE_AGENT_SLOTS.size % 8) + 1);
+  return TRACE_AGENT_SLOTS.get(actor);
+}
+function traceRow(e, body, cls = "") {
+  const actor = String(e.actor || "");
+  const agentCls = actor && actor !== "flag_manager" ? ` ag-${traceActorSlot(actor)}` : "";
+  return `<div class="tl ${cls}${agentCls}" data-agent="${esc(actor)}">
+    <time class="t">${esc(traceClock(e.ts))}</time><div class="b">${body}</div></div>`;
+}
+function traceAppend(e, body, cls = "") {
   const box = $("#trace-box");
-  if (force || box.scrollTop + box.clientHeight >= box.scrollHeight - 80)
+  box.querySelector(".empty-note")?.remove();
+  box.insertAdjacentHTML("beforeend", traceRow(e, body, cls));
+  traceScroll();
+  return box.lastElementChild;
+}
+function traceScroll(force = false) {
+  const box = $("#trace-box");
+  if (!box) return;
+  if (force || traceStick) {
     box.scrollTop = box.scrollHeight;
-}
-function traceAgent(actor) {
-  const box = $("#trace-box");
-  const empty = box.querySelector(".empty-note");
-  if (empty) empty.remove();
-  let el = box.querySelector(`.tr-agent[data-agent="${CSS.escape(actor)}"]`);
-  if (!el) {
-    box.insertAdjacentHTML("beforeend", `<div class="tr-agent" data-agent="${esc(actor)}">
-      <div class="h"><b>${esc(actorName(actor))}</b>
-        <span class="mono muted" style="font-size:10.5px">${esc(actor)}</span>
-        <span class="muted" data-role="st"></span></div></div>`);
-    el = box.lastElementChild;
+    traceStick = true;
   }
-  return el;
+  $("#trace-jump").hidden = traceStick || box.scrollHeight <= box.clientHeight + 2;
 }
-function traceTurn(actor, turn, meta) {
-  const host = traceAgent(actor);
-  let el = host.querySelector(`.tr-turn[data-turn="${turn}"]`);
-  if (!el) {
-    host.insertAdjacentHTML("beforeend", `<div class="tr-turn" data-turn="${esc(turn)}">
-      <div class="th"><span>第 ${esc(turn)} 回合</span>${meta ? `<span>${esc(meta)}</span>` : ""}</div>
-      <div class="tr-text"></div></div>`);
-    el = host.lastElementChild;
+function traceTurn(actor) {
+  const rows = $("#trace-box").querySelectorAll(".tl-turn");
+  for (let i = rows.length - 1; i >= 0; i--)
+    if (rows[i].dataset.agent === String(actor || "")) return rows[i];
+  return null;
+}
+function traceFinishThinking(turn) {
+  turn?.querySelectorAll(".tl-think.live").forEach(el => {
+    el.classList.remove("live");
+    const summary = el.querySelector("summary");
+    if (summary) summary.textContent = "思考过程";
+  });
+}
+function argBrief(name, args) {
+  args = args && typeof args === "object" ? args : {};
+  const one = v => String(v ?? "").replace(/\s+/g, " ").trim();
+  if (name === "http_request") {
+    let target = one(args.path || args.url || "/");
+    try { if (/^https?:\/\//i.test(target)) target = new URL(target).pathname + new URL(target).search; } catch {}
+    return `${one(args.method || "GET").toUpperCase()} ${target}`.slice(0, 180);
   }
-  return el;
+  if (name === "shell") return one(args.command).slice(0, 180);
+  if (name === "python") return one(args.code).split("\n")[0].slice(0, 180) || "运行脚本";
+  if (name === "note") return one(args.text).slice(0, 180);
+  if (name === "analyze_text") return "分析题面文本";
+  if (name === "analyze_attachments") return "分析全部附件";
+  const compact = one(JSON.stringify(args));
+  return compact === "{}" ? "执行" : compact.slice(0, 180);
 }
 function tracePush(e) {
   const box = $("#trace-box");
   if (!box) return;
   const d = (typeof e.detail === "object" && e.detail) || {};
-  const actor = e.actor || "";
+  const actor = String(e.actor || "");
   switch (e.type) {
-    case "task.start": {
-      box.insertAdjacentHTML("beforeend",
-        `<div class="tr-note">▶ 下发任务 ${esc(d.type || "")} · ${esc(actorName(actor))}</div>`);
-      traceScroll(); break;
-    }
+    case "task.start":
+      traceAppend(e, `<div class="m">开始执行 · ${esc(actorName(actor))}</div>`, "tl-sys");
+      break;
     case "agent.turn": {
-      traceTurn(actor, d.turn, `${d.budget || ""}${d.forced_finish ? " · 强制收尾" : ""}`);
-      traceScroll(); break;
+      traceFinishThinking(traceTurn(actor));
+      const turn = traceAppend(e, `<div class="hd"><span class="who">${esc(actorName(actor))}</span>
+        <span class="k">第 ${esc(d.turn || "?")} 回合${d.forced_finish ? " · 正在收尾" : ""}</span></div>
+        ${d.angle ? `<div class="ang">${esc(d.angle)}</div>` : ""}<div class="flow"></div>`, "tl-turn");
+      turn.dataset.turn = String(d.turn || "");
+      break;
     }
     case "agent.delta": {
       const kind = d.kind || "text";
-      const host = box.querySelector(`.tr-agent[data-agent="${CSS.escape(actor)}"]`);
-      if (kind === "reset") {                  // 主备切换重试：清掉半截文本
-        host?.querySelector(".tr-turn:last-of-type .tr-text")?.replaceChildren();
+      const turn = traceTurn(actor);
+      if (!turn) break;
+      if (kind === "reset") {
+        turn.querySelectorAll(".tl-say,.tl-think").forEach(el => el.remove());
         break;
       }
-      if (kind === "tool_call") break;         // 工具调用有独立事件，不重复渲染
-      const turn = host?.querySelector(".tr-turn:last-of-type");
-      if (!turn) break;
-      let el = turn.querySelector(kind === "reasoning" ? ".tr-think" : ".tr-text");
-      if (!el) {
-        turn.insertAdjacentHTML("afterbegin",
-          `<div class="${kind === "reasoning" ? "tr-think" : "tr-text"}"></div>`);
-        el = turn.firstElementChild;
+      if (kind === "tool_call") break;
+      const flow = turn.querySelector(".flow");
+      if (!flow) break;
+      if (kind === "reasoning") {
+        const text = d.text || "";
+        if (!text) break;
+        let el = flow.querySelector(".tl-think.live");
+        if (!el) {
+          flow.insertAdjacentHTML("beforeend", '<details class="tl-think live"><summary>思考中</summary><div class="bd"></div></details>');
+          el = flow.lastElementChild;
+        }
+        el.querySelector(".bd").textContent += text;
+      } else {
+        const text = d.text || "";
+        if (!text) break;
+        traceFinishThinking(turn);
+        let el = flow.querySelector(".tl-say:last-child");
+        if (!el) {
+          flow.insertAdjacentHTML("beforeend", '<div class="tl-say"></div>');
+          el = flow.lastElementChild;
+        }
+        el.textContent += text;
       }
-      el.textContent += d.text || "";
-      traceScroll(); break;
+      traceScroll();
+      break;
     }
     case "agent.tool_call": {
-      const turn = box.querySelector(
-        `.tr-agent[data-agent="${CSS.escape(actor)}"] .tr-turn:last-of-type`);
+      const turn = traceTurn(actor);
       if (!turn) break;
+      traceFinishThinking(turn);
+      const flow = turn.querySelector(".flow");
       for (const c of (d.calls || [])) {
-        turn.insertAdjacentHTML("beforeend", `<div class="tr-call" data-id="${esc(c.id || "")}">
-          <div class="ch"><span class="nm">${esc(c.name || "?")}</span>
-            <span class="ar">${esc(JSON.stringify(c.arguments ?? {}))}</span>
-            <span class="ok">…</span></div>
-          <div class="bd"><pre></pre></div></div>`);
+        flow.insertAdjacentHTML("beforeend", `<div class="tl-act" data-id="${esc(c.id || "")}">
+          <button class="hd" type="button" aria-expanded="false"><span class="nm">${esc(c.name || "?")}</span>
+            <span class="ar">${esc(argBrief(c.name, c.arguments))}</span><span class="st">进行中</span>
+            <span class="cv" aria-hidden="true">⌄</span></button><div class="nt"></div><pre></pre></div>`);
+        const act = flow.lastElementChild;
+        const btn = act.querySelector("button.hd");
+        btn.onclick = () => {
+          act.classList.toggle("open");
+          btn.setAttribute("aria-expanded", String(act.classList.contains("open")));
+        };
       }
-      turn.querySelectorAll(".tr-call").forEach(el => el.querySelector(".ch").onclick =
-        () => el.classList.toggle("open"));
-      traceScroll(); break;
+      traceScroll();
+      break;
     }
     case "agent.tool_result": {
-      const sel = `.tr-agent[data-agent="${CSS.escape(actor)}"] .tr-call[data-id="${CSS.escape(d.id || "")}"]`;
-      const el = box.querySelector(sel) ||
-        box.querySelector(`.tr-agent[data-agent="${CSS.escape(actor)}"] .tr-call:last-of-type`);
+      const id = CSS.escape(String(d.id || ""));
+      let el = id ? box.querySelector(`.tl-act[data-id="${id}"]`) : null;
+      if (!el) {
+        const turn = traceTurn(actor);
+        const acts = turn?.querySelectorAll(".tl-act") || [];
+        el = acts[acts.length - 1];
+      }
       if (!el) break;
-      const ok = el.querySelector(".ok");
-      ok.textContent = d.ok ? "完成" : "失败";
-      ok.className = "ok " + (d.ok ? "y" : "n");
-      el.querySelector(".bd pre").textContent = String(d.result ?? "");
-      if (!d.ok) el.classList.add("open");
-      traceScroll(); break;
+      const st = el.querySelector(".st");
+      st.textContent = d.ok ? "完成" : "失败";
+      st.className = "st " + (d.ok ? "y" : "n");
+      el.querySelector(".nt").textContent = String(d.note || "");
+      el.querySelector("pre").textContent = String(d.result ?? "");
+      if (!d.ok) {
+        el.classList.add("open");
+        el.querySelector("button.hd").setAttribute("aria-expanded", "true");
+      }
+      traceScroll();
+      break;
     }
     case "agent.conclude": {
-      const turn = box.querySelector(
-        `.tr-agent[data-agent="${CSS.escape(actor)}"] .tr-turn:last-of-type`);
-      (turn || traceAgent(actor)).insertAdjacentHTML("beforeend",
-        `<div class="tr-conclude">${esc(d.summary || "")}</div>`);
-      traceScroll(); break;
+      const turn = traceTurn(actor);
+      traceFinishThinking(turn);
+      if (turn) turn.querySelector(".flow").insertAdjacentHTML("beforeend",
+        `<div class="tl-concl">${esc(d.summary || "")}</div>`);
+      else traceAppend(e, `<div class="hd"><span class="who">${esc(actorName(actor))}</span></div>
+        <div class="flow"><div class="tl-concl">${esc(d.summary || "")}</div></div>`, "tl-turn");
+      traceScroll();
+      break;
     }
     case "agent.note": {
-      const turn = box.querySelector(
-        `.tr-agent[data-agent="${CSS.escape(actor)}"] .tr-turn:last-of-type`);
-      (turn || traceAgent(actor)).insertAdjacentHTML("beforeend",
-        `<div class="tr-share">✎ 共享笔记 ${esc(d.text || "")}</div>`);
-      traceScroll(); break;
+      const turn = traceTurn(actor);
+      if (turn) turn.querySelector(".flow").insertAdjacentHTML("beforeend",
+        `<div class="tl-share">${esc(d.text || "")}</div>`);
+      else traceAppend(e, `<div class="hd"><span class="who">${esc(actorName(actor))}</span></div>
+        <div class="flow"><div class="tl-share">${esc(d.text || "")}</div></div>`, "tl-turn");
+      traceScroll();
+      break;
     }
     case "agent.error": {
-      const turn = box.querySelector(
-        `.tr-agent[data-agent="${CSS.escape(actor)}"] .tr-turn:last-of-type`);
-      (turn || traceAgent(actor)).insertAdjacentHTML("beforeend",
-        `<div class="tr-err">⚠ ${esc(d.error || "")}</div>`);
-      traceScroll(); break;
+      const turn = traceTurn(actor);
+      traceFinishThinking(turn);
+      if (turn) turn.querySelector(".flow").insertAdjacentHTML("beforeend",
+        `<div class="tl-err">${esc(d.error || "")}</div>`);
+      else traceAppend(e, `<div class="hd"><span class="who">${esc(actorName(actor))}</span></div>
+        <div class="flow"><div class="tl-err">${esc(d.error || "")}</div></div>`, "tl-turn");
+      traceScroll();
+      break;
     }
-    case "flag.extracted": {
-      box.insertAdjacentHTML("beforeend",
-        `<div class="tr-note" style="color:var(--ok);font-weight:700">⚑ 捕获 Flag：${esc(d.value_preview || "")}</div>`);
-      traceScroll(); break;
-    }
-    case "task.done": {
-      const st = traceAgent(actor).querySelector('[data-role="st"]');
-      if (st) st.textContent = "已完成";
-      box.insertAdjacentHTML("beforeend",
-        `<div class="tr-note">■ ${esc(actorName(actor))} 任务结束</div>`);
-      traceScroll(); break;
-    }
+    case "flag.extracted":
+      traceAppend(e, `<div class="m">捕获 Flag · ${esc(d.value_preview || "")}</div>`, "tl-flag");
+      break;
+    case "task.done":
+      traceFinishThinking(traceTurn(actor));
+      traceAppend(e, `<div class="m">${esc(actorName(actor))} 已完成任务</div>`, "tl-sys");
+      break;
   }
 }
+const traceBox = $("#trace-box");
+traceBox.addEventListener("scroll", () => {
+  const gap = traceBox.scrollHeight - traceBox.scrollTop - traceBox.clientHeight;
+  traceStick = gap < 24;
+  $("#trace-jump").hidden = traceStick || traceBox.scrollHeight <= traceBox.clientHeight + 2;
+}, {passive: true});
+$("#trace-jump").onclick = () => traceScroll(true);
 function startStreams() {
   stopStreams();
   if (!S.cur) return;

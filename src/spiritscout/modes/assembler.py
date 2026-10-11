@@ -102,12 +102,23 @@ def _candidate_directions(ch: dict[str, Any]) -> list[str]:
 
 
 def _parallel_directions(ch: dict[str, Any]) -> list[str]:
-    """首轮并行方向：题面有可动手的现场（URL/附件）时，主方向与 misc
-    同时开工（互不依赖、无前驱）；只有题面文字时单方向起步。"""
+    """首轮并行方向：默认单方向起步，第二个方向必须有本方向的专属线索面。
+
+    misc 的场是附件与编码/隐写类题面（其专属工具 deep_strings 依赖附件）；
+    纯 URL 题并行 misc 只会让两个 Agent 打同一入口做同质重复功，杂项视角
+    留给重攻轮换角度（_candidate_directions）。
+    """
     primary = classify_challenge(ch)
-    if (ch.get("url") or ch.get("attachments")) and primary != "misc":
-        return [primary, "misc"]
-    return [primary]
+    has_url = str(ch.get("url") or "").startswith(("http://", "https://"))
+    attachments = ch.get("attachments") or []
+    if primary == "misc":
+        # 判为杂项但给了 URL：Web 视角工具面更宽，两个视角都成立
+        return ["web", "misc"] if has_url else ["misc"]
+    if not has_url and not attachments:
+        return [primary]
+    if has_url and not attachments:
+        return [primary]  # 纯 URL 题：单方向主攻
+    return [primary, "misc"]  # 有附件的题：杂项帮看附件
 
 
 def ctf_plan_provider(challenges: list[dict[str, Any]], *,

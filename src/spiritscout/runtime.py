@@ -60,6 +60,7 @@ from spiritscout.tools.executor import (
     docker_available,
 )
 from spiritscout.tools.registry import ToolRegistry
+from spiritscout.tools.sandbox import sandbox_exec
 from spiritscout.verify import VerifyPipeline
 
 if TYPE_CHECKING:
@@ -191,9 +192,10 @@ async def _build_infra(
         "guard": guard,
         "limiter": limiter,
         "allowed_dirs": [str(attachments)],
+        "workspace_root": str(workspace),
     }
     for name, fn in (("http_probe", http_probe), ("dns_resolve", dns_resolve),
-                     ("file_analyze", file_analyze)):
+                     ("file_analyze", file_analyze), ("sandbox_exec", sandbox_exec)):
         registry.register_builtin(name, fn, BUILTIN_SPECS[name])
     # 按 Agent 绑定的模型分配——失效模型（注册表已删）剔除并留痕，
     # 不静默绑定到不存在的模型导致路由期失败

@@ -146,9 +146,11 @@ def _html_digest(body: str) -> str | None:
 
     样式/脚本块剔除（内联 CSS 会把真正的入口信息挤出上下文）；注释单列且
     靠前——开发备注类线索（接口地址、口令提示）常藏于此；另提取标题、表单、
-    输入字段、链接、脚本引用与内联脚本。非 HTML 返回 None（回退原文截断）。
+    输入字段、链接、脚本引用与内联脚本。非 HTML 返回 None（回退文本提取）。
     """
-    if not _HTML_HINT.search(body[:4000]):
+    # HTML 文档以标签开头；JS/CSS/JSON 文本里出现 "<div" 之类字面量不算 HTML
+    head = body.lstrip("﻿ \t\r\n")[:200].lower()
+    if not head.startswith("<") or not _HTML_HINT.search(body[:4000]):
         return None
     m = re.search(r"<title[^>]*>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
     title = _collapse(m.group(1))[:150] if m else ""
@@ -236,7 +238,11 @@ def _text_digest(body: str, content_type: str = "") -> str | None:
     if not (sites or paths or tokens):
         return None
     kind = "JSON/文本" if "json" in content_type.lower() else "脚本/文本"
-    parts = [f"[{kind} 提取] 原文 {len(body)} 字符（结构提取如下，尾部附首尾原文）"]
+    note = "结构提取如下，尾部附首尾原文"
+    if len(body) > 6000:
+        note = ("超出单次上下文预算，结构提取 + 首尾原文如下；"
+                "需要完整内容可用 headers.Range 分段请求")
+    parts = [f"[{kind} 提取] 原文 {len(body)} 字符（{note}）"]
     if sites:
         parts.append("[调用点] " + " ｜ ".join(sites)[:900])
     if paths:
@@ -267,7 +273,11 @@ def _http_observation(desc: str, res: Any, url: str,
         obs["headers"] = picked
     body = res.stdout or ""
     ctype = headers.get("content-type", "")
-    obs["excerpt"] = (_html_digest(body) or _text_digest(body, ctype)
+    # 脚本/样式/JSON 文本不走 HTML 摘要（否则会被当作标签剥离只剩碎片）
+    scripty = any(k in ctype.lower() for k in
+                  ("javascript", "ecmascript", "json", "css"))
+    obs["excerpt"] = ((None if scripty else _html_digest(body))
+                      or _text_digest(body, ctype)
                       or body[:_OBS_EXCERPT_CAP])
     if flags:
         obs["flags"] = flags
@@ -383,9 +393,10 @@ class CTFBaseAgent(SubAgent):
     tool_schemas: ClassVar[list[dict[str, Any]]] = [
         _fn("http_request",
             "向赛题目标发一次 HTTP 请求并拿到响应（状态码/响应头/正文摘要）。"
-            "这是与目标交互的唯一通道。path 传站内相对路径（推荐），"
-            "或 url 传完整地址（须在授权范围内）。"
-            "需要看某个页面或接口的真实响应时用它；同一地址不要重复请求。",
+            "path 传站内相对路径（推荐），或 url 传完整地址（须在授权范围内）。"
+            "需要看某个页面或接口的真实响应时用它；正文较长被截断时，"
+            "可用 headers 里的 Range（如 {\"Range\": \"bytes=5000-10000\"}）"
+            "分段取完整内容。",
             {
                 "method": {"type": "string", "enum": list(_HTTP_METHODS),
                            "description": "HTTP 方法，缺省 GET"},
@@ -397,6 +408,25 @@ class CTFBaseAgent(SubAgent):
                 "headers": {"type": "object", "description": "额外请求头（键值对）"},
                 "data": {"type": "string", "description": "请求体原文（POST/PUT 用）"},
             }),
+        _fn("shell",
+            "在隔离沙箱里执行一条 shell 命令（bash -c），拿到输出与退出码。"
+            "适合 curl/nc/jq/grep/文件操作等一切命令行动作；系统文件只读，"
+            "你的工作区可写，联网仅限授权目标。命令全文留痕于审计。",
+            {
+                "command": {"type": "string", "description": "要执行的命令"},
+                "timeout": {"type": "number",
+                            "description": "超时秒数（缺省 60，上限 300）"},
+            }, required=["command"]),
+        _fn("python",
+            "在隔离沙箱里执行一段 Python 代码（python3），拿到输出与退出码。"
+            "已装 requests/httpx/websockets/pwntools 等常用库；适合 WebSocket/"
+            "socket 协议交互、数据计算与解码、脚本化构造请求。脚本与产物"
+            "落在工作区（后续可用附件工具继续分析）。",
+            {
+                "code": {"type": "string", "description": "完整 Python 代码"},
+                "timeout": {"type": "number",
+                            "description": "超时秒数（缺省 60，上限 300）"},
+            }, required=["code"]),
         _fn("analyze_text",
             "对题面文本做编码链解码（Base64/Hex/URL/Rot13 递归）与 Flag 提取。"
             "怀疑线索藏在题面或编码串里时用它；已经分析过就不必再来。",
@@ -831,6 +861,8 @@ class CTFBaseAgent(SubAgent):
         try:
             if name == "http_request":
                 out = await self._tool_http(task, route, state, args)
+            elif name in ("shell", "python"):
+                out = await self._tool_sandbox(task, route, state, name, args)
             elif name == "analyze_text":
                 out = await self._tool_analyze_text(task)
             elif name == "analyze_attachments":
@@ -849,16 +881,19 @@ class CTFBaseAgent(SubAgent):
         return out
 
     def _sig_args(self, task: Task, args: dict[str, Any]) -> dict[str, Any]:
-        """动作签名入参：HTTP 调用按「解析后的完整地址+方法」归一化，
-        使 path 写法与 url 写法、参数顺序不同的同一请求视为同一动作。"""
+        """动作签名入参：HTTP 调用按「完整地址+方法+参数+请求头」归一化，
+        使 path 写法与 url 写法、参数顺序不同的同一请求视为同一动作；
+        请求头是签名的一部分——换头重试（如 WS 握手 key、Range 分段）
+        是有意的变体请求，不按重复动作熔断。"""
         if "path" not in args and "url" not in args:
             return args
         resolved = self._resolve_http(task, args)
         if resolved is None:
             return args
-        url, params, _headers, data = resolved
+        url, params, headers, data = resolved
         return {"url": url, "method": str(args.get("method", "GET")).upper(),
-                "params": params or {}, "data": (data or "")[:400]}
+                "params": params or {}, "headers": headers or {},
+                "data": (data or "")[:400]}
 
     @staticmethod
     def _call_signature(name: str, args: dict[str, Any]) -> str:
@@ -976,6 +1011,60 @@ class CTFBaseAgent(SubAgent):
             findings=[{"type": "flag", "value": f} for f in accepted],
             note=f"{desc} → {status} flag={len(accepted)}",
             text=_obs_text(obs))
+
+    async def _tool_sandbox(self, task: Task, route, state: dict[str, Any],
+                            name: str, args: dict[str, Any]) -> _ToolOutcome:
+        """沙箱执行动作（shell/python）：LLM 出代码 → bwrap 沙箱运行 → 观察。
+
+        与 http_request 同一原则：LLM 只决定「跑什么」，执行边界由沙箱
+        （整机只读 + 主目录遮蔽 + 工作区可写）与审计留痕约束；输出照常过
+        Flag 提取与观察序列。
+        """
+        param = "command" if name == "shell" else "code"
+        code = str(args.get(param, "") or "").strip()
+        if not code:
+            return _ToolOutcome(ok=False, text=f"{name} 工具需要 {param} 参数。")
+        try:
+            timeout = float(args.get("timeout") or 60)
+        except (TypeError, ValueError):
+            timeout = 60.0
+        first = code.splitlines()[0][:80]
+        desc = f"{name}: {first}"
+        res = await self.ctx.tools.call(
+            "sandbox_exec",
+            {"code": code, "language": "python" if name == "python" else "shell",
+             "timeout": timeout},
+            **self.ctx.builtin_ctx)
+        if not res.ok and not (res.stdout or res.stderr):
+            state["observations"].append(
+                {"action": desc, "result": f"执行失败: {str(res.error)[:100]}"})
+            return _ToolOutcome(ok=False, note=f"{desc} → 执行失败", text=(
+                f"{desc} 执行失败：{str(res.error)[:300]}"))
+        rc = res.parsed.get("exit_code", res.returncode)
+        accepted = await self._harvest(
+            (res.stdout or "") + "\n" + (res.stderr or ""), task, f"llm:{name}")
+        state["flags"].extend(accepted)
+        status = (f"超时终止（{timeout:.0f}s）" if res.timed_out
+                  else f"退出码 {rc}")
+        state["observations"].append(
+            {"action": desc,
+             "result": f"{status}；输出 {len(res.stdout or '')} 字符"})
+        lines = [f"$ {first}", f"（{status}，耗时 {res.duration_ms / 1000:.1f}s）"]
+        if res.stdout:
+            lines.append("stdout:\n" + res.stdout)
+        if res.stderr:
+            lines.append("stderr:\n" + res.stderr)
+        if res.timed_out:
+            lines.append("提示：超时通常意味着脚本在等待输入或死循环——"
+                         "交互式脚本请改为非交互（预置输入/设置超时）。")
+        if accepted:
+            lines.append("Flag 已捕获并提交（FlagManager 确定性提取）: "
+                         + ", ".join(accepted))
+        return _ToolOutcome(
+            ok=True, value=0.05,
+            findings=[{"type": "flag", "value": f} for f in accepted],
+            note=f"{desc} → {status} flag={len(accepted)}",
+            text="\n".join(lines))
 
     async def _tool_analyze_text(self, task: Task) -> _ToolOutcome:
         """题面文本取证：全部载荷字符串的编码串链式解码 + 零宽字符统计 + Flag 提取。"""
@@ -1121,6 +1210,10 @@ class CTFBaseAgent(SubAgent):
             "工作方式：工具就是你的手——需要看什么就用工具去拿，不要凭空猜测"
             "页面内容或响应。每一轮可以调用一个或多个工具：互不依赖的请求放在"
             "同一轮并发发出，省时间。\n"
+            "动手能力：要跑命令用 shell，要写代码用 python——它们在隔离沙箱里"
+            "执行（系统文件只读、你的工作区可写、联网仅限授权目标）。"
+            "WebSocket/socket 等协议交互、数据计算、脚本化构造请求，"
+            "凡是 http_request 够不着的，一律用它们去完成。\n"
             "协同：同一道题可能有其他方向的 Agent 在并行工作，你们共享现场——"
             "别人探过的入口、写下的笔记、拿到的 Flag 会以「同伴动态」出现在对话里；"
             "有值得同伴立刻知道的发现（接口/参数/口令线索）就用 note 工具写一条，"

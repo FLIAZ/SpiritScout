@@ -202,4 +202,10 @@ BUILTIN_SPECS: dict[str, ToolSpec] = {
     "file_analyze": ToolSpec(
         name="file_analyze", kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY,
         description="本地文件分析（魔数/字符串/熵，仅限 allowed_dirs）"),
+    # 沙箱执行：风险定级按「对目标的行为」判——它本身不侵入目标，脚本内容
+    # 做什么由沙箱边界（整机只读 + 主目录遮蔽 + 工作区可写）与审计约束；
+    # 工具只暴露给 CTF 方向 Agent 的目录，常规渗透模式不下发。
+    "sandbox_exec": ToolSpec(
+        name="sandbox_exec", kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY,
+        description="沙箱执行（bwrap：整机只读 + 主目录遮蔽 + 工作区可写）"),
 }
