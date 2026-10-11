@@ -749,9 +749,14 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
         <p class="sub">用自然语言描述目标与意图——灵枢会自行判断这是 SRC 渗透、CTF 解题还是渗透赛，组队开工。</p>
       </div>
       <div class="card composer">
-        <textarea id="c-mission" placeholder="例如：对 https://testphp.vulnweb.com 做 Web 渗透，重点 SQL 注入与 XSS；或：解这几道 CTF 题 https://ctf.example.com/chal1（flag 格式：SCTF{...}）"></textarea>
+        <textarea id="c-mission" placeholder="例如：对 https://testphp.vulnweb.com 做 Web 渗透，重点 SQL 注入与 XSS；或：解这道 CTF 题 https://ctf.example.com/chal1（flag 格式：SCTF{...}）；也可以只上传题目附件"></textarea>
+        <div class="comp-files" id="home-files"></div>
         <div class="bar">
-          <span class="muted" style="font-size:12px">目标、范围与 Flag 格式自动从描述中识别；遇到高风险动作时会即时请你确认</span>
+          <button class="icon-btn" id="home-attach" type="button" title="上传题目附件（随任务一起交给灵枢）" aria-label="上传附件">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+          </button>
+          <input type="file" id="home-file" multiple hidden>
+          <span class="muted" style="font-size:12px;flex:1">目标、范围与 Flag 格式自动从描述中识别；遇到高风险动作时会即时请你确认</span>
           <button class="btn primary" id="c-go">开始执行</button>
         </div>
       </div>
@@ -933,7 +938,7 @@ const $ = s => document.querySelector(s);
 const S = { view: "home", cur: null, tab: "chat", sessions: [], state: null,
             agents: null, models: null, evSeen: 0, es: null, poll: null, medit: null,
             providers: null, pedit: null, fprov: "", presets: null, effSel: [],
-            topoView: null, compFiles: [] };
+            topoView: null, compFiles: [], homeFiles: [] };
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
 async function api(path, opt = {}) {
@@ -2276,19 +2281,25 @@ function compGrow() {
   compInput.style.height = "auto";
   compInput.style.height = Math.min(compInput.scrollHeight, 180) + "px";
 }
-function renderCompFiles() {
-  $("#comp-files").innerHTML = S.compFiles.map((f, i) => `
+/* 附件 chip（初始任务与会话输入坞共用）；files 数组由调用方持有 */
+function renderFileChips(sel, files) {
+  const box = $(sel);
+  box.innerHTML = files.map((f, i) => `
     <span class="comp-file"><b>${esc(f.name)}</b><i>${fmtSize(f.size)}</i>
       <button type="button" data-i="${i}" title="移除">✕</button></span>`).join("");
-  $("#comp-files").querySelectorAll("button").forEach(b =>
-    b.onclick = () => { S.compFiles.splice(+b.dataset.i, 1); renderCompFiles(); });
+  box.querySelectorAll("button").forEach(b =>
+    b.onclick = () => { files.splice(+b.dataset.i, 1); renderFileChips(sel, files); });
 }
-$("#comp-attach").onclick = () => $("#comp-file").click();
-$("#comp-file").onchange = () => {
-  for (const f of $("#comp-file").files) S.compFiles.push(f);
-  $("#comp-file").value = "";
-  renderCompFiles();
-};
+function bindAttach(btnId, inputId, files, chipsSel) {
+  $(btnId).onclick = () => $(inputId).click();
+  $(inputId).onchange = () => {
+    for (const f of $(inputId).files) files.push(f);
+    $(inputId).value = "";
+    renderFileChips(chipsSel, files);
+  };
+}
+bindAttach("#comp-attach", "#comp-file", S.compFiles, "#comp-files");
+bindAttach("#home-attach", "#home-file", S.homeFiles, "#home-files");
 compInput.addEventListener("input", compGrow);
 compInput.addEventListener("keydown", ev => {
   if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) {
@@ -2324,7 +2335,7 @@ async function compSend() {
     compInput.value = "";
     compGrow();
     S.compFiles = [];
-    renderCompFiles();
+    renderFileChips("#comp-files", S.compFiles);
   } catch (e) { toast(e.message, true); }
   $("#comp-send").disabled = TERMINAL.has(sess.status);
 }
@@ -2333,7 +2344,7 @@ async function compSend() {
 $("#c-go").onclick = async () => {
   const mission = $("#c-mission").value.trim();
   if (!mission) { toast("先用自然语言描述任务——目标与要求写清楚即可", true); return; }
-  await launchMission({ mission });
+  await launchMission({ mission }, [...S.homeFiles]);
 };
 $("#c-mission").addEventListener("keydown", ev => {
   if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) {
@@ -2342,12 +2353,30 @@ $("#c-mission").addEventListener("keydown", ev => {
   }
 });
 
-async function launchMission(payload) {
+/* 附件暂存：先传到暂存区拿 upload_id，随创建请求一并材料化进会话工作区 */
+async function stageFiles(files) {
+  const ids = [];
+  for (const f of files) {
+    const r = await fetch(`/api/uploads?name=${encodeURIComponent(f.name)}`,
+      { method: "POST", body: f });
+    if (!r.ok) {
+      let msg = r.statusText;
+      try { msg = (await r.json()).detail || msg; } catch {}
+      throw new Error(msg);
+    }
+    ids.push((await r.json()).upload_id);
+  }
+  return ids;
+}
+
+async function launchMission(payload, files = []) {
   $("#c-go").disabled = true;
   try {
+    if (files.length) payload = { ...payload, upload_ids: await stageFiles(files) };
     const s = await api("/api/sessions", { method: "POST", body: JSON.stringify(payload) });
-    toast("任务已下达，灵枢开始规划");
+    toast(files.length ? "任务已下达，附件已交给灵枢" : "任务已下达，灵枢开始规划");
     $("#c-mission").value = "";
+    if (files.length) { S.homeFiles = []; renderFileChips("#home-files", S.homeFiles); }
     await refreshSessions();
     openSession(s.session_id);
   } catch (e) {

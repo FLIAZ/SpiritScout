@@ -37,6 +37,7 @@ class LaunchRequest:
     rules_yaml: str | None = None           # 渗透赛赛制规则 YAML 文本
     accept_rule_conflicts: bool = False
     mission: str | None = None              # 自然语言任务意图（任务式启动）
+    has_uploads: bool = False               # 任务下达时携带了上传附件
 
 
 @dataclass
@@ -112,6 +113,10 @@ def fallback_mode(req: LaunchRequest) -> RunMode:
         return RunMode.COMPETITION
     if req.challenges_yaml:
         return RunMode.CTF
+    if req.has_uploads and not extract_targets(req.mission or "")[0]:
+        # 只有附件、没有目标 URL：SRC 无处安放目标，只能按赛题处理
+        # （附件文件由创建流程注入赛题载荷；运行期 LLM 路由仍可改判）
+        return RunMode.CTF
     return RunMode.SRC
 
 
@@ -134,9 +139,10 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
         hint = ("；任务描述中未识别到目标 URL——请写明 http(s):// 地址"
                 if mission else "——或在任务描述中写明目标")
         raise SpiritScoutError(f"SRC 模式需要目标 URL{hint}")
-    if req.mode == RunMode.CTF and not req.challenges_yaml and not m_urls:
+    if req.mode == RunMode.CTF and not req.challenges_yaml and not m_urls \
+            and not req.has_uploads:
         raise SpiritScoutError(
-            "CTF 模式需要赛题清单——粘贴赛题 YAML，或在任务描述中写明赛题 URL")
+            "CTF 模式需要赛题清单——粘贴赛题 YAML，写明赛题 URL，或上传题目附件")
     if req.mode == RunMode.COMPETITION and not req.rules_yaml:
         raise SpiritScoutError(
             "渗透赛模式需要赛制规则 YAML（contest_type/flag_patterns/submit 等"
@@ -152,6 +158,11 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
              "url": u, "description": mission[:500]}
             for i, u in enumerate(m_urls)
         ]
+    elif req.mode == RunMode.CTF and not challenges and req.has_uploads:
+        # 只有附件的赛题（离线题常态）：题目壳由装配合成，附件文件由
+        # 会话创建流程注入 attachments 字段——此处不知道落地路径
+        challenges = [{"id": "mission-1", "title": "任务附件赛题",
+                       "description": mission[:500]}]
 
     rules = None
     if req.mode == RunMode.COMPETITION:

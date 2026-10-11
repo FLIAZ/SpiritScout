@@ -294,8 +294,13 @@ class SessionManager:
             if session.status not in TERMINAL_STATES:
                 await self.stop(session.session_id)
 
-    async def create(self, payload: dict[str, Any], plan: LaunchPlan) -> Session:
-        """创建会话并入队启动（payload 已经 app 层合规校验；plan 由 launch 装配）。"""
+    async def create(self, payload: dict[str, Any], plan: LaunchPlan, *,
+                     staged_files: list[Path] | None = None) -> Session:
+        """创建会话并入队启动（payload 已经 app 层合规校验；plan 由 launch 装配）。
+
+        staged_files：用户任务下达前暂存的附件——在此移入会话工作区并注入
+        赛题载荷（必须在入队前完成，会话任务可能即刻开工）。
+        """
         # 热生效：Web 端改模型注册表后，新会话立即用新配置；
         # 加载失败显式报错（不静默退回旧配置）。先于建目录，失败不留痕。
         from spiritscout.config import load_model_config
@@ -312,7 +317,7 @@ class SessionManager:
             workspace=self.root / session_id,
             title=str(payload.get("title") or "").strip()[:80],
             request={k: v for k, v in payload.items()
-                     if k not in ("challenges_yaml", "rules_yaml")},
+                     if k not in ("challenges_yaml", "rules_yaml", "upload_ids")},
             created_at=time.time(),
         )
         session.workspace.mkdir(parents=True, exist_ok=False)
@@ -323,6 +328,31 @@ class SessionManager:
         session.approvals = ApprovalBroker(AuditLogger(cfg.audit_log_path))
         session.ring = RingLedger(AuditLogger(cfg.audit_log_path))
         no_llm = bool(payload.get("no_llm", False))
+        # 暂存附件材料化：移入工作区 attachments/ + 注入无附件的赛题载荷
+        # （方向判类/附件分析工具/题面视图直接可用）+ 种入灵枢收件箱
+        if staged_files:
+            dest_dir = session.workspace / "attachments"
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            audit = AuditLogger(cfg.audit_log_path)
+            records: list[dict[str, Any]] = []
+            for src in staged_files:
+                dest = dest_dir / src.name
+                n = 2
+                while dest.exists():                # 同名不覆盖
+                    dest = dest_dir / f"{src.stem}-{n}{src.suffix}"
+                    n += 1
+                shutil.move(str(src), str(dest))
+                records.append({"kind": "attachment", "name": dest.name,
+                                "path": str(dest), "size": dest.stat().st_size})
+                audit.log("user.attachment", "user", {
+                    "name": dest.name, "size": records[-1]["size"],
+                    "path": str(dest)})
+            session.user_inbox.extend(records)
+            for ch in plan.challenges:
+                if not ch.get("attachments"):
+                    ch["attachments"] = [r["path"] for r in records]
+            for updir in {p.parent for p in staged_files}:
+                shutil.rmtree(updir, ignore_errors=True)
         self.start()            # 直接使用（非 Web lifespan）时懒启动监督协程
         await self._queue.put((session, cfg, plan, no_llm, models))
         return session

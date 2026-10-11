@@ -13,6 +13,9 @@ Web 不另设前置副本，避免两套门槛漂移。
 from __future__ import annotations
 
 import json
+import shutil
+import time
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -178,6 +181,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                 mode = RunMode(raw_mode)
             except ValueError:
                 raise HTTPException(422, f"未知模式: {payload.get('mode')}") from None
+        staged = _resolve_staged_uploads(payload)
         try:
             plan = prepare_launch(LaunchRequest(
                 mode=mode,
@@ -192,6 +196,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                 accept_rule_conflicts=bool(
                     payload.get("accept_rule_conflicts", False)),
                 mission=payload.get("mission") or None,
+                has_uploads=bool(staged),
             ))
         except RuleConflictError as exc:
             # 结构化冲突清单：前端据此弹出即时确认对话，确认后带
@@ -205,7 +210,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         normalized = dict(payload, mode=plan.authorization.mode.value,
                           mode_auto=plan.mode_auto)
         try:
-            session = await manager.create(normalized, plan)
+            session = await manager.create(normalized, plan, staged_files=staged)
         except SpiritScoutError as exc:   # 模型注册表为空/损坏（热加载）
             raise HTTPException(422, str(exc)) from exc
         return {**session.brief(), "request": session.request}
@@ -314,6 +319,71 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
 
     _MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
+    def _clean_upload_name(name: str) -> str:
+        """附件名安全化：只留 basename，拒绝路径分隔符/控制字符/超长。"""
+        clean = Path(name.replace("\\", "/")).name.strip()
+        if (not clean or clean in (".", "..") or len(clean) > 200
+                or any(ord(c) < 32 for c in clean)):
+            raise HTTPException(422, "附件名不合法")
+        return clean
+
+    def _gc_staging(root: Path, *, max_age_s: float = 86400.0) -> None:
+        """暂存区惰性回收：超过 24h 未被会话创建带走的上传整目录清除。"""
+        now = time.time()
+        for d in root.iterdir():
+            try:
+                if d.is_dir() and now - d.stat().st_mtime > max_age_s:
+                    shutil.rmtree(d, ignore_errors=True)
+            except OSError:
+                continue
+
+    @app.post("/api/uploads")
+    async def stage_upload(request: Request, name: str = Query(...)) -> dict[str, Any]:
+        """任务下达前暂存附件（初始会话的附件上传）。
+
+        请求体为文件原始字节，?name= 携带文件名。返回 upload_id，创建会话
+        时随 upload_ids 一并材料化进会话工作区；未被带走的暂存 24h 后惰性回收。
+        """
+        clean = _clean_upload_name(name)
+        body = await request.body()
+        if not body:
+            raise HTTPException(422, "附件内容为空")
+        if len(body) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                413, f"附件过大（上限 {_MAX_UPLOAD_BYTES // (1024 * 1024)}MB）")
+        staging = Path(cfg.workspace.root) / "uploads-staging"
+        staging.mkdir(parents=True, exist_ok=True)
+        _gc_staging(staging)
+        updir = staging / uuid.uuid4().hex[:12]
+        updir.mkdir()
+        dest = updir / clean
+        if dest.exists():                      # 单目录内同名（理论不可达）不覆盖
+            stem, suffix, n = dest.stem, dest.suffix, 2
+            while dest.exists():
+                dest = updir / f"{stem}-{n}{suffix}"
+                n += 1
+        dest.write_bytes(body)
+        return {"upload_id": updir.name, "name": dest.name, "size": len(body)}
+
+    def _resolve_staged_uploads(payload: dict[str, Any]) -> list[Path]:
+        """校验并收集任务下达携带的暂存附件（路径全部收窄在暂存区内）。"""
+        ids = [str(u).strip() for u in (payload.get("upload_ids") or [])
+               if str(u).strip()]
+        if not ids:
+            return []
+        if len(ids) > 20:
+            raise HTTPException(422, "一次最多携带 20 个上传附件")
+        staging = (Path(cfg.workspace.root) / "uploads-staging").resolve()
+        out: list[Path] = []
+        for uid in ids:
+            if "/" in uid or "\\" in uid or uid in (".", ".."):
+                raise HTTPException(422, "上传标识不合法")
+            updir = staging / uid
+            if not updir.is_dir():
+                raise HTTPException(422, "上传不存在或已过期，请重新选择文件")
+            out.extend(sorted(p for p in updir.iterdir() if p.is_file()))
+        return out
+
     @app.post("/api/sessions/{session_id}/messages")
     async def post_message(session_id: str,
                            payload: dict[str, Any]) -> dict[str, Any]:
@@ -347,10 +417,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         session = _require(session_id)
         if session.status in TERMINAL_STATES:
             raise HTTPException(409, "会话已结束，不能再上传附件")
-        clean = Path(name.replace("\\", "/")).name.strip()
-        if (not clean or clean in (".", "..") or len(clean) > 200
-                or any(ord(c) < 32 for c in clean)):
-            raise HTTPException(422, "附件名不合法")
+        clean = _clean_upload_name(name)
         body = await request.body()
         if not body:
             raise HTTPException(422, "附件内容为空")
