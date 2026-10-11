@@ -452,7 +452,8 @@ class MasterAgent:
         watch = None
         if ctx.ring is not None and ctx.enable_llm_planning and round_tasks:
             watch = asyncio.create_task(self._steering_watch(
-                [t.task_id for t in round_tasks]))
+                [t.task_id for t in round_tasks],
+                agents=[t.agent_type.value for t in round_tasks]))
         try:
             results = await asyncio.gather(
                 *(_run_one(s, t) for s, t in zip(round_specs, round_tasks)))
@@ -491,32 +492,38 @@ class MasterAgent:
         if feed:
             self.ctx.extra.setdefault("user_inbox", [])[:0] = feed
 
-    async def _steering_watch(self, task_ids: list[str]) -> None:
+    async def _steering_watch(self, task_ids: list[str],
+                              agents: list[str] | None = None) -> None:
         """派发期并发督导：读各任务实时路线笔记 + 用户发来的意见 → LLM 判读
         全局 → 写方向建议。
 
         确定性边界：本函数只做「读进度、问模型、投递建议」；建议是否采纳由
         子 Agent 的 LLM 在其决策上下文中自行权衡，执行仍走原确定性通道。
-        用户意见绕过进度指纹门（意见本身就是新信息），预算单独计；
-        模型不可用/输出不合规 → 意见退回收件箱留给下一个决策点，不丢。
+        用户意见优先于进度摘要：每个节拍先取意见——即使首份实时进度还没落
+        到黑板（摘要为空时按派发的 Agent 名单兜底路由），意见也会在本节拍内
+        被消费，不会滞留在收件箱。用户意见绕过进度指纹门（意见本身就是新
+        信息），预算单独计；模型不可用/输出不合规 → 意见退回收件箱留给
+        下一个决策点，不丢。
         """
         assert self.ctx.audit is not None
         last_fingerprint = ""
         calls = 0
         feed_calls = 0
+        agent_fallback = sorted({a for a in (agents or []) if a})
         while True:
             await asyncio.sleep(self._STEER_INTERVAL)
-            digest = self._progress_digest(task_ids)
-            if not digest["tasks"]:
-                continue
             feed = (self._drain_user_feed()
                     if feed_calls < self._STEER_FEED_MAX_CALLS else [])
+            digest = self._progress_digest(task_ids)
+            if not feed and not digest["tasks"]:
+                continue
             fingerprint = json.dumps(digest, ensure_ascii=False, sort_keys=True)
             if not feed and (fingerprint == last_fingerprint
                              or calls >= self._STEER_MAX_CALLS):
                 continue
             last_fingerprint = fingerprint
-            steering = await self._llm_steer(digest, user_feed=feed)
+            steering = await self._llm_steer(digest, user_feed=feed,
+                                             agent_fallback=agent_fallback)
             if feed:
                 feed_calls += 1
             else:
@@ -577,13 +584,18 @@ class MasterAgent:
         return routes
 
     async def _llm_steer(self, digest: dict[str, Any],
-                         user_feed: list[dict[str, Any]] | None = None
+                         user_feed: list[dict[str, Any]] | None = None,
+                         *,
+                         agent_fallback: list[str] | None = None
                          ) -> list[dict[str, Any]]:
         """LLM 判读全局进度，产出需调整方向的子 Agent 建议（白名单校验）。
 
         user_feed：用户会话中发来的意见与附件记录——优先响应；失败原样退回。
+        agent_fallback：实时进度未落到黑板时，按派发名单路由用户意见。
         """
-        valid_agents = sorted({t["agent"] for t in digest["tasks"] if t.get("agent")})
+        valid_agents = sorted({t["agent"] for t in digest["tasks"]
+                               if t.get("agent")}) \
+            or sorted({a for a in (agent_fallback or []) if a})
         feed = list(user_feed or [])
         if not valid_agents:
             self._return_user_feed(feed)
@@ -611,6 +623,10 @@ class MasterAgent:
                     "Agent 可直接读取）。优先响应意见：给出与用户意图一致的方向"
                     "建议；附件则建议合适的 Agent 尽快分析，hint 里写明文件路径。"
                     "用户正在等灵枢的反应，除非确实无需调整，不要返回空列表。")
+                if not digest["tasks"]:
+                    payload["constraints"] += (
+                        " progress 为空——本轮尚未产生实时进度，请基于用户意见"
+                        "本身判断该路由给哪个 Agent。")
             resp = await self.ctx.gateway.chat(
                 [
                     {"role": "system", "content": self._system_prompt()

@@ -134,8 +134,12 @@ class Session:
     # 取走消费——派发期督导或轮末复盘，消费动作落审计事件）
     user_inbox: list[dict[str, Any]] = field(
         default_factory=list, repr=False, compare=False)
-    # 启动计划（进程内持有，续传复用同一授权/赛题载荷；重启后不在）
+    # 启动计划（进程内持有，续传复用同一授权/赛题载荷）
     plan: Any = field(default=None, repr=False, compare=False)
+    # 原始启动参数（含赛题/赛制 YAML，落 meta.json）——控制台重启后据此
+    # 确定性重建启动计划，续传不因重启被拦
+    launch_request: dict[str, Any] = field(
+        default_factory=dict, repr=False, compare=False)
     # 续传前的终态（续传失败时恢复，原成果不丢）
     resume_prev_status: str | None = field(
         default=None, repr=False, compare=False)
@@ -227,6 +231,7 @@ class SessionManager:
                 target=data["target"], workspace=meta.parent,
                 title=data.get("title", ""),
                 request=data.get("request", {}),
+                launch_request=data.get("launch_request", {}),
                 status=data.get("status", "interrupted"),
                 created_at=data.get("created_at", 0.0),
                 started_at=data.get("started_at"),
@@ -244,6 +249,7 @@ class SessionManager:
             "session_id": session.session_id, "mode": session.mode,
             "target": session.target, "title": session.title,
             "request": session.request,
+            "launch_request": session.launch_request,
             "status": session.status, "created_at": session.created_at,
             "started_at": session.started_at, "finished_at": session.finished_at,
             "summary": session.summary, "error": session.error,
@@ -340,6 +346,8 @@ class SessionManager:
         )
         session.workspace.mkdir(parents=True, exist_ok=False)
         session.plan = plan
+        session.launch_request = {k: v for k, v in payload.items()
+                                  if k != "upload_ids"}
         self._sessions[session.session_id] = session
         self._persist(session)
 
@@ -376,11 +384,43 @@ class SessionManager:
         await self._queue.put((session, cfg, plan, no_llm, models, False))
         return session
 
+    def _rebuild_plan(self, session: Session) -> LaunchPlan | None:
+        """控制台重启后从持久化的启动参数重建计划（同一输入 → 同一装配）。"""
+        req = session.launch_request or {}
+        if not req:
+            return None
+        try:
+            plan = prepare_launch(LaunchRequest(
+                mode=RunMode(session.mode),   # 续传钉住已定模式，不再改判
+                target=req.get("target") or None,
+                extra_scope=list(req.get("scope") or []),
+                platform=req.get("platform") or None,
+                allow_sensitive=bool(req.get("allow_sensitive", False)),
+                rps=float(req.get("rps", 10.0)),
+                flag_format=req.get("flag_format") or None,
+                challenges_yaml=req.get("challenges_yaml") or None,
+                rules_yaml=req.get("rules_yaml") or None,
+                accept_rule_conflicts=bool(req.get("accept_rule_conflicts", False)),
+                mission=req.get("mission") or None,
+            ))
+        except (SpiritScoutError, TypeError, ValueError):
+            return None
+        # 工作区里用户上传过的附件重新挂到无附件的赛题上（与创建时同规则）
+        att = session.workspace / "attachments"
+        if att.is_dir() and plan.challenges:
+            files = sorted(str(p) for p in att.iterdir() if p.is_file())
+            if files:
+                for ch in plan.challenges:
+                    if not ch.get("attachments"):
+                        ch["attachments"] = files
+        return plan
+
     async def resume(self, session_id: str) -> Session:
         """续传：终态会话带用户新来的意见重新开工（同一工作区/审计/Flag 库）。
 
-        复用进程内持有的启动计划（授权/赛题载荷不变）；CTF 已破题的赛题
-        不再重解，未破题的与用户意见一起进入新一轮决策环。
+        复用启动计划——进程内持有则直接用；控制台重启过则从 meta.json 的
+        原始启动参数确定性重建。CTF 已破题的赛题不再重解，未破题的与用户
+        意见一起进入新一轮决策环。
         """
         from spiritscout.config import load_model_config
         session = self._sessions.get(session_id)
@@ -389,8 +429,10 @@ class SessionManager:
         if session.status not in TERMINAL_STATES:
             raise SpiritScoutError("会话仍在运行中，意见将直接进入当前决策环")
         if session.plan is None:
+            session.plan = self._rebuild_plan(session)
+        if session.plan is None:
             raise SpiritScoutError(
-                "该会话无法续传（控制台重启后启动计划不在内存）——"
+                "该会话缺少启动信息（由不支持续传的旧版本创建），无法续传——"
                 "请基于现有报告与审计新开任务")
         models = vault.apply_keys(load_model_config(self._cfg.models_config_path))
         if not models:

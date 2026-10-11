@@ -12,8 +12,10 @@
 
 解题方式是**一条持久对话**：首条消息装入题面、入口预感知与同伴结论，
 之后每轮模型决定调用哪些工具（互不依赖的请求同轮并发），工具结果回灌，
-直到模型不再调用工具——那就是它的结论。步数顶与重复空转熔断是仅有的
-两个安全顶；LLM 不可用时解题环诚实停摆留痕，不做固定模板兜底。
+直到模型不再调用工具——那就是它的结论。回合步数顶是唯一安全顶；
+是否重复、要不要换思路由模型自己判断（提示词约束，后端不做动作
+去重截断——归一化签名无法真正判定两次调用意图相同）。LLM 不可用时
+解题环诚实停摆留痕，不做固定模板兜底。
 
 简单题简单做：默认单线调查（1 条路线），未破题由主 Agent 复盘另起一轮
 换角度再攻，而不是一上来就并行铺开多条分支。
@@ -50,9 +52,6 @@ _MSG_CHAR_BUDGET = 48000
 _TOOL_RESULT_CAP = 6000
 # 解题环回合安全顶（每回合一次 LLM 调用，可并发多个工具；到顶强制收尾）
 _INVESTIGATE_MAX_STEPS = 24
-# 连续重复动作告警/强制收尾线（同一动作签名连续出现；告警先提示，再犯即收）
-_DOOM_WARN_AT = 3
-_DOOM_STOP_AT = 4
 # 解题环单次 LLM 调用超时：重推理模型单次可达 3~4 分钟
 _SOLVER_TIMEOUT = 420
 # 解题环单回合输出上限（结论/工具参数所需，不需要长篇）
@@ -569,8 +568,8 @@ class CTFBaseAgent(SubAgent):
         key = f"inv|{self.challenge_id(task)}|{route.name}|{task.task_id}"
         state = self.cache.get(self.route_namespace, key)
         if not isinstance(state, dict):
-            state = {"messages": [], "seed": [], "observations": [], "tried": [],
-                     "flags": [], "concluded": False, "stall": "", "doom": 0,
+            state = {"messages": [], "seed": [], "observations": [],
+                     "flags": [], "concluded": False, "stall": "",
                      "turn": 0, "llm_failures": 0}
             self.cache.put(self.route_namespace, key, state)
         return state
@@ -741,8 +740,7 @@ class CTFBaseAgent(SubAgent):
 
         state["turn"] += 1
         turn = state["turn"]
-        forced = (turn > _INVESTIGATE_MAX_STEPS
-                  or state["doom"] >= _DOOM_STOP_AT)
+        forced = turn > _INVESTIGATE_MAX_STEPS
         self._compact_messages(state["messages"])
         messages: list[dict[str, Any]] = state["messages"]
         if forced:
@@ -827,10 +825,6 @@ class CTFBaseAgent(SubAgent):
                 "route": route.name, "challenge": self.challenge_id(task),
                 "id": call.get("id"), "name": call.get("name"), "ok": out.ok,
                 "note": out.note[:200], "result": (out.text or "")[:1200]})
-        if state["doom"] >= _DOOM_STOP_AT:
-            state["messages"].append({"role": "user", "content": (
-                "你已经连续重复同一动作。停止重复：换一个完全不同的思路，"
-                "或直接给出当前结论。")})
         head = f"第 {turn} 回合"
         note = f"{head}：" + "；".join(notes) if notes else head
         note = self._extend_or_finish(plan, state, note)
@@ -863,19 +857,6 @@ class CTFBaseAgent(SubAgent):
                 "text": text[:400]})
             return _ToolOutcome(ok=True, value=0.05, note=f"共享笔记：{text[:60]}",
                                 text="已写入团队共享笔记，同伴下一回合可见。")
-        sig = self._call_signature(name, self._sig_args(task, args))
-        if sig in state["tried"]:
-            state["doom"] += 1
-            note = f"重复动作跳过: {name}"
-            if state["doom"] >= _DOOM_WARN_AT:
-                note += f"（连续 {state['doom']} 次，已提示换方向）"
-            state["observations"].append(
-                {"action": name, "result": "重复动作（本路线已做过）"})
-            return _ToolOutcome(ok=False, note=note, text=(
-                "你之前已经执行过完全相同的调用，结果就在上文对话里。"
-                "不要重复，换一个思路或直接给出结论。"))
-        state["tried"].append(sig)
-        state["doom"] = 0
         try:
             if name == "http_request":
                 out = await self._tool_http(task, route, state, args)
@@ -898,36 +879,12 @@ class CTFBaseAgent(SubAgent):
                                {"tool": name, "error": str(exc)[:200]})
         return out
 
-    def _sig_args(self, task: Task, args: dict[str, Any]) -> dict[str, Any]:
-        """动作签名入参：HTTP 调用按「完整地址+方法+参数+请求头」归一化，
-        使 path 写法与 url 写法、参数顺序不同的同一请求视为同一动作；
-        请求头是签名的一部分——换头重试（如 WS 握手 key、Range 分段）
-        是有意的变体请求，不按重复动作熔断。"""
-        if "path" not in args and "url" not in args:
-            return args
-        resolved = self._resolve_http(task, args)
-        if resolved is None:
-            return args
-        url, params, headers, data = resolved
-        return {"url": url, "method": str(args.get("method", "GET")).upper(),
-                "params": params or {}, "headers": headers or {},
-                "data": (data or "")[:400]}
-
-    @staticmethod
-    def _call_signature(name: str, args: dict[str, Any]) -> str:
-        try:
-            payload = json.dumps(args, sort_keys=True, ensure_ascii=False)
-        except (TypeError, ValueError):
-            payload = str(args)
-        return f"{name}|{payload}"[:400]
-
     def _resolve_http(self, task: Task, args: dict[str, Any]
                       ) -> tuple[str, dict[str, str] | None,
                                  dict[str, str] | None, str | None] | None:
         """HTTP 入参归一化：path/url → 完整地址，参数/头/体按上限裁剪。
 
-        解析结果同时用于动作签名（去重）与实际请求——同一请求的两种写法
-        归一到同一个签名。非法目标返回 None。
+        只服务于实际请求构造（path 写法与 url 写法等价）。非法目标返回 None。
         """
         ch = self.challenge_of(task)
         base = str(ch.get("url") or task.target or "").rstrip("/")
@@ -1239,8 +1196,11 @@ class CTFBaseAgent(SubAgent):
             "收尾：当你不再调用工具时，你最后一条消息就是交给主 Agent 的结论——"
             "简明写清「拿到了什么（Flag 原文）、依据是什么、还差什么」。拿到 Flag "
             "或确认无解空间时立即收尾，不要空转。\n"
-            "纪律：不要重复调用完全相同的请求；结果里已经有答案就不要重复验证；"
-            "简单题简单做——用最少步骤验证最直接的线索，不要为一道小题铺开大扫描。"
+            "纪律：对话里已经记录了你发过的每个请求与结果——重复发出完全相同"
+            "的调用不会有任何新信息，是否算「同一动作」由你自己判断（换了参数、"
+            "换了头、换了时机就是不同的请求，可以再试）；结果里已经有答案就不要"
+            "重复验证；连续多轮没有新发现时，主动换思路或直接给出结论，不要"
+            "原地打转；简单题简单做——用最少步骤验证最直接的线索。"
         )
 
     def _seed_messages(self, task: Task, route, plan: RoutePlan,
