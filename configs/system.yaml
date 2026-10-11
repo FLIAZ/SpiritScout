@@ -94,14 +94,17 @@ mcp_servers:
 #   图形端「设置 → MCP」开启后亦可改走 http://127.0.0.1:11432/mcp（以应用内为准）。
 # —— 其余常见接入（按需启用；外部依赖，不随项目封装）：
 #   - name: burp                # Web 漏洞扫描与模糊测试（PortSwigger 官方扩展；需 Burp 图形端常驻）
-#     transport: sse
-#     url: http://127.0.0.1:9876/sse
-#   - name: wire                # 流量/数据包分析（需 Node.js）
-#     transport: stdio
-#     command: npx
-#     args: ["-y", "@0xkoda/wiremcp"]
-#   - name: shodan              # 资产情报（出网至第三方服务；需 API Key，经密钥库/环境注入）
+#     transport: sse            #   官方 SSE 端点即根路径 http://127.0.0.1:9876（不带 /sse）
+#     url: http://127.0.0.1:9876
+#   - name: wire                # 流量/数据包分析（WireMCP；需系统 tshark，无 npm 包）
+#     transport: stdio          #   git clone github.com/0xKoda/WireMCP && npm install 后：
+#     command: node
+#     args: ["<WireMCP 克隆目录>/index.js"]
+#   - name: shodan              # 资产情报（出网至第三方服务；密钥由启动环境注入，不落 YAML）
 #     transport: stdio
 #     command: npx
 #     args: ["-y", "@burtthecoder/mcp-shodan"]
-#     env: { SHODAN_API_KEY: "<密钥>" }
+#     env: { SHODAN_API_KEY: "${SHODAN_API_KEY}" }
+#   - name: virustotal          # 文件/域名情报（VirusTotal 官方托管端点，样本细节出网）
+#     transport: http
+#     url: https://ai.virustotal.com/mcp

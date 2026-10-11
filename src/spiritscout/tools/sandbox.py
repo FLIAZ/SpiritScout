@@ -5,7 +5,7 @@ CTF 解题需要真实动手能力——协议交互（WebSocket/socket）、数
 一双在受控沙箱里干活的手。
 
 隔离边界（bwrap，最小权限）：
-- 文件系统整机只读挂载；用户主目录与 /usr/local/*（宿主私有安装层）
+- 文件系统整机只读挂载；用户主目录与 /usr/local（宿主私有安装层）
   以 tmpfs 遮蔽——~/.ssh、密钥库、浏览器数据、手工安装的工具在沙箱内
   都不可见；工具库来自项目自带 .venv（只读回挂，pwntools/pycryptodome/
   PIL/sympy/z3/scapy 等封装于项目内，不依赖用户系统安装），另加会话
@@ -74,10 +74,10 @@ def _build_argv(workspace: Path, rundir: Path, inner: list[str]) -> list[str]:
         "--proc", "/proc",
         "--tmpfs", "/tmp",
         "--tmpfs", str(home),          # 主目录遮蔽：.ssh / 密钥库不可见
-        # 宿主私有安装层遮蔽：/usr/local/* 是手工安装落点（用户自装工具、
-        # 独立分发的二进制），沙箱内不可达
-        "--tmpfs", "/usr/local/bin",
-        "--tmpfs", "/usr/local/sbin",
+        # 宿主私有安装层遮蔽：/usr/local 是手工安装落点（用户自装工具、
+        # 独立分发的二进制、私有库），整层遮蔽（bin 内 sbin 是符号链接，
+        # 需整目录替换而非逐项挂载）
+        "--tmpfs", "/usr/local",
     ]
     venv = _project_venv()
     path_dirs = ["/usr/bin", "/bin"]
