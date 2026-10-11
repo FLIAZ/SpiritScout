@@ -261,6 +261,7 @@ main { min-width: 0; padding: 22px 26px 40px; }
 .topo svg.edges path { fill: none; stroke: color-mix(in srgb, var(--ink-3) 55%, transparent); stroke-width: 1.6; }
 .topo svg.edges path.done { stroke: var(--ok); opacity: .6; }
 .topo svg.edges path.active { stroke: var(--accent); stroke-dasharray: 5 5; animation: flow 1s linear infinite; }
+.topo svg.edges path.user-edge { stroke: var(--accent); stroke-dasharray: 3 4; opacity: .85; }
 .topo svg.edges path.pending { stroke-dasharray: 2 6; }
 @keyframes flow { to { stroke-dashoffset: -10; } }
 .topo-tools { position: absolute; right: 12px; top: 12px; z-index: 6; display: flex; gap: 6px; }
@@ -279,6 +280,22 @@ main { min-width: 0; padding: 22px 26px 40px; }
 }
 .hub b { font-size: 15px; letter-spacing: .02em; }
 .hub small { color: var(--accent-ink); font-size: 11px; font-weight: 600; }
+
+/* 用户意见节点：灵枢左侧，意见流经它进入决策环 */
+.unode { position: absolute; left: 0; top: 0; width: 216px; z-index: 2;
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+  border: 1.5px dashed color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: 14px; padding: 9px 13px; box-shadow: var(--shadow);
+  display: flex; flex-direction: column; gap: 5px; }
+.unode b { font-size: 12.5px; color: var(--accent-ink);
+  display: flex; align-items: center; gap: 6px; }
+.unode .utag { font-size: 10px; font-weight: 600; color: var(--ink-3);
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: 99px; padding: 0 7px; }
+.unode .txt { font-size: 11.5px; color: var(--ink-2); line-height: 1.5;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden; word-break: break-word; }
+.unode small { font-size: 10px; color: var(--ink-3); }
 .hub::before, .hub::after {
   content: ""; position: absolute; inset: -1.5px; border-radius: 14px;
   border: 1.5px solid var(--accent); opacity: 0; pointer-events: none;
@@ -1400,9 +1417,16 @@ function drawTopo() {
       ${ring.attempts ? `<div class="steer-meta">环形共享 · 已尝试登记 ${ring.attempts} 条——同伴无产出的入口自动避让</div>` : ""}
       ${steerItems.map(([k, v]) => `<div class="steer-item"><b>灵枢 → ${esc(agentName(k))}</b><span>${esc(v.hint || "")}</span>${v.rationale ? `<small title="${esc(v.rationale)}">${esc(v.rationale)}</small>` : ""}</div>`).join("")}
     </div></div>` : "";
+  const opinions = (S.state && S.state.user_opinions) || [];
+  const latestOp = opinions.length ? opinions[opinions.length - 1] : null;
+  const unodeHtml = latestOp ? `<div class="unode" id="topo-unode" style="visibility:hidden" title="${esc(latestOp.text || "")}">
+      <b>你<span class="utag">意见 ${opinions.length}</span></b>
+      <div class="txt">${esc(latestOp.text || "")}</div>
+      <small>经灵枢进入决策环，督导/复盘消费</small></div>` : "";
 
   box.innerHTML = `<div id="topo-stage">
       <svg class="edges"></svg>
+      ${unodeHtml}
       <div class="hub ${running ? "live" : ""}" id="topo-hub" style="visibility:hidden"><b>灵枢</b><small>主 Agent · 集中决策</small></div>
       ${ids.filter(id => id !== ORPHAN).map(id => cardHtml(nodeOf.get(id))).join("")}
       ${orphans.length ? orphanCard : ""}
@@ -1418,15 +1442,21 @@ function drawTopo() {
   // ---- 先隐藏渲染量高，再按层堆叠定位（节点高度随路线卡片数变化）
   const stage = box.querySelector("#topo-stage");
   const hubEl = box.querySelector("#topo-hub");
+  const unodeEl = box.querySelector("#topo-unode");
   const elOf = new Map(ids.map(id =>
     [id, stage.querySelector(`[data-node="${CSS.escape(id)}"]`)]));
   const heights = new Map(ids.map(id => [id, elOf.get(id).offsetHeight]));
   const hubH = hubEl.offsetHeight, hubW = hubEl.offsetWidth;
+  const unW = unodeEl ? unodeEl.offsetWidth : 0;
+  const unH = unodeEl ? unodeEl.offsetHeight : 0;
+  const unX = TOPO_GEO.PAD;
+  const hubXpos = unX + unW + (unodeEl ? 26 : 0);   // 意见节点占灵枢左侧
   const layerH = layerIds.map(arr =>
     arr.reduce((a, id) => a + heights.get(id), 0) + TOPO_GEO.GAP_Y * Math.max(arr.length - 1, 0));
   const totalH = Math.max(...layerH);
+  const centerY = TOPO_GEO.PAD + totalH / 2;
   const xOf = new Map(), yOf = new Map();
-  let cx = TOPO_GEO.PAD + hubW + TOPO_GEO.HUB_GAP;
+  let cx = hubXpos + hubW + TOPO_GEO.HUB_GAP;
   layerIds.forEach((arr, i) => {
     let y = TOPO_GEO.PAD + (totalH - layerH[i]) / 2;
     for (const id of arr) {
@@ -1444,7 +1474,11 @@ function drawTopo() {
     el.style.visibility = "";
   }
   hubEl.style.transform =
-    `translate(${TOPO_GEO.PAD}px, ${TOPO_GEO.PAD + totalH / 2 - hubH / 2}px)`;
+    `translate(${hubXpos}px, ${centerY - hubH / 2}px)`;
+  if (unodeEl) {
+    unodeEl.style.transform = `translate(${unX}px, ${centerY - unH / 2}px)`;
+    unodeEl.style.visibility = "";
+  }
   hubEl.style.visibility = "";
   stage.style.width = stageW + "px";
   stage.style.height = stageH + "px";
@@ -1454,13 +1488,17 @@ function drawTopo() {
   svg.setAttribute("width", stageW);
   svg.setAttribute("height", stageH);
   svg.setAttribute("viewBox", `0 0 ${stageW} ${stageH}`);
-  const hubX = TOPO_GEO.PAD + hubW, hubY = TOPO_GEO.PAD + totalH / 2;
+  const hubX = hubXpos + hubW, hubY = centerY;
   const link = (x1, y1, x2, y2, cls) => {
     const dx = Math.max(30, (x2 - x1) * 0.42);
     return `<path class="${cls}" d="M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}"/>`;
   };
   const midY = id => yOf.get(id) + heights.get(id) / 2;
   let paths = "";
+  if (unodeEl) {
+    // 你 → 灵枢：意见流入决策环
+    paths += link(unX + unW, hubY, hubXpos, hubY, "user-edge");
+  }
   for (const n of nodes) {
     const id = n.node_id;
     if (!xOf.has(id)) continue;

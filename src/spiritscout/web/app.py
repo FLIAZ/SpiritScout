@@ -52,6 +52,7 @@ def _read_state(session: Session) -> dict[str, Any]:
         "flags": None,
         "pending_approvals": session.approvals.view(),
         "ring": session.ring.snapshot(),
+        "user_opinions": session.opinions[-8:],
         "round_views": run_summary.get("round_views", []),
         "model_usage": run_summary.get("model_usage"),
         "verify": session.summary.get("verify"),
@@ -401,6 +402,9 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         if len(content) > 4000:
             raise HTTPException(422, "意见过长（≤4000 字）")
         session.user_inbox.append({"kind": "message", "text": content})
+        # 拓扑图/状态面展示用：历史意见（收件箱是消费语义，另一份不可变留档）
+        session.opinions.append({"text": content, "ts": time.time()})
+        del session.opinions[:-8]
         AuditLogger(session.audit_path).log(
             "user.message", "user", {"content": content})
         resumed = False

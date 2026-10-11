@@ -140,6 +140,9 @@ class Session:
     # 确定性重建启动计划，续传不因重启被拦
     launch_request: dict[str, Any] = field(
         default_factory=dict, repr=False, compare=False)
+    # 用户历史意见（最新在后，封顶保留；拓扑图与状态面展示用）
+    opinions: list[dict[str, Any]] = field(
+        default_factory=list, repr=False, compare=False)
     # 续传前的终态（续传失败时恢复，原成果不丢）
     resume_prev_status: str | None = field(
         default=None, repr=False, compare=False)
@@ -232,6 +235,7 @@ class SessionManager:
                 title=data.get("title", ""),
                 request=data.get("request", {}),
                 launch_request=data.get("launch_request", {}),
+                opinions=data.get("opinions", []),
                 status=data.get("status", "interrupted"),
                 created_at=data.get("created_at", 0.0),
                 started_at=data.get("started_at"),
@@ -250,6 +254,7 @@ class SessionManager:
             "target": session.target, "title": session.title,
             "request": session.request,
             "launch_request": session.launch_request,
+            "opinions": session.opinions[-8:],
             "status": session.status, "created_at": session.created_at,
             "started_at": session.started_at, "finished_at": session.finished_at,
             "summary": session.summary, "error": session.error,
