@@ -15,7 +15,9 @@
   --warn: #ad6f0e; --warn-soft: #faf0da;
   --bad: #d64343; --bad-soft: #fcebeb;
   --gold: #a87f00; --gold-soft: #faf3d7;
+  --violet: #7a5af8; --violet-soft: #efecfe;
   --shadow: 0 1px 2px rgba(22,27,38,.05), 0 4px 16px rgba(22,27,38,.06);
+  --shadow-raise: 0 2px 4px rgba(22,27,38,.07), 0 10px 26px rgba(22,27,38,.1);
   --radius: 10px;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   color-scheme: light;
@@ -30,7 +32,9 @@
     --warn: #d9a04f; --warn-soft: #372917;
     --bad: #f06a6a; --bad-soft: #3b1b1b;
     --gold: #d9b64f; --gold-soft: #352e14;
+    --violet: #9a86ff; --violet-soft: #251e47;
     --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
+    --shadow-raise: 0 2px 4px rgba(0,0,0,.35), 0 10px 26px rgba(0,0,0,.3);
     color-scheme: dark;
   }
 }
@@ -413,12 +417,111 @@ dialog::backdrop { background: rgba(10, 14, 22, .45); }
 .dlg-grid label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; font-weight: 600; color: var(--ink-2); }
 .dlg-grid .wide { grid-column: 1 / -1; }
 .dlg-ops { display: flex; justify-content: flex-end; gap: 8px; }
-.pcard { margin-bottom: 14px; }
-.pcard .h { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
-.pcard .h b { font-size: 15px; }
-.pcard .pops { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 11px; }
-.pcard table.list { margin-top: 12px; border: 1px solid var(--line); border-radius: 9px; }
-.pcard table.list td:first-child { border-top-left-radius: 9px; }
+/* ---- 模型页：供应商端子排 + 模型仪表卡 ---- */
+.msub { color: var(--ink-2); font-size: 12.5px; margin-top: 5px; max-width: 680px; line-height: 1.65; }
+.mpath { display: inline-flex; align-items: center; gap: 7px; margin-top: 10px;
+  font-family: var(--mono); font-size: 11px; color: var(--ink-3);
+  background: var(--surface-2); border-radius: 6px; padding: 4px 9px; max-width: 100%; }
+.mpath svg { width: 12px; height: 12px; flex: none; }
+.mpath span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.pblock { margin-top: 28px; }
+.pb-head { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap;
+  padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.pb-id { min-width: 0; }
+.pb-r1 { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.pb-name { font-size: 15.5px; font-weight: 700; letter-spacing: -.01em; }
+.led { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3);
+  flex: none; position: relative; }
+.led.ok { background: var(--ok); }
+.led.ok::after { content: ""; position: absolute; inset: -4px; border-radius: 50%;
+  border: 1.5px solid var(--ok); animation: ledpulse 2.4s ease-out infinite; }
+.led.bad { background: var(--bad); }
+@keyframes ledpulse { 0% { transform: scale(.55); opacity: .6; }
+  70% { transform: scale(1.2); opacity: 0; } 100% { opacity: 0; } }
+.pb-key { font-size: 11.5px; color: var(--ink-3); }
+.pb-key.ok { color: var(--ok); }
+.pb-key.bad { color: var(--bad); }
+.pb-count { font-size: 11.5px; color: var(--ink-3); }
+.pb-url { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3);
+  margin-top: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pb-ops { margin-left: auto; flex: none; display: flex; gap: 8px; align-items: center; }
+.pb-ops .btn svg { width: 13px; height: 13px; }
+
+.btn.tinted { background: var(--accent-soft); border-color: transparent; color: var(--accent-ink); }
+.btn.tinted:hover { background: color-mix(in srgb, var(--accent-soft) 76%, var(--accent) 24%);
+  border-color: transparent; }
+.btn:focus-visible, .icon-btn:focus-visible, .ghost-tile:focus-visible,
+.mtile .mt-ops button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.icon-btn { border: 1px solid var(--line); background: var(--surface); color: var(--ink-3);
+  width: 30px; height: 30px; padding: 0; border-radius: 8px;
+  display: inline-flex; align-items: center; justify-content: center; }
+.icon-btn:hover { color: var(--ink); border-color: var(--ink-3); }
+.icon-btn.danger:hover { color: var(--bad); border-color: var(--bad); background: var(--bad-soft); }
+.icon-btn svg { width: 14px; height: 14px; }
+
+.mgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(258px, 1fr));
+  gap: 12px; margin-top: 15px; }
+.mtile { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow); display: flex; flex-direction: column;
+  transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease; }
+.mtile:hover { transform: translateY(-2px); box-shadow: var(--shadow-raise);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); }
+.mt-id { padding: 13px 14px 0; display: flex; gap: 8px; align-items: flex-start; }
+.mt-id b { font-family: var(--mono); font-size: 13px; font-weight: 700; line-height: 1.5;
+  word-break: break-all; flex: 1; min-width: 0; }
+.tag.tier-flagship { background: var(--gold-soft); color: var(--gold); }
+.tag.tier-rigorous { background: var(--violet-soft); color: var(--violet); }
+.tag.tier-code { background: var(--accent-soft); color: var(--accent-ink); }
+.tag.tier-fast { background: var(--ok-soft); color: var(--ok); }
+.tag.tier-light { background: var(--surface-2); color: var(--ink-3); }
+.mt-caps { padding: 9px 14px 0; display: flex; flex-wrap: wrap; gap: 5px;
+  min-height: 30px; align-content: flex-start; }
+.mt-caps .tag { background: none; border: 1px solid var(--line); color: var(--ink-2);
+  font-weight: 500; }
+.mt-stats { display: flex; margin: 11px 14px 0; padding: 9px 0;
+  border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.mstat { flex: 1; min-width: 0; }
+.mstat + .mstat { border-left: 1px solid var(--line); padding-left: 12px; margin-left: 12px; }
+.mstat .k { font-size: 10.5px; color: var(--ink-3); letter-spacing: .05em; }
+.mstat .v { font-size: 13px; font-weight: 650; margin-top: 3px; font-variant-numeric: tabular-nums; }
+.qbar { display: inline-block; width: 42px; height: 3px; border-radius: 2px;
+  background: var(--surface-2); vertical-align: middle; margin: 0 7px 1px 0; }
+.qbar i { display: block; height: 100%; border-radius: 2px; background: var(--ok); }
+.mt-eff { padding: 10px 14px 10px; display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.mt-eff .k { font-size: 10.5px; color: var(--ink-3); letter-spacing: .05em; margin-right: 2px; }
+.eff-pill { font-family: var(--mono); font-size: 10.5px; padding: 1px 8px;
+  border-radius: 99px; border: 1px solid var(--line); color: var(--ink-2); }
+.mt-fb { padding: 0 14px 10px; font-size: 11px; color: var(--ink-3); }
+.mt-ops { margin: auto 0 0; display: flex; border-top: 1px solid var(--line); }
+.mt-ops button { flex: 1; border: 0; background: none; padding: 8px 0;
+  font-size: 12px; font-weight: 600; color: var(--ink-3); }
+.mt-ops button + button { border-left: 1px solid var(--line); }
+.mt-ops button:hover { color: var(--ink); background: var(--surface-2); }
+.mt-ops button:first-child:hover { border-radius: 0 0 0 var(--radius); }
+.mt-ops button:last-child:hover { border-radius: 0 0 var(--radius) 0; }
+.mt-ops button.danger:hover { color: var(--bad); background: var(--bad-soft); }
+
+.ghost-tile { border: 1.5px dashed var(--line); border-radius: var(--radius); background: none;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; color: var(--ink-3); font-size: 12.5px; font-weight: 600;
+  min-height: 152px; padding: 12px;
+  transition: border-color .16s ease, color .16s ease, background .16s ease; }
+.ghost-tile:hover { border-color: var(--accent); color: var(--accent-ink);
+  background: var(--accent-soft); }
+.ghost-tile svg { width: 16px; height: 16px; }
+
+.mempty { margin-top: 26px; border: 1.5px dashed var(--line); border-radius: 14px;
+  padding: 56px 24px; text-align: center; color: var(--ink-3); }
+.mempty svg { width: 36px; height: 36px; opacity: .55; }
+.mempty .t { font-size: 15px; font-weight: 650; color: var(--ink-2); margin-top: 12px; }
+.mempty .s { font-size: 12.5px; margin-top: 6px; line-height: 1.7; }
+.mempty .btn { margin-top: 18px; }
+
+.dlg-sec { grid-column: 1 / -1; font-size: 11px; font-weight: 700; color: var(--ink-3);
+  letter-spacing: .07em; margin-top: 4px; padding-top: 13px; border-top: 1px solid var(--line); }
+.dlg-sec:first-child { border-top: 0; padding-top: 0; margin-top: 0; }
+
 .fm-list { max-height: 46vh; overflow-y: auto; border: 1px solid var(--line); border-radius: 9px; }
 .fm-row { display: flex; align-items: center; gap: 9px; padding: 8px 12px; font-size: 13px;
   border-bottom: 1px solid var(--line); cursor: pointer; }
@@ -531,8 +634,9 @@ dialog::backdrop { background: rgba(10, 14, 22, .45); }
     <section id="view-models" hidden>
       <div class="models-head">
         <div>
-          <h2 style="margin:0 0 4px;font-size:19px">模型</h2>
-          <span class="muted" style="font-size:12.5px" id="models-path"></span>
+          <h2 style="margin:0;font-size:22px;font-weight:700;letter-spacing:-.01em">模型</h2>
+          <div class="msub">供应商 = 一个 API 地址 + 一把密钥；模型挂在供应商之下，编队按模型 ID 指派。</div>
+          <div class="mpath" id="models-path"></div>
         </div>
         <button class="btn primary" id="p-add">+ 添加供应商</button>
       </div>
@@ -547,12 +651,14 @@ dialog::backdrop { background: rgba(10, 14, 22, .45); }
     一个供应商 = 一个 API 地址 + 一把密钥，它下面的模型共用这套接入信息。
     保存后点「获取模型列表」从云端勾选启用；端点不提供列表接口时用「手动添加模型」。</p>
   <div class="dlg-grid">
+    <div class="dlg-sec">接入</div>
     <label><span>供应商名 *</span><input id="p-name" placeholder="自取，如 ark / deepseek"></label>
     <label><span>协议</span><select id="p-type">
       <option value="openai_compatible">OpenAI 兼容</option>
       <option value="anthropic_compatible">Anthropic 兼容</option>
     </select></label>
     <label class="wide"><span>API 地址 *</span><input id="p-baseurl" placeholder="如 https://ark.cn-beijing.volces.com/api/plan/v3"></label>
+    <div class="dlg-sec">密钥</div>
     <label><span>API Key（直填）</span><input id="p-keyval" type="password" placeholder="加密存入本机密钥库，不写回配置文件" autocomplete="new-password"></label>
     <label><span>或环境变量名</span><input id="p-keyenv" placeholder="如 SPIRITSCOUT_LLM_API_KEY（无人值守部署用）"></label>
     <div id="p-keystat" class="muted" style="grid-column:1/-1;font-size:11.5px"></div>
@@ -575,20 +681,23 @@ dialog::backdrop { background: rgba(10, 14, 22, .45); }
 <dialog id="m-dlg">
   <h3 id="m-dlg-title" style="margin:0">添加模型</h3>
   <div class="dlg-grid">
+    <div class="dlg-sec">身份</div>
     <label><span>模型 ID *</span><input id="m-model" placeholder="如 ark-code-latest 或 ep-xxx"></label>
     <label><span>归属供应商</span><select id="m-pref"></select></label>
     <label><span>档位</span><select id="m-tier">
       <option>flagship</option><option>rigorous</option><option>code</option>
       <option selected>fast</option><option>light</option>
     </select></label>
+    <div class="dlg-sec">能力画像</div>
     <label><span>上下文窗口（token）</span><input id="m-ctx" type="number" value="0" min="0" step="1000" placeholder="0 = 未声明"></label>
-    <label class="wide"><span>思考强度取值（逗号分隔，各模型不同）</span><input id="m-eff" placeholder="如 low,medium,high；不确定就留空"></label>
+    <label><span>思考强度取值（逗号分隔）</span><input id="m-eff" placeholder="如 low,medium,high；不确定就留空"></label>
     <label class="wide"><span>能力标签（逗号分隔）</span><input id="m-caps" placeholder="reasoning,code,chinese,security"></label>
+    <label class="wide"><span>作为哪些模型的备（逗号分隔）</span><input id="m-fb" placeholder="可空"></label>
+    <div class="dlg-sec">预算与限额</div>
     <label><span>输入单价（元/百万 token）</span><input id="m-ci" type="number" value="0" min="0" step="0.01"></label>
     <label><span>输出单价（元/百万 token）</span><input id="m-co" type="number" value="0" min="0" step="0.01"></label>
     <label><span>速率上限 RPM</span><input id="m-rpm" type="number" value="60" min="1"></label>
     <label><span>质量分（0~1）</span><input id="m-quality" type="number" value="1" min="0" max="1" step="0.01"></label>
-    <label class="wide"><span>作为哪些模型的备（逗号分隔）</span><input id="m-fb" placeholder="可空"></label>
     <div class="muted" style="grid-column:1/-1;font-size:11.5px;line-height:1.6">
       思考强度按模型实际支持的档位填（如某模型支持 ultra 就写 ultra）——灵枢只会从这里挑，
       留空则该模型不发送思考强度。密钥随供应商，不在这里填。</div>
@@ -1489,62 +1598,78 @@ const PROVIDER_CN = { openai_compatible: "OpenAI 兼容", anthropic_compatible: 
 const fmtCtx = n => n > 0 ? (n >= 1000 ? Math.round(n / 1000) + "k" : String(n)) : "—";
 /* 内联 onclick 里的字符串实参：JSON 转义 + 去掉能提前闭合属性的字符 */
 const jsArg = s => JSON.stringify(String(s ?? "")).replace(/'/g, "\\u0027").replace(/</g, "\\u003c");
+const M_ICONS = {
+  file: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>`,
+  sync: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.7-6.4"/><path d="M21 3v6h-6"/></svg>`,
+  pencil: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/></svg>`,
+  trash: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>`,
+  plus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>`,
+  hub: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><circle cx="4.5" cy="5" r="1.8"/><circle cx="19.5" cy="5" r="1.8"/><circle cx="12" cy="20" r="1.8"/><path d="M9.8 10.2 6 6.3M14.2 10.2 18 6.3M12 15v3.2"/></svg>`,
+};
 
-function keyTag(p) {
-  return p.key_source === "vault"
-    ? `<span class="tag green" title="已加密存入本机密钥库（vault.db），重启与更新均保留">密钥已就绪 · 密钥库</span>`
-    : p.key_source === "env"
-      ? `<span class="tag green" title="环境变量 ${esc(p.key_env)}">密钥已就绪 · 环境变量</span>`
-      : `<span class="tag red" title="编辑该供应商填入密钥（加密存入本机密钥库），或配置环境变量">密钥未配置</span>`;
+function keyLed(p) {
+  if (p.key_source === "vault")
+    return `<span class="led ok" title="密钥已加密存入本机密钥库（vault.db），重启与更新均保留"></span><span class="pb-key ok">密钥已就绪 · 密钥库</span>`;
+  if (p.key_source === "env")
+    return `<span class="led ok" title="密钥来自环境变量 ${esc(p.key_env)}"></span><span class="pb-key ok">密钥已就绪 · 环境变量</span>`;
+  return `<span class="led bad" title="编辑该供应商填入密钥（加密存入本机密钥库），或配置环境变量"></span><span class="pb-key bad">密钥未配置</span>`;
 }
 
-function modelRow(m) {
-  const caps = (m.capabilities || []).map(c => `<span class="tag">${esc(c)}</span>`).join(" ");
-  const eff = (m.reasoning_effort_levels || []).length
-    ? esc(m.reasoning_effort_levels.join(" / ")) : `<span class="muted">—</span>`;
-  return `<tr>
-    <td><b class="mono" style="font-size:12.5px">${esc(m.model)}</b>
-      ${(m.is_fallback_for || []).length ? `<br><span class="tag">备：${esc(m.is_fallback_for.join(", "))}</span>` : ""}</td>
-    <td><span class="tag blue">${TIER_CN[m.tier] || esc(m.tier)}</span></td>
-    <td>${caps || `<span class="muted">—</span>`}</td>
-    <td style="font-size:12.5px">${fmtCtx(m.context_window)}</td>
-    <td style="font-size:12.5px">${eff}</td>
-    <td style="font-size:12.5px">${m.quality_score ?? "—"}</td>
-    <td style="white-space:nowrap">
-      <button class="btn sm" onclick='modelTest(${jsArg(m.model)})'>测试</button>
-      <button class="btn sm" onclick='modelEdit(${jsArg(m.model)})'>编辑</button>
-      <button class="btn sm danger" onclick='modelDel(${jsArg(m.model)})'>删除</button>
-    </td></tr>`;
+function modelTile(m) {
+  const caps = (m.capabilities || []).map(c => `<span class="tag">${esc(c)}</span>`).join("");
+  const eff = m.reasoning_effort_levels || [];
+  const q = m.quality_score;
+  return `<div class="mtile">
+    <div class="mt-id"><b>${esc(m.model)}</b><span class="tag tier-${esc(m.tier || "")}">${TIER_CN[m.tier] || esc(m.tier)}</span></div>
+    <div class="mt-caps">${caps || `<span class="muted" style="font-size:11.5px">未声明能力标签</span>`}</div>
+    <div class="mt-stats">
+      <div class="mstat"><div class="k">上下文窗口</div><div class="v">${fmtCtx(m.context_window)}</div></div>
+      <div class="mstat"><div class="k">质量分</div><div class="v">${q == null ? "—" : `<span class="qbar"><i style="width:${Math.max(0, Math.min(100, Math.round(q * 100)))}%"></i></span>${q}`}</div></div>
+    </div>
+    <div class="mt-eff"><span class="k">思考强度</span>${eff.length
+      ? eff.map(e => `<span class="eff-pill">${esc(e)}</span>`).join("")
+      : `<span class="muted" style="font-size:11.5px">端点默认档</span>`}</div>
+    ${(m.is_fallback_for || []).length ? `<div class="mt-fb">备：${esc(m.is_fallback_for.join("、"))}</div>` : ""}
+    <div class="mt-ops">
+      <button onclick='modelTest(${jsArg(m.model)})'>测试</button>
+      <button onclick='modelEdit(${jsArg(m.model)})'>编辑</button>
+      <button class="danger" onclick='modelDel(${jsArg(m.model)})'>删除</button>
+    </div>
+  </div>`;
 }
 
 async function loadModels() {
   try {
     const [pv, md] = await Promise.all([api("/api/providers"), api("/api/models")]);
     S.providers = pv.providers; S.models = md;
-    $("#models-path").textContent = md.path + "（密钥加密存入本机密钥库，不写回本文件）";
+    $("#models-path").innerHTML = `${M_ICONS.file}<span>${esc(md.path)} · 密钥加密存入本机密钥库，不写回本文件</span>`;
     const box = $("#providers-list");
     if (!pv.providers.length) {
-      box.innerHTML = `<div class="empty-note">还没有供应商——添加一个（填 API 地址与密钥），再一键获取可用模型列表</div>`;
+      box.innerHTML = `<div class="mempty">${M_ICONS.hub}
+        <div class="t">还没有供应商</div>
+        <div class="s">供应商 = 一个 API 地址 + 一把密钥。添加后点「获取模型列表」从云端勾选启用；<br>端点不提供列表接口时，在供应商里手动填模型 ID。</div>
+        <button class="btn primary" onclick="providerAdd()">+ 添加供应商</button></div>`;
       return;
     }
     box.innerHTML = pv.providers.map(p => {
       const mine = md.models.filter(m => (m.provider_ref || "") === p.name);
-      return `<div class="card pcard">
-        <div class="h"><b>${esc(p.name)}</b>
-          <span class="tag">${PROVIDER_CN[p.provider] || esc(p.provider)}</span>
-          ${keyTag(p)}
-          <span class="muted" style="margin-left:auto;font-size:12px">${mine.length} 个模型</span></div>
-        <div class="muted mono" style="font-size:11.5px;margin-top:5px">${esc(p.base_url || "（未填 API 地址）")}</div>
-        <div class="pops">
-          <button class="btn sm" onclick='providerFetch(${jsArg(p.name)})'>获取模型列表</button>
-          <button class="btn sm" onclick='modelAddTo(${jsArg(p.name)})'>手动添加模型</button>
-          <button class="btn sm" onclick='providerEdit(${jsArg(p.name)})'>编辑供应商</button>
-          <button class="btn sm danger" onclick='providerDel(${jsArg(p.name)})'>删除供应商</button>
+      return `<div class="pblock">
+        <div class="pb-head">
+          <div class="pb-id">
+            <div class="pb-r1">${keyLed(p)}<span class="pb-name">${esc(p.name)}</span>
+              <span class="tag blue">${PROVIDER_CN[p.provider] || esc(p.provider)}</span>
+              <span class="pb-count">${mine.length} 个模型</span></div>
+            <div class="pb-url" title="${esc(p.base_url || "")}">${esc(p.base_url || "（未填 API 地址）")}</div>
+          </div>
+          <div class="pb-ops">
+            <button class="btn sm tinted" onclick='providerFetch(${jsArg(p.name)})' style="display:inline-flex;align-items:center;gap:6px">${M_ICONS.sync}获取模型列表</button>
+            <button class="icon-btn" title="编辑供应商" onclick='providerEdit(${jsArg(p.name)})'>${M_ICONS.pencil}</button>
+            <button class="icon-btn danger" title="删除供应商" onclick='providerDel(${jsArg(p.name)})'>${M_ICONS.trash}</button>
+          </div>
         </div>
-        ${mine.length ? `<table class="list">
-          <thead><tr><th>模型 ID</th><th>档位</th><th>能力</th><th>上下文</th><th>思考强度</th><th>质量</th><th></th></tr></thead>
-          <tbody>${mine.map(modelRow).join("")}</tbody></table>`
-        : `<div class="empty-note" style="padding:20px 0">该供应商下还没有启用模型</div>`}
+        <div class="mgrid">${mine.map(modelTile).join("")}
+          <button class="ghost-tile" onclick='modelAddTo(${jsArg(p.name)})'>${M_ICONS.plus}手动添加模型</button>
+        </div>
       </div>`;
     }).join("");
   } catch (e) { toast(e.message, true); }
@@ -1641,7 +1766,7 @@ window.providerDel = async name => {
   catch (e) { toast(e.message, true); }
 };
 
-$("#p-add").onclick = () => {
+window.providerAdd = () => {
   S.pedit = null;
   $("#p-dlg-title").textContent = "添加供应商";
   for (const id of ["p-name", "p-baseurl", "p-keyenv", "p-keyval"]) $("#" + id).value = "";
@@ -1649,6 +1774,7 @@ $("#p-add").onclick = () => {
   $("#p-type").value = "openai_compatible";
   $("#p-dlg").showModal();
 };
+$("#p-add").onclick = window.providerAdd;
 $("#p-cancel").onclick = () => $("#p-dlg").close();
 $("#p-save").onclick = async () => {
   const name = $("#p-name").value.trim();
