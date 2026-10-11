@@ -1977,7 +1977,7 @@ window.providerFetch = async name => {
       $("#fm-body").innerHTML = `<div class="empty-note" style="padding:14px 0;text-align:left">
         未能自动获取模型列表：${esc(d.error || "未知错误")}
         ${(d.tried || []).length ? `<br><span class="muted" style="font-size:11.5px">已尝试：${esc((d.tried || []).join("　"))}</span>` : ""}
-        <br>该服务可能未提供模型列表——关掉本窗口，用「手动添加模型」直接填模型 ID 即可。</div>`;
+        <br>关掉本窗口，用「手动添加模型」直接填模型 ID 即可。</div>`;
       return;
     }
     const known = new Set((S.models.models || []).map(x => x.model));
@@ -1993,8 +1993,9 @@ window.providerFetch = async name => {
       }).join("")}</div>
       <label style="display:flex;gap:9px;align-items:center;margin-top:11px;font-size:12px;font-weight:600;color:var(--ink-2)">
         批量档位 <select id="fm-tier" style="width:auto">
-          <option>flagship</option><option>rigorous</option><option>code</option>
-          <option selected>fast</option><option>light</option></select></label>`;
+          <option value="flagship">旗舰档</option><option value="rigorous">严谨档</option>
+          <option value="code">代码档</option>
+          <option value="fast" selected>快速档</option><option value="light">轻量档</option></select></label>`;
     const boxes = [...$("#fm-body").querySelectorAll("input[type=checkbox]:not(:disabled)")];
     const sync = () => { $("#fm-add").disabled = !boxes.some(b => b.checked); };
     boxes.forEach(b => b.onchange = sync); sync();

@@ -1,7 +1,11 @@
 """供应商端点的模型列表拉取（Web「模型」页：获取模型列表）。
 
-主流兼容端点都提供模型列表接口（OpenAI 的 ``GET /models``、Anthropic 的
-``GET /v1/models``），但并非所有中转/代理端点都实现——拉不到不是异常，
+各家模型列表接口以 2026-10 官方文档逐一核实：OpenAI 兼容协议统一为
+``GET {base}/models``（DeepSeek/Kimi/MiniMax/硅基流动/千帆/阶跃/OpenAI/
+xAI/Groq/Mistral/OpenRouter/Ollama）；Anthropic 协议为
+``GET {base}/v1/models``（默认只返回 20 条，取全量需带 limit 参数）；
+阿里百炼的模型列表在 DashScope 原生路径 ``{origin}/api/v1/models``。
+方舟 plan 端点、腾讯混元等未提供公开的模型列表接口——拉不到不是异常，
 如实回报试过的地址与错误，用户改用手动填模型 ID 即可（同一入口）。
 本模块只做一次显式外呼（用户点击触发），不缓存、不重试。
 """
@@ -69,16 +73,28 @@ PROVIDER_PRESETS: list[dict[str, str]] = [
 
 
 def _candidate_urls(base_url: str, provider: str) -> list[str]:
-    """按协议给出候选地址（去重保序）：先最可能的，再常见变体。"""
+    """按协议给出候选地址（去重保序）：先官方文档记载的，再常见变体。
+
+    - anthropic_compatible：Anthropic 的 ``GET /v1/models`` 默认只回 20 条，
+      官方参数 limit 可取全量（上限 1000），故先带 limit、再不带、再裸 /models
+      （部分中转只实现裸路径）。
+    - 阿里百炼：官方文档化的列表接口是 DashScope 原生
+      ``GET {origin}/api/v1/models``（响应在 output.models[]）；兼容模式
+      ``{base}/models`` 官方文档未记载，作为后备候选。
+    - 其余 OpenAI 兼容各家：官方文档统一为 ``{base}/models``。
+    """
     base = (base_url or "").strip().rstrip("/")
     if not base:
         return []
     urls: list[str] = []
     if provider == "anthropic_compatible":
-        urls += [f"{base}/v1/models", f"{base}/models"]
+        urls += [f"{base}/v1/models?limit=1000", f"{base}/v1/models", f"{base}/models"]
+    elif "dashscope" in base or ".maas.aliyuncs.com" in base:
+        origin = "/".join(base.split("/")[:3])       # scheme://host
+        urls += [f"{origin}/api/v1/models", f"{base}/models"]
     else:
         urls += [f"{base}/models"]
-        if not base.endswith(("/v1", "/v3")):
+        if not base.endswith(("/v1", "/v2", "/v3")):
             urls += [f"{base}/v1/models"]
     out: list[str] = []
     for u in urls:
@@ -102,23 +118,34 @@ def _headers(provider: str, api_key: str) -> dict[str, str]:
 
 
 def _parse(payload: Any) -> list[dict[str, str]]:
-    """统一解析：OpenAI 与 Anthropic 的列表都在 data[]，条目取 id/display_name。"""
+    """统一解析各家模型列表（形状按官方文档与实测核实）：
+
+    - OpenAI 兼容各家 / Anthropic：``data[]``，条目取 id；
+    - 阿里百炼原生：``output.models[]``，条目以 model 为 ID、name 为显示名；
+    - 智谱 Response 基址（/api/v1）：``models[]``，条目以 slug 为 ID；
+    - Ollama 原生：``models[]``，条目 name/model 同为模型名。
+    """
     if not isinstance(payload, dict):
         return []
     items = payload.get("data")
     if not isinstance(items, list):
         items = payload.get("models") if isinstance(payload.get("models"), list) else []
-    out: list[dict[str, str]] = []
+    if not items:
+        out = payload.get("output")
+        if isinstance(out, dict) and isinstance(out.get("models"), list):
+            items = out["models"]
+    result: list[dict[str, str]] = []
     for it in items:
         if isinstance(it, str):
-            out.append({"id": it, "display_name": ""})
+            result.append({"id": it, "display_name": ""})
         elif isinstance(it, dict):
-            mid = str(it.get("id") or it.get("name") or "").strip()
+            mid = str(it.get("id") or it.get("model") or it.get("slug")
+                      or it.get("name") or "").strip()
             if mid:
-                out.append({"id": mid,
-                            "display_name": str(it.get("display_name")
-                                                or it.get("name") or "")})
-    return out
+                result.append({"id": mid,
+                               "display_name": str(it.get("display_name")
+                                                   or it.get("name") or "")})
+    return result
 
 
 async def fetch_model_list(spec: dict[str, Any]) -> dict[str, Any]:
@@ -152,5 +179,8 @@ async def fetch_model_list(spec: dict[str, Any]) -> dict[str, Any]:
                 errors.append(f"{url}: 响应里没有模型条目")
                 continue
             return {"ok": True, "url": url, "models": models}
-    return {"ok": False, "tried": urls,
-            "error": "；".join(errors)[:400] or "端点未返回可用模型列表"}
+    error = "；".join(errors)[:400] or "端点未返回可用模型列表"
+    if errors and all(": HTTP 404" in e for e in errors):
+        # 所有候选都是 404 = 该端点没有模型列表接口（如方舟 plan 端点、混元）
+        error = "该端点未提供模型列表接口"
+    return {"ok": False, "tried": urls, "error": error}
