@@ -93,6 +93,12 @@ mcp_servers:
 #   解出 bins/yak_linux_amd64 放入 .tools/yak/yak 并 chmod +x
 #   图形端「设置 → MCP」开启后亦可改走 http://127.0.0.1:11432/mcp（以应用内为准）。
 # —— 其余常见接入（按需启用；外部依赖，不随项目封装）：
+#   - name: pentest             # 一站式渗透工具箱：235 工具合一（nmap/nuclei/sqlmap/ffuf/impacket/hydra…）
+#     transport: stdio          #   官方无预构建镜像，本地自建：git clone github.com/halilkirazkaya/pentester-mcp
+#     command: docker           #   docker compose up -d --build 使容器常驻（容器名 pentester-mcp，Kali 底）
+#     args: ["exec", "-i", "pentester-mcp", "/app/.venv/bin/python", "/app/server.py"]
+#     timeout: 600              #   扫描类工具耗时长；工具档位由容器环境 MCP_CONFIG_PATH 选择
+#                               #   （example=1 / recon=28 / web=49 / full=235）
 #   - name: burp                # Web 漏洞扫描与模糊测试（PortSwigger 官方扩展；需 Burp 图形端常驻）
 #     transport: sse            #   官方 SSE 端点即根路径 http://127.0.0.1:9876（不带 /sse）
 #     url: http://127.0.0.1:9876
