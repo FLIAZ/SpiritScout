@@ -125,7 +125,8 @@ def ctf_plan_provider(challenges: list[dict[str, Any]], *,
                       round_no: int = 0,
                       solved: set[str] | None = None,
                       pending: set[str] | None = None,
-                      tried: dict[str, set[str]] | None = None) -> dict[str, Any]:
+                      tried: dict[str, set[str]] | None = None,
+                      skip_solved: bool = False) -> dict[str, Any]:
     """CTF 元规划（规则化，5.2.1）：跳过侦察，按方向生成 DAG 节点。
 
     首轮：每题按形态并行下发 1~2 个方向节点（无依赖、同时开工），各方向
@@ -133,6 +134,7 @@ def ctf_plan_provider(challenges: list[dict[str, Any]], *,
     拿到 Flag 且本轮尚无待发节点的题，换一个尚未试过的方向再攻（战术名带
     @轮次 后缀，绕开「同战术不重建」的去重）；方向试尽则回主方向重开新
     对话换角度——跨轮不重复做功由环形台账与题级共享结论保证。
+    skip_solved（续传首轮）：已破题的赛题不再重解，只派未破题的。
     """
     solved = solved or set()
     pending = pending or set()
@@ -140,7 +142,7 @@ def ctf_plan_provider(challenges: list[dict[str, Any]], *,
     nodes: list[dict[str, Any]] = []
     for ch in challenges:
         cid = str(ch.get("id") or ch.get("title") or "?")
-        if round_no > 0 and (cid in solved or cid in pending):
+        if (round_no > 0 or skip_solved) and (cid in solved or cid in pending):
             continue
         if round_no == 0:
             directions = _parallel_directions(ch)
@@ -191,11 +193,12 @@ class ModeAssembler:
         rules: CompetitionRules | None = None,
         flag_manager: FlagManager | None = None,
         competition_engine: CompetitionEngine | None = None,
+        resume: bool = False,
     ) -> ModeAssembly:
         if mode == RunMode.SRC:
             return self._assemble_src()
         if mode == RunMode.CTF:
-            return self._assemble_ctf(challenges or [], flag_manager)
+            return self._assemble_ctf(challenges or [], flag_manager, resume=resume)
         return self._assemble_competition(challenges or [], rules, flag_manager,
                                           competition_engine)
 
@@ -214,7 +217,8 @@ class ModeAssembler:
     # ------------------------------------------------------------ CTF
 
     def _assemble_ctf(
-        self, challenges: list[dict[str, Any]], flag_manager: FlagManager | None
+        self, challenges: list[dict[str, Any]], flag_manager: FlagManager | None,
+        *, resume: bool = False,
     ) -> ModeAssembly:
         agents: dict[AgentType, SubAgent] = {
             AgentType.CTF_WEB: CTFWebAgent(self.ctx, flag_manager=flag_manager, **self.kw),
@@ -239,7 +243,8 @@ class ModeAssembler:
                     pending.add(cid)
             return ctf_plan_provider(
                 challenges, round_no=int(state.get("round_no", 0) or 0),
-                solved=solved, pending=pending, tried=tried)
+                solved=solved, pending=pending, tried=tried,
+                skip_solved=resume and int(state.get("round_no", 0) or 0) == 0)
 
         return ModeAssembly(
             mode=RunMode.CTF,

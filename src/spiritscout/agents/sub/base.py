@@ -63,6 +63,7 @@ class StepResult:
     risk_delta: float = 0.0
     detection_signals: int = 0               # 防护拦截信号（WAF/403/429，喂 6.5 风险分）
     tokens_used: int = 0
+    final_note: bool = False                 # 收尾结论文本（路线笔记按更长限额保留）
 
 
 @dataclass
@@ -448,7 +449,10 @@ class SubAgent(abc.ABC):
             route.consecutive_failures += 1
         route.risk_score = min(route.risk_score + result.risk_delta, 1.0)
         if result.note:
-            route.notes.append(result.note[:300])
+            # 收尾结论是路线最有分量的文本（最终答案与依据），给长限额；
+            # 过程笔记只留摘要
+            route.notes.append(result.note[:1600] if result.final_note
+                               else result.note[:300])
         self.health_mgr.evaluate(route)
 
     def _reflect(self, route: RouteState, plan: RoutePlan) -> None:

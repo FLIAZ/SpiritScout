@@ -590,7 +590,7 @@ class CTFBaseAgent(SubAgent):
         key = f"shared|{self.challenge_id(task)}"
         got = self.cache.get(self.shared_namespace, key)
         conclusions = got if isinstance(got, list) else []
-        conclusions.append(f"[{self.direction}/{route.name}] {summary}"[:300])
+        conclusions.append(f"[{self.direction}/{route.name}] {summary}"[:1000])
         self.cache.put(self.shared_namespace, key, conclusions[-12:])
 
     # ------------------------------------------------------------ 环形共享缓存
@@ -790,10 +790,12 @@ class CTFBaseAgent(SubAgent):
             self._record_conclusion(task, route, summary or "模型未给出结论文本")
             self.ctx.audit.log("agent.conclude", self.agent_id, {
                 "route": route.name, "challenge": self.challenge_id(task),
-                "turn": turn, "summary": summary[:800]})
-            note = f"收尾（第 {turn} 回合）：{summary[:160] or '无结论文本'}"
+                "turn": turn, "summary": summary[:2000]})
+            # 结论文本（最终答案与依据，常含 Markdown 表格）走长限额，
+            # WriteUp 的「解题依据」段不再半途截断
+            note = f"收尾（第 {turn} 回合）：{summary[:1500] or '无结论文本'}"
             self._save_inv_state(task, route, state)
-            return StepResult(ok=True, value=boot_value,
+            return StepResult(ok=True, value=boot_value, final_note=True,
                               note=self._merge_note(boot_note, note))
 
         self.ctx.audit.log("agent.tool_call", self.agent_id, {

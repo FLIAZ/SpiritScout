@@ -39,9 +39,15 @@
 
 {% for r in ts.routes %}
 - 路线 `{{ r.name }}`：{{ r.status }}（健康度 {{ "%.2f" | format(r.health) }}，{{ r.steps_executed }} 步）
-{% for note in r.notes[:5] %}
+{% for note in r.notes[:3] %}
   - {{ note }}
 {% endfor %}
+{% if r.notes | length > 4 %}
+  - ……（中间 {{ r.notes | length - 4 }} 条过程记录从略）
+{% endif %}
+{% if r.notes | length > 3 %}
+  - {{ r.notes[-1] }}
+{% endif %}
 {% endfor %}
 
 {% endfor %}

@@ -389,12 +389,12 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                            payload: dict[str, Any]) -> dict[str, Any]:
         """会话途中用户给灵枢发意见：入会话收件箱 + 审计留痕（事件流可见）。
 
-        灵枢在最近的决策点取走消费：派发期督导（~4s 节拍，化为对子 Agent
+        灵枢在最近的决策点取走消费：派发期督导（~2s 节拍，化为对子 Agent
         的方向建议）或轮末复盘；消费动作有审计事件，意见不重不漏。
+        会话已终态时消息触发续传——灵枢带着同一工作区、审计与 Flag 库
+        重新开工，在最近的决策点消费用户意见（提问即回答，布置新方向即派工）。
         """
         session = _require(session_id)
-        if session.status in TERMINAL_STATES:
-            raise HTTPException(409, "会话已结束，不能再发送意见")
         content = str(payload.get("content") or "").strip()
         if not content:
             raise HTTPException(422, "意见内容为空")
@@ -403,7 +403,14 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         session.user_inbox.append({"kind": "message", "text": content})
         AuditLogger(session.audit_path).log(
             "user.message", "user", {"content": content})
-        return {"queued": True}
+        resumed = False
+        if session.status in TERMINAL_STATES:
+            try:
+                await manager.resume(session_id)
+                resumed = True
+            except SpiritScoutError as exc:
+                raise HTTPException(409, str(exc)) from exc
+        return {"queued": True, "resumed": resumed}
 
     @app.post("/api/sessions/{session_id}/attachments")
     async def upload_attachment(session_id: str, request: Request,
@@ -412,11 +419,10 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
 
         落到会话工作区 attachments/——file_analyze 的允许目录、沙箱工作区
         的子目录，两类工具通道都能直接读取；审计留痕后由灵枢在下一决策点
-        知会各 Agent（督导建议里带文件路径）。
+        知会各 Agent（督导建议里带文件路径）。终态会话也可上传：
+        附件随下一次续传（发消息触发）进入决策环。
         """
         session = _require(session_id)
-        if session.status in TERMINAL_STATES:
-            raise HTTPException(409, "会话已结束，不能再上传附件")
         clean = _clean_upload_name(name)
         body = await request.body()
         if not body:

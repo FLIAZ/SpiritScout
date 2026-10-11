@@ -347,12 +347,15 @@ async def run_ctf_engagement(
     approval_gate: Callable[[str, str], Awaitable[bool]] | None = None,
     ring: Any = None,
     user_inbox: list[dict[str, Any]] | None = None,
+    resume: bool = False,
 ) -> EngagementResult:
     """CTF 专项任务入口（4.4/5.2）：五方向专项 Agent + Flag 统一管理。
 
     硬约束 C7：CTF 模式不启用端口扫描（PolicyEngine 模式禁用表强制，
     即使 LLM 规划出扫描动作也会在工具门被拒）。
     flag_submit_fn=None 时只提取不提交（提交接口由使用者按赛方规范接入）。
+    resume=True（续传）：Flag 库照常重载，已破题的赛题不再重解，
+    未破题的与用户意见进入新一轮决策环。
     """
     if authorization.mode != RunMode.CTF:
         raise SpiritScoutError("run_ctf_engagement 要求授权模式为 CTF")
@@ -366,7 +369,8 @@ async def run_ctf_engagement(
             store_path=infra.workspace / "flags.json",
         )
         assembly = _make_assembler(infra, enable_llm_planning).assemble(
-            RunMode.CTF, challenges=challenges, flag_manager=flag_manager)
+            RunMode.CTF, challenges=challenges, flag_manager=flag_manager,
+            resume=resume)
         target = next(
             (str(c["url"]) for c in challenges if c.get("url")),
             "ctf://challenges",

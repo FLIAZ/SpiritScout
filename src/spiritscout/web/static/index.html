@@ -482,6 +482,25 @@ table.list tr:last-child td { border-bottom: 0; }
   background: color-mix(in srgb, var(--violet) 7%, var(--surface));
   border: 1px dashed color-mix(in srgb, var(--violet) 32%, var(--line)); }
 
+/* Markdown 渲染块（回合收尾后的发言/结论/灵枢回执） */
+.md { white-space: normal; }
+.md p { margin: 0 0 6px; }
+.md p:last-child { margin-bottom: 0; }
+.md h1, .md h2, .md h3, .md h4 { font-size: 13px; margin: 8px 0 4px; }
+.md ul { margin: 4px 0; padding-left: 18px; }
+.md code { font-family: var(--mono); font-size: .92em;
+  background: var(--surface-2); border-radius: 4px; padding: 0 4px; }
+.md pre { background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 10px; overflow-x: auto;
+  font-size: 11.5px; margin: 6px 0; }
+.md pre code { background: none; padding: 0; }
+.md table { border-collapse: collapse; margin: 6px 0; max-width: 100%;
+  display: block; overflow-x: auto; }
+.md th, .md td { border: 1px solid var(--line); padding: 4px 9px; font-size: 12px; }
+.md th { background: var(--surface-2); }
+.md hr { border: 0; border-top: 1px solid var(--line); margin: 8px 0; }
+.md a { word-break: break-all; }
+
 /* ================= 会话输入坞（页底常驻：意见 + 附件） ================= */
 .composer-dock { flex: none; padding-top: 12px; }
 .composer-dock .comp { background: var(--surface); border: 1px solid var(--line);
@@ -809,7 +828,7 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </button>
             <input type="file" id="comp-file" multiple hidden>
-            <span class="hint" id="comp-hint">会话进行中可随时给灵枢提意见 · Enter 发送 · Shift+Enter 换行</span>
+            <span class="hint" id="comp-hint">Enter 发送 · Shift+Enter 换行 · 会话结束后发送将自动续传</span>
             <button class="btn primary sm" id="comp-send" type="button">发送</button>
           </div>
         </div>
@@ -1189,11 +1208,11 @@ function renderSessionHead() {
   ].join("");
   $("#s-err").innerHTML = s.error ? `<div class="err-banner">${esc(s.error)}</div>` : "";
   const running = !TERMINAL.has(s.status);
-  $("#comp-send").disabled = !running;
-  $("#comp-attach").disabled = !running;
+  $("#comp-send").disabled = false;
+  $("#comp-attach").disabled = false;
   $("#comp-input").placeholder = running
     ? "给灵枢提意见、补充线索或上传附件…"
-    : "会话已结束";
+    : "会话已结束——继续提问或布置新方向，灵枢带着现场重新开工";
   $("#s-ops").innerHTML = `
     ${running ? `<button class="btn danger sm" id="op-stop">停止</button>` : ""}
     <a class="btn sm" href="/api/sessions/${S.cur}/report/download" download>下载报告</a>
@@ -1606,11 +1625,20 @@ function traceTurn(actor) {
     if (rows[i].dataset.agent === String(actor || "")) return rows[i];
   return null;
 }
-function traceFinishThinking(turn) {
+function traceCloseThinking(turn) {
   turn?.querySelectorAll(".tl-think.live").forEach(el => {
     el.classList.remove("live");
     const summary = el.querySelector("summary");
     if (summary) summary.textContent = "思考过程";
+  });
+}
+function traceFinishThinking(turn) {
+  traceCloseThinking(turn);
+  // 回合收尾：流式期间的纯文本替换为 Markdown 渲染（表格/代码块/列表）。
+  // 已渲染的块标记 .md，后续文本段另起新块，不再往里拼原文
+  turn?.querySelectorAll(".tl-say:not(.md)").forEach(el => {
+    el.classList.add("md");
+    el.innerHTML = mdRender(el.textContent || "");
   });
 }
 function argBrief(name, args) {
@@ -1669,8 +1697,9 @@ function tracePush(e) {
       } else {
         const text = d.text || "";
         if (!text) break;
-        traceFinishThinking(turn);
+        traceCloseThinking(turn);   // 文本开始：只关思考气泡，不渲染半截文本
         let el = flow.querySelector(".tl-say:last-child");
+        if (el && el.classList.contains("md")) el = null;   // 已渲染块不回填原文
         if (!el) {
           flow.insertAdjacentHTML("beforeend", '<div class="tl-say"></div>');
           el = flow.lastElementChild;
@@ -1725,9 +1754,9 @@ function tracePush(e) {
       const turn = traceTurn(actor);
       traceFinishThinking(turn);
       if (turn) turn.querySelector(".flow").insertAdjacentHTML("beforeend",
-        `<div class="tl-concl">${esc(d.summary || "")}</div>`);
+        `<div class="tl-concl md">${mdRender(d.summary || "")}</div>`);
       else traceAppend(e, `<div class="hd"><span class="who">${esc(actorName(actor))}</span></div>
-        <div class="flow"><div class="tl-concl">${esc(d.summary || "")}</div></div>`, "tl-turn");
+        <div class="flow"><div class="tl-concl md">${mdRender(d.summary || "")}</div></div>`, "tl-turn");
       traceScroll();
       break;
     }
@@ -1778,9 +1807,12 @@ function tracePush(e) {
           <span class="k">第 ${esc(d.round ?? "?")} 轮规划${n ? ` · ${n} 个方向节点` : ""}</span></div>
           ${d.analysis ? `<div class="ang">${esc(String(d.analysis))}</div>` : ""}`, "tl-master");
       } else if (d.action === "review") {
+        // 复盘结论优先显示灵枢自己的话（用户追问的答案也走这里）
+        const body = String(d.llm_reason || "").trim()
+          || (d.continue ? "继续迭代" : `收敛：${d.stop_reason || "目标达成"}`);
         traceAppend(e, `<div class="hd"><span class="who">${esc(actorName(actor))}</span>
           <span class="k">第 ${esc(d.round ?? "?")} 轮复盘</span></div>
-          <div class="ang">${d.continue ? "继续迭代" : `收敛：${d.stop_reason || "目标达成"}`}</div>`, "tl-master");
+          <div class="ang md">${mdRender(body)}</div>`, "tl-master");
       } else if (d.action === "user_feed_consumed") {
         const cn = { steering: "派发督导", review: "轮末复盘" }[d.channel] || "决策";
         traceAppend(e, `<div class="tl-reply">已收到你的意见，纳入本轮${cn}。</div>`, "tl-master");
@@ -1844,10 +1876,11 @@ function mdRender(md) {
     if (inCode) { html += escT(ln) + "\n"; continue; }
     const h = ln.match(/^(#{1,4})\s+(.*)/);
     if (h) { closeList(); const lv = h[1].length; html += `<h${lv}>${inline(h[2])}</h${lv}>`; continue; }
-    if (/^\s*\|.*\|\s*$/.test(ln)) {
+    if (/^\s*\|/.test(ln)) {          // 表格行：容忍缺尾 | 的行（模型产出常见）
       closeList();
-      const cells = ln.trim().slice(1, -1).split("|").map(c => c.trim());
-      if (cells.every(c => /^:?-{2,}:?$/.test(c))) continue;
+      const cells = ln.trim().replace(/^\|/, "").replace(/\|\s*$/, "")
+        .split("|").map(c => c.trim());
+      if (cells.every(c => /^:?-{2,}:?$/.test(c))) continue;   // 分隔行不渲染
       if (!inTable) { html += "<table>"; inTable = true; }
       html += "<tr>" + cells.map(c => `<td>${inline(c)}</td>`).join("") + "</tr>";
       continue;
@@ -2323,21 +2356,29 @@ async function compSend() {
   const files = [...S.compFiles];
   if (!text && !files.length) return;
   const sess = S.cur ? S.sessions.find(x => x.session_id === S.cur) : null;
-  if (!sess || TERMINAL.has(sess.status)) {
-    toast("会话未在运行，无法发送", true);
+  if (!sess) {
+    toast("先选择会话或下达任务", true);
     return;
   }
   $("#comp-send").disabled = true;
   try {
     for (const f of files) await uploadAttachment(f);
-    if (text) await api(`/api/sessions/${S.cur}/messages`,
-      { method: "POST", body: JSON.stringify({ content: text }) });
+    let resumed = false;
+    if (text) {
+      const resp = await api(`/api/sessions/${S.cur}/messages`,
+        { method: "POST", body: JSON.stringify({ content: text }) });
+      resumed = !!resp.resumed;
+    }
     compInput.value = "";
     compGrow();
     S.compFiles = [];
     renderFileChips("#comp-files", S.compFiles);
+    if (resumed) {
+      toast("灵枢带着现场重新开工——你的消息已进入它的决策环");
+      refreshSessions();
+    }
   } catch (e) { toast(e.message, true); }
-  $("#comp-send").disabled = TERMINAL.has(sess.status);
+  $("#comp-send").disabled = false;
 }
 
 /* ================= 发起会话 ================= */

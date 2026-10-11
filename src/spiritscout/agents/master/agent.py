@@ -298,6 +298,18 @@ class MasterAgent:
                               if k in ("title", "direction", "category", "points",
                                        "description")},
             })
+        # 无可裁量项即不调用模型（省一次往返，不损质量——没有选择就没有决策）：
+        # 全部为 CTF 解题任务（路线预算固定）且每个任务的可用模型至多一个
+        # 思考档位（或未声明，用端点默认档）
+        if (all(t.task_type == "ctf_solve" for t, _ in task_objs)
+                and all(len(opts) <= 1 for opts in options.values())):
+            for i, (t, _) in enumerate(task_objs):
+                if options[i]:
+                    t.reasoning_effort = options[i][0]
+            ctx.audit.log("decision.change", self.agent_id, {
+                "action": "dispatch_plan_skipped", "count": len(task_objs),
+                "reason": "路线预算固定且思考档位无可选空间，按声明档直接采用"})
+            return
         try:
             resp = await ctx.gateway.chat(
                 [
@@ -438,7 +450,7 @@ class MasterAgent:
 
     # ------------------------------------------------------------ 环形督导
 
-    _STEER_INTERVAL = 4.0   # 观察节拍（秒）；无进展变化不调用 LLM
+    _STEER_INTERVAL = 2.0   # 观察节拍（秒）；无进展变化不调用 LLM
     _STEER_MAX_CALLS = 3    # 单轮派发内督导 LLM 调用上限（预算护栏）
     _STEER_FEED_MAX_CALLS = 6   # 用户意见触发的督导调用单独预算（不挤占自动督导）
 
@@ -642,8 +654,13 @@ class MasterAgent:
             stop_reason = "连续 2 轮 Flag 无进展，规则引擎熔断收敛"
             flags_pending = False
 
-        # LLM 全局复盘（建议者）；规则引擎裁决：DAG 未竟时否决收敛建议
-        llm_decision = await self._llm_review(state, view) if ctx.enable_llm_planning else None
+        # LLM 全局复盘（建议者）；规则引擎裁决：DAG 未竟时否决收敛建议。
+        # 收敛已由规则确定且无用户意见待消费时，复盘建议无从发挥作用——
+        # 直接跳过（省一次往返；建议本就不会被采纳，不损质量）
+        pending_feed = bool(self.ctx.extra.get("user_inbox"))
+        llm_decision = (await self._llm_review(state, view)
+                        if ctx.enable_llm_planning and (not stop_reason or pending_feed)
+                        else None)
         if llm_decision and not stop_reason:
             if not llm_decision.get("continue_iteration", False):
                 if dag.has_unfinished():
@@ -676,6 +693,7 @@ class MasterAgent:
         ctx.audit.log("decision.change", self.agent_id, {
             "action": "review", "round": state["round_no"],
             "continue": continue_iteration, "stop_reason": stop_reason,
+            "llm_reason": str((llm_decision or {}).get("reason", ""))[:400],
             "view": view, "verdicts": verdicts})
         return {"dag": dag.to_dict(), "round_no": next_round,
                 "continue_iteration": continue_iteration, "stop_reason": stop_reason}
