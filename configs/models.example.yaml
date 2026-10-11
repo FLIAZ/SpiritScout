@@ -35,7 +35,8 @@
 # 思考强度、用端点默认档。取值会原样下发：
 #   - OpenAI 兼容端点：作为 reasoning_effort 字段发给端点，端点不认会明确报错；
 #   - Anthropic 兼容端点：纯数字（如 4096）按原生思考预算 thinking.budget_tokens
-#     发送；档位名（如 high）由底层翻译成思考预算。
+#     发送；档位名（如 high）作为 reasoning_effort 发给端点，怎么解释由端点决定
+#     （Claude 系模型由底层换算成思考预算）。
 # 拿不准端点支持哪些档位时留空最稳（不发送 = 不会因参数被拒而调用失败）。
 #
 # 未配置 key 前系统无法发起 LLM 调用；离线开发/测试请用 configs/models.mock.yaml。

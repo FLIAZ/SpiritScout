@@ -438,10 +438,15 @@ class LiteLLMBackend(ChatBackend):
 
         - chat completions：``reasoning_effort`` 原样透传，端点自行裁决——litellm
           对未收录的模型名就是透传，端点不认会明确报错，不会被悄悄吞掉；
-        - anthropic messages：纯数字取值按原生 token 预算发 ``thinking``（Anthropic
-          开思考时 temperature 必须为 1、max_tokens 必须大于预算，这里一并满足）；
-          其余取值走 ``reasoning_effort`` 由 litellm 翻译成思考预算，翻译不了的
-          档位由 litellm 报错——错误如实上报，不静默降级。
+        - anthropic messages：litellm 只对它模型表里收录的 Claude 模型放行
+          ``thinking`` / ``reasoning_effort``，第三方兼容端点的自有模型名（glm-5.3
+          等）会被它整单拒绝，所以先问 litellm 认不认这个模型名：认，走它的原生
+          翻译；不认，用 ``allowed_openai_params`` 把参数按 Anthropic 协议原样
+          送进请求体，由端点自行裁决。
+        纯数字取值一律按原生 token 预算发 ``thinking``（Anthropic 开思考时
+        temperature 必须为 1、max_tokens 必须大于预算，这里一并满足）；档位名
+        （如 high）发 ``reasoning_effort``——它是端点自己的词汇，端点怎么解释由
+        端点决定，端点的思考开关一并打开。端点不认会明确报错，不静默降级。
         """
         if not effort:
             return
@@ -449,12 +454,40 @@ class LiteLLMBackend(ChatBackend):
             kwargs["reasoning_effort"] = effort
             return
         kwargs["temperature"] = 1
+        thinking: dict[str, Any] | None = None
         if effort.isdigit():
             budget = int(effort)
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            thinking = {"type": "enabled", "budget_tokens": budget}
             kwargs["max_tokens"] = max(int(kwargs.get("max_tokens") or 0), budget + 1024)
-        else:
+        if LiteLLMBackend._anthropic_native_effort(str(kwargs.get("model") or "")):
+            if thinking is not None:
+                kwargs["thinking"] = thinking
+            else:
+                kwargs["reasoning_effort"] = effort
+            return
+        # litellm 不认识的模型名（第三方兼容端点的自有模型）：带 allowed_openai_params
+        # 原样透传，参数不经过 litellm 的模型表校验，直接进请求体。
+        kwargs["allowed_openai_params"] = ["thinking", "reasoning_effort"]
+        kwargs["thinking"] = thinking if thinking is not None else {"type": "enabled"}
+        if thinking is None:
             kwargs["reasoning_effort"] = effort
+
+    @staticmethod
+    def _anthropic_native_effort(model: str) -> bool:
+        """litellm 是否认识这个模型名、肯替它翻译思考强度参数。
+
+        判据就是 litellm 自己放行参数时用的那张表（``get_supported_openai_params``）：
+        收录的 Claude 模型支持 ``reasoning_effort``/``thinking``，其余模型名一律
+        不支持。探测失败按不支持处理——走原样透传，由端点裁决。
+        """
+        try:
+            import litellm
+
+            params = litellm.get_supported_openai_params(
+                model=model, custom_llm_provider="anthropic") or []
+        except Exception:  # noqa: BLE001 —— 探测失败不阻断调用，按透传处理
+            return False
+        return "reasoning_effort" in params
 
     @staticmethod
     def _opt_unsupported(exc: Exception, opt: str) -> bool:
