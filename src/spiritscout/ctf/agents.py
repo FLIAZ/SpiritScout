@@ -719,9 +719,18 @@ class CTFBaseAgent(SubAgent):
         if not state["messages"]:
             boot_value, boot_note = await self._inv_bootstrap(task, route, state)
             self._seed_messages(task, route, plan, state)
-        elif (update := self._peer_updates(task, state)):
-            # 同伴动态作为新消息注入：并行 Agent 的现场即时互通
-            state["messages"].append({"role": "user", "content": update})
+        else:
+            if (update := self._peer_updates(task, state)):
+                # 同伴动态作为新消息注入：并行 Agent 的现场即时互通
+                state["messages"].append({"role": "user", "content": update})
+            steer = (self.ctx.ring.steering_for(self.agent_type.value)
+                     if self.ctx.ring is not None else None)
+            if steer and float(steer.get("ts") or 0) > float(state.get("steer_seen") or 0):
+                # 灵枢督导（含用户会话中发来的意见）注入活跃解题对话；
+                # 一条建议只注入一次（ts 水位），采纳与否由模型自行权衡
+                state["messages"].append({"role": "user", "content":
+                    f"灵枢督导（全局方向建议，结合现场自行权衡）：{steer['hint']}"})
+                state["steer_seen"] = steer["ts"]
 
         state["turn"] += 1
         turn = state["turn"]

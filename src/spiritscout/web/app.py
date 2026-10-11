@@ -310,6 +310,66 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             raise HTTPException(409, f"待确认项不存在或已裁决: {approval_id}")
         return {"approval_id": approval_id, "allow": allow}
 
+    # ------------------------------------------------------------ 会话协作（用户 → 灵枢）
+
+    _MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+
+    @app.post("/api/sessions/{session_id}/messages")
+    async def post_message(session_id: str,
+                           payload: dict[str, Any]) -> dict[str, Any]:
+        """会话途中用户给灵枢发意见：入会话收件箱 + 审计留痕（事件流可见）。
+
+        灵枢在最近的决策点取走消费：派发期督导（~4s 节拍，化为对子 Agent
+        的方向建议）或轮末复盘；消费动作有审计事件，意见不重不漏。
+        """
+        session = _require(session_id)
+        if session.status in TERMINAL_STATES:
+            raise HTTPException(409, "会话已结束，不能再发送意见")
+        content = str(payload.get("content") or "").strip()
+        if not content:
+            raise HTTPException(422, "意见内容为空")
+        if len(content) > 4000:
+            raise HTTPException(422, "意见过长（≤4000 字）")
+        session.user_inbox.append({"kind": "message", "text": content})
+        AuditLogger(session.audit_path).log(
+            "user.message", "user", {"content": content})
+        return {"queued": True}
+
+    @app.post("/api/sessions/{session_id}/attachments")
+    async def upload_attachment(session_id: str, request: Request,
+                                name: str = Query(...)) -> dict[str, Any]:
+        """会话区上传附件（请求体为文件原始字节，?name= 携带文件名）。
+
+        落到会话工作区 attachments/——file_analyze 的允许目录、沙箱工作区
+        的子目录，两类工具通道都能直接读取；审计留痕后由灵枢在下一决策点
+        知会各 Agent（督导建议里带文件路径）。
+        """
+        session = _require(session_id)
+        if session.status in TERMINAL_STATES:
+            raise HTTPException(409, "会话已结束，不能再上传附件")
+        clean = Path(name.replace("\\", "/")).name.strip()
+        if (not clean or clean in (".", "..") or len(clean) > 200
+                or any(ord(c) < 32 for c in clean)):
+            raise HTTPException(422, "附件名不合法")
+        body = await request.body()
+        if not body:
+            raise HTTPException(422, "附件内容为空")
+        if len(body) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                413, f"附件过大（上限 {_MAX_UPLOAD_BYTES // (1024 * 1024)}MB）")
+        dest_dir = session.workspace / "attachments"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / clean
+        if dest.exists():                      # 同名不覆盖：追加序号
+            stem, suffix, n = dest.stem, dest.suffix, 2
+            while dest.exists():
+                dest = dest_dir / f"{stem}-{n}{suffix}"
+                n += 1
+        dest.write_bytes(body)
+        AuditLogger(session.audit_path).log("user.attachment", "user", {
+            "name": dest.name, "size": len(body), "path": str(dest)})
+        return {"name": dest.name, "size": len(body), "path": str(dest)}
+
     @app.delete("/api/sessions/{session_id}")
     async def delete_session(session_id: str,
                              confirm: bool = Query(False)) -> dict[str, Any]:

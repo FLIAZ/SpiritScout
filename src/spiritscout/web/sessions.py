@@ -120,6 +120,10 @@ class Session:
     # 环形协同台账：子 Agent 已尝试登记 + 灵枢督导建议（进程内，随会话消亡）
     ring: RingLedger = field(
         default_factory=RingLedger, repr=False, compare=False)
+    # 用户会话中发来的意见与附件记录（进程内收件箱；灵枢在最近的决策点
+    # 取走消费——派发期督导或轮末复盘，消费动作落审计事件）
+    user_inbox: list[dict[str, Any]] = field(
+        default_factory=list, repr=False, compare=False)
 
     # ---- 路径（隔离边界）
     @property
@@ -369,7 +373,8 @@ class SessionManager:
                         enable_llm_planning=not no_llm,
                         agent_models=agent_models,
                         approval_gate=session.approvals.ask,
-                        ring=session.ring)
+                        ring=session.ring,
+                        user_inbox=session.user_inbox)
                 elif mode == RunMode.COMPETITION:
                     result = await run_competition_engagement(
                         cfg=cfg, models=models,
@@ -378,7 +383,8 @@ class SessionManager:
                         enable_llm_planning=not no_llm,
                         agent_models=agent_models,
                         approval_gate=session.approvals.ask,
-                        ring=session.ring)
+                        ring=session.ring,
+                        user_inbox=session.user_inbox)
                 else:
                     result = await run_engagement(
                         cfg=cfg, models=models,
@@ -388,7 +394,8 @@ class SessionManager:
                         mission=plan.mission,
                         agent_models=agent_models,
                         approval_gate=session.approvals.ask,
-                        ring=session.ring)
+                        ring=session.ring,
+                        user_inbox=session.user_inbox)
                 session.status = "completed"
                 session.summary = {
                     "run": result.run_summary,

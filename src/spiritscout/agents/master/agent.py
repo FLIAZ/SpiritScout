@@ -440,28 +440,52 @@ class MasterAgent:
 
     _STEER_INTERVAL = 4.0   # 观察节拍（秒）；无进展变化不调用 LLM
     _STEER_MAX_CALLS = 3    # 单轮派发内督导 LLM 调用上限（预算护栏）
+    _STEER_FEED_MAX_CALLS = 6   # 用户意见触发的督导调用单独预算（不挤占自动督导）
+
+    def _drain_user_feed(self) -> list[dict[str, Any]]:
+        """取走用户会话中发来的意见与附件记录（不重不漏地抵达一个决策点）。"""
+        inbox = self.ctx.extra.get("user_inbox")
+        if not inbox:
+            return []
+        items = list(inbox)
+        inbox.clear()
+        return items
+
+    def _return_user_feed(self, feed: list[dict[str, Any]]) -> None:
+        """决策调用失败时把用户意见原样退回收件箱（不丢用户的话）。"""
+        if feed:
+            self.ctx.extra.setdefault("user_inbox", [])[:0] = feed
 
     async def _steering_watch(self, task_ids: list[str]) -> None:
-        """派发期并发督导：读各任务实时路线笔记 → LLM 判读全局 → 写方向建议。
+        """派发期并发督导：读各任务实时路线笔记 + 用户发来的意见 → LLM 判读
+        全局 → 写方向建议。
 
         确定性边界：本函数只做「读进度、问模型、投递建议」；建议是否采纳由
         子 Agent 的 LLM 在其决策上下文中自行权衡，执行仍走原确定性通道。
-        模型不可用/输出不合规 → 本轮督导静默跳过（督导是增益而非主链）。
+        用户意见绕过进度指纹门（意见本身就是新信息），预算单独计；
+        模型不可用/输出不合规 → 意见退回收件箱留给下一个决策点，不丢。
         """
         assert self.ctx.audit is not None
         last_fingerprint = ""
         calls = 0
+        feed_calls = 0
         while True:
             await asyncio.sleep(self._STEER_INTERVAL)
             digest = self._progress_digest(task_ids)
             if not digest["tasks"]:
                 continue
+            feed = (self._drain_user_feed()
+                    if feed_calls < self._STEER_FEED_MAX_CALLS else [])
             fingerprint = json.dumps(digest, ensure_ascii=False, sort_keys=True)
-            if fingerprint == last_fingerprint or calls >= self._STEER_MAX_CALLS:
+            if not feed and (fingerprint == last_fingerprint
+                             or calls >= self._STEER_MAX_CALLS):
                 continue
             last_fingerprint = fingerprint
-            steering = await self._llm_steer(digest)
-            calls += 1
+            steering = await self._llm_steer(digest, user_feed=feed)
+            if feed:
+                feed_calls += 1
+            else:
+                calls += 1
             for item in steering:
                 self.ctx.ring.steer(item["agent"], item["hint"],
                                     rationale=item.get("rationale", ""))
@@ -517,22 +541,25 @@ class MasterAgent:
                 })
         return routes
 
-    async def _llm_steer(self, digest: dict[str, Any]) -> list[dict[str, Any]]:
-        """LLM 判读全局进度，产出需调整方向的子 Agent 建议（白名单校验）。"""
+    async def _llm_steer(self, digest: dict[str, Any],
+                         user_feed: list[dict[str, Any]] | None = None
+                         ) -> list[dict[str, Any]]:
+        """LLM 判读全局进度，产出需调整方向的子 Agent 建议（白名单校验）。
+
+        user_feed：用户会话中发来的意见与附件记录——优先响应；失败原样退回。
+        """
         valid_agents = sorted({t["agent"] for t in digest["tasks"] if t.get("agent")})
+        feed = list(user_feed or [])
         if not valid_agents:
+            self._return_user_feed(feed)
             return []
         try:
-            resp = await self.ctx.gateway.chat(
-                [
-                    {"role": "system", "content": self._system_prompt()
-                     + "\nROLE: collab_judge"},
-                    {"role": "user", "content": json.dumps({
-                        "action": "steer",
-                        "mission": self._mission()[:1000],
-                        "progress": digest,
-                        "agents": valid_agents,
-                        "constraints": (
+            payload: dict[str, Any] = {
+                "action": "steer",
+                "mission": self._mission()[:1000],
+                "progress": digest,
+                "agents": valid_agents,
+                "constraints": (
                             "你在实时督导并行作业的子 Agent。依据各路线进度与最新"
                             "笔记判断：谁走进了死胡同（建议换方向）、谁发现了高价值"
                             "线索（建议深挖或提醒同伴接力）、谁在同质重复做功"
@@ -540,22 +567,42 @@ class MasterAgent:
                             "Agent 给建议，一切正常则返回空列表。返回 JSON："
                             "{\"steering\": [{\"agent\": 仅 agents 列表之一, "
                             "\"hint\": 一句话方向建议, \"rationale\": 判断依据}]}"),
-                    }, ensure_ascii=False)},
+            }
+            if feed:
+                payload["user_feed"] = feed
+                payload["constraints"] += (
+                    " user_feed 是用户在会话进行中直接发来的意见（message）与上传的"
+                    "附件（attachment，文件已放在会话工作区 attachments/ 下，子 "
+                    "Agent 可直接读取）。优先响应意见：给出与用户意图一致的方向"
+                    "建议；附件则建议合适的 Agent 尽快分析，hint 里写明文件路径。"
+                    "用户正在等灵枢的反应，除非确实无需调整，不要返回空列表。")
+            resp = await self.ctx.gateway.chat(
+                [
+                    {"role": "system", "content": self._system_prompt()
+                     + "\nROLE: collab_judge"},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],
                 task_type="meta_planning", response_format="json",
             )
             data = extract_json(resp.content) or {}
             items = data.get("steering")
             if not isinstance(items, list):
-                return []
-            return [
+                raise TypeError("steering 应答不是列表")
+            out = [
                 {"agent": str(i["agent"]), "hint": str(i["hint"])[:300],
                  "rationale": str(i.get("rationale", ""))[:200]}
                 for i in items
                 if isinstance(i, dict) and i.get("agent") in valid_agents
                 and isinstance(i.get("hint"), str) and i["hint"].strip()
             ]
-        except Exception:  # noqa: BLE001 —— 督导失败静默跳过，不拖垮派发
+            if feed:
+                assert self.ctx.audit is not None
+                self.ctx.audit.log("decision.change", self.agent_id, {
+                    "action": "user_feed_consumed", "channel": "steering",
+                    "count": len(feed), "hints": len(out)})
+            return out
+        except Exception:  # noqa: BLE001 —— 督导失败意见退回，不拖垮派发
+            self._return_user_feed(feed)
             return []
 
     # ------------------------------------------------------------ 节点：汇聚
@@ -792,21 +839,19 @@ class MasterAgent:
         }
 
     async def _llm_review(self, state: MasterState, view: dict) -> dict[str, Any] | None:
+        feed = self._drain_user_feed()
         try:
             tactic_map = self.ctx.tactic_map or TACTIC_AGENT_MAP
-            resp = await self.ctx.gateway.chat(
-                [
-                    {"role": "system", "content": self._system_prompt() + "\nROLE: meta_planner"},
-                    {"role": "user", "content": json.dumps({
-                        "action": "review", "view": view,
-                        "mission": self._mission()[:2000],
-                        "dag_stats": TaskDAG.from_dict(state["dag"]).stats(),
-                        "available_tactics": {
-                            t: {"agent": a.value, "task_type": tt}
-                            for t, (a, tt) in tactic_map.items()},
-                        "situation": self._situation_digest(),
-                        "round_routes": self._route_digest(state),
-                        "constraints": (
+            payload: dict[str, Any] = {
+                "action": "review", "view": view,
+                "mission": self._mission()[:2000],
+                "dag_stats": TaskDAG.from_dict(state["dag"]).stats(),
+                "available_tactics": {
+                    t: {"agent": a.value, "task_type": tt}
+                    for t, (a, tt) in tactic_map.items()},
+                "situation": self._situation_digest(),
+                "round_routes": self._route_digest(state),
+                "constraints": (
                             "返回 JSON：{\"continue_iteration\": bool, \"reason\": str, "
                             "\"dag_nodes\": [{\"tactic\": 仅可用战术之一, \"title\": str, "
                             "\"depends_on\": []}]}。"
@@ -817,12 +862,29 @@ class MasterAgent:
                             "continue_iteration=true 并给出换思路的新节点"
                             "（dag_nodes 必填，否则等于收手）；"
                             "确认无解题空间时 continue_iteration=false 并说明理由。"),
-                    }, ensure_ascii=False)},
+            }
+            if feed:
+                payload["user_feed"] = feed
+                payload["constraints"] += (
+                    " user_feed 是用户在会话中发来的意见与上传的附件（attachment "
+                    "的文件在工作区 attachments/ 下，构造新节点时可在 title 里点明"
+                    "分析目标）。请优先结合用户意图决策。")
+            resp = await self.ctx.gateway.chat(
+                [
+                    {"role": "system", "content": self._system_prompt() + "\nROLE: meta_planner"},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],
                 task_type="meta_planning", response_format="json",
             )
-            return extract_json(resp.content)
+            data = extract_json(resp.content)
+            if feed:
+                assert self.ctx.audit is not None
+                self.ctx.audit.log("decision.change", self.agent_id, {
+                    "action": "user_feed_consumed", "channel": "review",
+                    "count": len(feed)})
+            return data
         except Exception:  # noqa: BLE001
+            self._return_user_feed(feed)
             return None
 
     def _rule_plan(self, state: MasterState) -> dict[str, Any]:

@@ -246,6 +246,7 @@ async def _run_master(
     *,
     enable_llm_planning: bool,
     mission: str = "",
+    user_inbox: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """装配主 Agent 并运行多轮闭环，返回 run_summary。"""
     master = MasterAgent(MasterContext(
@@ -257,7 +258,8 @@ async def _run_master(
         audit=infra.audit, enable_llm_planning=enable_llm_planning,
         tactic_map=assembly.tactic_map, plan_override=assembly.plan_provider,
         extra={"mode_notes": assembly.notes, "mission": mission,
-               "flag_manager": getattr(assembly, "flag_manager", None)},
+               "flag_manager": getattr(assembly, "flag_manager", None),
+               "user_inbox": user_inbox if user_inbox is not None else []},
         knowledge=infra.knowledge,   # 主 Agent 攻击路径模板接线（3.3.6）
         ring=infra.ring,             # 灵枢督导通道（与子 Agent 共持同一台账）
     ))
@@ -286,6 +288,7 @@ async def run_engagement(
     agent_models: dict[str, str] | None = None,
     approval_gate: Callable[[str, str], Awaitable[bool]] | None = None,
     ring: Any = None,
+    user_inbox: list[dict[str, Any]] | None = None,
 ) -> EngagementResult:
     """SRC 模式任务入口：侦察 → 探测 → 全链路核验 → 报告。
 
@@ -301,7 +304,7 @@ async def run_engagement(
         assembly = _make_assembler(infra, enable_llm_planning).assemble(RunMode.SRC)
         run_summary = await _run_master(
             infra, assembly, target, enable_llm_planning=enable_llm_planning,
-            mission=mission)
+            mission=mission, user_inbox=user_inbox)
 
         # ---- 全链路核验（4.3）：仅 ACCEPTED 漏洞入报告收录池
         # 接入知识库（误报特征/P0~P4 分级/PoC 模板/verify_method 联动）
@@ -343,6 +346,7 @@ async def run_ctf_engagement(
     agent_models: dict[str, str] | None = None,
     approval_gate: Callable[[str, str], Awaitable[bool]] | None = None,
     ring: Any = None,
+    user_inbox: list[dict[str, Any]] | None = None,
 ) -> EngagementResult:
     """CTF 专项任务入口（4.4/5.2）：五方向专项 Agent + Flag 统一管理。
 
@@ -368,7 +372,8 @@ async def run_ctf_engagement(
             "ctf://challenges",
         )
         run_summary = await _run_master(
-            infra, assembly, target, enable_llm_planning=enable_llm_planning)
+            infra, assembly, target, enable_llm_planning=enable_llm_planning,
+            user_inbox=user_inbox)
 
         # ---- Flag 统一提交（4.4.6：格式校验/去重/频率控制/退避重试）
         submit_stats = await flag_manager.submit_all()
@@ -407,6 +412,7 @@ async def run_competition_engagement(
     agent_models: dict[str, str] | None = None,
     approval_gate: Callable[[str, str], Awaitable[bool]] | None = None,
     ring: Any = None,
+    user_inbox: list[dict[str, Any]] | None = None,
 ) -> EngagementResult:
     """智能渗透赛任务入口（4.5/5.3）：赛制自适应调度。
 
@@ -468,7 +474,8 @@ async def run_competition_engagement(
             authorization.target_description or "competition://contest",
         )
         run_summary = await _run_master(
-            infra, assembly, target, enable_llm_planning=enable_llm_planning)
+            infra, assembly, target, enable_llm_planning=enable_llm_planning,
+            user_inbox=user_inbox)
 
         # 靶场/AWD 攻击线产出漏洞 → 全链路核验（4.3， 接入知识库）
         verify_stats: dict[str, int] = {}

@@ -58,6 +58,8 @@
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
+/* display:flex/none 类布局规则会压过 UA 的 [hidden]——显式兜底 */
+[hidden] { display: none !important; }
 body {
   margin: 0; background: var(--bg); color: var(--ink);
   font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
@@ -152,6 +154,8 @@ main { min-width: 0; padding: 22px 26px 40px; }
   .side { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
   #sess-list { max-height: 180px; }
   main { padding: 16px; }
+  #view-session { height: auto; }
+  #tab-area { min-height: 58vh; }
 }
 
 /* ================= 通用组件 ================= */
@@ -192,8 +196,11 @@ main { min-width: 0; padding: 22px 26px 40px; }
 .muted { color: var(--ink-3); }
 .empty-note { color: var(--ink-3); text-align: center; padding: 48px 0; font-size: 13px; }
 
-/* ================= 空态：任务下达 ================= */
-#view-home { max-width: 760px; margin: 7vh auto 0; }
+/* ================= 空态：任务下达（输入框常驻页底，Chat 式） ================= */
+#view-home { max-width: 780px; margin: 0 auto; width: 100%;
+  min-height: calc(100vh - 62px); display: flex; flex-direction: column; }
+#view-home .hero { flex: 1; display: flex; flex-direction: column;
+  justify-content: center; padding: 20px 0 30px; }
 #view-home .lead { font-size: 26px; font-weight: 800; letter-spacing: -.02em; margin: 0 0 6px; }
 #view-home .sub { color: var(--ink-2); margin: 0 0 22px; }
 .composer { padding: 18px; }
@@ -211,8 +218,9 @@ main { min-width: 0; padding: 22px 26px 40px; }
 .notice { font-size: 12px; color: var(--ink-3); margin-top: 14px; display: flex; gap: 6px; align-items: flex-start; }
 .notice svg { flex: none; margin-top: 1px; }
 
-/* ================= 会话头 ================= */
-.sess-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin-bottom: 16px; }
+/* ================= 会话头（固定高度 Chat 式布局：时间线滚动，输入坞常驻页底） ================= */
+#view-session { display: flex; flex-direction: column; height: calc(100vh - 62px); }
+.sess-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin-bottom: 10px; }
 .sess-head h2 { margin: 0 0 6px; font-size: 19px; letter-spacing: -.01em; word-break: break-all; }
 .sess-head .meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .sess-head .ops { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -224,7 +232,7 @@ main { min-width: 0; padding: 22px 26px 40px; }
 .chip b { display: block; font-size: 16px; color: var(--ink); font-weight: 700; }
 
 /* ================= 选项卡 ================= */
-.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 18px; overflow-x: auto; }
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 10px; overflow-x: auto; flex: none; }
 .tabs button {
   border: 0; background: none; padding: 9px 14px; color: var(--ink-2);
   font-weight: 600; font-size: 13.5px; border-bottom: 2px solid transparent; margin-bottom: -1px;
@@ -355,9 +363,12 @@ table.list tr:last-child td { border-bottom: 0; }
 .ev .de { color: var(--ink-2); word-break: break-all; }
 @media (max-width: 700px) { .ev { grid-template-columns: 70px 1fr; } .ev .ac, .ev .de { grid-column: 2; } }
 
-/* ================= 解题轨迹（单列时间线） ================= */
-.trace-wrap { position: relative; }
-.trace { max-height: 66vh; overflow-y: auto; padding: 8px 6px 16px 0; }
+/* ================= 会话视图：时间线即主对话流 ================= */
+#tab-area { flex: 1; min-height: 0; display: flex; }
+#tab-area > div { flex: 1; min-width: 0; overflow-y: auto; }
+#tab-area > div#tab-chat { overflow: hidden; }
+.trace-wrap { position: relative; height: 100%; }
+.trace { height: 100%; overflow-y: auto; padding: 8px 6px 16px 0; }
 .trace .empty-note { padding: 44px 0; }
 #trace-jump { position: absolute; right: 16px; bottom: 14px; z-index: 5;
   padding: 6px 13px; border-radius: 999px; font-size: 12px; font-weight: 600;
@@ -453,6 +464,47 @@ table.list tr:last-child td { border-bottom: 0; }
   .tl { grid-template-columns: 0 minmax(0, 1fr); column-gap: 0; }
   .tl > .t { display: none; }
 }
+
+/* 用户消息：时间线里的右侧气泡；灵枢的回执与督导指令用紫调卡片 */
+.tl-user { --ag: var(--accent); }
+.tl-user > .b { display: flex; justify-content: flex-end; }
+.tl-user .bubble { max-width: min(640px, 94%);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line));
+  border-radius: 12px 12px 3px 12px; padding: 8px 13px;
+  font-size: 13px; line-height: 1.65; }
+.tl-user .btxt { white-space: pre-wrap; word-break: break-word; }
+.tl-user .bpath { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3);
+  margin-top: 5px; word-break: break-all; }
+.tl-master { --ag: var(--violet); }
+.tl-reply { padding: 7px 11px; border-radius: 9px; font-size: 12.5px; line-height: 1.65;
+  white-space: pre-wrap; word-break: break-word;
+  background: color-mix(in srgb, var(--violet) 7%, var(--surface));
+  border: 1px dashed color-mix(in srgb, var(--violet) 32%, var(--line)); }
+
+/* ================= 会话输入坞（页底常驻：意见 + 附件） ================= */
+.composer-dock { flex: none; padding-top: 12px; }
+.composer-dock .comp { background: var(--surface); border: 1px solid var(--line);
+  border-radius: 14px; box-shadow: var(--shadow-raise); padding: 10px 12px 8px; }
+#comp-input { width: 100%; border: 0; background: transparent; resize: none;
+  display: block; min-height: 24px; max-height: 180px; padding: 4px 2px;
+  font-size: 14px; line-height: 1.6; }
+#comp-input:focus { outline: none; }
+.comp-files { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 2px; }
+.comp-files:empty { display: none; }
+.comp-file { display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px;
+  padding: 4px 8px; max-width: 320px; }
+.comp-file b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.comp-file i { font-style: normal; color: var(--ink-3); font-size: 10.5px; flex: none; }
+.comp-file button { border: 0; background: none; color: var(--ink-3); cursor: pointer;
+  padding: 0 2px; flex: none; }
+.comp-file button:hover { color: var(--bad); }
+.comp-bar { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.comp-bar .hint { flex: 1; min-width: 0; color: var(--ink-3); font-size: 11.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.comp-bar .icon-btn { flex: none; }
+.comp-bar button:disabled { opacity: .4; cursor: not-allowed; }
 
 /* ================= 报告 ================= */
 .report { padding: 22px 26px; max-width: 860px; }
@@ -690,10 +742,12 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
   </aside>
 
   <main>
-    <!-- 空态：任务下达 -->
+    <!-- 空态：任务下达（输入框常驻页底） -->
     <section id="view-home">
-      <p class="lead">下达任务，剩下的交给灵枢。</p>
-      <p class="sub">用自然语言描述目标与意图——灵枢会自行判断这是 SRC 渗透、CTF 解题还是渗透赛，组队开工。</p>
+      <div class="hero">
+        <p class="lead">下达任务，剩下的交给灵枢。</p>
+        <p class="sub">用自然语言描述目标与意图——灵枢会自行判断这是 SRC 渗透、CTF 解题还是渗透赛，组队开工。</p>
+      </div>
       <div class="card composer">
         <textarea id="c-mission" placeholder="例如：对 https://testphp.vulnweb.com 做 Web 渗透，重点 SQL 注入与 XSS；或：解这几道 CTF 题 https://ctf.example.com/chal1（flag 格式：SCTF{...}）"></textarea>
         <div class="bar">
@@ -707,7 +761,7 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
       </p>
     </section>
 
-    <!-- 会话视图 -->
+    <!-- 会话视图（时间线即对话流，输入坞常驻页底） -->
     <section id="view-session" hidden>
       <div class="sess-head">
         <div style="min-width:0">
@@ -721,24 +775,40 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
       <div id="apv-box"></div>
       <div class="chips" id="s-chips"></div>
       <div class="tabs" id="s-tabs">
-        <button data-tab="topo" class="on">拓扑</button>
-        <button data-tab="trace">轨迹</button>
+        <button data-tab="chat" class="on">会话</button>
+        <button data-tab="topo">拓扑</button>
         <button data-tab="tasks">任务</button>
         <button data-tab="vulns">漏洞</button>
         <button data-tab="flags">Flag</button>
         <button data-tab="events">事件</button>
         <button data-tab="report">报告</button>
       </div>
-      <div id="tab-topo"><div class="card topo" id="topo"></div></div>
-      <div id="tab-trace" hidden><div class="trace-wrap">
-        <div class="trace" id="trace-box"></div>
-        <button id="trace-jump" type="button" hidden aria-label="回到最新轨迹" title="回到最新轨迹">↓ 回到最新</button>
-      </div></div>
-      <div id="tab-tasks" hidden></div>
-      <div id="tab-vulns" hidden></div>
-      <div id="tab-flags" hidden></div>
-      <div id="tab-events" hidden><div class="events" id="events"></div></div>
-      <div id="tab-report" hidden></div>
+      <div id="tab-area">
+        <div id="tab-chat"><div class="trace-wrap">
+          <div class="trace" id="trace-box"></div>
+          <button id="trace-jump" type="button" hidden aria-label="回到最新轨迹" title="回到最新轨迹">↓ 回到最新</button>
+        </div></div>
+        <div id="tab-topo" hidden><div class="card topo" id="topo"></div></div>
+        <div id="tab-tasks" hidden></div>
+        <div id="tab-vulns" hidden></div>
+        <div id="tab-flags" hidden></div>
+        <div id="tab-events" hidden><div class="events" id="events"></div></div>
+        <div id="tab-report" hidden></div>
+      </div>
+      <div class="composer-dock">
+        <div class="comp">
+          <div class="comp-files" id="comp-files"></div>
+          <textarea id="comp-input" rows="1" placeholder="给灵枢提意见、补充线索或上传附件…"></textarea>
+          <div class="comp-bar">
+            <button class="icon-btn" id="comp-attach" type="button" title="上传附件（灵枢会知会各智能体去分析）" aria-label="上传附件">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+            </button>
+            <input type="file" id="comp-file" multiple hidden>
+            <span class="hint" id="comp-hint">会话进行中可随时给灵枢提意见 · Enter 发送 · Shift+Enter 换行</span>
+            <button class="btn primary sm" id="comp-send" type="button">发送</button>
+          </div>
+        </div>
+      </div>
     </section>
 
     <!-- 编队 -->
@@ -860,10 +930,10 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
 "use strict";
 /* ================= 基础 ================= */
 const $ = s => document.querySelector(s);
-const S = { view: "home", cur: null, tab: "topo", sessions: [], state: null,
+const S = { view: "home", cur: null, tab: "chat", sessions: [], state: null,
             agents: null, models: null, evSeen: 0, es: null, poll: null, medit: null,
             providers: null, pedit: null, fprov: "", presets: null, effSel: [],
-            topoView: null };
+            topoView: null, compFiles: [] };
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
 async function api(path, opt = {}) {
@@ -1048,22 +1118,21 @@ async function doDelete(id) {
 }
 
 /* ================= 会话详情 ================= */
+const TABS = ["chat", "topo", "tasks", "vulns", "flags", "events", "report"];
 function openSession(id) {
-  S.cur = id; S.tab = "topo"; S.evSeen = 0; S.topoView = null;
+  S.cur = id; S.tab = "chat"; S.evSeen = 0; S.topoView = null;
   show("session");
   renderSessions();
   document.querySelectorAll("#s-tabs button").forEach(b =>
-    b.classList.toggle("on", b.dataset.tab === "topo"));
-  for (const t of ["topo", "trace", "tasks", "vulns", "flags", "events", "report"])
-    $("#tab-" + t).hidden = t !== "topo";
+    b.classList.toggle("on", b.dataset.tab === "chat"));
+  for (const t of TABS) $("#tab-" + t).hidden = t !== "chat";
   refreshState();
   startStreams();
 }
 document.querySelectorAll("#s-tabs button").forEach(b => b.onclick = () => {
   S.tab = b.dataset.tab;
   document.querySelectorAll("#s-tabs button").forEach(x => x.classList.toggle("on", x === b));
-  for (const t of ["topo", "trace", "tasks", "vulns", "flags", "events", "report"])
-    $("#tab-" + t).hidden = t !== S.tab;
+  for (const t of TABS) $("#tab-" + t).hidden = t !== S.tab;
   if (S.tab === "topo") drawTopo();
   if (S.tab === "report") loadReport();
 });
@@ -1115,6 +1184,11 @@ function renderSessionHead() {
   ].join("");
   $("#s-err").innerHTML = s.error ? `<div class="err-banner">${esc(s.error)}</div>` : "";
   const running = !TERMINAL.has(s.status);
+  $("#comp-send").disabled = !running;
+  $("#comp-attach").disabled = !running;
+  $("#comp-input").placeholder = running
+    ? "给灵枢提意见、补充线索或上传附件…"
+    : "会话已结束";
   $("#s-ops").innerHTML = `
     ${running ? `<button class="btn danger sm" id="op-stop">停止</button>` : ""}
     <a class="btn sm" href="/api/sessions/${S.cur}/report/download" download>下载报告</a>
@@ -1480,7 +1554,7 @@ function evLine(e) {
 let traceStick = true;
 const TRACE_AGENT_SLOTS = new Map();
 function traceReset() {
-  $("#trace-box").innerHTML = '<div class="empty-note">等待智能体开始工作</div>';
+  $("#trace-box").innerHTML = '<div class="empty-note">等待灵枢开工——过程将按真实时间顺序在此展开</div>';
   TRACE_AGENT_SLOTS.clear();
   traceStick = true;
   $("#trace-jump").hidden = true;
@@ -1490,6 +1564,9 @@ function traceClock(ts) {
   const m = raw.match(/T?(\d{2}:\d{2}:\d{2})/);
   return m ? m[1] : "";
 }
+const fmtSize = n => n == null || n === "" ? "" :
+  n >= 1048576 ? (n / 1048576).toFixed(1) + "MB"
+  : n >= 1024 ? Math.round(n / 1024) + "KB" : n + "B";
 function traceActorSlot(actor) {
   actor = String(actor || "unknown");
   if (!TRACE_AGENT_SLOTS.has(actor))
@@ -1675,6 +1752,36 @@ function tracePush(e) {
       traceFinishThinking(traceTurn(actor));
       traceAppend(e, `<div class="m">${esc(actorName(actor))} 已完成任务</div>`, "tl-sys");
       break;
+    case "user.message":
+      traceAppend(e, `<div class="bubble"><div class="btxt">${esc(d.content || "")}</div></div>`, "tl-user");
+      break;
+    case "user.attachment": {
+      const sz = fmtSize(d.size);
+      traceAppend(e, `<div class="bubble"><div class="btxt">📎 ${esc(d.name || "")}${sz ? ` <span class="k">${esc(sz)}</span>` : ""}</div>
+        ${d.path ? `<div class="bpath">${esc(d.path)}</div>` : ""}</div>`, "tl-user");
+      break;
+    }
+    case "ring.steer":
+      traceAppend(e, `<div class="hd"><span class="who">灵枢</span>
+        <span class="k">→ ${esc(agentName(d.agent))}</span></div>
+        <div class="tl-reply">${esc(d.hint || "")}</div>`, "tl-master");
+      break;
+    case "decision.change": {
+      if (d.action === "meta_plan") {
+        const n = Array.isArray(d.new_nodes) ? d.new_nodes.length : 0;
+        traceAppend(e, `<div class="hd"><span class="who">${esc(actorName(actor))}</span>
+          <span class="k">第 ${esc(d.round ?? "?")} 轮规划${n ? ` · ${n} 个方向节点` : ""}</span></div>
+          ${d.analysis ? `<div class="ang">${esc(String(d.analysis))}</div>` : ""}`, "tl-master");
+      } else if (d.action === "review") {
+        traceAppend(e, `<div class="hd"><span class="who">${esc(actorName(actor))}</span>
+          <span class="k">第 ${esc(d.round ?? "?")} 轮复盘</span></div>
+          <div class="ang">${d.continue ? "继续迭代" : `收敛：${d.stop_reason || "目标达成"}`}</div>`, "tl-master");
+      } else if (d.action === "user_feed_consumed") {
+        const cn = { steering: "派发督导", review: "轮末复盘" }[d.channel] || "决策";
+        traceAppend(e, `<div class="tl-reply">已收到你的意见，纳入本轮${cn}。</div>`, "tl-master");
+      }
+      break;
+    }
   }
 }
 const traceBox = $("#trace-box");
@@ -2163,12 +2270,77 @@ $("#fm-add").onclick = async () => {
   } catch (e) { toast(e.message, true); }
 };
 
+/* ================= 会话输入坞：意见 + 附件（页底常驻） ================= */
+const compInput = $("#comp-input");
+function compGrow() {
+  compInput.style.height = "auto";
+  compInput.style.height = Math.min(compInput.scrollHeight, 180) + "px";
+}
+function renderCompFiles() {
+  $("#comp-files").innerHTML = S.compFiles.map((f, i) => `
+    <span class="comp-file"><b>${esc(f.name)}</b><i>${fmtSize(f.size)}</i>
+      <button type="button" data-i="${i}" title="移除">✕</button></span>`).join("");
+  $("#comp-files").querySelectorAll("button").forEach(b =>
+    b.onclick = () => { S.compFiles.splice(+b.dataset.i, 1); renderCompFiles(); });
+}
+$("#comp-attach").onclick = () => $("#comp-file").click();
+$("#comp-file").onchange = () => {
+  for (const f of $("#comp-file").files) S.compFiles.push(f);
+  $("#comp-file").value = "";
+  renderCompFiles();
+};
+compInput.addEventListener("input", compGrow);
+compInput.addEventListener("keydown", ev => {
+  if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) {
+    ev.preventDefault();
+    compSend();
+  }
+});
+$("#comp-send").onclick = () => compSend();
+
+async function uploadAttachment(file) {
+  const r = await fetch(`/api/sessions/${S.cur}/attachments?name=${encodeURIComponent(file.name)}`,
+    { method: "POST", body: file });
+  if (!r.ok) {
+    let msg = r.statusText;
+    try { msg = (await r.json()).detail || msg; } catch {}
+    throw new Error(msg);
+  }
+}
+async function compSend() {
+  const text = compInput.value.trim();
+  const files = [...S.compFiles];
+  if (!text && !files.length) return;
+  const sess = S.cur ? S.sessions.find(x => x.session_id === S.cur) : null;
+  if (!sess || TERMINAL.has(sess.status)) {
+    toast("会话未在运行，无法发送", true);
+    return;
+  }
+  $("#comp-send").disabled = true;
+  try {
+    for (const f of files) await uploadAttachment(f);
+    if (text) await api(`/api/sessions/${S.cur}/messages`,
+      { method: "POST", body: JSON.stringify({ content: text }) });
+    compInput.value = "";
+    compGrow();
+    S.compFiles = [];
+    renderCompFiles();
+  } catch (e) { toast(e.message, true); }
+  $("#comp-send").disabled = TERMINAL.has(sess.status);
+}
+
 /* ================= 发起会话 ================= */
 $("#c-go").onclick = async () => {
   const mission = $("#c-mission").value.trim();
   if (!mission) { toast("先用自然语言描述任务——目标与要求写清楚即可", true); return; }
   await launchMission({ mission });
 };
+$("#c-mission").addEventListener("keydown", ev => {
+  if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) {
+    ev.preventDefault();
+    $("#c-go").click();
+  }
+});
 
 async function launchMission(payload) {
   $("#c-go").disabled = true;
