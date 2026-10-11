@@ -203,17 +203,28 @@ async def _build_infra(
         "workspace_root": str(workspace),
     }
     # 外部 MCP 服务器：握手 + 工具清单并入智能体工具目录（失败留痕跳过，
-    # 不阻断开工——MCP 是增益能力而非主链依赖）
+    # 不阻断开工——MCP 是增益能力而非主链依赖；多台服务器并发握手，
+    # 慢服务器不拖累开工时序）
     mcp_clients: list[Any] = []
     mcp_tools: dict[str, dict[str, Any]] = {}
-    for spec in cfg.mcp_servers:
-        if not spec.enabled:
-            continue
-        try:
-            from spiritscout.tools.mcp_client import build_client
+    enabled_specs = [s for s in cfg.mcp_servers if s.enabled]
+    if enabled_specs:
+        from spiritscout.tools.mcp_client import build_client
 
-            client = build_client(spec)
-            tools = await client.start()
+        async def _start_mcp(spec: Any) -> tuple[Any, Any, list[dict[str, Any]], str]:
+            try:
+                client = build_client(spec)
+                return spec, client, await client.start(), ""
+            except Exception as exc:  # noqa: BLE001 —— 不可达：留痕后继续
+                return spec, None, [], str(exc)[:300]
+
+        for spec, client, tools, err in await asyncio.gather(
+                *(_start_mcp(s) for s in enabled_specs)):
+            if client is None:
+                audit.log("system.lifecycle", "runtime", {
+                    "action": "mcp_server_failed", "server": spec.name,
+                    "error": err})
+                continue
             mcp_clients.append(client)
             for t in tools:
                 mcp_tools[f"mcp__{spec.name}__{t['name']}"] = {
@@ -223,10 +234,6 @@ async def _build_infra(
             audit.log("system.lifecycle", "runtime", {
                 "action": "mcp_server_ready", "server": spec.name,
                 "transport": spec.transport, "tools": [t["name"] for t in tools]})
-        except Exception as exc:  # noqa: BLE001 —— 服务器不可达：留痕后继续
-            audit.log("system.lifecycle", "runtime", {
-                "action": "mcp_server_failed", "server": spec.name,
-                "error": str(exc)[:300]})
     for name, fn in (("http_probe", http_probe), ("dns_resolve", dns_resolve),
                      ("file_analyze", file_analyze), ("sandbox_exec", sandbox_exec)):
         registry.register_builtin(name, fn, BUILTIN_SPECS[name])

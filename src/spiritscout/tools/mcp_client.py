@@ -1,257 +1,238 @@
-"""MCP 客户端（Model Context Protocol）：把外部安全工具服务器接入智能体工具环。
+"""MCP 客户端（官方 ``mcp`` SDK）：把外部安全工具服务器接入智能体工具环。
 
-两类传输（协议规范 model-context-protocol/specification）：
-- **stdio**：子进程 + 换行分隔 JSON-RPC（本地服务器主流形态，
-  如 ida-pro-mcp 的 ``idalib-mcp --stdio``）；
-- **http**：Streamable HTTP——POST JSON-RPC 到单一端点，应答为 JSON 或
-  SSE 流（Yakit 1.4.6+ 内置 MCP Server 即此协议；ida-pro-mcp 亦支持
-  ``--transport http://...``）。
+三类传输（协议规范 transports）：
+- **stdio**：子进程 + 标准输入输出 JSON-RPC（本机 CLI 型服务器，
+  如 ``idalib-mcp --stdio``、``yak mcp``）；
+- **http**：Streamable HTTP——POST 单端点，应答为 JSON 或 SSE 流
+  （Yakit 引擎 ``--transport streamable_http``，端点为 ``/mcp``）；
+- **sse**：旧版 SSE 传输——GET 长连接 + POST 消息端点（Burp 官方扩展等）。
 
 接入方式完全配置驱动（configs/system.yaml 的 ``mcp_servers`` 段）：
 每台服务器在会话基础设施建立时握手并拉取工具清单，工具以
 ``mcp__<服务器名>__<工具名>`` 前缀并入智能体工具目录。服务器不可达
 不阻断开工（留痕后跳过）——MCP 是增益能力而非主链依赖。
+
+生命周期：官方 SDK 的会话是异步上下文管理器（进入=连接+协商，
+退出=断开），而灵探的 MCP 连接随一次会话存续、跨多次调用——因此每台
+服务器由一个常驻任务持有会话，调用请求经队列投递、结果回填 Future；
+任务退出（服务器断开）时唤醒全部等待者并拒绝后续调用。
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import time
+from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
-import httpx
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.sse import sse_client
+from mcp.client.stdio import stdio_client
+from mcp.client.streamable_http import streamablehttp_client
+from mcp.types import Implementation
 
-_MCP_PROTOCOL_VERSION = "2025-03-26"
-_CLIENT_INFO = {"name": "spiritscout", "version": "0.1.0"}
-_HANDSHAKE_TIMEOUT = 30.0
+_HANDSHAKE_TIMEOUT = 60.0        # 握手：子进程冷启动 + initialize + tools/list
+_SESSION_READ_TIMEOUT = 3600.0   # 会话级默认读超时（单次调用超时另行覆盖）
+_CLIENT_INFO = Implementation(name="spiritscout", version="0.1.0")
 
 
 class McpError(RuntimeError):
     """MCP 调用失败（握手/请求/协议不符）。"""
 
 
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _resolve_command(command: str) -> str:
+    """项目内相对路径命令（如 ``.venv/bin/idalib-mcp``、``.tools/yak/yak``）
+    解析为项目根下绝对路径；其余原样交给 PATH（npx、docker 等）。"""
+    if not command or Path(command).is_absolute():
+        return command
+    candidate = _project_root() / command
+    return str(candidate) if candidate.exists() else command
+
+
+def _content_texts(result: Any) -> list[str]:
+    texts = [str(getattr(block, "text", "")) for block in (result.content or [])
+             if getattr(block, "type", "") == "text"]
+    return texts or ["（无文本内容）"]
+
+
 class McpClient:
-    """单台 MCP 服务器的客户端基类：initialize → tools/list → tools/call。"""
+    """单台 MCP 服务器的常驻客户端：start → call → close。"""
 
     def __init__(self, name: str, *, timeout: float = 180.0):
         self.name = name
         self.timeout = timeout
-        self.session_id: str = ""          # http 传输的会话头
-        self._req_id = 0
         self.tools: list[dict[str, Any]] = []
+        self._requests: asyncio.Queue[Any] = asyncio.Queue()
+        self._task: asyncio.Task[None] | None = None
+        self._ready: asyncio.Future[None] | None = None
+        self._fatal: BaseException | None = None
 
-    # ---- 传输接口（子类实现）
+    # ---- 传输（子类实现）：返回官方 SDK 的异步上下文管理器
 
-    async def _send(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+    def _connect(self) -> Any:
         raise NotImplementedError
 
+    # ---- 对外接口
+
     async def start(self) -> list[dict[str, Any]]:
-        """握手 + 拉取工具清单，返回服务器暴露的工具定义列表。"""
-        init = await self._rpc("initialize", {
-            "protocolVersion": _MCP_PROTOCOL_VERSION,
-            "capabilities": {}, "clientInfo": _CLIENT_INFO,
-        }, timeout=_HANDSHAKE_TIMEOUT)
-        if not init:
-            raise McpError(f"MCP[{self.name}] 握手无应答")
-        await self._notify("notifications/initialized", {})
-        listed = await self._rpc("tools/list", {}, timeout=_HANDSHAKE_TIMEOUT)
-        tools = (listed or {}).get("tools") or []
-        self.tools = [t for t in tools if isinstance(t, dict) and t.get("name")]
+        """连接 + 握手 + 拉取工具清单；失败抛 McpError（调用方留痕跳过）。"""
+        loop = asyncio.get_running_loop()
+        self._ready = loop.create_future()
+        self._task = loop.create_task(self._serve(), name=f"mcp[{self.name}]")
+        try:
+            await asyncio.wait_for(asyncio.shield(self._ready), _HANDSHAKE_TIMEOUT)
+        except TimeoutError as exc:
+            await self.close()
+            raise McpError(
+                f"MCP[{self.name}] 握手超时（{_HANDSHAKE_TIMEOUT:.0f}s）") from exc
+        if self._fatal is not None:
+            raise McpError(f"MCP[{self.name}] 连接失败: {str(self._fatal)[:300]}")
         return self.tools
 
     async def call(self, tool: str, arguments: dict[str, Any] | None = None,
                    *, timeout: float | None = None) -> dict[str, Any]:
         """调用远程工具，归一为 {"text": str, "is_error": bool}。"""
-        result = await self._rpc("tools/call", {
-            "name": tool, "arguments": arguments or {},
-        }, timeout=timeout or self.timeout)
-        if result is None:
-            raise McpError(f"MCP[{self.name}].{tool} 无应答")
-        if result.get("isError"):
-            texts = _content_texts(result)
-            return {"text": "\n".join(texts)[:8000] or "（工具报告错误）",
-                    "is_error": True}
-        return {"text": "\n".join(_content_texts(result))[:16000],
-                "is_error": False}
+        if self._task is None or self._task.done():
+            raise McpError(f"MCP[{self.name}] 会话未建立或已断开")
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[dict[str, Any]] = loop.create_future()
+        await self._requests.put(
+            (future, tool, dict(arguments or {}), float(timeout or self.timeout)))
+        return await future
 
-    async def close(self) -> None:  # pragma: no cover - 子类按需覆盖
-        return
+    async def close(self) -> None:
+        if self._task is None:
+            return
+        if not self._task.done():
+            await self._requests.put(None)
+            try:
+                await asyncio.wait_for(asyncio.shield(self._task), 10)
+            except TimeoutError:
+                self._task.cancel()
+        self._task = None
 
-    # ---- JSON-RPC 框架
+    # ---- 常驻会话任务
 
-    async def _rpc(self, method: str, params: dict[str, Any],
-                   *, timeout: float) -> dict[str, Any] | None:
-        self._req_id += 1
-        payload = {"jsonrpc": "2.0", "id": self._req_id,
-                   "method": method, "params": params}
-        resp = await self._send(payload)
-        if resp is None or resp.get("id") != self._req_id:
-            return None
-        if "error" in resp:
-            err = resp["error"]
-            raise McpError(f"MCP[{self.name}] {method} 错误: "
-                           f"{err.get('message', err)}"[:300])
-        return resp.get("result")
+    async def _serve(self) -> None:
+        try:
+            async with self._connect() as streams:
+                read, write = streams[0], streams[1]
+                async with ClientSession(
+                        read, write,
+                        read_timeout_seconds=timedelta(
+                            seconds=_SESSION_READ_TIMEOUT),
+                        client_info=_CLIENT_INFO) as session:
+                    await session.initialize()
+                    listed = await session.list_tools()
+                    self.tools = [
+                        {"name": t.name,
+                         "description": t.description or "",
+                         "inputSchema": getattr(t, "inputSchema", None) or {}}
+                        for t in listed.tools
+                    ]
+                    if self._ready is not None and not self._ready.done():
+                        self._ready.set_result(None)
+                    await self._pump(session)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:  # noqa: BLE001 —— 连接/会话故障：唤醒等待者
+            self._fatal = exc
+        finally:
+            if self._ready is not None and not self._ready.done():
+                self._ready.set_result(None)   # start() 检查 _fatal
+            while not self._requests.empty():
+                item = self._requests.get_nowait()
+                if item is None or item[0].done():
+                    continue
+                item[0].set_exception(
+                    McpError(f"MCP[{self.name}] 会话已断开"))
 
-    async def _notify(self, method: str, params: dict[str, Any]) -> None:
-        """通知无 id、无应答——stdio 下只写不读（等应答会永远超时）。"""
-        payload = {"jsonrpc": "2.0", "method": method, "params": params}
-        await self._send_no_wait(payload)
-
-    async def _send_no_wait(self, payload: dict[str, Any]) -> None:
-        await self._send(payload)
-
-
-def _content_texts(result: dict[str, Any]) -> list[str]:
-    out: list[str] = []
-    for item in result.get("content") or []:
-        if isinstance(item, dict) and item.get("type") == "text":
-            out.append(str(item.get("text", "")))
-    return out or ([str(result.get("result"))]
-                   if result.get("result") is not None else [])
+    async def _pump(self, session: ClientSession) -> None:
+        while True:
+            item = await self._requests.get()
+            if item is None:
+                return
+            future, tool, arguments, timeout = item
+            if future.done():
+                continue
+            try:
+                result = await session.call_tool(
+                    tool, arguments,
+                    read_timeout_seconds=timedelta(seconds=timeout))
+            except Exception as exc:  # noqa: BLE001 —— 单次调用失败不拆会话
+                future.set_exception(McpError(
+                    f"MCP[{self.name}].{tool} 调用失败: {str(exc)[:300]}"))
+                continue
+            future.set_result({
+                "text": "\n".join(_content_texts(result))[:16000],
+                "is_error": bool(result.isError),
+            })
 
 
 class McpStdioClient(McpClient):
-    """stdio 传输：子进程 + 换行分隔 JSON-RPC。"""
+    """stdio 传输：服务器作为子进程，走标准输入输出 JSON-RPC。"""
 
     def __init__(self, name: str, *, command: str, args: list[str],
                  env: dict[str, str] | None = None, timeout: float = 180.0):
         super().__init__(name, timeout=timeout)
-        self._command = command
-        self._args = list(args)
-        self._env = dict(env or {})
-        self._proc: asyncio.subprocess.Process | None = None
+        self._params = StdioServerParameters(
+            command=_resolve_command(command), args=list(args),
+            env=dict(env) if env else None)
 
-    async def _send(self, payload: dict[str, Any]) -> dict[str, Any] | None:
-        if self._proc is None or self._proc.stdin is None:
-            await self._ensure_proc()
-        assert self._proc.stdin is not None and self._proc.stdout is not None
-        line = json.dumps(payload, ensure_ascii=False) + "\n"
-        self._proc.stdin.write(line.encode("utf-8"))
-        try:
-            await asyncio.wait_for(self._proc.stdin.drain(), timeout=10)
-        except TimeoutError as exc:
-            raise McpError(f"MCP[{self.name}] stdin 写入超时") from exc
-        deadline = time.monotonic() + self.timeout
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise McpError(f"MCP[{self.name}] 应答超时")
-            try:
-                raw = await asyncio.wait_for(
-                    self._proc.stdout.readline(), timeout=remaining)
-            except TimeoutError as exc:
-                raise McpError(f"MCP[{self.name}] 应答超时") from exc
-            if not raw:
-                raise McpError(f"MCP[{self.name}] 进程已退出")
-            text = raw.decode("utf-8", errors="replace").strip()
-            if not text:
-                continue
-            try:
-                msg = json.loads(text)
-            except ValueError:
-                continue                        # 非帧内容（横幅等）跳过
-            if msg.get("id") != payload.get("id") and payload.get("id") is not None:
-                continue                        # 服务器主动通知，等真正应答
-            return msg if payload.get("id") is not None else None
-
-    async def _send_no_wait(self, payload: dict[str, Any]) -> None:
-        if self._proc is None or self._proc.stdin is None:
-            await self._ensure_proc()
-        assert self._proc is not None and self._proc.stdin is not None
-        line = json.dumps(payload, ensure_ascii=False) + "\n"
-        self._proc.stdin.write(line.encode("utf-8"))
-        try:
-            await asyncio.wait_for(self._proc.stdin.drain(), timeout=10)
-        except TimeoutError as exc:
-            raise McpError(f"MCP[{self.name}] stdin 写入超时") from exc
-
-    async def _ensure_proc(self) -> None:
-        self._proc = await asyncio.create_subprocess_exec(
-            self._command, *self._args,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=True)
-
-    async def close(self) -> None:
-        if self._proc is not None and self._proc.returncode is None:
-            try:
-                self._proc.terminate()
-                await asyncio.wait_for(self._proc.wait(), timeout=5)
-            except (TimeoutError, ProcessLookupError):
-                pass
+    def _connect(self) -> Any:
+        return stdio_client(self._params)
 
 
 class McpHttpClient(McpClient):
     """Streamable HTTP 传输：POST 到单一端点，应答 JSON 或 SSE 流。"""
 
-    def __init__(self, name: str, *, url: str, headers: dict[str, str] | None = None,
-                 timeout: float = 180.0):
+    def __init__(self, name: str, *, url: str,
+                 headers: dict[str, str] | None = None, timeout: float = 180.0):
         super().__init__(name, timeout=timeout)
         self._url = url
         self._headers = dict(headers or {})
-        self._client: httpx.AsyncClient | None = None
 
-    async def _post(self, payload: dict[str, Any],
-                    timeout: float) -> dict[str, Any] | None:
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=timeout)
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-            **self._headers,
-        }
-        if self.session_id:
-            headers["mcp-session-id"] = self.session_id
-        resp = await self._client.post(self._url, json=payload,
-                                       headers=headers, timeout=timeout)
-        sid = resp.headers.get("mcp-session-id")
-        if sid:
-            self.session_id = sid
-        if resp.status_code == 202:
-            return None                            # 已受理的通知
-        resp.raise_for_status()
-        ctype = resp.headers.get("content-type", "")
-        if "text/event-stream" in ctype:
-            data = _sse_data(resp.text)            # 已整流到达的 SSE 文本
-            return json.loads(data) if data else None
-        if not resp.text.strip():
-            return None
-        return json.loads(resp.text)
-
-    async def _send(self, payload: dict[str, Any]) -> dict[str, Any] | None:
-        try:
-            return await self._post(payload, timeout=self.timeout)
-        except httpx.HTTPError as exc:
-            raise McpError(f"MCP[{self.name}] HTTP 错误: {exc}"[:300]) from exc
-
-    async def close(self) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
+    def _connect(self) -> Any:
+        return streamablehttp_client(
+            self._url, headers=self._headers or None,
+            timeout=max(self.timeout, 30.0),
+            sse_read_timeout=max(self.timeout, 300.0))
 
 
-def _sse_data(raw: str) -> str:
-    """取 SSE 文本中最后一条 data 帧（JSON-RPC 应答在单帧内）。"""
-    data: str = ""
-    for block in raw.split("\n\n"):
-        for line in block.splitlines():
-            if line.startswith("data:"):
-                data += line[5:].strip()
-    return data
+class McpSseClient(McpClient):
+    """旧版 SSE 传输：GET 长连接收事件，POST 到消息端点发请求。"""
+
+    def __init__(self, name: str, *, url: str,
+                 headers: dict[str, str] | None = None, timeout: float = 180.0):
+        super().__init__(name, timeout=timeout)
+        self._url = url
+        self._headers = dict(headers or {})
+
+    def _connect(self) -> Any:
+        return sse_client(
+            self._url, headers=self._headers or None,
+            timeout=max(self.timeout, 30.0),
+            sse_read_timeout=max(self.timeout, 300.0))
 
 
 def build_client(spec: Any) -> McpClient:
     """按配置构造客户端（spec: config.settings.McpServerConfig）。"""
     transport = str(spec.transport or "stdio").lower()
     timeout = float(spec.timeout or 180.0)
-    if transport == "http":
+    if transport in ("http", "streamable_http", "streamable-http"):
         if not spec.url:
             raise McpError(f"MCP[{spec.name}] http 传输缺少 url")
         return McpHttpClient(spec.name, url=spec.url,
                              headers=dict(spec.headers or {}), timeout=timeout)
+    if transport in ("sse", "sse-legacy"):
+        if not spec.url:
+            raise McpError(f"MCP[{spec.name}] sse 传输缺少 url")
+        return McpSseClient(spec.name, url=spec.url,
+                            headers=dict(spec.headers or {}), timeout=timeout)
     if not spec.command:
         raise McpError(f"MCP[{spec.name}] stdio 传输缺少 command")
     return McpStdioClient(spec.name, command=spec.command,

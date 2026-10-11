@@ -67,41 +67,41 @@ audit_log_path: .spiritscout/audit.jsonl
 max_routes_per_agent: 8        # 分支数硬上限（防分支爆炸）
 default_routes_per_agent: 3    # 默认 3 条差异化路线（硬约束 C2）
 iteration_max_rounds: 20
-# 外部 MCP 服务器接入（可选）：工具以 mcp__<名>__<工具> 并入智能体工具目录。
-# 服务器不可达时留痕跳过，不阻断开工。以下为按本项目能力面筛选的推荐接入
-# （部署/依赖由各服务器自行解决，均在服务器进程内，不进沙箱）：
-# mcp_servers:
-#   —— 逆向方向：IDA Pro（ida-pro-mcp，pip install ida-pro-mcp 后 --install 装 GUI 插件）
-#   - name: ida
-#     transport: stdio
-#     command: uv
-#     args: ["run", "idalib-mcp", "--stdio", "/path/to/target_binary"]
-#     timeout: 300
-#   - name: ida-gui                 # 或 IDA GUI 插件已开时走 SSE
-#     transport: http
-#     url: http://127.0.0.1:8744/sse
-#   —— Web 渗透平台：Yakit（1.4.6+ 内置 MCP Server，Streamable HTTP，端口以应用内显示为准）
-#   - name: yakit
-#     transport: http
-#     url: http://127.0.0.1:7778/mcp
-#   —— 一站式渗透工具箱：pentestMCP（Docker 镜像内置 Nmap/Nuclei/SQLMap/ZAP/Subfinder 等 20+ 工具，
-#      与「工具封装、不依赖宿主机」的原则天然契合）
-#   - name: pentest
-#     transport: stdio
-#     command: docker
-#     args: ["run", "-i", "--rm", "halilkirazkaya/pentester-mcp"]
-#   —— Web 漏洞扫描与模糊测试（PortSwigger 官方；需本机运行 Burp 并加载官方 MCP 扩展）
-#   - name: burp
-#     transport: http
+# 外部 MCP 服务器接入：工具以 mcp__<名>__<工具> 并入智能体工具目录，服务器
+# 不可达时留痕跳过、不阻断开工。传输三态：stdio（子进程）/ http（Streamable
+# HTTP 单端点）/ sse（旧版 SSE 长连接）。前两项随项目封装、开箱即用：
+mcp_servers:
+  - name: ida                     # 逆向：反编译 / 交叉引用 / 函数与类型检索（无头 idalib）
+    transport: stdio
+    command: .venv/bin/idalib-mcp # 相对路径按项目根解析；绝对路径或 PATH 命令原样使用
+    args: ["--stdio"]
+    timeout: 600                  # 大型二进制自动分析可跑数分钟
+  - name: yakit                   # Web 渗透：编解码 / HTTP 流量 / 模糊测试 / 指纹 / 端口 / 反序列化
+    transport: stdio
+    command: .tools/yak/yak       # 项目自带 Yakit 引擎（无头运行，不依赖图形端）
+    args: ["mcp"]                 # 需要全部工具集时加 "--enable-all"
+    timeout: 300
+
+# —— idalib 装配（一次性，项目根执行；<IDA> 为 IDA Pro 安装目录）：
+#   .venv/bin/pip install <IDA>/idalib/python/idapro-*.whl
+#   .venv/bin/pip install --no-deps https://github.com/mrexodia/ida-pro-mcp/archive/refs/heads/main.zip
+#   .venv/bin/python3 <IDA>/idalib/python/py-activate-idalib.py -d <IDA>
+#   逆向工具带 database 参数，先用 idb_open 打开目标（库文件 .i64 生成在目标
+#   文件旁，目标需位于可写目录）；idb_open 的 mode=prefer_gui 可接管 IDA 图形端。
+# —— Yakit 引擎提取（一次性，来自官方 AppImage）：
+#   ./Yakit-*.AppImage --appimage-extract → squashfs-root/bins/yak.zip
+#   解出 bins/yak_linux_amd64 放入 .tools/yak/yak 并 chmod +x
+#   图形端「设置 → MCP」开启后亦可改走 http://127.0.0.1:11432/mcp（以应用内为准）。
+# —— 其余常见接入（按需启用；外部依赖，不随项目封装）：
+#   - name: burp                # Web 漏洞扫描与模糊测试（PortSwigger 官方扩展；需 Burp 图形端常驻）
+#     transport: sse
 #     url: http://127.0.0.1:9876/sse
-#   —— 流量分析取证（WireMCP；需系统 tshark，Misc/取证向可补 pcap 深析能力）
-#   - name: wire
+#   - name: wire                # 流量/数据包分析（需 Node.js）
 #     transport: stdio
 #     command: npx
 #     args: ["-y", "@0xkoda/wiremcp"]
-#   —— 外部威胁情报（可选；动作出网至第三方服务，接入前自行确认合规边界并配置 API Key）
-#   - name: shodan
+#   - name: shodan              # 资产情报（出网至第三方服务；需 API Key，经密钥库/环境注入）
 #     transport: stdio
 #     command: npx
 #     args: ["-y", "@burtthecoder/mcp-shodan"]
-#     env: { SHODAN_API_KEY: "<在密钥库/环境注入>" }
+#     env: { SHODAN_API_KEY: "<密钥>" }

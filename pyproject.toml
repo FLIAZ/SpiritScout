@@ -20,6 +20,7 @@ dependencies = [
     "fastapi>=0.115",      # Web 控制台
     "uvicorn>=0.30",
     "cryptography>=42",    # 密钥库加密（Fernet）
+    "mcp>=1.20,<2",        # 外部 MCP 工具服务器客户端（ida/yakit 等接入）
 ]
 
 [project.optional-dependencies]

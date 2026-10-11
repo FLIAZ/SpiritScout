@@ -5,10 +5,12 @@ CTF 解题需要真实动手能力——协议交互（WebSocket/socket）、数
 一双在受控沙箱里干活的手。
 
 隔离边界（bwrap，最小权限）：
-- 文件系统整机只读挂载；用户主目录以 tmpfs 遮蔽（~/.ssh、密钥库、浏览器
-  数据在沙箱内不可见），工具库来自项目自带 .venv（只读回挂，pwntools/
-  pycryptodome/PIL/sympy/z3/scapy 等封装于项目内，不依赖用户系统安装），
-  另加会话工作区；
+- 文件系统整机只读挂载；用户主目录与 /usr/local/*（宿主私有安装层）
+  以 tmpfs 遮蔽——~/.ssh、密钥库、浏览器数据、手工安装的工具在沙箱内
+  都不可见；工具库来自项目自带 .venv（只读回挂，pwntools/pycryptodome/
+  PIL/sympy/z3/scapy 等封装于项目内，不依赖用户系统安装），另加会话
+  工作区；/usr/bin、/bin 保留为发行版基础层（python 解释器、coreutils、
+  binutils 等操作系统组件），项目工具以 PATH 首位覆盖同名系统命令；
 - 会话工作区可写——脚本与产物落在这里，附件工具可继续分析；
 - 环境变量清零后仅注入 PATH/HOME/LANG/PYTHONPATH；HOME 指向本次运行目录
   （脚本写 ~ 不会碰到真实主目录）；
@@ -58,10 +60,11 @@ def _venv_site_dirs(venv: Path) -> list[str]:
 
 
 def _build_argv(workspace: Path, rundir: Path, inner: list[str]) -> list[str]:
-    """bwrap 参数：整机只读 + 主目录遮蔽 + 工作区可写 + 干净环境。
+    """bwrap 参数：整机只读 + 主目录/私有安装层遮蔽 + 工作区可写 + 干净环境。
 
-    工具来源：项目内 .venv（只读回挂并入 PATH/PYTHONPATH）——用户主目录
-    与其个人安装（~/.local 等）一律不进沙箱，智能体调不到。
+    工具来源：项目内 .venv（只读回挂并入 PATH/PYTHONPATH）——用户主目录、
+    ~/.local、/usr/local 等私有安装层一律不进沙箱，智能体工具能力来自
+    项目封装与发行版基础层。
     """
     home = Path.home()
     argv = [
@@ -71,9 +74,13 @@ def _build_argv(workspace: Path, rundir: Path, inner: list[str]) -> list[str]:
         "--proc", "/proc",
         "--tmpfs", "/tmp",
         "--tmpfs", str(home),          # 主目录遮蔽：.ssh / 密钥库不可见
+        # 宿主私有安装层遮蔽：/usr/local/* 是手工安装落点（用户自装工具、
+        # 独立分发的二进制），沙箱内不可达
+        "--tmpfs", "/usr/local/bin",
+        "--tmpfs", "/usr/local/sbin",
     ]
     venv = _project_venv()
-    path_dirs = ["/usr/local/bin", "/usr/bin", "/bin"]
+    path_dirs = ["/usr/bin", "/bin"]
     site_dirs: list[str] = []
     if venv is not None:
         argv += ["--ro-bind", str(venv), str(venv)]

@@ -131,13 +131,15 @@ class WebConfig(BaseModel):
 class McpServerConfig(BaseModel):
     """外部 MCP 服务器接入（工具以 mcp__<名>__<工具> 并入智能体工具目录）。
 
-    transport=stdio：本地子进程（如 ida-pro-mcp 的 `uv run idalib-mcp --stdio`）；
-    transport=http：Streamable HTTP 端点（如 Yakit 内置 MCP Server、
-    ida-pro-mcp 的 --transport http://...）。
+    transport=stdio：本地子进程（如项目 venv 的 ``idalib-mcp --stdio``、
+    自带 Yakit 引擎的 ``yak mcp``）；
+    transport=http：Streamable HTTP 单端点（如 Yakit 引擎
+    ``--transport streamable_http`` 的 ``/mcp``）；
+    transport=sse：旧版 SSE 端点（如 Burp 官方扩展的 ``/sse``）。
     """
 
     name: str
-    transport: Literal["stdio", "http"] = "stdio"
+    transport: Literal["stdio", "http", "sse"] = "stdio"
     command: str = ""                     # stdio：可执行命令
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
