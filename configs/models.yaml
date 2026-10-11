@@ -6,6 +6,15 @@ providers:
 - name: ark
   provider: openai_compatible
   base_url: https://ark.cn-beijing.volces.com/api/plan/v3
+  api_key: ''
+- name: zhipu
+  provider: anthropic_compatible
+  base_url: https://open.bigmodel.cn/api/anthropic
+  api_key: ''
+- name: agentrouter_cn
+  provider: openai_compatible
+  base_url: https://ps.air-outer.com
+  api_key: ''
 models:
 - model: ark-code-latest
   provider_ref: ark
@@ -20,5 +29,59 @@ models:
   cost_input_per_mtok: 0.8
   cost_output_per_mtok: 2
   rate_limit_rpm: 300
+  quality_score: 1
+  is_fallback_for: []
+- model: glm-5.3
+  provider_ref: zhipu
+  tier: flagship
+  context_window: 1000000
+  reasoning_effort_levels:
+  - low
+  - medium
+  - high
+  - xhigh
+  - max
+  capabilities: []
+  cost_input_per_mtok: 0
+  cost_output_per_mtok: 0
+  rate_limit_rpm: 60
+  quality_score: 1
+  is_fallback_for: []
+- model: glm-5.3-flash
+  provider_ref: zhipu
+  tier: rigorous
+  context_window: 0
+  reasoning_effort_levels: []
+  capabilities: []
+  cost_input_per_mtok: 0
+  cost_output_per_mtok: 0
+  rate_limit_rpm: 60
+  quality_score: 1
+  is_fallback_for: []
+- model: glm-5-turbo
+  provider_ref: zhipu
+  tier: code
+  context_window: 0
+  reasoning_effort_levels: []
+  capabilities: []
+  cost_input_per_mtok: 0
+  cost_output_per_mtok: 0
+  rate_limit_rpm: 60
+  quality_score: 1
+  is_fallback_for: []
+- model: deepseek-v4-flash
+  provider_ref: agentrouter_cn
+  tier: flagship
+  context_window: 1000000
+  reasoning_effort_levels:
+  - low
+  - medium
+  - high
+  - xhigh
+  - max
+  capabilities: []
+  cost_input_per_mtok: 0
+  cost_output_per_mtok: 0
+  rate_limit_rpm: 60
   quality_score: 1
   is_fallback_for: []
