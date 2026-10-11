@@ -363,6 +363,12 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     async def list_providers() -> dict[str, Any]:
         return _providers_view()
 
+    @app.get("/api/provider-presets")
+    async def provider_presets() -> dict[str, Any]:
+        """厂商预设目录（添加供应商对话框：选中带入协议/地址/建议环境变量名）。"""
+        from spiritscout.web.provider_api import PROVIDER_PRESETS
+        return {"presets": PROVIDER_PRESETS}
+
     def _model_error(exc: SpiritScoutError) -> HTTPException:
         msg = str(exc)
         status = 409 if "已存在" in msg else 404 if "不存在" in msg else 422
