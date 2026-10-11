@@ -82,12 +82,17 @@ class SubAgentContext:
     # 环形协同台账：已尝试登记 + 灵枢督导（会话内所有 Agent 共持一份；
     # for_agent 的 dataclasses.replace 共享同一引用）
     ring: RingLedger | None = None
+    # 环形共享缓存：同题并行 Agent 的共享现场（已探入口/共享笔记/已夺 Flag）
+    # 按命名空间隔离；会话内共持一份，for_agent 的 replace 共享同一引用
+    shared_cache: LocalSharedCache | None = None
 
     def __post_init__(self) -> None:
         if self.audit is None:
             self.audit = NullAuditLogger()
         if self.ring is None:
             self.ring = RingLedger(self.audit)
+        if self.shared_cache is None:
+            self.shared_cache = LocalSharedCache(default_ttl_seconds=3600)
 
     def for_agent(self, agent_key: str) -> SubAgentContext:
         """按 Agent 绑定模型：该 Agent 有分配 → 网关包装注入别名；
@@ -128,7 +133,9 @@ class SubAgent(abc.ABC):
         self.default_routes = default_routes
         self.max_routes = max_routes
         self.enable_llm_planning = enable_llm_planning
-        self.cache = LocalSharedCache(default_ttl_seconds=3600)
+        # 共享缓存按会话共持：同一会话内各 Agent/路线按命名空间隔离读写，
+        # 环形共享现场（ctf_shared 等）因此跨 Agent 可见
+        self.cache = self.ctx.shared_cache or LocalSharedCache(default_ttl_seconds=3600)
         self.agent_id = new_id(self.agent_type.value.replace("_", "-"))
 
     # ------------------------------------------------------------ 主流程

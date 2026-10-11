@@ -18,6 +18,7 @@ from spiritscout.agents.master.agent import MasterAgent, MasterContext
 from spiritscout.agents.report.agent import ReportAgent
 from spiritscout.agents.ring import RingLedger
 from spiritscout.agents.sub.base import SubAgentContext
+from spiritscout.agents.sub.cache import LocalSharedCache
 from spiritscout.blackboard import Blackboard, ConvergenceEngine
 from spiritscout.bus import create_bus
 from spiritscout.bus.base import EventBus
@@ -99,6 +100,7 @@ class _Infra:
     knowledge: KnowledgeStore
     agent_models: dict[str, str] = field(default_factory=dict)  # 按 Agent 绑定模型
     ring: Any = None            # RingLedger 环形台账（主/子 Agent 共持，随会话消亡）
+    shared_cache: Any = None    # LocalSharedCache 环形共享缓存（同题并行 Agent 共持）
 
     async def close(self) -> None:
         await self.bus.stop()
@@ -209,6 +211,7 @@ async def _build_infra(
         convergence=convergence, gateway=gateway, tools=registry,
         builtin_ctx=builtin_ctx, workspace=workspace, knowledge=knowledge,
         agent_models=bound, ring=ring if ring is not None else RingLedger(audit),
+        shared_cache=LocalSharedCache(default_ttl_seconds=3600),
     )
 
 
@@ -221,6 +224,7 @@ def _sub_ctx(infra: _Infra) -> SubAgentContext:
         knowledge=infra.knowledge,   # 子 Agent 经验库检索接线（3.3.6）
         agent_models=infra.agent_models,   # 子 Agent 初始化时按名册绑定
         ring=infra.ring,             # 环形台账共持（避让登记 + 督导消费）
+        shared_cache=infra.shared_cache,   # 环形共享缓存共持（同题现场/笔记/Flag）
     )
 
 
@@ -374,6 +378,7 @@ async def run_ctf_engagement(
         out = report.generate_writeup(
             challenges, flag_manager.all(), report_path,
             context={"contest_type": "ctf", "flag_stats": flag_stats,
+                     "submit_enabled": flag_manager.submit_fn is not None,
                      "notes": assembly.notes},
         )
         infra.audit.log("system.lifecycle", "runtime", {
@@ -494,7 +499,9 @@ async def run_competition_engagement(
             out = report.generate_writeup(
                 ordered, flag_manager.all(), report_path,
                 context={"contest_type": rules.contest_type.value,
-                         "flag_stats": flag_stats, "notes": assembly.notes},
+                         "flag_stats": flag_stats,
+                         "submit_enabled": flag_manager.submit_fn is not None,
+                         "notes": assembly.notes},
             )
         infra.audit.log("system.lifecycle", "runtime", {
             "action": "engagement_complete", "mode": "competition",

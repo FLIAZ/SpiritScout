@@ -191,15 +191,20 @@ class MasterAgent:
                 node.meta["skip_reason"] = "agent_not_assembled"
                 continue
             attack_paths = self._kb_attack_paths(node.tactic)
+            # 赛题绑定：规划器节点自带；复盘新增节点按 id 匹配/单题沿用，
+            # 保证 CTF 任务永远带着赛题载荷下发（载荷为空的节点无题可解）
+            challenge = node.meta.get("challenge") or self._bind_challenge(dag, node)
+            if challenge:
+                node.meta["challenge"] = challenge
             task = Task(
                 task_id=new_id("task"), task_type=task_type,
-                target=str(node.meta.get("challenge", {}).get("url") or state["target"]),
+                target=str(challenge.get("url") or state["target"]),
                 agent_type=agent_type, round_no=round_no,
                 parent_dag_node=node.node_id,
                 payload={"tactic": node.tactic, "technique": node.technique or "",
                          "node_title": node.title,
                          "attack_paths": attack_paths,
-                         "challenge": node.meta.get("challenge")},
+                         "challenge": challenge or None},
             )
             if attack_paths:
                 ctx.audit.log("kb.guidance", self.agent_id, {
@@ -218,6 +223,23 @@ class MasterAgent:
         self._write_dag_snapshot(dag)
         return {"dag": dag.to_dict(), "tasks_dispatched": tasks,
                 "plan_source": plan_source}
+
+    @staticmethod
+    def _bind_challenge(dag: TaskDAG, node: Any) -> dict[str, Any]:
+        """复盘新增节点的赛题绑定：按 challenge_id 匹配既有节点携带的赛题；
+        单题会话（唯一赛题）直接沿用——CTF 语境下「哪道题」不能靠猜。"""
+        want = str((node.meta or {}).get("challenge_id") or "")
+        found: dict[str, dict[str, Any]] = {}
+        for other in dag.all_nodes():
+            ch = (other.meta or {}).get("challenge") or {}
+            cid = str(ch.get("id") or "")
+            if cid and cid not in found:
+                found[cid] = ch
+        if want and want in found:
+            return found[want]
+        if len(found) == 1:
+            return next(iter(found.values()))
+        return {}
 
     async def _assign_route_budgets(self, task_objs: list[tuple[Task, str]]) -> None:
         """按任务复杂度/攻击面逐任务决策并发分支路线预算（1~8）。
@@ -532,8 +554,16 @@ class MasterAgent:
                 else:
                     stop_reason = f"主Agent决策收敛: {llm_decision.get('reason', '')[:120]}"
             elif llm_decision.get("dag_nodes"):
-                dag.upsert_from_plan(
-                    self._filter_plannable(llm_decision["dag_nodes"]), next_round)
+                nodes = self._filter_plannable(llm_decision["dag_nodes"])
+                if ctx.plan_override is not None:
+                    # 模式自带规划器（CTF/渗透赛）：重攻节点由规划器按方向轮换
+                    # 统一生成并绑定赛题；LLM 建议只作方向参考，不直接入图
+                    ctx.audit.log("decision.change", self.agent_id, {
+                        "action": "llm_nodes_deferred", "round": state["round_no"],
+                        "count": len(nodes),
+                        "titles": [str(n.get("title", ""))[:80] for n in nodes[:6]]})
+                else:
+                    dag.upsert_from_plan(nodes, next_round)
 
         if not stop_reason and not dag.ready_nodes() and not dag.has_unfinished():
             if flags_pending:

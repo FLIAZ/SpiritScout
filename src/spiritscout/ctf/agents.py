@@ -71,9 +71,13 @@ _OBS_HEADERS = ("location", "set-cookie", "server", "x-powered-by",
                 "content-type", "www-authenticate", "x-flag", "allow")
 # 解题思维流程（提示词层的方法引导，不限定具体动作；具体出牌仍由 LLM 按题决定）
 _METHODOLOGY = (
-    "解题流程：先信息收集（页面结构/注释/链接/表单/接口/响应头/报错/附件），"
-    "再基于已见证据推断攻击面并做针对性验证——每步能说出「看到了什么、"
-    "要验证什么」；信息不足时继续收集，不做无依据的爆破/注入/字典扫描。")
+    "解题思路像人一样：拿到题先把这道题当成一个正常功能**完整用一遍**——"
+    "打开页面就顺着它的引导点进去、把表单填了、把按钮按了、按它设计的流程"
+    "从头走到尾，边用边想「这东西是干什么的、谁在用、正常走完会发生什么」；"
+    "用通了、看懂它怎么运转了，再回头看哪一步可以做得不对（参数被改、步骤"
+    "被跳过、状态被伪造、数据被换掉），针对那个点去试。不要一上来就盯着"
+    "静态文件反复读，也不要脱离这个应用本身去猜通用漏洞；每步能说出"
+    "「我看到/试出了什么，接下来想验证什么」。")
 
 
 def _challenge_text(ch: dict[str, Any]) -> str:
@@ -203,6 +207,50 @@ def _html_digest(body: str) -> str | None:
     return "\n".join(parts)[:_OBS_EXCERPT_CAP]
 
 
+_STR_LITERAL = re.compile(r"""["'`]([^"'`\n]{2,200})["'`]""")
+_CALL_SITE = re.compile(
+    r"""(?:fetch|axios(?:\.\w+)?|\$\.(?:get|post|ajax|getJSON)|\.open|WebSocket"""
+    r"""|EventSource|\.(?:get|post|put|delete|patch))\s*\(\s*["'`]([^"'`\s]{1,200})["'`]""",
+    re.IGNORECASE)
+_TOKEN_HINT = re.compile(
+    r"(token|key|secret|passw|admin|cmd|command|exec|shell|flag|auth)", re.IGNORECASE)
+
+
+def _text_digest(body: str, content_type: str = "") -> str | None:
+    """非 HTML 文本（JS/JSON/纯文本）→ 机械提取：调用点、地址串、敏感词字面量。
+
+    前端代码与接口应答是理解应用行为的现场；整段压缩代码直接进上下文会挤爆
+    预算且读不出结构，这里只做机械提取（提出来的都是原文片段，不做判断），
+    另附首尾原文——怎么用它由模型决定。
+    """
+    if len(body) < 200 and not _CALL_SITE.search(body):
+        return None
+    sites = list(dict.fromkeys(m for m in _CALL_SITE.findall(body) if m.strip()))[:30]
+    paths = list(dict.fromkeys(
+        s for s in _STR_LITERAL.findall(body)
+        if s.startswith(("/", "http://", "https://", "ws://", "wss://"))
+        and not s.startswith(("//", "/**"))))[:40]
+    tokens = list(dict.fromkeys(
+        s for s in _STR_LITERAL.findall(body)
+        if _TOKEN_HINT.search(s) and 2 < len(s) < 120))[:15]
+    if not (sites or paths or tokens):
+        return None
+    kind = "JSON/文本" if "json" in content_type.lower() else "脚本/文本"
+    parts = [f"[{kind} 提取] 原文 {len(body)} 字符（结构提取如下，尾部附首尾原文）"]
+    if sites:
+        parts.append("[调用点] " + " ｜ ".join(sites)[:900])
+    if paths:
+        parts.append("[地址串] " + " ".join(paths)[:700])
+    if tokens:
+        parts.append("[敏感词字面量] " + " ｜ ".join(tokens)[:500])
+    head = body[:1400]
+    tail = body[-700:] if len(body) > 2200 else ""
+    parts.append("[原文首段] " + head)
+    if tail:
+        parts.append("[原文尾段] " + tail)
+    return "\n".join(parts)[:_OBS_EXCERPT_CAP]
+
+
 def _http_observation(desc: str, res: Any, url: str,
                       flags: list[str]) -> dict[str, Any]:
     """HTTP 结果 → 观察条目：状态/跳转/高信号响应头/正文摘要（HTML 结构化）。"""
@@ -218,10 +266,27 @@ def _http_observation(desc: str, res: Any, url: str,
     if picked:
         obs["headers"] = picked
     body = res.stdout or ""
-    obs["excerpt"] = _html_digest(body) or body[:_OBS_EXCERPT_CAP]
+    ctype = headers.get("content-type", "")
+    obs["excerpt"] = (_html_digest(body) or _text_digest(body, ctype)
+                      or body[:_OBS_EXCERPT_CAP])
     if flags:
         obs["flags"] = flags
     return obs
+
+
+def _signal_line(obs: dict[str, Any]) -> str:
+    """观察 → 一行信号（进共享缓存给同伴看）：标题/注释线索/flag 计数。"""
+    excerpt = str(obs.get("excerpt") or "")
+    bits: list[str] = []
+    for marker in ("[标题] ", "[注释] "):
+        idx = excerpt.find(marker)
+        if idx >= 0:
+            bits.append(_collapse(excerpt[idx + len(marker):].split("\n")[0])[:80])
+    if obs.get("final_url"):
+        bits.append(f"→ {str(obs['final_url'])[:60]}")
+    if obs.get("flags"):
+        bits.append(f"flag×{len(obs['flags'])}")
+    return (" " + " ｜ ".join(bits)) if bits else ""
 
 
 @dataclass
@@ -311,6 +376,8 @@ class CTFBaseAgent(SubAgent):
     """CTF 专项子 Agent 基座：工具目录 + 结果流向 + 原生工具调用解题环。"""
 
     direction = "misc"
+    # 环形共享缓存命名空间：同题各方向 Agent 共写共读（现场/笔记/Flag）
+    shared_namespace: ClassVar[str] = "ctf_shared"
     flag_manager: FlagManager | None = None
     # 本方向工具目录（原生 function calling schema）；子类在此之上增补方向工具
     tool_schemas: ClassVar[list[dict[str, Any]]] = [
@@ -338,8 +405,14 @@ class CTFBaseAgent(SubAgent):
             "对全部附件做魔数识别 + 字符串提取 + Flag 提取。有附件时先跑它，"
             "方向工具（checksec/algo_hints/deep_strings）依赖它的结果。",
             {}),
+        _fn("note",
+            "把关键发现写进团队共享笔记——同题并行工作的其他方向 Agent 下一"
+            "回合就能看到（如「/api/v1/admin 需要 adm_token」「终端接口是 "
+            "POST /api/exec，命令放 cmd 参数」）。有值得同伴接力的发现时写一条。",
+            {"text": {"type": "string", "description": "要共享的发现，一句话"}},
+            required=["text"]),
     ]
-    # 方向方法论（思路启发，不是步骤；LLM 按题面证据自选方向）
+    # 方向知识（思路启发，不是步骤；LLM 按题面证据自选方向）
     direction_brief: ClassVar[str] = ""
     # 解题路线的安全顶是回合上限与重复空转熔断；健康度剪枝面向多路线资源
     # 再分配场景，逐轮探索的起步进展分天然低于阈值，会误杀在途调查——豁免
@@ -353,7 +426,8 @@ class CTFBaseAgent(SubAgent):
 
     @staticmethod
     def challenge_of(task: Task) -> dict[str, Any]:
-        return task.payload.get("challenge", {})
+        # 载荷可能显式为 null（如复盘新增节点未绑定赛题）——一律归零为 {}
+        return task.payload.get("challenge") or {}
 
     def challenge_id(self, task: Task) -> str:
         return str(self.challenge_of(task).get("id", task.task_id))
@@ -369,6 +443,7 @@ class CTFBaseAgent(SubAgent):
         accepted: list[str] = []
         for cand in candidates:
             await self.flag_manager.submit(cand)
+            self._record_flag(task, cand.value)   # 共享缓存：同伴下一回合即见
             if cand.accepted:
                 accepted.append(cand.value)
         return accepted
@@ -425,7 +500,8 @@ class CTFBaseAgent(SubAgent):
                 "返回 JSON：{\"angles\": [{\"name\": 英文短名(小写字母数字下划线), "
                 "\"angle\": 一句话调查角度}]}。角度必须针对本题的具体信息"
                 "（题面/附件/目标特征），互相不重叠，最多 slots 条；"
-                "角度先覆盖信息收集与目标理解，再考虑针对已见线索的深入利用；"
+                + _METHODOLOGY +
+                " 角度先覆盖完整体验与目标理解，再考虑针对已见线索的深入利用；"
                 "不要以具体攻击技术（注入/爆破等）作为初始角度——除非题面信息"
                 "已明确指向它。题目信息不足以区分时给出 1 条即可。"),
         }, max_user_chars=8000, timeout_seconds=_SOLVER_TIMEOUT)
@@ -475,16 +551,109 @@ class CTFBaseAgent(SubAgent):
 
     def _shared_conclusions(self, task: Task) -> list[str]:
         """题级共享结论：各路线收尾结论（同伴路线与复盘都能读到）。"""
-        got = self.cache.get(self.route_namespace,
+        got = self.cache.get(self.shared_namespace,
                              f"shared|{self.challenge_id(task)}")
         return got if isinstance(got, list) else []
 
     def _record_conclusion(self, task: Task, route, summary: str) -> None:
         key = f"shared|{self.challenge_id(task)}"
-        got = self.cache.get(self.route_namespace, key)
+        got = self.cache.get(self.shared_namespace, key)
         conclusions = got if isinstance(got, list) else []
-        conclusions.append(f"[{route.name}] {summary}"[:300])
-        self.cache.put(self.route_namespace, key, conclusions[-12:])
+        conclusions.append(f"[{self.direction}/{route.name}] {summary}"[:300])
+        self.cache.put(self.shared_namespace, key, conclusions[-12:])
+
+    # ------------------------------------------------------------ 环形共享缓存
+    # 同题的所有方向 Agent（并行工作）共用一份现场：已探入口、共享笔记、
+    # 已夺 Flag。任何一方写入，其余方下一回合即见——不重复做功、相互接力。
+
+    def _shared_site(self, task: Task) -> dict[str, Any]:
+        got = self.cache.get(self.shared_namespace,
+                             f"site|{self.challenge_id(task)}")
+        return got if isinstance(got, dict) else {}
+
+    def _record_site(self, task: Task, url: str, line: str) -> None:
+        key = f"site|{self.challenge_id(task)}"
+        site = self._shared_site(task)
+        site[url[:200]] = f"{self.direction}: {line}"[:200]
+        if len(site) > 60:                      # 保序裁剪：丢最旧的
+            for old in list(site)[:len(site) - 60]:
+                site.pop(old, None)
+        self.cache.put(self.shared_namespace, key, site)
+
+    def _shared_notes(self, task: Task) -> list[str]:
+        got = self.cache.get(self.shared_namespace,
+                             f"notes|{self.challenge_id(task)}")
+        return got if isinstance(got, list) else []
+
+    def _record_note(self, task: Task, text: str) -> None:
+        key = f"notes|{self.challenge_id(task)}"
+        entry = f"[{self.direction}] {text}"[:400]
+        notes = self._shared_notes(task)
+        if entry in notes:          # 同伴/自己已写过同一条，不重复登记
+            return
+        notes.append(entry)
+        self.cache.put(self.shared_namespace, key, notes[-20:])
+
+    def _shared_flags(self, task: Task) -> list[dict[str, str]]:
+        got = self.cache.get(self.shared_namespace,
+                             f"flags|{self.challenge_id(task)}")
+        return [f for f in got if isinstance(f, dict)] if isinstance(got, list) else []
+
+    def _record_flag(self, task: Task, value: str) -> None:
+        key = f"flags|{self.challenge_id(task)}"
+        flags = self._shared_flags(task)
+        if value not in [f.get("value") for f in flags]:
+            flags.append({"value": value, "by": self.direction,
+                          "round": int(getattr(task, "round_no", 0) or 0)})
+            self.cache.put(self.shared_namespace, key, flags)
+
+    def _peer_flags(self, task: Task, state: dict[str, Any], *,
+                    same_round: bool = False) -> list[str]:
+        """同伴（其他方向）已捕获、且本路线尚未持有的 Flag。
+
+        same_round=True 只认本轮并行的同伴——上一轮的候选可能未经判定，
+        不足以让新方向直接收工（信息照常可见，只是不当作终止信号）。
+        """
+        mine = set(state.get("flags") or [])
+        rnd = int(getattr(task, "round_no", 0) or 0)
+        out: list[str] = []
+        for f in self._shared_flags(task):
+            if f.get("by") == self.direction or f.get("value") in mine:
+                continue
+            if same_round and int(f.get("round", 0) or 0) != rnd:
+                continue
+            out.append(str(f["value"]))
+        return out
+
+    def _peer_updates(self, task: Task, state: dict[str, Any]) -> str:
+        """同伴动态：自本路线上次查看以来，其他方向新增的入口/笔记/Flag。"""
+        seen = state.setdefault("peer_seen", {"site": [], "notes": 0, "flags": []})
+        lines: list[str] = []
+        site = self._shared_site(task)
+        for url, line in [(u, v) for u, v in site.items()
+                          if u not in seen["site"]
+                          and not v.startswith(f"{self.direction}:")][-12:]:
+            lines.append(f"· {url} → {line}")
+            seen["site"].append(url)
+        seen["site"] = seen["site"][-200:]
+        notes = self._shared_notes(task)
+        for note in notes[seen["notes"]:][-8:]:
+            if not note.startswith(f"[{self.direction}]"):
+                lines.append(f"· 同伴笔记 {note}")
+        seen["notes"] = len(notes)
+        concl = self._shared_conclusions(task)
+        for c in concl[seen.get("concl", 0):][-4:]:
+            if not c.startswith(f"[{self.direction}/"):
+                lines.append(f"· 同伴结论 {c}")
+        seen["concl"] = len(concl)
+        fresh = [v for v in self._peer_flags(task, state) if v not in seen["flags"]]
+        if fresh:
+            lines.append("· 同伴已捕获 Flag：" + ", ".join(fresh))
+            seen["flags"].extend(fresh)
+        if not lines:
+            return ""
+        return ("## 同伴动态（并行工作的其他方向 Agent 刚做了什么，"
+                "避免重复、可以直接接力）\n" + "\n".join(lines[:16]))
 
     def _ring_actor(self, route) -> str:
         """环形台账身份按路线区分：同 Agent 的并行路线之间也互相避让。"""
@@ -504,11 +673,24 @@ class CTFBaseAgent(SubAgent):
         if state["concluded"] or state["stall"]:
             return StepResult(ok=True, value=0.0,
                               note=state["stall"] or "本路线已收尾")
+        # 环形协同终止：本轮并行的同伴方向已夺旗 → 本路线立即收尾（收敛阀）
+        peers = self._peer_flags(task, state, same_round=True)
+        if peers:
+            state["concluded"] = True
+            summary = f"同伴方向已捕获 Flag（{', '.join(peers[:3])}），本路线收尾"
+            self._record_conclusion(task, route, summary)
+            self.ctx.audit.log("agent.conclude", self.agent_id, {
+                "route": route.name, "challenge": self.challenge_id(task),
+                "turn": state["turn"], "summary": summary})
+            return StepResult(ok=True, value=0.0, note=summary)
 
         boot_value, boot_note = 0.0, ""
         if not state["messages"]:
             boot_value, boot_note = await self._inv_bootstrap(task, route, state)
             self._seed_messages(task, route, plan, state)
+        elif (update := self._peer_updates(task, state)):
+            # 同伴动态作为新消息注入：并行 Agent 的现场即时互通
+            state["messages"].append({"role": "user", "content": update})
 
         state["turn"] += 1
         turn = state["turn"]
@@ -621,7 +803,17 @@ class CTFBaseAgent(SubAgent):
                 "请重新调用并给出合法的 JSON 参数。"))
         if not name:
             return _ToolOutcome(ok=False, text="工具名缺失，请重新调用。")
-        sig = self._call_signature(name, args)
+        if name == "note":
+            text = str(args.get("text", "") or "").strip()
+            if not text:
+                return _ToolOutcome(ok=False, text="note 需要 text 参数。")
+            self._record_note(task, text)
+            self.ctx.audit.log("agent.note", self.agent_id, {
+                "route": route.name, "challenge": self.challenge_id(task),
+                "text": text[:400]})
+            return _ToolOutcome(ok=True, value=0.05, note=f"共享笔记：{text[:60]}",
+                                text="已写入团队共享笔记，同伴下一回合可见。")
+        sig = self._call_signature(name, self._sig_args(task, args))
         if sig in state["tried"]:
             state["doom"] += 1
             note = f"重复动作跳过: {name}"
@@ -654,6 +846,18 @@ class CTFBaseAgent(SubAgent):
                                {"tool": name, "error": str(exc)[:200]})
         return out
 
+    def _sig_args(self, task: Task, args: dict[str, Any]) -> dict[str, Any]:
+        """动作签名入参：HTTP 调用按「解析后的完整地址+方法」归一化，
+        使 path 写法与 url 写法、参数顺序不同的同一请求视为同一动作。"""
+        if "path" not in args and "url" not in args:
+            return args
+        resolved = self._resolve_http(task, args)
+        if resolved is None:
+            return args
+        url, params, _headers, data = resolved
+        return {"url": url, "method": str(args.get("method", "GET")).upper(),
+                "params": params or {}, "data": (data or "")[:400]}
+
     @staticmethod
     def _call_signature(name: str, args: dict[str, Any]) -> str:
         try:
@@ -662,30 +866,25 @@ class CTFBaseAgent(SubAgent):
             payload = str(args)
         return f"{name}|{payload}"[:400]
 
-    async def _tool_http(self, task: Task, route, state: dict[str, Any],
-                         args: dict[str, Any]) -> _ToolOutcome:
-        """通用 HTTP 动作：LLM 提议 → 确定性校验 → 环形避让 → 执行 → 观察。
+    def _resolve_http(self, task: Task, args: dict[str, Any]
+                      ) -> tuple[str, dict[str, str] | None,
+                                 dict[str, str] | None, str | None] | None:
+        """HTTP 入参归一化：path/url → 完整地址，参数/头/体按上限裁剪。
 
-        目标范围由 ScopeGuard 把关（http_probe 内），参数上限仅防上下文污染。
+        解析结果同时用于动作签名（去重）与实际请求——同一请求的两种写法
+        归一到同一个签名。非法目标返回 None。
         """
         ch = self.challenge_of(task)
         base = str(ch.get("url") or task.target or "").rstrip("/")
-        method = str(args.get("method", "GET") or "GET").upper()
         path = str(args.get("path", "") or "").strip()
         full = str(args.get("url", "") or "").strip()
-        desc = f"{method} {path or full[:60] or '?'}"
-        if method not in _HTTP_METHODS:
-            return _ToolOutcome(
-                ok=False, text=f"方法 {method} 不支持，可用：{', '.join(_HTTP_METHODS)}")
         url = ""
         if path.startswith("/") and "://" not in path and len(path) <= 300 and base:
             url = base + path
         elif full.startswith(("http://", "https://")) and len(full) <= 400:
             url = full
         if not url:
-            return _ToolOutcome(ok=False, text=(
-                "目标不合法：path 需为以 / 开头的站内路径，或 url 传完整 "
-                "http(s) 地址（须在授权范围内）。"))
+            return None
         params = args.get("params")
         if isinstance(params, dict) and params:
             params = {str(k)[:32]: str(v)[:400] for k, v in list(params.items())[:6]}
@@ -701,6 +900,27 @@ class CTFBaseAgent(SubAgent):
             data = json.dumps(data, ensure_ascii=False)
         if isinstance(data, str):
             data = data[:2000]
+        return url, params, headers, data
+
+    async def _tool_http(self, task: Task, route, state: dict[str, Any],
+                         args: dict[str, Any]) -> _ToolOutcome:
+        """通用 HTTP 动作：LLM 提议 → 确定性校验 → 环形避让 → 执行 → 观察。
+
+        目标范围由 ScopeGuard 把关（http_probe 内），参数上限仅防上下文污染。
+        """
+        resolved = self._resolve_http(task, args)
+        if resolved is None:
+            return _ToolOutcome(ok=False, text=(
+                "目标不合法：path 需为以 / 开头的站内路径，或 url 传完整 "
+                "http(s) 地址（须在授权范围内）。"))
+        url, params, headers, data = resolved
+        method = str(args.get("method", "GET") or "GET").upper()
+        if method not in _HTTP_METHODS:
+            return _ToolOutcome(
+                ok=False, text=f"方法 {method} 不支持，可用：{', '.join(_HTTP_METHODS)}")
+        base = str(self.challenge_of(task).get("url") or task.target or "").rstrip("/")
+        shown = url[len(base):] if base and url.startswith(base) else url
+        desc = f"{method} {shown[:100] or '/'}"
 
         # 环形避让：同伴（含本 Agent 其他路线/前轮尝试）在此入口无产出 → 不重复做功
         akey = attempt_key(method, url, params)
@@ -740,6 +960,9 @@ class CTFBaseAgent(SubAgent):
         state["flags"].extend(accepted)
         obs = _http_observation(desc, res, url, accepted)
         state["observations"].append(obs)
+        # 环形共享缓存：入口与关键信号登记，同伴不再重复探同一入口
+        signal = _signal_line(obs)
+        self._record_site(task, url, f"{status}{signal}")
         value = (0.25 if status < 400 else 0.05) + 0.6 * len(accepted)
         if self.ctx.ring is not None:
             self.ctx.ring.record_attempt(
@@ -862,6 +1085,7 @@ class CTFBaseAgent(SubAgent):
             state["flags"].extend(accepted)
             obs = _http_observation(f"GET {url}", res, url, accepted)
             state["observations"].append(obs)
+            self._record_site(task, url, f"{status}{_signal_line(obs)}")
             state["seed"].append("入口页预感知：\n" + _obs_text(obs))
             value = (0.3 if status < 400 else 0.05) + 0.6 * len(accepted)
             if self.ctx.ring is not None:
@@ -891,9 +1115,14 @@ class CTFBaseAgent(SubAgent):
             f"正在解一道已获授权的 CTF 赛题。授权范围严格限于: {allowed}；"
             f"禁止访问范围外目标，禁止破坏性操作。\n"
             f"{self.direction_brief}\n"
+            f"{_METHODOLOGY}\n"
             "工作方式：工具就是你的手——需要看什么就用工具去拿，不要凭空猜测"
             "页面内容或响应。每一轮可以调用一个或多个工具：互不依赖的请求放在"
             "同一轮并发发出，省时间。\n"
+            "协同：同一道题可能有其他方向的 Agent 在并行工作，你们共享现场——"
+            "别人探过的入口、写下的笔记、拿到的 Flag 会以「同伴动态」出现在对话里；"
+            "有值得同伴立刻知道的发现（接口/参数/口令线索）就用 note 工具写一条，"
+            "发现别人已经解决或已经试过的，不要重复做功。\n"
             "收尾：当你不再调用工具时，你最后一条消息就是交给主 Agent 的结论——"
             "简明写清「拿到了什么（Flag 原文）、依据是什么、还差什么」。拿到 Flag "
             "或确认无解空间时立即收尾，不要空转。\n"
@@ -920,6 +1149,24 @@ class CTFBaseAgent(SubAgent):
         if prior:
             parts.append("## 已有结论（同伴路线/前轮尝试，避免重复做功）\n"
                          + "\n".join(prior))
+        notes = [n for n in self._shared_notes(task) if not n.startswith(
+            f"[{self.direction}]")][-8:]
+        if notes:
+            parts.append("## 同伴共享笔记（并行工作的其他方向 Agent 写下）\n"
+                         + "\n".join(notes))
+        site = self._shared_site(task)
+        shown_site = list(site.items())[-20:]
+        if shown_site:
+            parts.append("## 已探入口（团队共享，含同伴；不必重复请求）\n"
+                         + "\n".join(f"· {u} → {v}" for u, v in shown_site))
+        peer_flags = self._peer_flags(task, state)
+        if peer_flags:
+            parts.append("## 同伴已捕获 Flag\n" + ", ".join(peer_flags))
+        state.setdefault("peer_seen", {
+            "site": [u for u, _ in shown_site],
+            "notes": len(self._shared_notes(task)),
+            "concl": len(self._shared_conclusions(task)),
+            "flags": peer_flags})
         parts.append("## 任务\n夺取本题 Flag。Flag 常藏在响应正文/注释/编码串/"
                      "响应头或附件里；拿到就收尾。")
         state["messages"] = [
@@ -973,8 +1220,10 @@ class CTFWebAgent(CTFBaseAgent):
     direction = "web"
     route_namespace = "ctf_web"
     direction_brief = (
-        "先读入口页与响应内容（结构、注释、链接、表单、脚本、接口与响应头），"
-        "再按证据选方向；Web 题常见考点（在信息支撑下选用，不逐条硬套）：源码/"
+        "先把入口页当用户界面用起来：按页面引导点开各个功能、提交表单、走完"
+        "它的正常业务流程，同时从响应内容（结构、注释、链接、表单、脚本、接口"
+        "与响应头）读懂这个应用是做什么的、有哪些功能与角色，再按证据选方向；"
+        "Web 题常见考点（在信息支撑下选用，不逐条硬套）：源码/"
         "备份泄露（.git、.bak、www.zip）、robots.txt 与隐藏路径、参数注入"
         "（SQLi/命令注入/模板注入——模板 canary 如 {{7*7}} 被求值为 49 即命中）、"
         "文件包含与路径穿越、类型混淆与弱比较、反序列化、条件竞争、JWT 伪造、"

@@ -107,7 +107,7 @@ class FlagManager:
         if cand.submitted and cand.accepted is not None:
             return cand  # 已终判，幂等跳过
         if self.submit_fn is None:
-            cand.submit_response = "未配置提交接口（submit_fn=None）"
+            cand.submit_response = "本题未配置提交接口，Flag 仅提取待人工判定"
             return cand
         async with self._lock:
             for attempt in range(1, self.max_attempts + 1):

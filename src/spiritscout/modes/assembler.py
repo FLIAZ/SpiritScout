@@ -57,7 +57,7 @@ def classify_challenge(challenge: dict[str, Any]) -> str:
     if direction in _DIRECTION_TO_TACTIC:
         return direction
     blob = " ".join(str(challenge.get(k, "")) for k in
-                    ("title", "description", "category")).lower()
+                    ("title", "description", "category", "url")).lower()
     for direction, keywords in (
         ("web", ("http", "url", "web", "网站", "页面")),
         ("crypto", ("rsa", "aes", "cipher", "密码", "加密", "base64", "编码")),
@@ -77,39 +77,81 @@ def classify_challenge(challenge: dict[str, Any]) -> str:
     return "misc"
 
 
+def _candidate_directions(ch: dict[str, Any]) -> list[str]:
+    """按赛题形态列出可用解题方向（优先级序，去重保序）——重攻轮换角度用。
+
+    只列该形态下真正说得通的方向（有 URL 才是 web/misc 的场，二进制附件
+    才谈 pwn/reverse），不摆一套对本题无意义的通用清单。
+    """
+    order = [classify_challenge(ch)]
+    if str(ch.get("url") or "").startswith(("http://", "https://")):
+        order += ["web", "misc"]
+    names = [str(a).lower() for a in ch.get("attachments", [])]
+    if any(n.endswith((".elf", ".bin", ".exe", ".out", ".so")) for n in names):
+        order += ["pwn", "reverse", "misc"]
+    elif names:
+        order += ["misc", "crypto", "reverse"]
+    order += ["misc"]
+    seen: set[str] = set()
+    out: list[str] = []
+    for d in order:
+        if d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
+
+
+def _parallel_directions(ch: dict[str, Any]) -> list[str]:
+    """首轮并行方向：题面有可动手的现场（URL/附件）时，主方向与 misc
+    同时开工（互不依赖、无前驱）；只有题面文字时单方向起步。"""
+    primary = classify_challenge(ch)
+    if (ch.get("url") or ch.get("attachments")) and primary != "misc":
+        return [primary, "misc"]
+    return [primary]
+
+
 def ctf_plan_provider(challenges: list[dict[str, Any]], *,
                       round_no: int = 0,
                       solved: set[str] | None = None,
-                      pending: set[str] | None = None) -> dict[str, Any]:
+                      pending: set[str] | None = None,
+                      tried: dict[str, set[str]] | None = None) -> dict[str, Any]:
     """CTF 元规划（规则化，5.2.1）：跳过侦察，按方向生成 DAG 节点。
 
-    首轮：每题一个方向节点。重攻轮（round_no>0）：对尚未拿到 Flag 且本轮
-    尚无待发节点的题追加一个新节点（战术名带 @轮次 后缀，绕开「同战术不
-    重建」的去重），子 Agent 据此换角度重开一条全新解题对话——跨轮不重复
-    做功由环形台账与题级共享结论保证。
+    首轮：每题按形态并行下发 1~2 个方向节点（无依赖、同时开工），各方向
+    Agent 共享现场（环形共享缓存）协同解题。重攻轮（round_no>0）：对尚未
+    拿到 Flag 且本轮尚无待发节点的题，换一个尚未试过的方向再攻（战术名带
+    @轮次 后缀，绕开「同战术不重建」的去重）；方向试尽则回主方向重开新
+    对话换角度——跨轮不重复做功由环形台账与题级共享结论保证。
     """
     solved = solved or set()
     pending = pending or set()
+    tried = tried or {}
     nodes: list[dict[str, Any]] = []
     for ch in challenges:
         cid = str(ch.get("id") or ch.get("title") or "?")
         if round_no > 0 and (cid in solved or cid in pending):
             continue
-        direction = classify_challenge(ch)
-        tactic = _DIRECTION_TO_TACTIC[direction]
-        title = f"[{direction}] {ch.get('title', cid)}"
-        meta_ch = {**ch, "direction": direction}
-        if round_no > 0:
-            tactic = f"{tactic}@{round_no}"
-            title = f"重攻 #{round_no} {title}"
-            meta_ch["retry_round"] = round_no
-        nodes.append({
-            "tactic": tactic, "title": title, "depends_on": [],
-            "meta": {"challenge": meta_ch},
-        })
-    analysis = (f"CTF 赛题分发：{len(nodes)} 题（跳过端口扫描，C7）"
+        if round_no == 0:
+            directions = _parallel_directions(ch)
+        else:
+            done = tried.get(cid, set())
+            directions = [next((d for d in _candidate_directions(ch)
+                                if d not in done), classify_challenge(ch))]
+        for direction in directions:
+            tactic = _DIRECTION_TO_TACTIC[direction]
+            title = f"[{direction}] {ch.get('title', cid)}"
+            meta_ch = {**ch, "direction": direction}
+            if round_no > 0:
+                tactic = f"{tactic}@{round_no}"
+                title = f"重攻 #{round_no} {title}"
+                meta_ch["retry_round"] = round_no
+            nodes.append({
+                "tactic": tactic, "title": title, "depends_on": [],
+                "meta": {"challenge": meta_ch},
+            })
+    analysis = (f"CTF 赛题分发：{len(nodes)} 个方向节点并行开工（跳过端口扫描，C7）"
                 if round_no == 0 else
-                f"CTF 重攻轮 #{round_no}：{len(nodes)} 题未破，换角度再攻")
+                f"CTF 重攻轮 #{round_no}：{len(nodes)} 个方向节点，换角度再攻")
     return {"analysis": analysis, "dag_nodes": nodes}
 
 
@@ -172,19 +214,21 @@ class ModeAssembler:
         }
 
         def _plan(state: dict[str, Any]) -> dict[str, Any]:
-            """CTF 元规划：首轮分发 + 未破题的重攻轮（Flag 状态驱动）。"""
+            """CTF 元规划：首轮并行分发 + 未破题的重攻轮（Flag 状态驱动）。"""
             solved = ({f.challenge_id for f in flag_manager.accepted_flags()}
                       if flag_manager is not None else set())
             pending: set[str] = set()
+            tried: dict[str, set[str]] = {}
             for node in (state.get("dag") or {}).values():
-                if str(node.get("status")) != TaskStatus.PENDING.value:
-                    continue
-                cid = ((node.get("meta") or {}).get("challenge") or {}).get("id")
-                if cid:
-                    pending.add(str(cid))
+                meta_ch = (node.get("meta") or {}).get("challenge") or {}
+                cid = str(meta_ch.get("id") or "")
+                if cid and meta_ch.get("direction"):
+                    tried.setdefault(cid, set()).add(str(meta_ch["direction"]))
+                if str(node.get("status")) == TaskStatus.PENDING.value and cid:
+                    pending.add(cid)
             return ctf_plan_provider(
                 challenges, round_no=int(state.get("round_no", 0) or 0),
-                solved=solved, pending=pending)
+                solved=solved, pending=pending, tried=tried)
 
         return ModeAssembly(
             mode=RunMode.CTF,

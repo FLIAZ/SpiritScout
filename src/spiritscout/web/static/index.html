@@ -382,6 +382,10 @@ table.list tr:last-child td { border-bottom: 0; }
   border: 1px solid color-mix(in srgb, var(--ok) 35%, var(--line)); }
 .tr-note { font-size: 11px; color: var(--ink-3); text-align: center; padding: 1px 0; }
 .tr-err { color: var(--bad); font-size: 12px; }
+.tr-share { margin-top: 7px; padding: 7px 11px; border-radius: 9px; font-size: 12px;
+  line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: var(--ink-2);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  border: 1px dashed color-mix(in srgb, var(--accent) 32%, var(--line)); }
 
 /* ================= 报告 ================= */
 .report { padding: 22px 26px; max-width: 860px; }
@@ -838,6 +842,11 @@ function renderSessionHead() {
   $("#op-del").onclick = (ev) => armDelete(ev.currentTarget, S.cur);
 }
 
+/* Flag 概览：无提交接口时显示「已提取」数；接了判定接口才显示「通过/已提交」 */
+function flagChipValue(f) {
+  if (!f || !f.total) return "—";
+  return f.submitted ? `${f.accepted}/${f.submitted}` : `${f.total}`;
+}
 function renderChips() {
   const st = S.state;
   const v = st.vulns.by_status || {};
@@ -846,7 +855,7 @@ function renderChips() {
   const rounds = (st.round_views || []).length;
   $("#s-chips").innerHTML = [
     ["收录漏洞", v.accepted || 0], ["候选/核验中", (v.candidate || 0) + (v.verifying || 0)],
-    ["Flag", st.flags ? `${st.flags.accepted}/${st.flags.total}` : "—"],
+    ["Flag", flagChipValue(st.flags)],
     ["决策轮次", rounds || "—"],
     ["Token", tokens != null ? Number(tokens).toLocaleString() : "—"],
   ].map(([k, x]) => `<div class="chip"><b>${x}</b>${k}</div>`).join("");
@@ -1167,8 +1176,8 @@ function renderFlags() {
   $("#tab-flags").innerHTML = f && f.items.length ? `<div class="grid-cards">${f.items.map(x => `
     <div class="card flag-card">
       <div class="v">${esc(x.value)}</div>
-      <div><span class="tag ${x.accepted ? "gold" : x.submitted ? "blue" : ""}">
-        ${x.accepted ? "已收录" : x.submitted ? "已提交" : "待提交"}</span>
+      <div><span class="tag ${x.accepted ? "gold" : x.submitted ? "blue" : "green"}">
+        ${x.accepted ? "已判定" : x.submitted ? "已提交" : "已提取"}</span>
         <span class="muted" style="font-size:11.5px"> ${esc(x.challenge_id || "")}</span></div>
     </div>`).join("")}</div>`
     : `<div class="empty-note">尚无 Flag 记录</div>`;
@@ -1280,6 +1289,13 @@ function tracePush(e) {
         `.tr-agent[data-agent="${CSS.escape(actor)}"] .tr-turn:last-of-type`);
       (turn || traceAgent(actor)).insertAdjacentHTML("beforeend",
         `<div class="tr-conclude">${esc(d.summary || "")}</div>`);
+      traceScroll(); break;
+    }
+    case "agent.note": {
+      const turn = box.querySelector(
+        `.tr-agent[data-agent="${CSS.escape(actor)}"] .tr-turn:last-of-type`);
+      (turn || traceAgent(actor)).insertAdjacentHTML("beforeend",
+        `<div class="tr-share">✎ 共享笔记 ${esc(d.text || "")}</div>`);
       traceScroll(); break;
     }
     case "agent.error": {
