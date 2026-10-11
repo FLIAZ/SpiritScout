@@ -1,6 +1,7 @@
 """配置加载与校验。
 
-- YAML 为主，支持 ``${ENV_VAR}`` 环境变量展开（api_key 只允许环境变量注入，合规 G8）；
+- YAML 为主，支持 ``${ENV_VAR}`` 展开（通用机制；模型密钥不用它——
+  密钥在 Web 直填加密入密钥库，合规 G8）；
 - 环境变量覆盖：``SPIRITSCOUT_<SECTION>__<KEY>`` 双下划线分层；
 - 加载即校验（pydantic），缺失/非法直接报 ConfigurationError。
 """
@@ -165,7 +166,7 @@ class ProviderEntry(BaseModel):
     name: str                             # 供应商名（主键，用户自取，如 ark / deepseek）
     provider: str = "openai_compatible"   # openai_compatible / anthropic_compatible（Web 端仅此两类；mock 仅供离线开发经 YAML 装载）
     base_url: str = ""
-    api_key: str = ""                     # 经 ${ENV_VAR} 展开而来；mock 后端可为空
+    api_key: str = ""                     # 由密钥库注入（Web 直填加密入库）；YAML 不落密钥，mock 后端可为空
     # 端点协议：chat completions、OpenAI Responses、Anthropic Messages
     # 三协议的请求体与响应结构不同（messages 与 input/instructions、choices 与 output
     # items、usage 字段名 prompt_tokens 与 input_tokens）。auto 按 provider 推导
@@ -192,7 +193,7 @@ class ModelEntry(BaseModel):
     provider_ref: str = ""                # 归属供应商名（ProviderEntry.name）
     provider: str = "openai_compatible"   # 由供应商合并而来
     base_url: str = ""
-    api_key: str = ""                     # 由供应商合并而来（经 ${ENV_VAR} 展开或密钥库覆盖）
+    api_key: str = ""                     # 由供应商合并而来（密钥库注入）
     api_format: Literal["auto", "chat_completions", "responses", "anthropic_messages"] = "auto"
     tier: str = "fast"                    # flagship / fast / code / rigorous / light
     capabilities: list[str] = Field(default_factory=list)  # reasoning/code/chinese/security

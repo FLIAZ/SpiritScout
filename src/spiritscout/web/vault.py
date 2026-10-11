@@ -7,15 +7,13 @@
 - 数据库：工作区 ``vault.db``（SQLite，secrets 表：供应商名主键 + 密文 + 时间）。
 
 安全边界：明文密钥只在本进程内存中短暂存在（解析后的 ModelEntry），
-API 永不回传、审计不含值；``models.yaml`` 里只出现 ``${ENV_VAR}`` 占位符。
-密钥库条目按供应商名覆盖环境变量占位符（库内直填优先）——
-同一供应商下的模型共用一条密钥记录。
+API 永不回传、审计不含值；``models.yaml`` 不落密钥（占位符也不用）。
+密钥库条目按供应商名注入注册表——同一供应商下的模型共用一条密钥记录。
 """
 
 from __future__ import annotations
 
 import os
-import re
 import sqlite3
 import threading
 import time
@@ -28,7 +26,6 @@ from spiritscout.config.settings import ModelEntry
 from spiritscout.core.exceptions import SpiritScoutError
 
 _ENV_MASTER_KEY = "SPIRITSCOUT_VAULT_KEY"
-_ENV_REF = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 
 _lock = threading.Lock()
 _root: Path | None = None
@@ -175,7 +172,7 @@ def _load_all() -> dict[str, str]:
 
 
 def apply_keys(models: list[ModelEntry]) -> list[ModelEntry]:
-    """密钥库覆盖到加载后的注册表（库内密钥优先于环境变量占位符）。
+    """密钥库注入加载后的注册表（密钥的唯一来源）。
 
     模型不单独存密钥——按所属供应商取（provider_ref）。
     """
@@ -185,22 +182,12 @@ def apply_keys(models: list[ModelEntry]) -> list[ModelEntry]:
 
 
 def key_status(entry: dict[str, Any], name: str) -> dict[str, Any]:
-    """从原始条目提取 key 状态（不展开、不回传密钥本身）。
+    """供应商密钥状态（不回传密钥本身）。
 
-    key_source：vault（密钥库已配置）/ env（环境变量）/ none（未配置）。
+    key_source：vault（密钥库已配置）/ none（未配置）。
     """
-    api_key = str(entry.get("api_key") or "")
-    m = _ENV_REF.match(api_key)
-    env = m.group(1) if m else ""
-    if has_key(name):
-        source = "vault"
-    elif env and os.environ.get(env):
-        source = "env"
-    else:
-        source = "none"
+    configured = has_key(name)
     return {
-        "key_env": env,
-        "key_source": source,
-        "key_configured": source != "none",
-        "key_is_placeholder": bool(m) or not api_key,
+        "key_source": "vault" if configured else "none",
+        "key_configured": configured,
     }

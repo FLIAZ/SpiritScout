@@ -365,7 +365,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
 
     @app.get("/api/provider-presets")
     async def provider_presets() -> dict[str, Any]:
-        """厂商预设目录（添加供应商对话框：选中带入协议/地址/建议环境变量名）。"""
+        """厂商预设目录（添加供应商对话框：选中带入协议与地址）。"""
         from spiritscout.web.provider_api import PROVIDER_PRESETS
         return {"presets": PROVIDER_PRESETS}
 
@@ -441,8 +441,8 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             "provider": str(payload.get("provider") or stored.get("provider")
                             or "openai_compatible"),
             "base_url": str(payload.get("base_url") or stored.get("base_url") or ""),
-            "api_key": key_value or vault.get_key(name)
-            or str(stored.get("api_key") or ""),
+            # 密钥只认本次直填或密钥库——YAML 不落密钥，stored 里没有可用值
+            "api_key": key_value or vault.get_key(name),
         }
         result = await fetch_model_list(spec)
         AuditLogger(cfg.audit_log_path).log("system.lifecycle", "modelcfg", {
@@ -510,7 +510,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         if not entry.api_key:
             return {"ok": False,
                     "error": "密钥未配置——在该模型所属供应商里填入密钥"
-                             "（加密存入本机密钥库）或配置环境变量"}
+                             "（加密存入本机密钥库）"}
         gateway = ModelGateway(
             ModelRegistry(entries),
             GatewayConfig(request_timeout_seconds=25),

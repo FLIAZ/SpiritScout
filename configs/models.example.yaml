@@ -9,8 +9,8 @@
 # 也可在 Web 控制台侧栏「模型」里图形化维护：添加供应商 → 一键「获取模型列表」
 # 从云端拉取可用模型并勾选启用；端点没有模型列表接口时，在供应商内手动填模型 ID。
 #
-# api_key 只允许 ${ENV_VAR} 环境变量注入（合规 G8，禁止明文 key 落盘）；
-# Web 直填的密钥加密存入本机密钥库（按供应商保管，不落明文）。
+# 密钥不落本文件（合规 G8，禁止明文 key 落盘）：在 Web「模型」页供应商里
+# 直填 API Key，加密存入本机密钥库（按供应商保管，重启后仍有效）。
 #
 # 模型 ID 即身份：编队页直接把模型 ID 指派给 Agent，密钥、审计与预算也按它
 # 对应；同一个模型 ID 不能注册两次（同一端点要配两种参数时，请用端点侧不同
@@ -44,31 +44,27 @@ providers:
   # ========== 火山引擎方舟（Ark）==========
   # OpenAI 兼容端点：https://ark.cn-beijing.volces.com/api/plan/v3
   # Anthropic 兼容端点：https://ark.cn-beijing.volces.com/api/plan
-  # export SPIRITSCOUT_LLM_API_KEY=<你的 API Key>（无人值守部署用；
-  # 交互使用推荐在 Web「模型」页直填——加密存入本机密钥库，不落明文）
+  # API Key 在 Web「模型」页该供应商里直填（加密存入本机密钥库，不落明文）
   - name: ark                        # 供应商名（自取，模型用 provider_ref 引用）
     provider: openai_compatible
     base_url: https://ark.cn-beijing.volces.com/api/plan/v3
-    api_key: ${SPIRITSCOUT_LLM_API_KEY}
     api_format: auto
 
-  # 其他供应商示例（取消注释即可；模型侧用 provider_ref 引用供应商名）
+  # 其他供应商示例（取消注释即可；模型侧用 provider_ref 引用供应商名；
+  # 密钥同样在 Web 页直填。手写本文件时也可以直接省略供应商——
+  # Web「添加供应商」对话框内置各厂商预设，选中即带入协议与地址）
   # - name: deepseek
   #   provider: openai_compatible
-  #   base_url: https://api.deepseek.com/v1
-  #   api_key: ${DEEPSEEK_API_KEY}
+  #   base_url: https://api.deepseek.com
   # - name: qwen
   #   provider: openai_compatible
   #   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-  #   api_key: ${DASHSCOPE_API_KEY}
   # - name: openai
   #   provider: openai_compatible
   #   base_url: https://api.openai.com/v1          # 或你的中转端点
-  #   api_key: ${OPENAI_API_KEY}
   # - name: anthropic
   #   provider: anthropic_compatible
   #   base_url: https://api.anthropic.com          # 或你的中转端点
-  #   api_key: ${ANTHROPIC_API_KEY}
 
 models:
   # model 填模型名（如 ark-code-latest）或推理接入点 ID（ep-xxxxxxxx）

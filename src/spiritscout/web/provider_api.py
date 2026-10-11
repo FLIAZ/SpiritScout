@@ -15,54 +15,49 @@ import httpx
 _TIMEOUT = 20.0
 _ANTHROPIC_VERSION = "2023-06-01"
 
-# 厂商预设目录（Web「添加供应商」对话框：选中即带入协议/地址/建议环境变量名，
+# 厂商预设目录（Web「添加供应商」对话框：选中即带入协议与地址，
 # 填入后全部字段仍可手改；「自定义」项由前端提供，不在此列）。
-# key_env 为该厂商通行的环境变量名，仅作占位符建议，不含任何密钥。
 # base_url 以各厂商 2026-10 现行接入文档为准（国内站优先；国际站域名不同者
 # 在名称中注明，用户可按需手改）。
 PROVIDER_PRESETS: list[dict[str, str]] = [
     # ---- 国内厂商 ----
     {"key": "ark", "name": "火山方舟", "provider": "openai_compatible",
-     "base_url": "https://ark.cn-beijing.volces.com/api/plan/v3",
-     "key_env": "SPIRITSCOUT_LLM_API_KEY"},
+     "base_url": "https://ark.cn-beijing.volces.com/api/plan/v3"},
     {"key": "deepseek", "name": "DeepSeek", "provider": "openai_compatible",
-     "base_url": "https://api.deepseek.com", "key_env": "DEEPSEEK_API_KEY"},
+     "base_url": "https://api.deepseek.com"},
     {"key": "qwen", "name": "阿里百炼", "provider": "openai_compatible",
-     "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-     "key_env": "DASHSCOPE_API_KEY"},
+     "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"},
     {"key": "zhipu", "name": "智谱", "provider": "openai_compatible",
-     "base_url": "https://open.bigmodel.cn/api/paas/v4", "key_env": "ZHIPU_API_KEY"},
+     "base_url": "https://open.bigmodel.cn/api/paas/v4"},
     {"key": "moonshot", "name": "Kimi（Moonshot）", "provider": "openai_compatible",
-     "base_url": "https://api.moonshot.cn/v1", "key_env": "MOONSHOT_API_KEY"},
+     "base_url": "https://api.moonshot.cn/v1"},
     {"key": "minimax", "name": "MiniMax", "provider": "openai_compatible",
-     "base_url": "https://api.minimax.cn/v1", "key_env": "MINIMAX_API_KEY"},
+     "base_url": "https://api.minimax.cn/v1"},
     {"key": "qianfan", "name": "百度千帆", "provider": "openai_compatible",
-     "base_url": "https://qianfan.baidubce.com/v2", "key_env": "QIANFAN_API_KEY"},
+     "base_url": "https://qianfan.baidubce.com/v2"},
     {"key": "hunyuan", "name": "腾讯混元", "provider": "openai_compatible",
-     "base_url": "https://api.hunyuan.cloud.tencent.com/v1",
-     "key_env": "HUNYUAN_API_KEY"},
+     "base_url": "https://api.hunyuan.cloud.tencent.com/v1"},
     {"key": "stepfun", "name": "阶跃星辰", "provider": "openai_compatible",
-     "base_url": "https://api.stepfun.com/v1", "key_env": "STEP_API_KEY"},
+     "base_url": "https://api.stepfun.com/v1"},
     {"key": "siliconflow", "name": "硅基流动", "provider": "openai_compatible",
-     "base_url": "https://api.siliconflow.cn/v1", "key_env": "SILICONFLOW_API_KEY"},
+     "base_url": "https://api.siliconflow.cn/v1"},
     # ---- 国际厂商 ----
     {"key": "openai", "name": "OpenAI", "provider": "openai_compatible",
-     "base_url": "https://api.openai.com/v1", "key_env": "OPENAI_API_KEY"},
+     "base_url": "https://api.openai.com/v1"},
     {"key": "anthropic", "name": "Anthropic", "provider": "anthropic_compatible",
-     "base_url": "https://api.anthropic.com", "key_env": "ANTHROPIC_API_KEY"},
+     "base_url": "https://api.anthropic.com"},
     {"key": "gemini", "name": "Google Gemini", "provider": "openai_compatible",
-     "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
-     "key_env": "GEMINI_API_KEY"},
+     "base_url": "https://generativelanguage.googleapis.com/v1beta/openai"},
     {"key": "xai", "name": "xAI", "provider": "openai_compatible",
-     "base_url": "https://api.x.ai/v1", "key_env": "XAI_API_KEY"},
+     "base_url": "https://api.x.ai/v1"},
     {"key": "groq", "name": "Groq", "provider": "openai_compatible",
-     "base_url": "https://api.groq.com/openai/v1", "key_env": "GROQ_API_KEY"},
+     "base_url": "https://api.groq.com/openai/v1"},
     {"key": "mistral", "name": "Mistral", "provider": "openai_compatible",
-     "base_url": "https://api.mistral.ai/v1", "key_env": "MISTRAL_API_KEY"},
+     "base_url": "https://api.mistral.ai/v1"},
     {"key": "openrouter", "name": "OpenRouter", "provider": "openai_compatible",
-     "base_url": "https://openrouter.ai/api/v1", "key_env": "OPENROUTER_API_KEY"},
+     "base_url": "https://openrouter.ai/api/v1"},
     {"key": "ollama", "name": "Ollama（本地）", "provider": "openai_compatible",
-     "base_url": "http://127.0.0.1:11434/v1", "key_env": ""},
+     "base_url": "http://127.0.0.1:11434/v1"},
 ]
 
 

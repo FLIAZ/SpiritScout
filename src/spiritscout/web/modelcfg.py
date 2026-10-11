@@ -3,17 +3,15 @@
 文件分两段：``providers``（供应商：base_url + 密钥 + 协议）与 ``models``
 （模型：能力画像/档位/思考强度）。一个供应商下挂多个模型，接入信息不重复存。
 
-安全边界（合规 G8）：密钥不以明文落盘。YAML 里的 api_key 只允许
-``${ENV_VAR}`` 占位符；Web 直填的密钥加密存入本机密钥库（见 vault 模块），
-本模块读写给前端的永远是 YAML 原文（占位符不展开），已解析的密钥只存在
-于内存 ModelEntry 中，API 绝不回传。
+安全边界（合规 G8）：密钥不以任何形式落进 YAML。Web 直填的密钥加密存入
+本机密钥库（见 vault 模块），装载时按供应商名注入内存 ModelEntry；
+本模块读写给前端的永远不含密钥，API 绝不回传。
 写回用 PyYAML 规范化（手写注释不保留），原子替换防半写损坏。
 """
 
 from __future__ import annotations
 
 import os
-import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -26,27 +24,20 @@ from spiritscout.core.exceptions import SpiritScoutError
 _HEADER = """\
 # 模型注册表（设计书 4.9.4，硬约束 C9：OpenAI/Anthropic 兼容 API）。
 # 本文件可被 Web 控制台「模型」面板写回（手写注释会被规范化；完整注释模板见
-# configs/models.example.yaml）。api_key 仅允许 ${ENV_VAR} 注入（合规 G8）。
+# configs/models.example.yaml）。密钥不落本文件（G8）——在 Web「模型」页直填，
+# 加密存入本机密钥库。
 """
-
-_ENV_REF = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 
 _CLOUD_PROVIDERS = ("openai_compatible", "anthropic_compatible")
 
 
 def normalize_api_key(raw: str) -> str:
-    """把用户输入规范为 ${VAR} 占位符（空留空；已是 ${} 形式原样）。"""
-    raw = (raw or "").strip()
-    if not raw:
-        return ""
-    if _ENV_REF.match(raw):
-        return raw
-    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", raw):
-        return "${" + raw + "}"
-    raise SpiritScoutError(
-        "api_key 只允许填环境变量名（如 SPIRITSCOUT_LLM_API_KEY）"
-        "或 ${SPIRITSCOUT_LLM_API_KEY} 形式（G8）；"
-        "直填密钥请用 api_key_value 字段（加密存入本机密钥库）")
+    """密钥不落 YAML：api_key 字段只接受空值；直填密钥走 api_key_value（入密钥库）。"""
+    if (raw or "").strip():
+        raise SpiritScoutError(
+            "密钥不写进配置文件（G8）——请用 api_key_value 字段直填"
+            "（加密存入本机密钥库）")
+    return ""
 
 
 # ------------------------------------------------------------ 读

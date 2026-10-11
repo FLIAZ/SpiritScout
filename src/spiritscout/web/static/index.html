@@ -687,8 +687,7 @@ dialog::backdrop { background: rgba(10, 14, 22, .45); }
     </select></label>
     <label class="wide"><span>API 地址 *</span><input id="p-baseurl" placeholder="https://api.example.com/v1"></label>
     <div class="dlg-sec">密钥</div>
-    <label><span>API Key（直填）</span><input id="p-keyval" type="password" placeholder="加密存入本机密钥库，不写回配置文件" autocomplete="new-password"></label>
-    <label><span>或环境变量名</span><input id="p-keyenv" placeholder="如 SPIRITSCOUT_LLM_API_KEY（无人值守部署用）"></label>
+    <label class="wide"><span>API Key</span><input id="p-keyval" type="password" placeholder="加密存入本机密钥库，不写回配置文件" autocomplete="new-password"></label>
     <div id="p-keystat" class="muted" style="grid-column:1/-1;font-size:11.5px"></div>
   </div>
   <div class="dlg-ops">
@@ -1642,9 +1641,7 @@ const M_ICONS = {
 function keyLed(p) {
   if (p.key_source === "vault")
     return `<span class="led ok" title="密钥已加密存入本机密钥库（vault.db），重启与更新均保留"></span><span class="pb-key ok">密钥已就绪 · 密钥库</span>`;
-  if (p.key_source === "env")
-    return `<span class="led ok" title="密钥来自环境变量 ${esc(p.key_env)}"></span><span class="pb-key ok">密钥已就绪 · 环境变量</span>`;
-  return `<span class="led bad" title="编辑该供应商填入密钥（加密存入本机密钥库），或配置环境变量"></span><span class="pb-key bad">密钥未配置</span>`;
+  return `<span class="led bad" title="编辑该供应商填入密钥（加密存入本机密钥库）"></span><span class="pb-key bad">密钥未配置</span>`;
 }
 
 function modelTile(m) {
@@ -1818,10 +1815,9 @@ window.providerEdit = name => {
   $("#p-name").value = p.name;
   $("#p-type").value = p.provider === "anthropic_compatible" ? "anthropic_compatible" : "openai_compatible";
   $("#p-baseurl").value = p.base_url || "";
-  $("#p-keyenv").value = p.key_env || ""; $("#p-keyval").value = "";
+  $("#p-keyval").value = "";
   $("#p-keystat").textContent =
     p.key_source === "vault" ? "当前密钥：密钥库已配置（留空表示保持不变；重填即覆盖）"
-    : p.key_source === "env" ? `当前密钥：环境变量 ${p.key_env} 已配置`
     : "当前密钥：未配置";
   $("#p-presets-sec").hidden = true; $("#p-presets").hidden = true;   // 编辑已有供应商不带预设
   $("#p-dlg").showModal();
@@ -1855,7 +1851,6 @@ function renderPresets(selKey) {
       if (!$("#p-name").value.trim()) $("#p-name").value = p.key;
       $("#p-type").value = p.provider === "anthropic_compatible" ? "anthropic_compatible" : "openai_compatible";
       $("#p-baseurl").value = p.base_url || "";
-      if (p.key_env) $("#p-keyenv").value = p.key_env;
     }
   });
 }
@@ -1863,7 +1858,7 @@ function renderPresets(selKey) {
 window.providerAdd = async () => {
   S.pedit = null;
   $("#p-dlg-title").textContent = "添加供应商";
-  for (const id of ["p-name", "p-baseurl", "p-keyenv", "p-keyval"]) $("#" + id).value = "";
+  for (const id of ["p-name", "p-baseurl", "p-keyval"]) $("#" + id).value = "";
   $("#p-keystat").textContent = "";
   $("#p-type").value = "openai_compatible";
   $("#p-presets-sec").hidden = false; $("#p-presets").hidden = false;
@@ -1875,15 +1870,12 @@ $("#p-add").onclick = window.providerAdd;
 $("#p-cancel").onclick = () => $("#p-dlg").close();
 $("#p-save").onclick = async () => {
   const name = $("#p-name").value.trim();
-  const env = $("#p-keyenv").value.trim(), keyval = $("#p-keyval").value.trim();
+  const keyval = $("#p-keyval").value.trim();
   if (!name) { toast("供应商名必填", true); return; }
   const body = { name, provider: $("#p-type").value, base_url: $("#p-baseurl").value.trim(),
-                 api_key: env ? `\${${env}}` : "" };
-  // 直填：服务端加密存入密钥库；把环境变量改名/新填 = 切到环境变量模式，
-  // 顺带清掉库内直填密钥（否则库内密钥优先级更高，环境变量形同虚设）
-  const orig = S.pedit ? (S.providers || []).find(x => x.name === S.pedit) : null;
+                 api_key: "" };
+  // 密钥只走直填：服务端加密存入密钥库；编辑时留空 = 库内密钥保持不变
   if (keyval) body.api_key_value = keyval;
-  else if (orig && orig.key_source === "vault" && env !== (orig.key_env || "")) body.api_key_value = "";
   try {
     if (S.pedit) await api(`/api/providers/${encodeURIComponent(S.pedit)}`,
       { method: "PUT", body: JSON.stringify(body) });
