@@ -717,7 +717,14 @@ class CTFBaseAgent(SubAgent):
 
         boot_value, boot_note = 0.0, ""
         if not state["messages"]:
-            boot_value, boot_note = await self._inv_bootstrap(task, route, state)
+            try:
+                boot_value, boot_note = await self._inv_bootstrap(task, route, state)
+            except Exception as exc:  # noqa: BLE001 —— 首轮感知失败不终结调查：
+                # 把障碍原样交给模型（见过现场才知道怎么绕：换入口/换工具/先读题面）
+                state["seed"].append(
+                    f"首轮感知失败: {type(exc).__name__}: {str(exc)[:200]}"
+                    "——请换可行的入口或工具继续调查")
+                boot_note = f"首轮感知失败: {str(exc)[:120]}"
             self._seed_messages(task, route, plan, state)
         else:
             if (update := self._peer_updates(task, state)):

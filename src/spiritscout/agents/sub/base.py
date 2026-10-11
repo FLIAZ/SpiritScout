@@ -375,6 +375,11 @@ class SubAgent(abc.ABC):
                     result = await self.execute_step(task, route, plan, step)
                 except Exception as exc:  # noqa: BLE001 —— 单步失败不拖垮路线（容错 2.1-3）
                     result = StepResult(ok=False, note=f"step exception: {exc}")
+                    # 步异常必须留痕于事件流：只进路线笔记会让「智能体零回合
+                    # 收工」在时间线上看起来像正常完成
+                    self.ctx.audit.log("agent.error", self.agent_id, {
+                        "route": route.name, "step": str(step.get("action", "")),
+                        "error": str(exc)[:300]})
                 # 已尝试登记：结果价值供同伴避让参考（高价值先写不被低价值覆盖）
                 if akey and self.ctx.ring is not None:
                     self.ctx.ring.record_attempt(

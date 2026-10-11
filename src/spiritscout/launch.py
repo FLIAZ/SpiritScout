@@ -54,8 +54,10 @@ class LaunchPlan:
     source_request: LaunchRequest | None = None  # 重建计划用（LLM 改判时）
 
 
-# 任务意图中的目标提取：URL 优先，裸域名兜底
-_URL_RE = re.compile(r"https?://[^\s，。；\"'<>()]+", re.IGNORECASE)
+# 任务意图中的目标提取：URL 优先，裸域名兜底。
+# 排除类含全角标点——中文任务描述「…cn（flag 格式：…）」的括号不该被吞进 URL
+_URL_RE = re.compile(
+    r"https?://[^\s，。；：、！？（）【】《》「」『』\"'<>()]+", re.IGNORECASE)
 _DOMAIN_RE = re.compile(
     r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b", re.IGNORECASE)
 

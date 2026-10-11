@@ -33,11 +33,13 @@ from spiritscout.web import agentcfg, vault
 async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
                           mission: str, heuristic: RunMode,
                           audit: AuditLogger) -> RunMode | None:
-    """智能模式的 LLM 语义路由：任务描述交给模型判定归属分支
-    （CTF/SRC/渗透赛），不写关键词脚本；不可用/解析失败 → None（按兜底走）。
+    """智能模式的 LLM 语义路由，并**兼任开工预检**（开工前唯一模型调用）。
 
-    护栏：只返回三枚举之一，模型自由裁决「走哪条分支」，但分支内部的
-    范围/预算/核验护栏不变。
+    - 网关调用失败（连接/认证/超时）→ 抛出：等同模型预检失败，会话不
+      开工（LLM-first：无脑不开工）——一次调用同时完成「模型可用性」与
+      「模式裁决」两件事，不再为预检单付一次串行等待；
+    - 模型应答但解析不出模式 → 返回 None：模型活着，按装配层结构化兜底走。
+    低思考档提示：分类是小判断，不值得重推理（模型未声明低档时忽略）。
     """
     from spiritscout.gateway import ModelGateway, ModelRegistry
     from spiritscout.gateway.backends import extract_json
@@ -58,19 +60,27 @@ async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
                  "fallback_guess": heuristic.value,
                  "answer": '{"mode": "src|ctf|competition", "rationale": "一句话"}',
              }, ensure_ascii=False)}],
-            task_type="classification", response_format="json")
+            task_type="classification", response_format="json",
+            reasoning_effort="low")
+    except Exception as exc:
+        audit.log("system.lifecycle", "mode_router", {
+            "action": "model_preflight_failed", "error": str(exc)[:300]})
+        raise SpiritScoutError(
+            f"模型不可用，会话未开工：{exc}。请在「模型」页检查接入配置"
+            f"与密钥后重新发起") from exc
+    try:
         data = extract_json(resp.content)
         mode = RunMode(str((data or {}).get("mode", "")).strip().lower())
-        audit.log("decision.change", "mode_router", {
-            "action": "llm_mode_route", "llm_mode": mode.value,
-            "heuristic": heuristic.value,
-            "rationale": str((data or {}).get("rationale", ""))[:200]})
-        return mode
-    except Exception as exc:  # noqa: BLE001 —— 路由失败按兜底模式走（留痕）
+    except (ValueError, TypeError) as exc:
         audit.log("decision.change", "mode_router", {
             "action": "llm_mode_route_fallback",
-            "heuristic": heuristic.value, "error": str(exc)[:200]})
+            "heuristic": heuristic.value, "reason": f"应答不可解析: {exc}"[:160]})
         return None
+    audit.log("decision.change", "mode_router", {
+        "action": "llm_mode_route", "llm_mode": mode.value,
+        "heuristic": heuristic.value,
+        "rationale": str((data or {}).get("rationale", ""))[:200]})
+    return mode
 
 TERMINAL_STATES = frozenset({"completed", "failed", "stopped", "interrupted"})
 
@@ -88,7 +98,7 @@ async def _preflight_models(cfg: SystemConfig, models: list[ModelEntry],
     try:
         await gateway.chat(
             [{"role": "user", "content": "就绪检查：回复 ok 即可"}],
-            task_type="preflight", max_tokens=8)
+            task_type="preflight", max_tokens=8, reasoning_effort="low")
     except Exception as exc:
         audit.log("system.lifecycle", "preflight", {
             "action": "model_preflight_failed", "error": str(exc)[:300]})
@@ -416,22 +426,18 @@ class SessionManager:
         mode = RunMode(session.mode)
         async with self._sem:
             try:
-                # 开工预检与智能模式语义路由并行（两者都是模型调用，串行纯属
-                # 等待）：路由调用成功本身即证明模型全链可用，预检失败即熔断
+                # 开工即有声：先落一条事件让用户立刻看到灵枢动起来了
+                # （随后的模型调用期间时间线不再静默）
                 audit = AuditLogger(cfg.audit_log_path)
+                audit.log("system.lifecycle", "runtime", {
+                    "action": "session_kickoff", "resume": resume})
                 routed = None
                 if not no_llm and models:
-                    route_task = (_llm_route_mode(cfg, models, plan.mission, mode, audit)
-                                  if (not resume and plan.mode_auto and plan.mission)
-                                  else None)
-                    if route_task is not None:
-                        pre, routed = await asyncio.gather(
-                            _preflight_models(cfg, models, audit), route_task,
-                            return_exceptions=True)
-                        if isinstance(pre, BaseException):
-                            raise pre
-                        if isinstance(routed, BaseException):
-                            routed = None
+                    if not resume and plan.mode_auto and plan.mission:
+                        # 语义路由兼任开工预检（开工前唯一模型调用，调用成功
+                        # 即模型全链可用），不为预检单付一次串行等待
+                        routed = await _llm_route_mode(
+                            cfg, models, plan.mission, mode, audit)
                     else:
                         await _preflight_models(cfg, models, audit)
                 if routed is not None and routed != mode and plan.source_request:

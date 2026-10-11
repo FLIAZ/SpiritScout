@@ -215,9 +215,8 @@ class MasterAgent:
             dag.mark(node.node_id, TaskStatus.RUNNING)
             task_objs.append((task, node.node_id))
 
-        # 灵枢按任务复杂度逐任务决策并发分支数与思考强度（LLM 主路径，规则只做钳制）
-        if task_objs and ctx.enable_llm_planning:
-            await self._assign_dispatch_plan(task_objs)
+        # 思考强度/路线预算的下发决策不再挡在开工路径上（见 _dispatch：
+        # 与子 Agent 执行并行裁定，落定后即时生效）
         tasks = [{"task": t.model_dump(mode="json"), "node_id": nid}
                  for t, nid in task_objs]
 
@@ -334,6 +333,7 @@ class MasterAgent:
                     }, ensure_ascii=False)},
                 ],
                 task_type="meta_planning", response_format="json",
+                reasoning_effort="low",
             )
             data = extract_json(resp.content)
         except Exception as exc:  # noqa: BLE001 —— 决策失败不阻断任务下发
@@ -414,12 +414,16 @@ class MasterAgent:
     async def _dispatch(self, state: MasterState) -> dict[str, Any]:
         ctx = self.ctx
         dag = TaskDAG.from_dict(state["dag"])
-        # 取本轮任务（meta_plan 刚按 round_no 生成）
-        round_tasks = [t for t in state["tasks_dispatched"]
+        # 取本轮任务（meta_plan 刚按 round_no 生成）；任务对象只重建一次，
+        # 与执行侧共享同一实例——思考强度裁定落定后对后续每次调用即时生效
+        round_specs = [t for t in state["tasks_dispatched"]
                        if Task.model_validate(t["task"]).round_no == state["round_no"]]
+        round_tasks = [Task.model_validate(s["task"]) for s in round_specs]
+        for t in round_tasks:
+            if t.task_type == "ctf_solve":
+                t.max_routes = 1          # 单线起步是策略，先于执行落定（无竞态）
 
-        async def _run_one(spec: dict[str, Any]) -> tuple[str, bool]:
-            task = Task.model_validate(spec["task"])
+        async def _run_one(spec: dict[str, Any], task: Task) -> tuple[str, bool]:
             agent = ctx.agents[task.agent_type]
             try:
                 await agent.run(task)
@@ -430,19 +434,33 @@ class MasterAgent:
                               {"task_id": task.task_id, "error": str(exc)[:300]})
                 return spec["node_id"], False
 
+        # 下发决策（复杂度/路线预算/思考强度）与子 Agent 执行并行：裁定本身
+        # 是一次模型调用（重推理端点上可达十余秒），串行挡在开工路径上纯属
+        # 等待。裁定未落定期间首轮调用按端点默认档起步，落定后即时生效。
+        assign_task = None
+        if round_tasks and ctx.enable_llm_planning:
+            assign_task = asyncio.create_task(self._assign_dispatch_plan(
+                list(zip(round_tasks, (s["node_id"] for s in round_specs)))))
+
         # 环形督导：派发期间灵枢实时观察各子 Agent 路线进度，
         # 按全局态势给方向建议（建议经环形台账投递，子 Agent 在 LLM 决策上下文消费）
         watch = None
         if ctx.ring is not None and ctx.enable_llm_planning and round_tasks:
             watch = asyncio.create_task(self._steering_watch(
-                [Task.model_validate(s["task"]).task_id for s in round_tasks]))
+                [t.task_id for t in round_tasks]))
         try:
-            results = await asyncio.gather(*(_run_one(s) for s in round_tasks))
+            results = await asyncio.gather(
+                *(_run_one(s, t) for s, t in zip(round_specs, round_tasks)))
         finally:
             if watch is not None:
                 watch.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await watch
+            if assign_task is not None and not assign_task.done():
+                # 任务全部先于裁定完成：裁定已无用，取消并回收
+                assign_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await assign_task
         for node_id, ok in results:
             dag.mark(node_id, TaskStatus.DONE if ok else TaskStatus.FAILED)
         self._write_dag_snapshot(dag)

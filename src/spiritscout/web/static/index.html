@@ -1789,6 +1789,10 @@ function tracePush(e) {
     case "user.message":
       traceAppend(e, `<div class="bubble"><div class="btxt">${esc(d.content || "")}</div></div>`, "tl-user");
       break;
+    case "system.lifecycle":
+      if (d.action === "session_kickoff")
+        traceAppend(e, `<div class="m">灵枢开工准备中——检查模型链路并判定任务模式…</div>`, "tl-sys");
+      break;
     case "user.attachment": {
       const sz = fmtSize(d.size);
       traceAppend(e, `<div class="bubble"><div class="btxt">📎 ${esc(d.name || "")}${sz ? ` <span class="k">${esc(sz)}</span>` : ""}</div>
@@ -1801,7 +1805,13 @@ function tracePush(e) {
         <div class="tl-reply">${esc(d.hint || "")}</div>`, "tl-master");
       break;
     case "decision.change": {
-      if (d.action === "meta_plan") {
+      if (d.action === "llm_mode_route") {
+        traceAppend(e, `<div class="hd"><span class="who">灵枢</span>
+          <span class="k">任务模式判定</span></div>
+          <div class="ang">→ ${esc(MODE_CN[d.llm_mode] || d.llm_mode || "?")}${d.rationale ? ` · ${esc(d.rationale)}` : ""}</div>`, "tl-master");
+      } else if (d.action === "dispatch_plan" || d.action === "dispatch_plan_skipped") {
+        traceAppend(e, `<div class="m">灵枢已定下发计划（任务复杂度 · 路线预算 · 思考强度）</div>`, "tl-sys");
+      } else if (d.action === "meta_plan") {
         const n = Array.isArray(d.new_nodes) ? d.new_nodes.length : 0;
         traceAppend(e, `<div class="hd"><span class="who">${esc(actorName(actor))}</span>
           <span class="k">第 ${esc(d.round ?? "?")} 轮规划${n ? ` · ${n} 个方向节点` : ""}</span></div>
