@@ -51,6 +51,7 @@ class LaunchPlan:
     flag_patterns: list[str] | None
     mission: str = ""                       # 任务意图原文（喂主 Agent 规划）
     mode_auto: bool = False                 # 智能模式：待 LLM 路由复核
+    needs_mode_routing: bool = False        # 输入未明确声明模式时才需要 LLM 语义裁决
     source_request: LaunchRequest | None = None  # 重建计划用（LLM 改判时）
 
 
@@ -60,6 +61,19 @@ _URL_RE = re.compile(
     r"https?://[^\s，。；：、！？（）【】《》「」『』\"'<>()]+", re.IGNORECASE)
 _DOMAIN_RE = re.compile(
     r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b", re.IGNORECASE)
+
+# 这里只识别用户已经明确写出的任务类型，不从漏洞名、URL 或业务词猜模式。
+# 中文紧邻英文缩写时 ``\b`` 不可靠，因此使用 ASCII 标识符边界。
+_CTF_DECLARATION_RE = re.compile(
+    r"(?i)(?<![a-z0-9_])ctf(?![a-z0-9_])|"
+    r"(?:拿|找|获取|夺取|提交|得到)\s*(?:到|出)?\s*flag(?![a-z0-9_])|"
+    r"(?:一道|这道|解|破解)\s*(?:ctf\s*)?(?:题|赛题)")
+_COMPETITION_DECLARATION_RE = re.compile(
+    r"(?i)(?<![a-z0-9_])awd(?:-[a-z]+)?(?![a-z0-9_])|"
+    r"渗透赛|攻防赛|攻防对抗|红蓝对抗")
+_SRC_DECLARATION_RE = re.compile(
+    r"(?i)(?<![a-z0-9_])src(?![a-z0-9_])|"
+    r"漏洞赏金|漏洞挖掘|授权渗透(?:测试)?|安全评估")
 
 
 def extract_targets(mission: str) -> tuple[list[str], list[str]]:
@@ -107,14 +121,36 @@ def _mission_flag_patterns(mission: str) -> list[str]:
     return extract_flag_patterns_from_text(mission)
 
 
-def fallback_mode(req: LaunchRequest) -> RunMode:
-    """智能模式的结构化兜底判定：不看关键词、不做语义猜测——
-    语义裁决归运行期 LLM 路由；此处只在模型不可用时保底：
-    给了赛制规则 → 渗透赛；给了赛题清单 → CTF；否则 SRC。"""
+def declared_mode(req: LaunchRequest) -> RunMode | None:
+    """读取用户已经明确给出的模式声明。
+
+    结构化赛制/赛题优先；自然语言只接受 ``CTF``、``拿 flag``、``AWD``、
+    ``授权渗透`` 这类强声明。返回 ``None`` 表示确实需要 LLM 理解上下文，
+    避免把可确定的任务交给模型再猜一次。
+    """
     if req.rules_yaml:
         return RunMode.COMPETITION
     if req.challenges_yaml:
         return RunMode.CTF
+    mission = req.mission or ""
+    if _COMPETITION_DECLARATION_RE.search(mission):
+        return RunMode.COMPETITION
+    if _CTF_DECLARATION_RE.search(mission):
+        return RunMode.CTF
+    if _SRC_DECLARATION_RE.search(mission):
+        return RunMode.SRC
+    return None
+
+
+def fallback_mode(req: LaunchRequest) -> RunMode:
+    """智能模式的确定性兜底。
+
+    明确声明直接采用；只有附件且没有在线目标时按离线赛题装配；其余先按
+    SRC 构造可校验的授权计划，并在运行前交给 LLM 做语义裁决。
+    """
+    declared = declared_mode(req)
+    if declared is not None:
+        return declared
     if req.has_uploads and not extract_targets(req.mission or "")[0]:
         # 只有附件、没有目标 URL：SRC 无处安放目标，只能按赛题处理
         # （附件文件由创建流程注入赛题载荷；运行期 LLM 路由仍可改判）
@@ -133,6 +169,7 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
     mission = (req.mission or "").strip()
     m_urls, m_domains = extract_targets(mission)
     mode_auto = req.mode is None
+    needs_mode_routing = mode_auto and declared_mode(req) is None
     if mode_auto:
         req = LaunchRequest(**{**req.__dict__, "mode": fallback_mode(req)})
     if mission and not req.target and m_urls:
@@ -179,9 +216,6 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
     # 授权范围：默认限定目标 URL 前缀（最小授权原则）；extra_scope 可追加
     allowed_urls = [req.target.rstrip("/")] if req.target else []
     allowed_domains: list[str] = []
-    host = urlparse(req.target).hostname if req.target else None
-    if host:
-        allowed_domains.append(host)
     for extra in req.extra_scope:
         (allowed_urls if extra.startswith(("http://", "https://"))
          else allowed_domains).append(extra)
@@ -189,9 +223,6 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
     for u in m_urls:
         if u not in allowed_urls:
             allowed_urls.append(u)
-        uh = urlparse(u).hostname
-        if uh and uh not in allowed_domains:
-            allowed_domains.append(uh)
     for d in m_domains:
         if d not in allowed_domains:
             allowed_domains.append(d)
@@ -200,9 +231,6 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
         url = str(ch.get("url", ""))
         if url.startswith(("http://", "https://")):
             allowed_urls.append(url.rstrip("/"))
-            ch_host = urlparse(url).hostname
-            if ch_host and ch_host not in allowed_domains:
-                allowed_domains.append(ch_host)
 
     scope = Scope(
         allowed_domains=allowed_domains, allowed_urls=allowed_urls,
@@ -225,5 +253,6 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
         flag_patterns=flag_patterns,
         mission=mission,
         mode_auto=mode_auto,
+        needs_mode_routing=needs_mode_routing,
         source_request=req if mode_auto else None,
     )

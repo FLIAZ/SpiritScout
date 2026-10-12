@@ -12,7 +12,10 @@ Web 不另设前置副本，避免两套门槛漂移。
 
 from __future__ import annotations
 
+import base64
 import json
+import os
+import secrets
 import shutil
 import time
 import uuid
@@ -22,13 +25,22 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    PlainTextResponse,
+    StreamingResponse,
+)
 
 from spiritscout import __version__
 from spiritscout.blackboard import Blackboard
 from spiritscout.config.settings import GatewayConfig, ModelEntry, SystemConfig
 from spiritscout.core.audit import AuditLogger
-from spiritscout.core.exceptions import RuleConflictError, SpiritScoutError
+from spiritscout.core.exceptions import (
+    ConfigurationError,
+    RuleConflictError,
+    SpiritScoutError,
+)
 from spiritscout.core.models import BlackboardLayer, RunMode
 from spiritscout.launch import LaunchRequest, prepare_launch
 from spiritscout.web import agentcfg, modelcfg, vault
@@ -51,11 +63,13 @@ def _read_state(session: Session) -> dict[str, Any]:
         "vulns": {"by_status": {}, "items": []},
         "flags": None,
         "pending_approvals": session.approvals.view(),
+        "pending_questions": session.questions.view(),
         "ring": session.ring.snapshot(),
         "user_opinions": session.opinions[-8:],
         "round_views": run_summary.get("round_views", []),
         "model_usage": run_summary.get("model_usage"),
         "verify": session.summary.get("verify"),
+        "business_context": None,
         "topology": {"dag_nodes": [], "tasks": []},
     }
     if not session.bb_path.exists():
@@ -109,6 +123,8 @@ def _read_state(session: Session) -> dict[str, Any]:
         if not state["topology"]["dag_nodes"]:
             # 终态会话兜底：摘要中的最终 DAG（如快照记录被清理）
             state["topology"]["dag_nodes"] = run_summary.get("dag_nodes", [])
+        state["business_context"] = bb.read(
+            BlackboardLayer.TOPOLOGY, "business-context")
         by_status: dict[str, int] = {}
         for rec in bb.query(BlackboardLayer.VULN, limit=50):
             d = rec["data"]
@@ -122,6 +138,22 @@ def _read_state(session: Session) -> dict[str, Any]:
                 "endpoint": d.get("endpoint"),
             })
         state["vulns"]["by_status"] = by_status
+        # 灵枢应答流：拓扑「你 → 灵枢」节点的回执展示
+        replies = []
+        for rec in bb.query(BlackboardLayer.TOPOLOGY, limit=400):
+            d = rec["data"]
+            if isinstance(d, dict) and d.get("kind") == "reply":
+                replies.append(d)
+        replies.sort(key=lambda d: float(d.get("ts") or 0))
+        state["master_replies"] = replies[-8:]
+        # 发现台账：拓扑「发现」组数据源（共享笔记/入口/Flag 落黑板，跨轮持久）
+        findings: list[dict[str, Any]] = []
+        for rec in bb.query(BlackboardLayer.TOPOLOGY, limit=400):
+            d = rec["data"]
+            if isinstance(d, dict) and d.get("kind") == "finding":
+                findings.append(d)
+        findings.sort(key=lambda d: float(d.get("ts") or 0))
+        state["findings"] = findings[-80:]
         if session.flags_path.exists():
             try:
                 flags = json.loads(
@@ -140,11 +172,32 @@ def _read_state(session: Session) -> dict[str, Any]:
             }
     finally:
         bb.close()
+    # 黑板保留历次续传记录；状态页以当前 DAG 为准，历史任务仍可在审计中查。
+    current_task_ids = {
+        str(task_id)
+        for node in state["topology"]["dag_nodes"]
+        for task_id in node.get("task_ids", [])
+    }
+    if current_task_ids:
+        state["tasks"] = [
+            task for task in state["tasks"]
+            if str(task.get("task_id")) in current_task_ids
+        ]
+        state["topology"]["tasks"] = [
+            task for task in state["topology"]["tasks"]
+            if str(task.get("task_id")) in current_task_ids
+        ]
     return state
 
 
 def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                max_concurrent: int = 4) -> FastAPI:
+    password = os.environ.get(cfg.web.password_env, "")
+    loopback = cfg.web.host in ("127.0.0.1", "localhost", "::1")
+    if cfg.web.remote_auth_required and not loopback and not password:
+        raise ConfigurationError(
+            f"Web 控制台绑定 {cfg.web.host} 时必须通过环境变量 "
+            f"{cfg.web.password_env} 设置管理密码")
     vault.configure(cfg.workspace.root)   # 密钥库落在工作区（vault.db/vault.key）
     manager = SessionManager(cfg, models, max_concurrent=max_concurrent)
 
@@ -156,9 +209,43 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         yield
         await manager.aclose()
 
-    app = FastAPI(title="灵探 SpiritScout 控制台", version=__version__,
+    app = FastAPI(title="灵枢 SpiritScout 控制台", version=__version__,
                   lifespan=lifespan)
     app.state.manager = manager
+
+    @app.middleware("http")
+    async def console_security(request: Request, call_next):
+        """统一的控制台安全边界。
+
+        Basic Auth 只在配置密码时启用；跨站写防护始终启用，
+        因为恶意网页同样可以向本机回环地址提交普通表单。
+        """
+        if password:
+            supplied_user = supplied_password = ""
+            value = request.headers.get("authorization", "")
+            if value.lower().startswith("basic "):
+                try:
+                    decoded = base64.b64decode(value.split(None, 1)[1],
+                                               validate=True).decode("utf-8")
+                    supplied_user, supplied_password = decoded.split(":", 1)
+                except (ValueError, UnicodeDecodeError):
+                    pass
+            if not (secrets.compare_digest(supplied_user, "spiritscout")
+                    and secrets.compare_digest(supplied_password, password)):
+                return PlainTextResponse(
+                    "需要管理认证", status_code=401,
+                    headers={"WWW-Authenticate": 'Basic realm="SpiritScout"'})
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            fetch_site = request.headers.get("sec-fetch-site", "").lower()
+            origin = request.headers.get("origin", "").rstrip("/")
+            expected = str(request.base_url).rstrip("/")
+            if fetch_site == "cross-site" or (origin and origin != expected):
+                return PlainTextResponse("拒绝跨站写请求", status_code=403)
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        return response
 
     # ------------------------------------------------------------ 前端
 
@@ -221,7 +308,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     def _agents_view() -> dict[str, Any]:
         from spiritscout.agents.roster import roster_view
         from spiritscout.config import load_model_config
-        models = [{"model": m.model, "tier": m.tier, "capabilities": list(m.capabilities),
+        models = [{"model": m.model, "capabilities": list(m.capabilities),
                    "context_window": m.context_window}
                   for m in load_model_config(cfg.models_config_path)]
         return {"roster": roster_view(),
@@ -237,8 +324,12 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     async def assign_agent_model(agent_key: str,
                                  payload: dict[str, Any]) -> dict[str, Any]:
         """给 Agent 分配模型（空串 = 清除分配，回到档位路由）。"""
+        from spiritscout.agents.profiles import PROFILE_BY_KEY
         from spiritscout.config import load_model_config
         model = str(payload.get("model") or "").strip()
+        profile = PROFILE_BY_KEY.get(agent_key)
+        if profile is None or not profile.configurable:
+            raise HTTPException(422, f"Agent 不支持模型指派: {agent_key}")
         valid = {m.model for m in load_model_config(cfg.models_config_path)}
         try:
             agentcfg.set_assignment(cfg.agent_models_path, agent_key, model, valid)
@@ -315,6 +406,25 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         if not session.approvals.decide(approval_id, allow):
             raise HTTPException(409, f"待确认项不存在或已裁决: {approval_id}")
         return {"approval_id": approval_id, "allow": allow}
+
+    @app.post("/api/sessions/{session_id}/questions/{question_id}")
+    async def answer_question(session_id: str, question_id: str,
+                              payload: dict[str, Any]) -> dict[str, Any]:
+        """回答模型发起的提问：{"choice": 选项下标} 或 {"text": 自由输入}，
+        {"add_targets": [...]} 为用户勾选的扩围目标（写入会话批准集）。"""
+        session = manager.get(session_id)
+        if session is None:
+            raise HTTPException(404, f"会话不存在: {session_id}")
+        choice = payload.get("choice")
+        if choice is not None and not isinstance(choice, int):
+            raise HTTPException(422, "choice 必须是选项下标整数")
+        ok = session.questions.answer(
+            question_id, choice=choice,
+            text=str(payload.get("text", "") or ""),
+            add_targets=payload.get("add_targets") or [])
+        if not ok:
+            raise HTTPException(409, f"待答问题不存在或已作答: {question_id}")
+        return {"question_id": question_id, "answered": True}
 
     # ------------------------------------------------------------ 会话协作（用户 → 灵枢）
 
@@ -593,10 +703,9 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         """批量启用供应商下的模型（从拉取的列表里勾选）。"""
         provider_ref = str(payload.get("provider_ref") or "")
         ids = [str(x) for x in (payload.get("models") or []) if str(x).strip()]
-        tier = str(payload.get("tier") or "fast")
         try:
             entries, added = modelcfg.add_entries(
-                cfg.models_config_path, provider_ref, ids, tier=tier)
+                cfg.models_config_path, provider_ref, ids)
         except SpiritScoutError as exc:
             raise _model_error(exc) from exc
         return {**_models_view(entries), "added": added}

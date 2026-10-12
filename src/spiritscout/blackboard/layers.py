@@ -10,6 +10,11 @@ from spiritscout.core.models import AgentType, BlackboardLayer
 # 写入方/消费方对照设计书 4.8.1 表
 LAYER_WRITE_PERMISSIONS: dict[AgentType, set[BlackboardLayer]] = {
     AgentType.MASTER: set(BlackboardLayer),  # 主 Agent 全权（焦点管理/终审）
+    AgentType.BUSINESS_CONTEXT: {
+        BlackboardLayer.ASSET,
+        BlackboardLayer.TOPOLOGY,
+        BlackboardLayer.TASK_STATE,
+    },
     AgentType.RECON: {
         BlackboardLayer.ASSET,
         BlackboardLayer.RECON_CLUE,
@@ -35,11 +40,16 @@ LAYER_WRITE_PERMISSIONS: dict[AgentType, set[BlackboardLayer]] = {
         BlackboardLayer.VULN,
         BlackboardLayer.TASK_STATE,
     },
-    AgentType.CTF_WEB: {BlackboardLayer.VULN, BlackboardLayer.TASK_STATE},
-    AgentType.CTF_PWN: {BlackboardLayer.VULN, BlackboardLayer.TASK_STATE},
-    AgentType.CTF_REVERSE: {BlackboardLayer.VULN, BlackboardLayer.TASK_STATE},
-    AgentType.CTF_CRYPTO: {BlackboardLayer.VULN, BlackboardLayer.TASK_STATE},
-    AgentType.CTF_MISC: {BlackboardLayer.VULN, BlackboardLayer.TASK_STATE},
+    AgentType.CTF_WEB: {BlackboardLayer.VULN, BlackboardLayer.TOPOLOGY,
+                          BlackboardLayer.TASK_STATE},
+    AgentType.CTF_PWN: {BlackboardLayer.VULN, BlackboardLayer.TOPOLOGY,
+                          BlackboardLayer.TASK_STATE},
+    AgentType.CTF_REVERSE: {BlackboardLayer.VULN, BlackboardLayer.TOPOLOGY,
+                          BlackboardLayer.TASK_STATE},
+    AgentType.CTF_CRYPTO: {BlackboardLayer.VULN, BlackboardLayer.TOPOLOGY,
+                          BlackboardLayer.TASK_STATE},
+    AgentType.CTF_MISC: {BlackboardLayer.VULN, BlackboardLayer.TOPOLOGY,
+                          BlackboardLayer.TASK_STATE},
     AgentType.REPORT: set(),  # 报告 Agent 只读（4.6）
 }
 

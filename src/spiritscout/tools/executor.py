@@ -116,7 +116,8 @@ class LocalExecutor(ToolExecutor):
             if not ok:
                 rolled = await rollback.rollback()
             result = ToolResult(
-                tool=spec.name, ok=ok, returncode=proc.returncode or -1,
+                tool=spec.name, ok=ok,
+                returncode=proc.returncode if proc.returncode is not None else -1,
                 stdout=stdout, stderr=stderr, duration_ms=duration,
                 timed_out=timed_out, attempts=1, rolled_back=rolled,
                 error="执行超时" if timed_out else ("" if ok else f"退出码 {proc.returncode}"),
@@ -192,7 +193,7 @@ class DockerExecutor(ToolExecutor):
             name=f"docker:{spec.name}", kind=ToolKind.DOCKER, description=spec.description,
             risk=spec.risk, timeout_seconds=spec.timeout_seconds,
             command_template=self._docker_cmd(spec, params, container_name),
-            parser=spec.parser,
+            parser=spec.parser, target_params=(), scope_required=False,
         )
         result = await LocalExecutor.run(self, wrapped, params={})
         if result.timed_out:

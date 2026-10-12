@@ -9,12 +9,15 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from spiritscout.agents.profiles import AgentProfile, get_profile
 from spiritscout.core.audit import AuditLogger, NullAuditLogger
 from spiritscout.core.exceptions import (
     PolicyViolation,
+    ScopeViolation,
     SpiritScoutError,
     ToolExecutionError,
 )
+from spiritscout.core.models import AgentType
 from spiritscout.tools.executor import ToolExecutor
 from spiritscout.tools.spec import ToolKind, ToolResult, ToolSpec
 
@@ -63,18 +66,27 @@ class ToolRegistry:
     # ------------------------------------------------------------ 调用
 
     async def call(self, name: str, params: dict[str, Any], **builtin_ctx) -> ToolResult:
-        """统一调用入口：策略风险门 → 重试 → 降级替代 → 结构化结果。"""
+        """统一调用入口：策略门 → 授权范围门 → 执行/重试 → 结构化结果。"""
         spec = self.get(name)
+        if spec.allowed_params:
+            unknown = set(params) - spec.allowed_params
+            if unknown:
+                reason = f"工具 {name} 非法参数: {sorted(unknown)}"
+                self.audit.log("tool.denied", "registry", {"tool": name, "reason": reason})
+                return ToolResult(tool=name, ok=False, error=reason, returncode=-4)
         if self.policy is not None:
             try:
+                self._check_scope(spec, params)
                 await self.policy.ensure_tool_allowed(
                     spec, action=str(params.get("action", "")) or None)
-            except PolicyViolation as exc:
+            except (PolicyViolation, ScopeViolation) as exc:
                 self.audit.log("tool.denied", "registry", {"tool": name, "reason": str(exc)})
                 return ToolResult(tool=name, ok=False, error=str(exc), returncode=-3)
         attempts = 0
         last: ToolResult | None = None
-        while attempts <= self.max_retries:
+        # 侵入性工具不自动重放，避免网络抖动把一次有副作用的调用变成两次。
+        retry_limit = self.max_retries if spec.risk.value == "readonly" else 0
+        while attempts <= retry_limit:
             attempts += 1
             if name in self._builtins:
                 last = await self._builtins[name](**params, **builtin_ctx)
@@ -95,3 +107,66 @@ class ToolRegistry:
             return fb
         assert last is not None
         return last
+
+    def _check_scope(self, spec: ToolSpec, params: dict[str, Any]) -> None:
+        """禁打列表硬校验（用户显式配置的拒绝边界），内置/CLI/Docker/MCP 共用。
+
+        授权白名单不在此拦截：范围外目标照常执行、结果带范围标注，
+        是否扩大测试范围由模型向用户提问确认（ask_user）——后端不做
+        进度与探索的刽子手。
+        """
+        if self.policy is None:
+            return
+        targets: list[str] = []
+        for field in spec.target_params:
+            if field not in params or params[field] in (None, ""):
+                continue
+            values = params[field] if isinstance(params[field], (list, tuple, set)) \
+                else [params[field]]
+            targets.extend(str(v) for v in values if isinstance(v, str))
+        if spec.scope_target_extractor is not None:
+            targets.extend(str(v) for v in spec.scope_target_extractor(params))
+        for value in targets:
+            if value.strip():
+                self.policy.guard.ensure_not_denied(value.strip())
+
+
+class AgentToolView:
+    """按角色收窄后的工具视图。
+
+    角色提示词中的工具边界同时落实到调用层。即使模型生成了越权工具名，
+    也会在进入策略与执行器前被拒绝并留下审计记录。
+    """
+
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        agent: AgentType | str,
+        *,
+        audit: AuditLogger | None = None,
+    ) -> None:
+        self._registry = registry
+        self.profile: AgentProfile = get_profile(agent)
+        self.audit = audit or registry.audit
+
+    def _allowed(self, name: str) -> bool:
+        return self.profile.allows_tool(name)
+
+    def get(self, name: str) -> ToolSpec:
+        if not self._allowed(name):
+            raise ToolExecutionError(
+                f"Agent {self.profile.key.value} 无权使用工具 {name}")
+        return self._registry.get(name)
+
+    def names(self) -> list[str]:
+        return [name for name in self._registry.names() if self._allowed(name)]
+
+    async def call(self, name: str, params: dict[str, Any], **builtin_ctx) -> ToolResult:
+        if not self._allowed(name):
+            reason = f"Agent {self.profile.key.value} 无权使用工具 {name}"
+            self.audit.log("tool.denied", self.profile.key.value, {
+                "tool": name,
+                "reason": reason,
+            })
+            return ToolResult(tool=name, ok=False, error=reason, returncode=-5)
+        return await self._registry.call(name, params, **builtin_ctx)

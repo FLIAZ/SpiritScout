@@ -14,12 +14,12 @@ from pathlib import Path
 
 import yaml
 
-from spiritscout.agents.roster import ROSTER
+from spiritscout.agents.profiles import PROFILES
 from spiritscout.core.exceptions import SpiritScoutError
 
 _HEADER = "# Agent 模型分配表——由 Web「编队」页维护，可手工编辑。\n"
 
-_VALID_KEYS = {r["key"] for r in ROSTER}
+_VALID_KEYS = {profile.key.value for profile in PROFILES if profile.configurable}
 
 
 def read_assignments(path: str | Path) -> dict[str, str]:
@@ -33,7 +33,7 @@ def read_assignments(path: str | Path) -> dict[str, str]:
     if not isinstance(data, dict) or not isinstance(data.get("assignments", {}), dict):
         raise SpiritScoutError(f"Agent 模型分配表格式错误: {p}")
     return {str(k): str(v) for k, v in (data.get("assignments") or {}).items()
-            if v}
+            if v and str(k) in _VALID_KEYS}
 
 
 def write_assignments(path: str | Path, assignments: dict[str, str]) -> None:

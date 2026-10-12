@@ -1,4 +1,4 @@
-"""灵探（SpiritScout）Web 控制台启动入口。
+"""灵枢（SpiritScout）Web 控制台启动入口。
 
 用法::
 
@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from spiritscout import __version__
@@ -20,7 +21,7 @@ from spiritscout.core.exceptions import SpiritScoutError
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="spiritscout",
-        description="灵探（SpiritScout）渗透测试智能体系统 · Web 控制台")
+        description="灵枢（SpiritScout）渗透测试智能体系统 · Web 控制台")
     parser.add_argument("--version", action="version",
                         version=f"%(prog)s {__version__}")
     parser.add_argument("--config", default="configs/system.yaml",
@@ -48,14 +49,19 @@ def main(argv: list[str] | None = None) -> int:
     host = args.host or cfg.web.host
     port = args.port or cfg.web.port
     if host not in ("127.0.0.1", "localhost", "::1"):
-        # 非回环绑定：控制台无鉴权，显著警告而非静默放行
-        print("⚠⚠ [警告] Web 控制台绑定非回环地址 "
-              f"{host}:{port}——任何可达网络的用户均可创建/停止渗透会话。\n"
-              "   请确认暴露面已获得授权方认可，或加前置反向代理认证。",
-              file=sys.stderr)
+        password = os.environ.get(cfg.web.password_env, "")
+        if cfg.web.remote_auth_required and not password:
+            print("[错误] Web 控制台绑定非回环地址时必须设置管理密码："
+                  f"export {cfg.web.password_env}='强密码'", file=sys.stderr)
+            return 2
+        print(f"[安全] 非回环控制台已启用 Basic Auth（用户 spiritscout）: {host}:{port}")
+    # 命令行覆盖不只传给 uvicorn；应用内部的认证策略和生成的
+    # 同源边界也必须看到最终绑定值。
+    cfg.web.host = host
+    cfg.web.port = port
     app = create_app(cfg, models,
                      max_concurrent=cfg.web.max_concurrent_sessions)
-    print(f"灵探 Web 控制台: http://{host}:{port}  "
+    print(f"灵枢 Web 控制台: http://{host}:{port}  "
           f"(并发上限 {cfg.web.max_concurrent_sessions}，Ctrl+C 停止)")
     uvicorn.run(app, host=host, port=port, log_level="warning")
     return 0

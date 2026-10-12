@@ -1,4 +1,4 @@
-# 灵探（SpiritScout）系统配置示例
+# 灵枢（SpiritScout）系统配置示例
 # 复制为 configs/system.yaml 后修改；亦可用 SPIRITSCOUT_<段>__<键> 环境变量覆盖。
 
 mode: src                      # src / ctf / competition（三模式， 完整启用）
@@ -44,6 +44,13 @@ report:
   template: src_standard       # 报告模板（4.6.2）
   output_format: markdown
   output_dir: .spiritscout/reports
+
+web:
+  host: 127.0.0.1
+  port: 8000
+  max_concurrent_sessions: 4
+  remote_auth_required: true     # 非回环绑定无密码时拒绝启动
+  password_env: SPIRITSCOUT_SERVER_PASSWORD
 
 models_config_path: configs/models.yaml
 audit_log_path: .spiritscout/audit.jsonl

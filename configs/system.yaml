@@ -1,4 +1,4 @@
-# 灵探（SpiritScout）系统配置示例
+# 灵枢（SpiritScout）系统配置示例
 # 复制为 configs/system.yaml 后修改；亦可用 SPIRITSCOUT_<段>__<键> 环境变量覆盖。
 
 mode: src                      # src / ctf / competition（三模式， 完整启用）
@@ -56,10 +56,12 @@ report:
   output_format: markdown
   output_dir: .spiritscout/reports
 
-web:                            # Web 控制台：spiritscout web 启动
-  host: 127.0.0.1               # 仅回环（无鉴权；改非回环启动时会有显著警告）
+web:                            # Web 控制台：spiritscout 启动
+  host: 127.0.0.1               # 非回环绑定时必须设置下方环境变量对应的管理密码
   port: 8000
   max_concurrent_sessions: 4    # 并发会话上限
+  remote_auth_required: true
+  password_env: SPIRITSCOUT_SERVER_PASSWORD
 
 models_config_path: configs/models.yaml
 audit_log_path: .spiritscout/audit.jsonl
@@ -76,11 +78,15 @@ mcp_servers:
     command: .venv/bin/idalib-mcp # 相对路径按项目根解析；绝对路径或 PATH 命令原样使用
     args: ["--stdio"]
     timeout: 600                  # 大型二进制自动分析可跑数分钟
+    default_risk: readonly        # 只读分析；MCP destructiveHint 仍会强制提升为 destructive
+    scope_enforcement: none       # 仅分析会话附件，不触网
   - name: yakit                   # Web 渗透：编解码 / HTTP 流量 / 模糊测试 / 指纹 / 端口 / 反序列化
     transport: stdio
     command: .tools/yak/yak       # 项目自带 Yakit 引擎（无头运行，不依赖图形端）
     args: ["mcp"]                 # 需要全部工具集时加 "--enable-all"
     timeout: 300
+    default_risk: intrusive       # 网络探测默认需会话即时批准
+    scope_enforcement: required   # 参数无法给出可校验目标时默认拒绝
 
 # —— idalib 装配（一次性，项目根执行；<IDA> 为 IDA Pro 安装目录）：
 #   .venv/bin/pip install <IDA>/idalib/python/idapro-*.whl

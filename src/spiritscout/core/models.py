@@ -69,9 +69,10 @@ class VulnStatus(str, enum.Enum):
 
 
 class AgentType(str, enum.Enum):
-    """子 Agent 类型（含三模式全谱系， 先实现 recon/web_vuln）。"""
+    """子 Agent 类型（含三模式全谱系）。"""
 
     MASTER = "master"
+    BUSINESS_CONTEXT = "business_context"  # 业务流程理解与上下文建模
     RECON = "recon"                # 侦察
     PORT_SCAN = "port_scan"        # 端口扫描
     WEB_VULN = "web_vuln"          # Web 漏洞

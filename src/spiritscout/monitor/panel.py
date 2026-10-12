@@ -29,7 +29,7 @@ def render_status(blackboard: Blackboard, *, flags_path: str | Path | None = Non
     """渲染实时状态面板（子 Agent 集群/路线进度/漏洞核验/赛况）。"""
     lines: list[str] = []
     lines.append("=" * 60)
-    lines.append("灵探 SpiritScout 运行状态面板")
+    lines.append("灵枢 SpiritScout 运行状态面板")
     lines.append("=" * 60)
 
     # ---- 黑板层统计

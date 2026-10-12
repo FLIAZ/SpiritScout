@@ -1,4 +1,4 @@
-"""灵探 Web 控制台：FastAPI + SSE + 无构建单页前端。
+"""灵枢 Web 控制台：FastAPI + SSE + 无构建单页前端。
 
 - 会话隔离：SessionManager 为每个会话建独立工作区与配置副本；
 - 实时进度：SSE 跟随会话审计 JSONL（断线 Last-Event-ID 续传）；

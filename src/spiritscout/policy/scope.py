@@ -1,15 +1,21 @@
-"""授权范围守卫（设计书 9.3：目标范围白名单、边界校验、越界自动拦截）。
+"""授权范围守卫（设计书 9.3：目标范围、边界校验、动态扩围）。
 
-合规自查 G1：未提供授权范围时系统拒绝启动；所有工具调用与 HTTP 请求的
-目标必须先过 ScopeGuard。判定顺序：禁打列表 > 白名单（域名/网段/URL 前缀）。
+边界语义（用户裁定）：
+- **禁打列表是唯一硬边界**——用户显式配置的拒绝目标，命中即拒；
+- 授权白名单是**初始范围**而非运行期围栏：范围外目标照常可达，后端
+  不做拦截，只在结果里标注「范围外」；是否扩大测试范围由模型向用户
+  提问（问题与选项由模型撰写），用户确认后目标写入会话批准集
+  （随守卫实例消亡，不落盘）——授权决定权始终在用户手里。
+合规自查 G1：未提供授权范围时系统拒绝启动。
 """
 
 from __future__ import annotations
 
 import fnmatch
 import ipaddress
+import posixpath
 from datetime import UTC, datetime
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from spiritscout.core.exceptions import ScopeViolation
 from spiritscout.core.models import Scope
@@ -20,6 +26,8 @@ class ScopeGuard:
         self.scope = scope
         # 会话级敏感动作批准集：即时确认放行后写入，随守卫实例消亡（不落盘）
         self._approved_sensitive: set[str] = set()
+        # 会话级范围批准集：用户确认扩围后写入（URL 归一到 origin、主机归一到域）
+        self._approved_targets: set[str] = set()
 
     # ------------------------------------------------------------ 启动门
 
@@ -37,14 +45,70 @@ class ScopeGuard:
     # ------------------------------------------------------------ 目标校验
 
     def check_target(self, target: str) -> str:
-        """校验任意目标字符串（URL/域名/IP）。通过返回规范化目标，否则抛 ScopeViolation。"""
+        """校验任意目标字符串（URL/域名/IP）：禁打 > 白名单/会话批准集。
+
+        通过返回规范化目标，否则抛 ScopeViolation。运行期工具门只调用
+        ensure_not_denied（禁打硬边界）；本方法供范围分类与导入过滤使用。
+        """
         host, url = self._split(target)
         self._check_denied(target, host)
-        if url and self._match_url(url):
-            return target
-        if host and self._match_host(host):
+        if url:
+            # URL 授权必须命中 URL 前缀，或命中用户显式给出的域名范围。
+            # allowed_urls 中出现某主机只代表允许解析该主机，不会把路径授权
+            # 隐式扩大为整站授权。
+            if (self._match_url(url) or (host and self._match_domain(host))
+                    or self._match_approved(target, host)):
+                return target
+        elif host and (self._match_host(host) or self._match_approved(target, host)):
             return target
         raise ScopeViolation(f"目标超出授权范围: {target}")
+
+    def ensure_not_denied(self, target: str) -> None:
+        """禁打列表硬校验（用户显式配置的拒绝边界）；白名单不在此拦。"""
+        host = self._split(target)[0]
+        self._check_denied(target, host)
+
+    def is_allowed(self, target: str) -> bool:
+        """目标是否落在授权白名单/会话批准集内（信息标注用，不做拦截）。"""
+        try:
+            self.check_target(target)
+            return True
+        except ScopeViolation:
+            return False
+
+    def approve_target(self, target: str) -> str:
+        """用户确认扩围：目标写入会话批准集并返回规范化条目。
+
+        URL 归一到 origin 前缀（同意一个目标=同意该站点的这个服务），
+        裸主机/域名按域批准；随会话消亡，不落盘。
+        """
+        target = str(target or "").strip()
+        host, url = self._split(target)
+        if url:
+            parsed = urlparse(url)
+            if not parsed.hostname:
+                raise ScopeViolation(f"无法解析的扩围目标: {target}")
+            entry = (f"{parsed.scheme.lower()}://{self._normalize_host(parsed.hostname)}")
+            if parsed.port:
+                entry += f":{parsed.port}"
+            entry += "/"
+        else:
+            if not host:
+                raise ScopeViolation(f"无法解析的扩围目标: {target}")
+            entry = self._normalize_host(host)
+        self._approved_targets.add(entry)
+        return entry
+
+    def _match_approved(self, target: str, host: str | None) -> bool:
+        """会话批准集匹配：origin 前缀条目按 URL 匹配，域条目按主机匹配。"""
+        for entry in self._approved_targets:
+            if "://" in entry:
+                if self._url_within(target, entry):
+                    return True
+            elif host and (host == entry or fnmatch.fnmatchcase(
+                    self._normalize_host(host), entry)):
+                return True
+        return False
 
     def check_url(self, url: str) -> str:
         parsed = urlparse(url if "://" in url else f"http://{url}")
@@ -80,10 +144,19 @@ class ScopeGuard:
 
     def _check_denied(self, raw: str, host: str | None) -> None:
         for pattern in self.scope.denied:
-            if raw.startswith(pattern) or (host and fnmatch.fnmatchcase(host, pattern)):
+            pattern_host, pattern_url = self._split(pattern)
+            url_denied = bool(
+                pattern_url and self._url_within(raw, pattern_url))
+            host_denied = bool(
+                host and not pattern_url and pattern_host
+                and fnmatch.fnmatchcase(
+                    self._normalize_host(host),
+                    self._normalize_host(pattern_host)))
+            if url_denied or host_denied:
                 raise ScopeViolation(f"目标命中禁打列表 {pattern}: {raw}")
 
     def _match_host(self, host: str) -> bool:
+        host = self._normalize_host(host)
         # IP 走网段
         try:
             ipaddress.ip_address(host)
@@ -94,21 +167,76 @@ class ScopeGuard:
                 return False
         except ValueError:
             pass
-        # 域名（含 *. 通配）
+        if self._match_domain(host):
+            return True
+        # URL 白名单中的主机允许被 DNS 解析，但不因此获得整站 URL 权限。
+        for url in self.scope.allowed_urls:
+            parsed = urlparse(url if "://" in url else f"http://{url}")
+            if parsed.hostname and host == self._normalize_host(parsed.hostname):
+                return True
+        return False
+
+    def _match_domain(self, host: str) -> bool:
+        """只匹配显式域名白名单，不读取 allowed_urls。"""
+        host = self._normalize_host(host)
         for pattern in self.scope.allowed_domains:
+            pattern = self._normalize_host(pattern)
             if fnmatch.fnmatchcase(host, pattern):
                 return True
             if pattern.startswith("*.") and host == pattern[2:]:
                 return True
-        # URL 白名单中的主机也算在范围内
-        for url in self.scope.allowed_urls:
-            parsed = urlparse(url if "://" in url else f"http://{url}")
-            if parsed.hostname and fnmatch.fnmatchcase(host, parsed.hostname):
-                return True
         return False
 
     def _match_url(self, url: str) -> bool:
-        return any(url.startswith(prefix) for prefix in self.scope.allowed_urls)
+        return any(self._url_within(url, prefix)
+                   for prefix in self.scope.allowed_urls)
+
+    @classmethod
+    def _url_within(cls, url: str, prefix: str) -> bool:
+        candidate = cls._url_parts(url)
+        allowed = cls._url_parts(prefix)
+        if candidate is None or allowed is None:
+            return False
+        c_scheme, c_host, c_port, c_path = candidate
+        a_scheme, a_host, a_port, a_path = allowed
+        if (c_scheme, c_host, c_port) != (a_scheme, a_host, a_port):
+            return False
+        return a_path == "/" or c_path == a_path or c_path.startswith(a_path + "/")
+
+    @classmethod
+    def _url_parts(cls, raw: str) -> tuple[str, str, int, str] | None:
+        """URL → 可比较的 origin + 路径边界；查询串不扩大或缩小授权。"""
+        parsed = urlparse(raw)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return None
+        scheme = parsed.scheme.lower()
+        try:
+            port = parsed.port or (443 if scheme == "https" else 80)
+        except ValueError:
+            return None
+        # 解码转义分隔符并归一化点路径，避免 /app/../admin 一类边界绕过。
+        path = parsed.path or "/"
+        # 多层解码防止 %252e%252e 在下游框架二次解码后越界。
+        for _ in range(5):
+            decoded = unquote(path)
+            if decoded == path:
+                break
+            path = decoded
+        path = path.replace("\\", "/")
+        path = posixpath.normpath("/" + path.lstrip("/"))
+        if path != "/":
+            path = path.rstrip("/")
+        return scheme, cls._normalize_host(parsed.hostname), port, path
+
+    @staticmethod
+    def _normalize_host(host: str) -> str:
+        value = str(host or "").strip().rstrip(".").lower()
+        if value.startswith("*."):
+            return "*." + value[2:].encode("idna").decode("ascii")
+        try:
+            return value.encode("idna").decode("ascii")
+        except UnicodeError:
+            return value
 
     @staticmethod
     def _split(target: str) -> tuple[str | None, str | None]:

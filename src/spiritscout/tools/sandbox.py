@@ -11,8 +11,10 @@ CTF 解题需要真实动手能力——协议交互（WebSocket/socket）、数
   PIL/sympy/z3/scapy 等封装于项目内，不依赖用户系统安装），另加会话
   工作区；/usr/bin、/bin 保留为发行版基础层（python 解释器、coreutils、
   binutils 等操作系统组件），项目工具以 PATH 首位覆盖同名系统命令；
-- 会话工作区可写——脚本与产物落在这里，附件工具可继续分析；
-- 环境变量清零后仅注入 PATH/HOME/LANG/PYTHONPATH；HOME 指向本次运行目录
+- 工作目录跨调用持久——``workspace_root/sandbox`` 即会话工作区内的固定
+  工作目录（HOME 与 cwd 都指向它）：脚本与产物统一落这里，同一会话的
+  后续调用与附件分析工具都能继续使用；/tmp 为每次运行的 tmpfs，不持久；
+- 环境变量清零后仅注入 PATH/HOME/LANG/PYTHONPATH；HOME 指向工作目录
   （脚本写 ~ 不会碰到真实主目录）；
 - 进程组独立 + 超时强杀；输出流式读取限幅（脚本无限输出也不会撑爆内存）。
 
@@ -101,8 +103,9 @@ def _build_argv(workspace: Path, rundir: Path, inner: list[str]) -> list[str]:
 
 
 async def _read_capped(stream: asyncio.StreamReader | None,
-                       cap: int) -> tuple[bytes, int]:
-    """流式读取并限幅：保留头尾，返回（保留字节, 实际总量）。"""
+                       cap: int, sink=None) -> tuple[bytes, int]:
+    """流式读取并限幅：完整内容逐块写入 sink（落盘，过程不丢），
+    内存只保留头尾，返回（保留字节, 实际总量）。"""
     if stream is None:
         return b"", 0
     head_cap = cap * 3 // 4
@@ -115,6 +118,11 @@ async def _read_capped(stream: asyncio.StreamReader | None,
         if not chunk:
             break
         total += len(chunk)
+        if sink is not None:
+            try:
+                sink.write(chunk)
+            except OSError:  # 落盘失败不影响执行与限幅读取
+                sink = None
         if len(head) < head_cap:
             take = min(head_cap - len(head), len(chunk))
             head.extend(chunk[:take])
@@ -151,6 +159,7 @@ async def sandbox_exec(
     language: str = "shell",
     timeout: float = 60.0,
     workspace_root: str | None = None,
+    log_name: str = "last_output",
     max_output_chars: int = 20000,
     **_: Any,
 ) -> ToolResult:
@@ -179,7 +188,9 @@ async def sandbox_exec(
     workspace = Path(workspace_root).resolve()
     try:
         workspace.mkdir(parents=True, exist_ok=True)
-        rundir = workspace / ".sandbox"
+        # 会话持久工作目录：workspace_root 即会话工作区，跨调用保留产物，
+        # 供后续回合与附件工具继续使用（/tmp 为每运行 tmpfs，不持久）
+        rundir = workspace / "sandbox"
         rundir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         return ToolResult(tool="sandbox_exec", ok=False, returncode=-1,
@@ -203,8 +214,16 @@ async def sandbox_exec(
                           error=f"沙箱启动失败: {exc}")
 
     cap = max(1000, int(max_output_chars))
-    out_task = asyncio.create_task(_read_capped(proc.stdout, cap))
-    err_task = asyncio.create_task(_read_capped(proc.stderr, cap))
+    # 完整输出逐块落盘（工作目录内，跨调用可查）——上下文只进头尾摘要，
+    # 过程不因截断而丢失；需要细节时模型用沙箱按需读取该文件
+    log_path = rundir / f"{log_name}.log"
+    try:
+        log_fh = log_path.open("ab")
+    except OSError:
+        log_fh = None
+        log_path = None
+    out_task = asyncio.create_task(_read_capped(proc.stdout, cap, sink=log_fh))
+    err_task = asyncio.create_task(_read_capped(proc.stderr, cap, sink=log_fh))
     timed_out = False
     try:
         await asyncio.wait_for(proc.wait(), timeout=timeout)
@@ -224,6 +243,9 @@ async def sandbox_exec(
         await asyncio.gather(out_task, err_task, return_exceptions=True)
         out_b = err_b = b""
         out_total = err_total = 0
+    finally:
+        if log_fh is not None:
+            log_fh.close()
     rc = proc.returncode if proc.returncode is not None else -1
 
     duration = (time.perf_counter() - started) * 1000
@@ -233,7 +255,8 @@ async def sandbox_exec(
         tool="sandbox_exec", ok=not timed_out, returncode=rc,
         stdout=stdout, stderr=stderr, timed_out=timed_out,
         parsed={"language": lang, "exit_code": rc,
-                "duration_ms": round(duration, 1)},
+                "duration_ms": round(duration, 1), "workdir": str(rundir),
+                "output_file": str(log_path) if log_path else ""},
         error=(f"执行超时（{timeout:.0f}s），进程已终止" if timed_out else ""),
         duration_ms=duration,
     )

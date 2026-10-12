@@ -14,7 +14,7 @@ from typing import Any
 
 from spiritscout.config.settings import GatewayConfig, ModelEntry
 from spiritscout.core.audit import AuditLogger, NullAuditLogger
-from spiritscout.core.exceptions import BudgetExceeded, SpiritScoutError
+from spiritscout.core.exceptions import SpiritScoutError
 from spiritscout.gateway.backends import (
     ChatBackend,
     DeltaCallback,
@@ -41,10 +41,10 @@ class ChatResponse:
 
 @dataclass
 class BudgetTracker:
-    """预算治理（4.9.4 成本预算 / 9.1 模型成本失控）。
+    """用量计量（token/美元/按模型/按模式）。
 
-    双层控制：全局 token/美元硬顶（超顶熔断）+ 按运行模式 token 硬顶；
-    用量比例（pressure）供网关做「超预算自动降级到低档模型」的软控制。
+    只计量不拦截：进度性的杀开关（预算耗尽/模式熔断）已移除——调查正酣时
+    被后端规则掐断对用户是灾难；用量数据仅供控制台展示与成本复盘。
     """
 
     budget_tokens: int
@@ -55,29 +55,6 @@ class BudgetTracker:
     per_model_tokens: dict[str, int] = field(default_factory=dict)
     per_mode_tokens: dict[str, int] = field(default_factory=dict)
     mode: str = ""
-
-    def check(self) -> None:
-        if self.used_tokens >= self.budget_tokens or self.used_usd >= self.budget_usd:
-            raise BudgetExceeded(
-                f"模型预算耗尽: tokens {self.used_tokens}/{self.budget_tokens}, "
-                f"usd {self.used_usd:.4f}/{self.budget_usd}"
-            )
-        if self.mode and self.mode in self.mode_budgets:
-            cap = self.mode_budgets[self.mode]
-            if self.per_mode_tokens.get(self.mode, 0) >= cap:
-                raise BudgetExceeded(
-                    f"模式 {self.mode} 预算熔断: tokens "
-                    f"{self.per_mode_tokens[self.mode]}/{cap}（9.1 预算硬顶）"
-                )
-
-    def pressure(self) -> float:
-        """用量压力 0~1：全局与当前模式预算中的最大占用比（降级阈值判定依据）。"""
-        ratios = [self.used_tokens / max(self.budget_tokens, 1),
-                  self.used_usd / max(self.budget_usd, 1e-9)]
-        if self.mode and self.mode in self.mode_budgets:
-            ratios.append(self.per_mode_tokens.get(self.mode, 0)
-                          / max(self.mode_budgets[self.mode], 1))
-        return min(max(ratios), 1.0)
 
     def record(self, model: str, tokens: int, usd: float) -> None:
         self.used_tokens += tokens
@@ -106,7 +83,7 @@ class ModelGateway:
         self._rate_state: dict[str, list[float]] = {}
 
     def set_mode(self, mode: str) -> None:
-        """设置当前运行模式（src/ctf/competition）：模式预算计量与熔断生效。"""
+        """设置当前运行模式（src/ctf/competition）：按模式分开计量用量。"""
         self.budget.mode = mode
 
     # ------------------------------------------------------------ 主入口
@@ -127,7 +104,7 @@ class ModelGateway:
         on_delta: DeltaCallback | None = None,
         reasoning_effort: str = "",
     ) -> ChatResponse:
-        """统一对话入口：路由（预算降级）→ 限流 → 调用（主备切换）→ 计量 → 审计。
+        """统一对话入口：路由 → 限流 → 调用（主备切换）→ 计量 → 审计。
 
         timeout_seconds：单次后端调用硬超时；缺省用网关配置。重推理角色
         （如解题环）可放宽，避免长链推理被全局默认值中途掐死。
@@ -135,22 +112,10 @@ class ModelGateway:
         切换前投递 reset 让消费端清屏，避免两次尝试的文本叠加）。
         reasoning_effort：思考强度取值，按候选模型各自声明的档位把关
         （未声明的取值不下发，见 _resolve_effort）。"""
-        self.budget.check()
-        degraded = (model is None
-                    and self.config.degrade_at_ratio < 1.0
-                    and self.budget.pressure() >= self.config.degrade_at_ratio)
-        if degraded:
-            # 预算压力超阈值：自动降级到低档模型（4.9.4），硬顶仍在（BudgetExceeded）
-            entry = self.registry.route_degraded(
-                task_type, required_capability=required_capability)
-            self.audit.log("model.degraded", "gateway", {
-                "task_type": task_type, "to_model": entry.model, "to_tier": entry.tier,
-                "pressure": round(self.budget.pressure(), 3)})
-        else:
-            entry = self.registry.route(
-                task_type, prefer_model=model,
-                required_capability=required_capability,
-            )
+        entry = self.registry.route(
+            task_type, prefer_model=model,
+            required_capability=required_capability,
+        )
         chain = [entry, *self.registry.fallback_of(entry.model)]
 
         # 流式增量与主备切换的衔接：已吐出的增量在切换前用 reset 清屏
@@ -185,8 +150,6 @@ class ModelGateway:
                         {"from": entry.model, "to": candidate.model, "reason": str(last_exc)},
                     )
                 return resp
-            except BudgetExceeded:
-                raise
             except Exception as exc:  # noqa: BLE001 —— 主备切换语义（4.9.3-5）
                 last_exc = exc
                 continue
@@ -247,7 +210,7 @@ class ModelGateway:
         self.budget.record(entry.model, total_tokens, cost)
         self.audit.log(
             "model.call", "gateway",
-            {"model": entry.model, "tier": entry.tier, "tokens": total_tokens,
+            {"model": entry.model, "tokens": total_tokens,
              "cost_usd": round(cost, 6), "latency_ms": round(latency, 1),
              "effort": reasoning_effort,
              "tool_calls": [c.get("name") for c in raw.get("tool_calls", [])]},
@@ -283,12 +246,9 @@ class ModelGateway:
         return {
             "used_tokens": self.budget.used_tokens,
             "used_usd": round(self.budget.used_usd, 6),
-            "budget_tokens": self.budget.budget_tokens,
-            "budget_usd": self.budget.budget_usd,
             "per_model_tokens": dict(self.budget.per_model_tokens),
             "per_mode_tokens": dict(self.budget.per_mode_tokens),
             "mode": self.budget.mode,
-            "pressure": round(self.budget.pressure(), 3),
         }
 
 

@@ -1,4 +1,4 @@
-"""侦察子 Agent（TA0043）：被动指纹识别 / 敏感路径探测 / 服务发现 三路并行。
+"""侦察子 Agent（TA0043）：从已观测业务面逐步扩展攻击面。
 
 - 产出写入资产层（经汇聚引擎去重）与侦察线索层（供 Web 漏洞 Agent 消费）；
 - CTF 模式不生成服务发现路线（合规 G2：不启用端口扫描，硬约束 C7）；
@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import fnmatch
+import ipaddress
 from typing import Any
 from urllib.parse import urlparse
 
@@ -14,14 +16,6 @@ from spiritscout.agents.sub.base import RoutePlan, StepResult, SubAgent
 from spiritscout.core.ids import new_id
 from spiritscout.core.models import AgentType, Asset, BlackboardLayer, RunMode, Task
 
-# 敏感路径字典（MVP 内置最小集； 由知识库装载场景化字典）
-# 注意：robots.txt 不在此列——存在 robots.txt 不是漏洞（互联网通行做法），
-# 它只作为路径发现来源由 robots_discover 步骤单独处理
-SENSITIVE_PATHS = [
-    "/.git/HEAD", "/.git/config", "/.env",
-    "/backup.zip", "/wwwroot.zip", "/.svn/entries", "/phpinfo.php",
-    "/actuator/env", "/swagger-ui.html", "/api-docs", "/server-status",
-]
 # 服务发现常用 Web 端口（MVP 最小集；仅 SRC/渗透赛模式使用）
 COMMON_WEB_PORTS = [80, 443, 8080, 8000, 8443, 3000, 5000, 9000]
 # 命中即判定内容泄露的标记（侦察线索置信度依据）
@@ -32,6 +26,7 @@ EXPOSURE_MARKERS = {
     "/phpinfo.php": "phpinfo()",
     "/.svn/entries": "svn",
 }
+ARCHIVE_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz", ".sql", ".bak", ".7z", ".rar")
 
 
 class ReconAgent(SubAgent):
@@ -44,29 +39,30 @@ class ReconAgent(SubAgent):
         base = task.target.rstrip("/")
         routes = [
             RoutePlan(
-                name="passive_fingerprint",
-                strategy="首页抓取 + DNS 解析 + 指纹/技术栈识别（被动低噪）",
+                name="observed_application_surface",
+                strategy="交付可核验结果：入口与技术栈的实证画像（指纹/标题/服务头"
+                         "证据），以及信息泄露面的证据化核验结论——有内容证据才算命中",
                 steps=[
                     {"action": "homepage", "url": base},
-                    {"action": "dns"},
                     {"action": "fingerprint"},
+                    {"action": "robots_discover"},
+                    {"action": "llm_path_sweep"},
                 ],
             ),
-            RoutePlan(
-                name="sensitive_paths",
-                strategy="敏感路径与备份文件探测（内置字典 + LLM 按指纹动态补充）",
-                steps=[{"action": "path_probe", "path": p} for p in SENSITIVE_PATHS]
-                # robots.txt 只作路径发现来源（Disallow 条目接力探测）
-                + [{"action": "robots_discover"}]
-                # 收尾步：LLM 依据已观测指纹/标题建议追加路径（字典降级为骨架）
-                + [{"action": "llm_path_sweep"}],
-            ),
         ]
-        if self.ctx.policy.mode != RunMode.CTF:
-            # CTF 模式不启用端口扫描（合规 G2）
+        host_wide = self._host_wide_scope(task.target)
+        if host_wide:
+            routes.append(RoutePlan(
+                name="dns_identity",
+                strategy="交付可核验结果：已授权主机的身份记录（IP 解析证据），供资产归并",
+                steps=[{"action": "dns"}],
+            ))
+        if self.ctx.policy.mode != RunMode.CTF and host_wide:
+            # 只有域名/IP/CIDR 级授权才扩展端口；URL 前缀授权不推断其他端口。
             routes.append(RoutePlan(
                 name="service_discovery",
-                strategy="常用 Web 端口服务发现（主动探测）",
+                strategy="交付可核验结果：主机级授权范围内存活的 Web 服务清单"
+                         "（附响应状态与指纹证据）",
                 steps=[{"action": "port_probe", "port": p} for p in COMMON_WEB_PORTS],
             ))
         return routes
@@ -100,7 +96,7 @@ class ReconAgent(SubAgent):
             port=urlparse(url).port, fingerprint=parsed.get("fingerprint", {}),
             attrs={"title": parsed.get("title", ""),
                    "status_code": parsed.get("status_code"),
-                   "headers": parsed.get("headers", {})},
+                   "headers": self._safe_headers(parsed.get("headers", {}))},
             source_agent=self.agent_id,
         )
         _, is_new = self.ctx.convergence.merge_asset(asset, self.agent_type)
@@ -111,7 +107,7 @@ class ReconAgent(SubAgent):
             cache_writes={f"fingerprint|{url}": {
                 "fingerprint": parsed.get("fingerprint", {}),
                 "title": parsed.get("title", ""),
-                "headers": parsed.get("headers", {}),
+                "headers": self._safe_headers(parsed.get("headers", {})),
             }},
         )
 
@@ -159,19 +155,25 @@ class ReconAgent(SubAgent):
         if status != 200:
             return StepResult(ok=True, value=0.0, note=f"{path} → {status}")
         marker = EXPOSURE_MARKERS.get(path)
-        confirmed = marker is None or marker in res.stdout
+        marker_hit = bool(marker and marker in res.stdout)
+        content_type = str((res.parsed.get("headers") or {}).get("content-type", "")).lower()
+        archive_hit = path.lower().endswith(ARCHIVE_SUFFIXES) and "text/html" not in content_type
+        confirmed = marker_hit or archive_hit
         # 确认命中给足价值分：保证命中路线不被健康度剪枝误杀（阈值调优）
         value = 0.8 if confirmed else 0.2
         self._write_clue(
-            task, clue_type="sensitive_path", value=url,
-            confidence=0.9 if confirmed else 0.5,
-            detail={"status_code": status, "marker": marker, "marker_hit": confirmed,
-                    "content_preview": res.stdout[:200]},
+            task, clue_type="sensitive_path" if confirmed else "observed_path", value=url,
+            confidence=0.9 if confirmed else 0.6,
+            detail={"status_code": status, "marker": marker,
+                    "marker_hit": marker_hit, "archive_hit": archive_hit,
+                    "exposure_confirmed": confirmed},
         )
         return StepResult(ok=True, value=value,
-                          findings=[{"type": "sensitive_path", "value": url,
+                          findings=[{"type": "sensitive_path" if confirmed else "observed_path",
+                                     "value": url,
                                      "confirmed": confirmed}],
-                          note=f"敏感路径命中 {path} → 200 marker={'hit' if confirmed else 'miss'}")
+                          note=(f"{'泄露证据命中' if confirmed else '路径可达'} "
+                                f"{path} → 200"))
 
     async def _step_robots_discover(self, task: Task, step: dict) -> StepResult:
         """robots.txt 路径发现：解析 Disallow/Allow 条目接力探测。
@@ -215,7 +217,7 @@ class ReconAgent(SubAgent):
 
     # ------------------------------------------------------------ LLM 路径建议
 
-    LLM_PATH_CAP = 30          # LLM 追加路径数上限（限请求扇出）
+    LLM_PATH_CAP = 12          # 仅按已观测指纹提出少量可解释假设
 
     async def _step_llm_path_sweep(self, task: Task, step: dict) -> StepResult:
         """收尾步：LLM 按已观测指纹/标题建议追加敏感路径（云端主路径）。
@@ -232,7 +234,7 @@ class ReconAgent(SubAgent):
                            for rec in self.ctx.blackboard.query(
                                BlackboardLayer.RECON_CLUE, limit=100)
                            if rec["data"].get("clue_type") == "tech_stack"][:5],
-            "already_probed": SENSITIVE_PATHS,
+            "already_probed": ["/robots.txt"],
         }
         data = await self._llm_chat_json("path_planner", {
             "action": "suggest_paths", "target": task.target, **observed,
@@ -240,11 +242,12 @@ class ReconAgent(SubAgent):
             "constraints": (
                 "返回 JSON：{\"paths\": [str], \"rationale\": str}。仅站内相对路径"
                 "（以 / 开头），不要重复已探测清单；针对观测到的技术栈给出"
-                "高价值信息泄露面（配置/备份/调试端点），不猜测业务接口。"),
+                "少量高价值信息泄露面（配置/公开文档/调试端点）；每个建议都必须"
+                "能由给出的技术栈或页面标题解释，不猜测业务接口。"),
         }, reasoning_effort=self.task_effort(task))
         if data is None:
             return StepResult(ok=True, value=0.0,
-                              note="LLM 路径建议不可用（内置字典已兜底）")
+                              note="无可信的指纹扩展建议，未做字典猜测")
         paths: list[str] = []
         for p in data.get("paths", []):
             if not isinstance(p, str):
@@ -252,7 +255,7 @@ class ReconAgent(SubAgent):
             p = p.strip()
             # 确定性校验：站内相对路径、禁目录穿越、去重（骨架 + 本轮）
             if (not p.startswith("/")) or "://" in p or ".." in p \
-                    or p in SENSITIVE_PATHS or p in paths:
+                    or p == "/robots.txt" or p in paths:
                 continue
             paths.append(p[:200])
         paths = paths[: self.LLM_PATH_CAP]
@@ -296,6 +299,28 @@ class ReconAgent(SubAgent):
                           note=f"端口 {port} Web 服务 {res.parsed.get('status_code')}")
 
     # ------------------------------------------------------------ 内部
+
+    def _host_wide_scope(self, target: str) -> bool:
+        host = urlparse(target).hostname or target
+        scope = self.ctx.policy.guard.scope
+        for domain in scope.allowed_domains:
+            pattern = domain.lower().strip()
+            if pattern.startswith("*."):
+                pattern = "*" + pattern[1:]
+            if fnmatch.fnmatchcase(host.lower(), pattern):
+                return True
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return False
+        return any(address in ipaddress.ip_network(cidr, strict=False)
+                   for cidr in scope.allowed_cidrs)
+
+    @staticmethod
+    def _safe_headers(headers: dict[str, Any]) -> dict[str, Any]:
+        allowed = {"content-type", "server", "x-powered-by", "location", "allow"}
+        return {key: value for key, value in headers.items()
+                if str(key).lower() in allowed}
 
     def _write_clue(self, task: Task, *, clue_type: str, value: str,
                     confidence: float, detail: dict[str, Any]) -> None:

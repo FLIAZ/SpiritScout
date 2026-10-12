@@ -41,7 +41,7 @@ ROLE_TASK_MAP: dict[str, str] = {
 }
 
 _JUDGE_SYSTEM = (
-    "你是灵探 SpiritScout 的多模型协作判定员。对给定安全判定议题独立给出结论，"
+    "你是灵枢 SpiritScout 的多模型协作判定员。对给定安全判定议题独立给出结论，"
     "只输出 JSON：{\"verdict\": \"pass|reject|review\", \"confidence\": 0~1, "
     "\"reason\": \"一句话依据\"}。拿不准一律 review，不得臆断。\nROLE: collab_judge"
 )

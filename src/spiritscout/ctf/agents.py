@@ -11,14 +11,19 @@
   避让，不重复做功）。
 
 解题方式是**一条持久对话**：首条消息装入题面、入口预感知与同伴结论，
-之后每轮模型决定调用哪些工具（互不依赖的请求同轮并发），工具结果回灌，
-直到模型不再调用工具——那就是它的结论。回合步数顶是唯一安全顶；
-是否重复、要不要换思路由模型自己判断（提示词约束，后端不做动作
-去重截断——归一化签名无法真正判定两次调用意图相同）。LLM 不可用时
+完整系统提示只在第一次模型调用时注入；之后只续传题面、既有判断、工具证据
+与新增动态，避免长系统提示在每轮重新压过现场推理。每轮模型决定调用哪些工具
+（互不依赖的请求同轮并发），工具结果回灌，直到模型不再调用工具——那就是
+它的结论。不设固定回合顶——收尾由模型自主决定，滥用由网关 token
+预算与连续故障熔断兜底；已读取过的地址再次请求时直接回放
+当时记录（重取与否由模型用 refresh 参数决定）；除此之外是否重复、
+要不要换思路由模型自己判断（后端不做动作去重截断——归一化签名无法
+真正判定两次调用意图相同）。LLM 不可用时
 解题环诚实停摆留痕，不做固定模板兜底。
 
-简单题简单做：默认单线调查（1 条路线），未破题由主 Agent 复盘另起一轮
-换角度再攻，而不是一上来就并行铺开多条分支。
+分支并行：路线预算由灵枢按任务复杂度裁定（1~8），K>1 时按题面提出
+互不重叠的调查角度并行展开——分支共享现场（已探入口/笔记/Flag）
+相互接力，任一分支夺旗其余立即收尾；简单题自然落在单线。
 
 不启用端口扫描（C7）；仅访问赛题入口（URL 需在授权范围内）与本地附件。
 """
@@ -39,7 +44,8 @@ from typing import Any, ClassVar
 
 from spiritscout.agents.ring import attempt_key
 from spiritscout.agents.sub.base import RoutePlan, StepResult, SubAgent
-from spiritscout.core.models import AgentType, Task
+from spiritscout.core.ids import new_id
+from spiritscout.core.models import AgentType, BlackboardLayer, Task
 from spiritscout.ctf.flags import FlagManager
 
 # 题面中疑似编码串的最小长度（降噪）
@@ -50,15 +56,16 @@ _OBS_EXCERPT_CAP = 3000
 _MSG_CHAR_BUDGET = 48000
 # 单条工具结果回灌上限
 _TOOL_RESULT_CAP = 6000
-# 解题环回合安全顶（每回合一次 LLM 调用，可并发多个工具；到顶强制收尾）
-_INVESTIGATE_MAX_STEPS = 24
+# 已读地址记录回放的文本上限
+_FETCH_RECORD_CAP = 2600
+# 沙箱输出回灌模型的上限（头尾保留；完整输出已落盘，不丢过程）
+_SAND_MODEL_CAP = 3600
 # 解题环单次 LLM 调用超时：重推理模型单次可达 3~4 分钟
 _SOLVER_TIMEOUT = 420
 # 解题环单回合输出上限（结论/工具参数所需，不需要长篇）
 _SOLVER_MAX_TOKENS = 4096
-# 步数顶到达后的收尾指令（剥离工具后的一次纯文本回合）
-_FORCE_FINISH = ("回合预算已用尽。不要再调用工具，直接基于已获得的证据给出"
-                 "最终结论：拿到了什么、还差什么、卡在哪里。")
+# 单回合路线进度增量（进度展示用；无固定回合顶，进度饱和于 1.0）
+_TURN_PROGRESS = 0.04
 # HTTP 动作参数上限（上下文保护，非行为限制；目标范围由 ScopeGuard 把关）
 _HTTP_METHODS = ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS")
 # HTML 结构探测：响应首段命中常见标签即按 HTML 摘要处理
@@ -68,6 +75,12 @@ _HTML_HINT = re.compile(
 # 观察保留的高信号响应头（跳转目标/会话/指纹/鉴权）
 _OBS_HEADERS = ("location", "set-cookie", "server", "x-powered-by",
                 "content-type", "www-authenticate", "x-flag", "allow")
+# 未裁定预算时的默认互补视角（与主路线的体验视角并行，零额外 LLM 延迟）
+_COMPLEMENTARY_ANGLE: dict[str, str] = {
+    "web": "互补视角：服务与技术面取证——指纹/响应头/接口清单/静态资源与"
+           "注释线索，不与体验视角重复走页面流程",
+}
+
 # 解题思维流程（提示词层的方法引导，不限定具体动作；具体出牌仍由 LLM 按题决定）
 _METHODOLOGY = (
     "解题思路像人一样：拿到题先把这道题当成一个正常功能**完整用一遍**——"
@@ -138,6 +151,65 @@ def _challenge_view(ch: dict[str, Any], *, total_cap: int = 6000) -> dict[str, A
 def _collapse(text: str) -> str:
     """空白折叠（多行 HTML 片段 → 单行可读文本）。"""
     return re.sub(r"\s+", " ", text).strip()
+
+
+_EMPTY_ASSISTANT_MARKER = re.compile(
+    r"(?:empty message content|content is empty|message content sanitised|"
+    r"空消息内容|提供的内容为空|内容为空.*协议)", re.IGNORECASE)
+
+
+def _model_messages(messages: list[dict[str, Any]], *, initialized: bool) \
+        -> list[dict[str, Any]]:
+    """构造本轮实际发送给模型的上下文。
+
+    Chat Completions 一类接口没有服务端会话，历史消息需要由调用方续传；但首轮
+    的长系统提示不应在每一轮重新成为最高优先级指令。初始化成功后只续传题面、
+    助手判断、工具结果和后续用户动态。复制列表容器，避免过滤操作改写持久状态。
+    """
+    selected = messages if not initialized else [
+        message for message in messages if message.get("role") != "system"
+    ]
+    # 发送视图与持久状态使用不同的容器：网关/后端即使对
+    # message 字典增补字段，也不会改写缓存中的对话。
+    view = [dict(message) for message in selected]
+    for message in view:
+        if message.get("role") != "assistant" or not message.get("tool_calls"):
+            continue
+        content = str(message.get("content") or "").strip()
+        if not content or _EMPTY_ASSISTANT_MARKER.search(content):
+            names = [str((call.get("function") or {}).get("name") or "")
+                     for call in message.get("tool_calls", [])
+                     if isinstance(call, dict)]
+            message["content"] = "已发起工具调用" + (
+                "：" + "、".join(name for name in names if name)
+                if any(names) else "。")
+    return view
+
+
+def _challenge_instance_blocker(status: Any, text: str) -> str:
+    """识别比赛平台明确返回的实例生命周期错误。
+
+    只接受状态码与平台原文的组合，不把普通业务 404 当作环境故障。该判断
+    用于及时停止无效探测，保留证据并让用户回题目页重启实例。
+    """
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return ""
+    if code not in (404, 410, 502, 503, 504):
+        return ""
+    body = _collapse(text).lower()
+    strong_markers = (
+        "题目实例未找到",
+        "题目实例不存在、已经销毁",
+        "请从比赛题目页重新启动实例",
+        "challenge-gateway / route-check",
+    )
+    if not any(marker in body for marker in strong_markers):
+        return ""
+    return (
+        f"赛题实例不可用（平台网关 HTTP {code}）：实例不存在、已销毁或地址"
+        "已失效。请从比赛题目页重新启动实例并提供新的入口地址。")
 
 
 def _html_digest(body: str) -> str | None:
@@ -265,14 +337,15 @@ def _http_observation(desc: str, res: Any, url: str,
     final = str(parsed.get("final_url") or "")
     if final and final.rstrip("/") != url.rstrip("/"):
         obs["final_url"] = final[:300]
+    if parsed.get("scope_note"):
+        obs["scope_note"] = str(parsed["scope_note"])
     headers = {str(k).lower(): str(v)
                for k, v in (parsed.get("headers") or {}).items()}
     picked = {k: headers[k][:300] for k in _OBS_HEADERS if k in headers}
     if picked:
         obs["headers"] = picked
     body = res.stdout or ""
-    ctype = headers.get("content-type", "")
-    # 脚本/样式/JSON 文本不走 HTML 摘要（否则会被当作标签剥离只剩碎片）
+    ctype = headers.get("content-type", "")    # 脚本/样式/JSON 文本不走 HTML 摘要（否则会被当作标签剥离只剩碎片）
     scripty = any(k in ctype.lower() for k in
                   ("javascript", "ecmascript", "json", "css"))
     obs["excerpt"] = ((None if scripty else _html_digest(body))
@@ -298,6 +371,17 @@ def _signal_line(obs: dict[str, Any]) -> str:
     return (" " + " ｜ ".join(bits)) if bits else ""
 
 
+def _head_tail(text: str, cap: int) -> str:
+    """超长输出的上下文摘要：头尾保留、中段略去（完整内容已落盘可查）。"""
+    if len(text) <= cap:
+        return text
+    dropped = len(text) - cap
+    return (text[:cap * 3 // 4]
+            + f"\n…[中段略去 {dropped} 字符——完整输出已存工作区文件，"
+              "需要时用沙箱读取]…\n"
+            + text[-(cap // 4):])
+
+
 @dataclass
 class _ToolOutcome:
     """一次工具调用的结果：text 回灌模型，其余喂路线状态与前端轨迹。"""
@@ -308,6 +392,7 @@ class _ToolOutcome:
     findings: list[dict[str, Any]] = field(default_factory=list)
     note: str = ""
     observation: dict[str, Any] | None = None
+    empty: bool = False        # 成功执行但无有效输出（喂空转感知，不做拦截）
 
 
 def _fn(name: str, description: str, properties: dict[str, Any],
@@ -370,6 +455,8 @@ def _obs_text(obs: dict[str, Any]) -> str:
     lines = [f"{obs.get('action', '')} → {obs.get('status', 0)}"]
     if obs.get("final_url"):
         lines.append(f"最终地址: {obs['final_url']}")
+    if obs.get("scope_note"):
+        lines.append(str(obs["scope_note"]))
     if obs.get("headers"):
         lines.append("响应头: " + json.dumps(
             obs["headers"], ensure_ascii=False)[:600])
@@ -392,13 +479,16 @@ class CTFBaseAgent(SubAgent):
     tool_schemas: ClassVar[list[dict[str, Any]]] = [
         _fn("http_request",
             "向赛题目标发一次 HTTP 请求并拿到响应（状态码/响应头/正文摘要）。"
+            "GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS 全部支持——表单提交、"
+            "接口调用、登录动作都用它：method 指定方法，data 放请求体"
+            "（表单串或 JSON 原文），headers 可补 Content-Type 等头。"
             "path 传站内相对路径（推荐），或 url 传完整地址（须在授权范围内）。"
-            "需要看某个页面或接口的真实响应时用它；正文较长被截断时，"
-            "可用 headers 里的 Range（如 {\"Range\": \"bytes=5000-10000\"}）"
-            "分段取完整内容。",
+            "正文较长被截断时，可用 headers 里的 Range"
+            "（如 {\"Range\": \"bytes=5000-10000\"}）分段取完整内容。",
             {
                 "method": {"type": "string", "enum": list(_HTTP_METHODS),
-                           "description": "HTTP 方法，缺省 GET"},
+                           "description": "HTTP 方法，全部可用；缺省 GET，"
+                                          "提交表单/调用接口时用 POST"},
                 "path": {"type": "string",
                          "description": "站内路径，如 /api/v1/users"},
                 "url": {"type": "string",
@@ -406,11 +496,16 @@ class CTFBaseAgent(SubAgent):
                 "params": {"type": "object", "description": "查询参数（键值对）"},
                 "headers": {"type": "object", "description": "额外请求头（键值对）"},
                 "data": {"type": "string", "description": "请求体原文（POST/PUT 用）"},
+                "refresh": {"type": "boolean",
+                            "description": "true=对该地址重新发起真实请求（页面"
+                            "状态可能已变化时用）；缺省 false——已读取过的地址"
+                            "直接回放当时的记录"},
             }),
         _fn("shell",
             "在隔离沙箱里执行一条 shell 命令（bash -c），拿到输出与退出码。"
-            "适合 curl/nc/jq/grep/文件操作等一切命令行动作；系统文件只读，"
-            "你的工作区可写，联网仅限授权目标。命令全文留痕于审计。",
+            "适合 curl/nc/jq/grep/文件操作等一切命令行动作；工作目录在会话内"
+            "持久（脚本与产物落那里，跨回合直接可用；/tmp 每次运行即焚），"
+            "系统文件只读，联网仅限授权目标。命令全文留痕于审计。",
             {
                 "command": {"type": "string", "description": "要执行的命令"},
                 "timeout": {"type": "number",
@@ -418,9 +513,10 @@ class CTFBaseAgent(SubAgent):
             }, required=["command"]),
         _fn("python",
             "在隔离沙箱里执行一段 Python 代码（python3），拿到输出与退出码。"
-            "已装 requests/httpx/websockets/pwntools 等常用库；适合 WebSocket/"
-            "socket 协议交互、数据计算与解码、脚本化构造请求。脚本与产物"
-            "落在工作区（后续可用附件工具继续分析）。",
+            "已装 requests/httpx/websockets/pwntools 等常用库；适合 "
+            "WebSocket/socket 协议交互、数据计算与解码、脚本化构造请求。"
+            "工作目录会话内持久，产物跨回合直接可用（/tmp 每次运行即焚）；"
+            "产物也可用附件分析工具继续研究。",
             {
                 "code": {"type": "string", "description": "完整 Python 代码"},
                 "timeout": {"type": "number",
@@ -449,12 +545,29 @@ class CTFBaseAgent(SubAgent):
                        "description": "检索词，如：备份文件 / PHP 弱类型 / "
                                       "隐写 / 提权 / 模板注入"}},
             required=["query"]),
-        _fn("probe_paths",
-            "对入口站点批量探测常见敏感路径（robots/.git/.env/备份包/调试面/"
-            "管理面等清单，也可传自定义 paths 列表），返回命中状态与线索。"
-            "拿到 Web 入口、想快速过一遍常见泄露面时用它；全 404 就放下清单。",
-            {"paths": {"type": "array", "items": {"type": "string"},
-                       "description": "自定义路径列表（以 / 开头）；缺省用内置清单"}}),
+        _fn("ask_user",
+            "向用户提问并等待答复。遇到授权范围外的目标、拿不准的路线分叉、"
+            "需要用户拍板的取舍时用它：问题用你自己的话写清「看到了什么、"
+            "为什么想继续、不同选择意味着什么」；options 给 2~4 个你建议的"
+            "选项（用户也可以自由输入其他意见）；targets 填你希望纳入测试"
+            "范围的目标（URL 或主机，用户勾选后系统才真正放行）。一次性把"
+            "问题问清楚，不要反复追问。",
+            {"question": {"type": "string",
+                          "description": "要问用户的问题（自己组织语言）"},
+             "options": {"type": "array", "items": {"type": "string"},
+                         "description": "建议选项（2~4 个，用户可自由输入）"},
+             "targets": {"type": "array", "items": {"type": "string"},
+                         "description": "希望纳入本会话范围的目标（URL/主机）"}},
+            required=["question"]),
+        _fn("submit_flag",
+            "把你判定为本题 Flag 的值提交（判定权在你：依据题面给定的格式与"
+            "你拿到的证据）。后端只做登记、去重与赛方接口提交，应答（对/错/"
+            "未判定）会回灌给你；同一个值不要重复提交。",
+            {"flag": {"type": "string",
+                      "description": "Flag 原文（照抄证据里的值，不要加工）"},
+             "note": {"type": "string",
+                      "description": "判定依据（一句话：来源与推导）"}},
+            required=["flag"]),
     ]
     # 方向知识（思路启发，不是步骤；LLM 按题面证据自选方向）
     direction_brief: ClassVar[str] = ""
@@ -467,7 +580,7 @@ class CTFBaseAgent(SubAgent):
         self.flag_manager = flag_manager
         # 外部 MCP 工具并入实例工具目录（类级目录保持不变；有 MCP 时逐
         # 实例扩展，schema 原样透传服务器的 inputSchema）
-        mcp = getattr(ctx, "mcp_tools", None) or {}
+        mcp = getattr(self.ctx, "mcp_tools", None) or {}
         if mcp:
             extra: list[dict[str, Any]] = []
             for prefix, entry in mcp.items():
@@ -496,29 +609,6 @@ class CTFBaseAgent(SubAgent):
 
     # ------------------------------------------------------------ Flag 闭环
 
-    async def _harvest(self, text: str, task: Task, source: str) -> list[str]:
-        """文本 → Flag 提取 → 提交 → 返回接受的 Flag 值列表。"""
-        if not text or self.flag_manager is None:
-            return []
-        candidates = self.flag_manager.extract(
-            text, challenge_id=self.challenge_id(task), found_by=self.agent_id)
-        accepted: list[str] = []
-        for cand in candidates:
-            await self.flag_manager.submit(cand)
-            self._record_flag(task, cand.value)   # 共享缓存：同伴下一回合即见
-            if cand.accepted:
-                accepted.append(cand.value)
-        return accepted
-
-    async def _harvest_http(self, text: str, task: Task, source: str) -> list[str]:
-        """HTTP 响应取证：原文 + 内嵌编码串链式解码 → Flag 提取（与题面同规格）。"""
-        accepted = await self._harvest(text, task, source)
-        decoded = _decode_blobs(text)
-        if decoded:
-            accepted.extend(await self._harvest(
-                "\n".join(decoded), task, source + ":decoded"))
-        return accepted
-
     # ------------------------------------------------------------ 路线生成
 
     def route_templates(self, task: Task) -> list[RoutePlan]:
@@ -532,10 +622,13 @@ class CTFBaseAgent(SubAgent):
         简单题简单做——不再为「取个路线名」多花一次 LLM 调用；K>1
         （主 Agent 明确要求多角度并发）时才由 LLM 按题提出 K 个角度。
         """
-        k = task.max_routes if task.max_routes is not None else 1
-        k = max(1, min(int(k), self.max_routes))
+        # 下发决策与执行并行（不挡开工），首轮 plan 常在裁定落地前运行：
+        # 未裁定时默认双分支即时起步（主视角 + 互补视角，零额外延迟），
+        # 裁定后的轮次按预算由 LLM 提出互不重叠的角度。
+        decided = task.max_routes is not None
+        k = max(1, min(int(task.max_routes if decided else 2), self.max_routes))
         plans: list[RoutePlan] = []
-        if k > 1:
+        if k > 1 and decided:
             angles = await self._llm_propose_angles(task, k)
             plans = [RoutePlan(name=a["name"], strategy=a["angle"],
                                steps=[{"action": "investigate"}])
@@ -545,6 +638,15 @@ class CTFBaseAgent(SubAgent):
                 name="solve",
                 strategy=self.direction_brief or "自主解题：从题面与目标出发自行决定方向",
                 steps=[{"action": "investigate"}])]
+            if k > 1:
+                plans.append(RoutePlan(
+                    name="solve_alt",
+                    strategy=_COMPLEMENTARY_ANGLE.get(
+                        self.direction,
+                        "互补视角：从服务与技术面取证——指纹、响应头、接口清单、"
+                        "静态资源与注释里的线索"),
+                    steps=[{"action": "investigate"}]))
+        plans = plans[:k]
         if self.ctx.knowledge is not None:
             self._attach_kb_guidance(task, plans)
         return plans
@@ -567,7 +669,7 @@ class CTFBaseAgent(SubAgent):
                 "不要以具体攻击技术（注入/爆破等）作为初始角度——除非题面信息"
                 "已明确指向它。题目信息不足以区分时给出 1 条即可。"),
         }, max_user_chars=8000, timeout_seconds=_SOLVER_TIMEOUT,
-            reasoning_effort=self.task_effort(task))
+            reasoning_effort=self.task_effort(task), task=task)
         raw_angles = (data or {}).get("angles")
         if not isinstance(raw_angles, list):
             return []
@@ -603,8 +705,19 @@ class CTFBaseAgent(SubAgent):
         if not isinstance(state, dict):
             state = {"messages": [], "seed": [], "observations": [],
                      "flags": [], "concluded": False, "stall": "",
-                     "turn": 0, "llm_failures": 0}
+                     "turn": 0, "llm_failures": 0, "empty_streak": 0,
+                     "system_initialized": False, "fetches": {}}
             self.cache.put(self.route_namespace, key, state)
+        else:
+            # 兼容升级前已经落盘的活跃会话。只有出现过助手应答，才说明首轮
+            # 初始化确实成功；仅有 seed/system/user 的失败会话仍需完成初始化。
+            state.setdefault("system_initialized", any(
+                message.get("role") == "assistant"
+                for message in state.get("messages", [])
+                if isinstance(message, dict)))
+        # 升级兼容：旧会话状态缺新字段时补齐（记录回放 / 空转感知）
+        state.setdefault("fetches", {})
+        state.setdefault("empty_streak", 0)
         return state
 
     def _save_inv_state(self, task: Task, route, state: dict[str, Any]) -> None:
@@ -625,6 +738,26 @@ class CTFBaseAgent(SubAgent):
         conclusions.append(f"[{self.direction}/{route.name}] {summary}"[:1000])
         self.cache.put(self.shared_namespace, key, conclusions[-12:])
 
+    def _record_finding(self, task: Task, kind: str, text: str,
+                        url: str = "") -> None:
+        """发现台账：关键信息同步落黑板（拓扑「发现」组的数据源）。
+
+        共享缓存服务并行同伴的即时接力，随会话消亡；黑板记录进入会话
+        数据面——拓扑图的发现组与报告都从这里取，跨轮持久、不占任何
+        Agent 的上下文。dedup_key 保证同一发现只存一条。
+        """
+        ch = self.challenge_of(task)
+        self.ctx.blackboard.write(
+            BlackboardLayer.TOPOLOGY, new_id("finding"),
+            {"kind": "finding", "type": kind, "text": str(text)[:400],
+             "url": str(url)[:300], "by": self.direction,
+             "challenge": str(ch.get("id") or "")[:80],
+             "round": int(getattr(task, "round_no", 0) or 0),
+             "ts": time.time()},
+            agent_type=self.agent_type, updated_by=self.agent_id,
+            dedup_key=(f"finding|{self.challenge_id(task)}|{kind}|"
+                       f"{hash(str(url) if url else str(text)[:200])}"))
+
     # ------------------------------------------------------------ 环形共享缓存
     # 同题的所有方向 Agent（并行工作）共用一份现场：已探入口、共享笔记、
     # 已夺 Flag。任何一方写入，其余方下一回合即见——不重复做功、相互接力。
@@ -642,6 +775,7 @@ class CTFBaseAgent(SubAgent):
             for old in list(site)[:len(site) - 60]:
                 site.pop(old, None)
         self.cache.put(self.shared_namespace, key, site)
+        self._record_finding(task, "asset", f"{url} {line}", url=url)
 
     def _shared_notes(self, task: Task) -> list[str]:
         got = self.cache.get(self.shared_namespace,
@@ -652,10 +786,10 @@ class CTFBaseAgent(SubAgent):
         key = f"notes|{self.challenge_id(task)}"
         entry = f"[{self.direction}] {text}"[:400]
         notes = self._shared_notes(task)
-        if entry in notes:          # 同伴/自己已写过同一条，不重复登记
-            return
-        notes.append(entry)
-        self.cache.put(self.shared_namespace, key, notes[-20:])
+        if entry not in notes:          # 同伴/自己已写过同一条，不重复登记
+            notes.append(entry)
+            self.cache.put(self.shared_namespace, key, notes[-20:])
+        self._record_finding(task, "note", text)
 
     def _shared_flags(self, task: Task) -> list[dict[str, str]]:
         got = self.cache.get(self.shared_namespace,
@@ -669,6 +803,7 @@ class CTFBaseAgent(SubAgent):
             flags.append({"value": value, "by": self.direction,
                           "round": int(getattr(task, "round_no", 0) or 0)})
             self.cache.put(self.shared_namespace, key, flags)
+        self._record_finding(task, "flag", value)
 
     def _peer_flags(self, task: Task, state: dict[str, Any], *,
                     same_round: bool = False) -> list[str]:
@@ -735,13 +870,17 @@ class CTFBaseAgent(SubAgent):
         state = self._inv_state(task, route)
         if state["concluded"] or state["stall"]:
             return StepResult(ok=True, value=0.0,
+                              final_note=True,
                               note=state["stall"] or "本路线已收尾")
-        # 环形协同终止：本轮并行的同伴方向已夺旗 → 本路线立即收尾（收敛阀）
-        peers = self._peer_flags(task, state, same_round=True)
-        if peers:
+        # 并行收敛阀：本轮并行工作的同伴（其他方向或其他分支路线）已夺旗
+        # → 本路线立即收尾——并行铺开的分支在结果处汇合，不做重复功
+        rnd = int(getattr(task, "round_no", 0) or 0)
+        mine = set(state.get("flags") or [])
+        fresh = [f["value"] for f in self._shared_flags(task)
+                 if int(f.get("round", 0) or 0) == rnd and f["value"] not in mine]
+        if fresh:
             state["concluded"] = True
-            summary = f"同伴方向已捕获 Flag（{', '.join(peers[:3])}），本路线收尾"
-            self._record_conclusion(task, route, summary)
+            summary = "同伴路线已夺旗，本路线收尾"
             self.ctx.audit.log("agent.conclude", self.agent_id, {
                 "route": route.name, "challenge": self.challenge_id(task),
                 "turn": state["turn"], "summary": summary})
@@ -757,6 +896,16 @@ class CTFBaseAgent(SubAgent):
                     f"首轮感知失败: {type(exc).__name__}: {str(exc)[:200]}"
                     "——请换可行的入口或工具继续调查")
                 boot_note = f"首轮感知失败: {str(exc)[:120]}"
+            if state["stall"]:
+                summary = str(state["stall"])
+                self._record_conclusion(task, route, summary)
+                self.ctx.audit.log("agent.blocked", self.agent_id, {
+                    "route": route.name, "challenge": self.challenge_id(task),
+                    "reason": summary})
+                self._save_inv_state(task, route, state)
+                return StepResult(
+                    ok=True, value=boot_value, final_note=True,
+                    note=self._merge_note(boot_note, summary))
             self._seed_messages(task, route, plan, state)
         else:
             if (update := self._peer_updates(task, state)):
@@ -773,23 +922,23 @@ class CTFBaseAgent(SubAgent):
 
         state["turn"] += 1
         turn = state["turn"]
-        forced = turn > _INVESTIGATE_MAX_STEPS
-        self._compact_messages(state["messages"])
-        messages: list[dict[str, Any]] = state["messages"]
-        if forced:
-            messages = [*messages, {"role": "user", "content": _FORCE_FINISH}]
+        include_initial_system = not bool(state.get("system_initialized"))
+        self._compact_messages(
+            state["messages"], initialized=not include_initial_system)
+        messages: list[dict[str, Any]] = _model_messages(
+            state["messages"], initialized=not include_initial_system)
         emitter = _DeltaEmitter(self.ctx.audit, self.agent_id, route=route.name,
                                 challenge=self.challenge_id(task), turn=turn)
         self.ctx.audit.log("agent.turn", self.agent_id, {
             "route": route.name, "challenge": self.challenge_id(task),
-            "turn": turn, "budget": f"{turn}/{_INVESTIGATE_MAX_STEPS}",
-            "forced_finish": forced, "angle": plan.strategy[:160]})
+            "turn": turn,
+            "initial_system_prompt": include_initial_system,
+            "angle": plan.strategy[:160] if turn == 1 else ""})
         try:
             resp = await self.ctx.gateway.chat(
                 messages, task_type="execution",
                 max_tokens=_SOLVER_MAX_TOKENS, timeout_seconds=_SOLVER_TIMEOUT,
-                tools=None if forced else self.tool_schemas,
-                tool_choice=None if forced else "auto",
+                tools=self.tool_schemas, tool_choice="auto",
                 on_delta=emitter,
                 reasoning_effort=self.task_effort(task))
         except Exception as exc:  # noqa: BLE001 —— 单次调用失败允许下一回合重试
@@ -807,6 +956,7 @@ class CTFBaseAgent(SubAgent):
                               note=self._merge_note(boot_note, note))
         emitter.flush()
         state["llm_failures"] = 0
+        state["system_initialized"] = True
 
         calls = [c for c in (resp.tool_calls or []) if isinstance(c, dict)]
         assistant: dict[str, Any] = {"role": "assistant",
@@ -846,10 +996,18 @@ class CTFBaseAgent(SubAgent):
         total_value = 0.0
         notes: list[str] = []
         findings: list[dict[str, Any]] = []
-        for call, out in zip(calls, outcomes):
+        empty_streak = int(state.get("empty_streak") or 0)
+        for idx, (call, out) in enumerate(zip(calls, outcomes)):
+            text = out.text or "（无输出）"
+            if idx == 0 and out.ok and empty_streak >= 3:
+                # 感知标注（非规则）：连续空输出是「方法可能不成立」的事实信号，
+                # 是否换路由模型自行判断——后端不截断不强制
+                text += (f"\n（感知：本路线已连续 {empty_streak} 次工具调用"
+                         "输出为空——若当前方法可能不成立，把已排除的假设用 "
+                         "note 记下后换条路；是否调整由你判断）")
             state["messages"].append({
                 "role": "tool", "tool_call_id": call.get("id") or "call_0",
-                "content": (out.text or "（无输出）")[:_TOOL_RESULT_CAP]})
+                "content": text[:_TOOL_RESULT_CAP]})
             total_value += out.value
             findings.extend(out.findings)
             if out.note:
@@ -858,13 +1016,15 @@ class CTFBaseAgent(SubAgent):
                 "route": route.name, "challenge": self.challenge_id(task),
                 "id": call.get("id"), "name": call.get("name"), "ok": out.ok,
                 "note": out.note[:200], "result": (out.text or "")[:1200]})
+        state["empty_streak"] = (empty_streak + 1) if outcomes and all(
+            o.ok and o.empty for o in outcomes) else 0
         head = f"第 {turn} 回合"
         note = f"{head}：" + "；".join(notes) if notes else head
         note = self._extend_or_finish(plan, state, note)
         self._save_inv_state(task, route, state)
         return StepResult(
             ok=True, value=min(boot_value + total_value, 1.0),
-            progress_delta=1.0 / _INVESTIGATE_MAX_STEPS,
+            progress_delta=_TURN_PROGRESS,
             findings=findings, note=self._merge_note(boot_note, note[:300]))
 
     # ------------------------------------------------------------ 工具执行
@@ -880,6 +1040,15 @@ class CTFBaseAgent(SubAgent):
                 "请重新调用并给出合法的 JSON 参数。"))
         if not name:
             return _ToolOutcome(ok=False, text="工具名缺失，请重新调用。")
+        allowed_tools = {
+            str(schema.get("function", {}).get("name") or "")
+            for schema in self.tool_schemas
+        }
+        if name not in allowed_tools:
+            return _ToolOutcome(
+                ok=False,
+                text=f"工具 {name} 不在 {self.agent_type.value} 的工具目录内。",
+            )
         if name == "note":
             text = str(args.get("text", "") or "").strip()
             if not text:
@@ -901,6 +1070,10 @@ class CTFBaseAgent(SubAgent):
                 out = await self._tool_analyze_attachments(task)
             elif name == "kb_search":
                 out = await self._tool_kb_search(args)
+            elif name == "ask_user":
+                out = await self._tool_ask_user(task, route, state, args)
+            elif name == "submit_flag":
+                out = await self._tool_submit_flag(task, route, state, args)
             elif name == "probe_paths":
                 out = await self._tool_probe_paths(task, route, state, args)
             elif name.startswith("mcp__"):
@@ -955,7 +1128,6 @@ class CTFBaseAgent(SubAgent):
             title = str(parsed.get("title", "")).strip()[:40]
             size = parsed.get("content_length", len(res.stdout or ""))
             hits.append(f"{p} → {code} len={size}" + (f" title={title}" if title else ""))
-        accepted = await self._harvest("\n".join(hits), task, "probe_paths")
         if not hits:
             return _ToolOutcome(ok=True, value=0.05,
                                 note=f"敏感路径探测 {len(paths)} 条未命中",
@@ -964,9 +1136,80 @@ class CTFBaseAgent(SubAgent):
                                       "回到页面功能本身找线索。"))
         body = "命中:\n" + "\n".join(hits[:20]) + f"\n（共 {len(hits)}/{len(paths)} 命中）"
         return _ToolOutcome(ok=True, value=min(0.2 + 0.15 * len(hits), 0.9),
-                            findings=[{"type": "flag", "value": f} for f in accepted],
+                            findings=[],
                             note=f"敏感路径探测命中 {len(hits)}/{len(paths)}",
                             text=body[:_TOOL_RESULT_CAP])
+
+    async def _tool_submit_flag(self, task: Task, route, state: dict[str, Any],
+                                args: dict[str, Any]) -> _ToolOutcome:
+        """模型判定的 Flag 提交：登记（去重）→ 赛方接口 → 应答回灌。
+
+        判定权在模型——后端不做内容正则筛选；格式匹配只作登记信息。
+        提交成功即写入共享缓存，并行分支据此收敛。
+        """
+        value = str(args.get("flag", "") or "").strip()
+        if not value:
+            return _ToolOutcome(ok=False, text="submit_flag 需要 flag 参数（Flag 原文）。")
+        if self.flag_manager is None:
+            return _ToolOutcome(ok=False, text="本题未装配 Flag 管理器，无法提交。")
+        cand = self.flag_manager.register(
+            value, challenge_id=self.challenge_id(task), found_by=self.agent_id)
+        if cand is None:
+            return _ToolOutcome(ok=True, value=0.0, note=f"Flag 重复: {value[:40]}",
+                                text="该 Flag 值此前已登记过，无需重复提交。")
+        self._record_flag(task, cand.value)   # 共享缓存：并行分支即刻收敛
+        result = await self.flag_manager.submit(cand)
+        verdict = {True: "判定正确", False: "判定错误", None: "未获平台判定"}[
+            result.accepted]
+        self.ctx.audit.log("agent.flag_submit", self.agent_id, {
+            "route": route.name, "challenge": self.challenge_id(task),
+            "flag_id": cand.flag_id, "verdict": str(result.accepted),
+            "note": str(args.get("note", ""))[:200]})
+        text = (f"已登记并提交：{cand.value}\n平台应答：{verdict}"
+                + (f"（{result.submit_response[:200]}）" if result.submit_response else ""))
+        return _ToolOutcome(
+            ok=True, value=0.9 if result.accepted is not False else 0.2,
+            findings=[{"type": "flag", "value": cand.value}],
+            note=f"Flag 提交 {cand.value} → {verdict}", text=text)
+
+    async def _tool_ask_user(self, task: Task, route, state: dict[str, Any],
+                             args: dict[str, Any]) -> _ToolOutcome:
+        """向用户提问并挂起等待作答（问题与选项由模型撰写，后端只送达回收）。
+
+        用户答复（点选选项或自由输入）与勾选扩围的目标原样回灌；会话停止
+        时按「无答复」唤醒，模型据此自行决定继续或收尾。
+        """
+        question = str(args.get("question", "") or "").strip()
+        if not question:
+            return _ToolOutcome(ok=False, text="ask_user 需要 question 参数。")
+        options = [str(o).strip()[:200] for o in (args.get("options") or [])[:6]
+                   if isinstance(o, (str, int, float)) and str(o).strip()]
+        targets = [str(t).strip()[:300] for t in (args.get("targets") or [])[:6]
+                   if isinstance(t, str) and t.strip()]
+        broker = getattr(self.ctx, "questions", None)
+        if broker is None:
+            return _ToolOutcome(ok=False, text=(
+                "当前会话没有可用的用户询问通道——基于已有证据自行决策，"
+                "并在结论中说明该不确定点。"))
+        self.ctx.audit.log("agent.ask_user", self.agent_id, {
+            "route": route.name, "challenge": self.challenge_id(task),
+            "question": question[:500], "options": options, "targets": targets})
+        result = await broker.ask(self.agent_type.value, question, options, targets)
+        answer = str(result.get("answer") or "").strip()
+        added = result.get("scope_added") or []
+        if result.get("cancelled"):
+            return _ToolOutcome(ok=True, value=0.0,
+                                note="ask_user → 会话停止，未获答复",
+                                text="用户尚未作答（会话已停止）。基于已有证据自行决策。")
+        lines = [f"用户已答复：{answer or '（未给出明确选择，请基于现有证据继续）'}"]
+        if added:
+            lines.append("以下目标已由用户确认加入本会话授权范围，可继续测试: "
+                         + ", ".join(added))
+        self.ctx.audit.log("agent.ask_answered", self.agent_id, {
+            "route": route.name, "answer": answer[:300], "scope_added": added})
+        return _ToolOutcome(ok=True, value=0.1,
+                            note=f"用户答复: {answer[:60]}",
+                            text="\n".join(lines))
 
     async def _tool_kb_search(self, args: dict[str, Any]) -> _ToolOutcome:
         """经验知识库检索：检查清单/攻击路径/狩猎模板/平台规则（参考资料）。"""
@@ -1029,26 +1272,17 @@ class CTFBaseAgent(SubAgent):
 
     async def _tool_mcp(self, task: Task, name: str,
                         args: dict[str, Any]) -> _ToolOutcome:
-        """外部 MCP 工具调用：结果作为观察回灌，照常过 Flag 提取。"""
+        """外部 MCP 工具调用：统一经过 ToolRegistry 的风险门与范围门。"""
         entry = (getattr(self.ctx, "mcp_tools", None) or {}).get(name)
         if entry is None:
             return _ToolOutcome(ok=False,
                                 text=f"MCP 工具 {name} 不在当前会话工具目录。")
-        try:
-            res = await entry["client"].call(
-                entry["tool"], args, timeout=entry.get("timeout"))
-        except Exception as exc:  # noqa: BLE001 —— MCP 失败回灌，模型自行调整
-            return _ToolOutcome(ok=False,
-                                text=f"MCP 调用失败: {str(exc)[:300]}")
-        text = str(res.get("text", ""))
-        accepted = await self._harvest(text, task, name)
+        res = await self.ctx.tools.call(name, args, **self.ctx.builtin_ctx)
+        text = res.stdout or res.error or res.stderr
         note = f"MCP {entry['server']}/{entry['tool']}"
-        if accepted:
-            note += f" flag={len(accepted)}"
-        return _ToolOutcome(ok=not res.get("is_error"),
-                            value=0.2 + 0.5 * len(accepted),
-                            findings=[{"type": "flag", "value": f}
-                                      for f in accepted],
+        return _ToolOutcome(ok=res.ok,
+                            value=0.2,
+                            findings=[],
                             note=note[:120],
                             text=text[:_TOOL_RESULT_CAP] or "（无输出）")
 
@@ -1107,6 +1341,35 @@ class CTFBaseAgent(SubAgent):
         shown = url[len(base):] if base and url.startswith(base) else url
         desc = f"{method} {shown[:100] or '/'}"
 
+        # 记录回放（record-first）：本路线已读取过的地址直接回放当时记录，
+        # 不再发请求；需要重新获取（页面状态可能已变化）时模型显式加
+        # refresh 参数。Range 等头不同的请求键不同，分段取原文不受影响。
+        refresh = bool(args.get("refresh"))
+        hsig = ""
+        if headers:
+            hsig = "|" + "|".join(sorted(
+                f"{k}:{str(v)[:60]}" for k, v in headers.items()))[:300]
+        rkey = attempt_key(method, url, params) + hsig
+        fetches = state.setdefault("fetches", {})
+        if (method == "GET" and not params and not data and not refresh
+                and rkey in fetches):
+            record = fetches[rkey]
+            prior = record.get("obs") if isinstance(record.get("obs"), dict) else {}
+            state["observations"].append({
+                "action": desc,
+                "result": f"记录回放（第 {record.get('round', '?')} 回合已读取）"})
+            self.ctx.audit.log("agent.reread", self.agent_id, {
+                "route": route.name, "challenge": self.challenge_id(task),
+                "turn": int(state.get("turn") or 0), "url": url[:200],
+                "from_round": record.get("round")})
+            return _ToolOutcome(
+                ok=True, value=0.0, note=f"{desc} → 记录回放",
+                text=("（记录回放：该地址已在第 "
+                      f"{record.get('round', '?')} 回合读取过，以下为当时的记录，"
+                      "本次未重复请求；页面状态可能已变化需要重新获取时，"
+                      "在参数中加 \"refresh\": true）\n" + _obs_text(prior))
+                [:_FETCH_RECORD_CAP])
+
         # 环形避让：同伴（含本 Agent 其他路线/前轮尝试）在此入口无产出 → 不重复做功
         akey = attempt_key(method, url, params)
         if self.ctx.ring is not None:
@@ -1140,24 +1403,26 @@ class CTFBaseAgent(SubAgent):
                 {"action": desc, "result": f"请求失败: {str(res.error)[:100]}"})
             return _ToolOutcome(ok=False, note=f"{desc} → 请求失败", text=(
                 f"请求失败（{desc}）：{str(res.error)[:300]}"))
-        accepted = await self._harvest_http(res.stdout, task, f"llm:{desc[:40]}")
         status = res.parsed.get("status_code", 0)
-        state["flags"].extend(accepted)
-        obs = _http_observation(desc, res, url, accepted)
+        obs = _http_observation(desc, res, url, [])
         state["observations"].append(obs)
+        fetches[rkey] = {"round": int(state.get("turn") or 0), "obs": obs}
         # 环形共享缓存：入口与关键信号登记，同伴不再重复探同一入口
         signal = _signal_line(obs)
         self._record_site(task, url, f"{status}{signal}")
-        value = (0.25 if status < 400 else 0.05) + 0.6 * len(accepted)
+        value = 0.25 if status < 400 else 0.05
+        blocker = _challenge_instance_blocker(status, res.stdout)
+        if blocker:
+            state["stall"] = blocker
         if self.ctx.ring is not None:
             self.ctx.ring.record_attempt(
                 akey, agent_id=self._ring_actor(route),
                 agent_name=self._ring_name(route), action="http_request",
-                outcome=value, note=f"{status} flag={len(accepted)}")
+                outcome=value, note=f"{status}")
         return _ToolOutcome(
             ok=True, value=value, observation=obs,
-            findings=[{"type": "flag", "value": f} for f in accepted],
-            note=f"{desc} → {status} flag={len(accepted)}",
+            findings=[],
+            note=f"{desc} → {status}",
             text=_obs_text(obs))
 
     async def _tool_sandbox(self, task: Task, route, state: dict[str, Any],
@@ -1181,7 +1446,7 @@ class CTFBaseAgent(SubAgent):
         res = await self.ctx.tools.call(
             "sandbox_exec",
             {"code": code, "language": "python" if name == "python" else "shell",
-             "timeout": timeout},
+             "timeout": timeout, "log_name": f"output_{route.name}"},
             **self.ctx.builtin_ctx)
         if not res.ok and not (res.stdout or res.stderr):
             state["observations"].append(
@@ -1189,50 +1454,46 @@ class CTFBaseAgent(SubAgent):
             return _ToolOutcome(ok=False, note=f"{desc} → 执行失败", text=(
                 f"{desc} 执行失败：{str(res.error)[:300]}"))
         rc = res.parsed.get("exit_code", res.returncode)
-        accepted = await self._harvest(
-            (res.stdout or "") + "\n" + (res.stderr or ""), task, f"llm:{name}")
-        state["flags"].extend(accepted)
         status = (f"超时终止（{timeout:.0f}s）" if res.timed_out
                   else f"退出码 {rc}")
         state["observations"].append(
             {"action": desc,
              "result": f"{status}；输出 {len(res.stdout or '')} 字符"})
-        lines = [f"$ {first}", f"（{status}，耗时 {res.duration_ms / 1000:.1f}s）"]
+        workdir = str((res.parsed or {}).get("workdir") or "")
+        out_file = str((res.parsed or {}).get("output_file") or "")
+        head = (f"（{status}，耗时 {res.duration_ms / 1000:.1f}s，"
+                f"工作目录 {workdir or '见输出'}——会话内持久；/tmp 即焚）")
+        lines = [f"$ {first}", head]
         if res.stdout:
-            lines.append("stdout:\n" + res.stdout)
+            lines.append("stdout:\n" + _head_tail(res.stdout, _SAND_MODEL_CAP))
         if res.stderr:
-            lines.append("stderr:\n" + res.stderr)
+            lines.append("stderr:\n" + _head_tail(res.stderr, 1200))
+        if out_file:
+            lines.append(f"完整输出已存盘（不占上下文）: {out_file}"
+                         "——需要细节时在沙箱里按需读取")
         if res.timed_out:
             lines.append("提示：超时通常意味着脚本在等待输入或死循环——"
                          "交互式脚本请改为非交互（预置输入/设置超时）。")
-        if accepted:
-            lines.append("Flag 已捕获并提交（FlagManager 确定性提取）: "
-                         + ", ".join(accepted))
         return _ToolOutcome(
-            ok=True, value=0.05,
-            findings=[{"type": "flag", "value": f} for f in accepted],
-            note=f"{desc} → {status} flag={len(accepted)}",
+            ok=True, value=0.05, empty=not (res.stdout or "").strip(),
+            findings=[],
+            note=f"{desc} → {status}",
             text="\n".join(lines))
 
     async def _tool_analyze_text(self, task: Task) -> _ToolOutcome:
         """题面文本取证：全部载荷字符串的编码串链式解码 + 零宽字符统计 + Flag 提取。"""
         text = _challenge_text(self.challenge_of(task))
         decoded_texts = _decode_blobs(text)
-        accepted = await self._harvest("\n".join([text, *decoded_texts]), task, "description")
         zw = len(re.findall(r"[\u200b\u200c\u200d\u2060]", text))
         obs = {"action": "analyze_text",
                "result": f"可解码串 {len(decoded_texts)} 个，零宽字符 {zw} 个"}
-        if accepted:
-            obs["flags"] = accepted
-        state_note = (f"题面分析：{len(decoded_texts)} 个可解码串，"
-                      f"零宽字符={zw} flag={len(accepted)}")
+        state_note = f"题面分析：{len(decoded_texts)} 个可解码串，零宽字符={zw}"
         body = ("题面分析结果：可解码串 "
                 f"{len(decoded_texts)} 个，零宽字符 {zw} 个。\n"
                 + ("解码结果:\n" + "\n".join(d[:600] for d in decoded_texts[:6])
-                   if decoded_texts else "（无可解码串）")
-                + (f"\nFlag 已捕获并提交: {', '.join(accepted)}" if accepted else ""))
-        return _ToolOutcome(ok=True, value=0.15 + 0.6 * len(accepted),
-                            findings=[{"type": "flag", "value": f} for f in accepted],
+                   if decoded_texts else "（无可解码串）"))
+        return _ToolOutcome(ok=True, value=0.15,
+                            findings=[],
                             note=state_note, observation=obs, text=body)
 
     async def _ensure_attachments(self, task: Task) -> dict[str, dict[str, Any]]:
@@ -1277,11 +1538,7 @@ class CTFBaseAgent(SubAgent):
                 f"{path}: magic={parsed['magic']} size={parsed['size']} "
                 f"is_elf={parsed.get('is_elf')}\n  字符串样本: "
                 + " | ".join(str(s)[:120] for s in strings[:40]))
-        accepted = await self._harvest("\n".join(all_strings), task, "attachment_strings")
-        findings.extend({"type": "flag", "value": f} for f in accepted)
-        if accepted:
-            body_lines.append("Flag 已捕获并提交: " + ", ".join(accepted))
-        return _ToolOutcome(ok=True, value=0.3 + 0.5 * len(accepted),
+        return _ToolOutcome(ok=True, value=0.3,
                             findings=findings, note="; ".join(notes),
                             text="\n".join(body_lines)[:_TOOL_RESULT_CAP])
 
@@ -1319,20 +1576,23 @@ class CTFBaseAgent(SubAgent):
                         agent_name=self._ring_name(route), action="bootstrap",
                         outcome=0.0, note="入口页不可达")
                 return 0.0, "赛题入口不可达"
-            accepted = await self._harvest_http(res.stdout, task, "bootstrap:page")
             status = res.parsed.get("status_code", 0)
-            state["flags"].extend(accepted)
-            obs = _http_observation(f"GET {url}", res, url, accepted)
+            obs = _http_observation(f"GET {url}", res, url, [])
             state["observations"].append(obs)
+            state.setdefault("fetches", {})[attempt_key("GET", url, None)] = {
+                "round": 0, "obs": obs}
             self._record_site(task, url, f"{status}{_signal_line(obs)}")
             state["seed"].append("入口页预感知：\n" + _obs_text(obs))
-            value = (0.3 if status < 400 else 0.05) + 0.6 * len(accepted)
+            value = 0.3 if status < 400 else 0.05
+            blocker = _challenge_instance_blocker(status, res.stdout)
+            if blocker:
+                state["stall"] = blocker
             if self.ctx.ring is not None:
                 self.ctx.ring.record_attempt(
                     akey, agent_id=self._ring_actor(route),
                     agent_name=self._ring_name(route), action="bootstrap",
                     outcome=value, note=f"入口页 {status}")
-            return value, f"入口页 {status} flag={len(accepted)}"
+            return value, blocker or f"入口页 {status}"
         attachments = ch.get("attachments", [])
         if attachments:
             out = await self._tool_analyze_attachments(task)
@@ -1347,12 +1607,13 @@ class CTFBaseAgent(SubAgent):
     # ------------------------------------------------------------ 提示词与上下文
 
     def _solver_system_prompt(self, task: Task) -> str:
+        from spiritscout.agents.profiles import agent_system_prompt
+
         scope = self.ctx.policy.guard.scope
         allowed = scope.allowed_domains + scope.allowed_cidrs + scope.allowed_urls
         return (
-            f"你是灵探 SpiritScout 的 CTF {self.direction} 方向解题 Agent，"
-            f"正在解一道已获授权的 CTF 赛题。授权范围严格限于: {allowed}；"
-            f"禁止访问范围外目标，禁止破坏性操作。\n"
+            agent_system_prompt(self.agent_type, allowed)
+            + "\n"
             f"{self.direction_brief}\n"
             f"{_METHODOLOGY}\n"
             "工作方式：工具就是你的手——需要看什么就用工具去拿，不要凭空猜测"
@@ -1364,16 +1625,21 @@ class CTFBaseAgent(SubAgent):
             "事实用 kb_search 检索——它们是参考资料，采纳与否由你基于现场"
             "证据判断。\n"
             "动手能力：要跑命令用 shell，要写代码用 python——它们在隔离沙箱里"
-            "执行（系统文件只读、你的工作区可写、联网仅限授权目标）。"
-            "WebSocket/socket 等协议交互、数据计算、脚本化构造请求，"
-            "凡是 http_request 够不着的，一律用它们去完成。\n"
+            "执行（系统文件只读、联网仅限授权目标）。工作目录在会话内持久："
+            "脚本与产物放在那里，后续回合直接可用；/tmp 每次运行即焚，需要"
+            "留存的文件不要写进 /tmp。WebSocket/socket 等协议交互、数据计算、"
+            "脚本化构造请求，凡是 http_request 够不着的，一律用它们去完成。\n"
             "协同：同一道题可能有其他方向的 Agent 在并行工作，你们共享现场——"
             "别人探过的入口、写下的笔记、拿到的 Flag 会以「同伴动态」出现在对话里；"
             "有值得同伴立刻知道的发现（接口/参数/口令线索）就用 note 工具写一条，"
             "发现别人已经解决或已经试过的，不要重复做功。\n"
-            "收尾：当你不再调用工具时，你最后一条消息就是交给主 Agent 的结论——"
-            "简明写清「拿到了什么（Flag 原文）、依据是什么、还差什么」。拿到 Flag "
-            "或确认无解空间时立即收尾，不要空转。\n"
+            "提问：遇到授权范围外的目标或需要用户拍板的分叉，用 ask_user 向"
+            "用户提问——问题与选项用你自己的话写清楚；用户同意的目标会被"
+            "加入本会话范围，之后可正常测试。\n"
+            "收尾：判定拿到 Flag 时先用 submit_flag 提交（写明依据），拿到平台"
+            "应答再收尾；当你不再调用工具时，最后一条消息就是交给主 Agent 的"
+            "结论——简明写清「拿到了什么（Flag 原文）、依据是什么、还差什么」。"
+            "确认无解题空间时直接收尾，不要空转。\n"
             "纪律：对话里已经记录了你发过的每个请求与结果——重复发出完全相同"
             "的调用不会有任何新信息，是否算「同一动作」由你自己判断（换了参数、"
             "换了头、换了时机就是不同的请求，可以再试）；结果里已经有答案就不要"
@@ -1418,46 +1684,68 @@ class CTFBaseAgent(SubAgent):
             "notes": len(self._shared_notes(task)),
             "concl": len(self._shared_conclusions(task)),
             "flags": peer_flags})
+        angle = str(plan.strategy or "").strip()
+        if angle:
+            parts.append("## 本路线调查角度（与并行分支分工，不重复做功）\n"
+                         + angle[:200])
         parts.append("## 任务\n夺取本题 Flag。Flag 常藏在响应正文/注释/编码串/"
-                     "响应头或附件里；拿到就收尾。")
+                     "响应头或附件里；判定拿到后用 submit_flag 提交，拿到应答"
+                     "即收尾。")
         state["messages"] = [
             {"role": "system", "content": self._solver_system_prompt(task)},
             {"role": "user", "content": "\n\n".join(parts)[:24000]},
         ]
 
     @staticmethod
-    def _compact_messages(messages: list[dict[str, Any]]) -> None:
-        """对话压缩：超预算时从最旧开始把长工具结果/助手长文折叠成占位符。
+    def _compact_messages(messages: list[dict[str, Any]], *,
+                          initialized: bool = False) -> None:
+        """对话压缩：超预算时从最旧开始折叠，锚点不丢、折叠可恢复。
 
-        保留 system 与首条用户消息（题面契约不丢）；折叠只影响旧回合。
+        - system 与首条用户消息（题面契约）永不折叠；
+        - 工具/助手长文折叠为「头 + 尾」摘录：头保方法与现场，尾常是结论
+          与落点地址；HTTP GET 可记录回放、沙箱输出在工作区文件——折叠
+          不等于丢失；
+        - 中途注入的 user 消息（同伴动态/督导）只保留最近 2 条，更旧的
+          压缩为摘录：其状态本体在共享缓存与水位里，不因折叠失真。
         """
-        total = sum(len(str(m.get("content") or "")) for m in messages)
+        sent_view = _model_messages(messages, initialized=initialized)
+        total = sum(len(str(m.get("content") or "")) for m in sent_view)
         if total <= _MSG_CHAR_BUDGET:
             return
-        for msg in messages[2:]:
+        user_idx = [i for i, m in enumerate(messages)
+                    if i >= 2 and m.get("role") == "user"]
+        foldable_user = set(user_idx[:-2])
+        for i, msg in enumerate(messages[2:], start=2):
             if total <= _MSG_CHAR_BUDGET:
                 break
             content = str(msg.get("content") or "")
-            if msg.get("role") not in ("tool", "assistant") or len(content) <= 400:
+            role = msg.get("role")
+            if role == "user" and i not in foldable_user:
                 continue
-            keep = content[:200] + "…（早前内容已折叠，需要时重新获取）"
+            if role not in ("tool", "assistant", "user") or len(content) <= 400:
+                continue
+            keep = (content[:200]
+                    + "…（早前内容已折叠，头尾摘录；完整内容可按记录重取）"
+                    + content[-120:])
             total -= len(content) - len(keep)
             msg["content"] = keep
 
     @staticmethod
     def _merge_note(prefix: str, note: str) -> str:
+        if prefix and prefix == note:
+            return note
         return f"{prefix}；{note}" if prefix else note
 
     @staticmethod
     def _extend_or_finish(plan: RoutePlan, state: dict[str, Any], note: str) -> str:
-        """动态延展：未收尾则追加下一回合占位步（回合安全顶内）；到顶即收尾。"""
+        """动态延展：未收尾则追加下一回合占位步。
+
+        不设固定回合顶：收尾由模型自主决定（不再调用工具即结论），
+        或由用户手动停止会话；后端规则不做进度的刽子手。
+        """
         if state["concluded"] or state["stall"]:
             return note
-        if len(plan.steps) < _INVESTIGATE_MAX_STEPS:
-            plan.steps.append({"action": "investigate"})
-        else:
-            state["concluded"] = True
-            note += "；回合安全顶收尾"
+        plan.steps.append({"action": "investigate"})
         return note
 
 
@@ -1475,6 +1763,14 @@ class CTFWebAgent(CTFBaseAgent):
         "它的正常业务流程，同时从响应内容里读懂这个应用是做什么的、有哪些"
         "功能与角色。没有任何预设考点清单——信息由你自行收集，解题计划由你"
         "从收集到的证据里分析得出。")
+    tool_schemas: ClassVar[list[dict[str, Any]]] = [
+        *CTFBaseAgent.tool_schemas,
+        _fn("probe_paths",
+            "仅在入口页面、技术栈或题面给出相应线索后，批量验证少量敏感路径；"
+            "优先传自定义 paths，不把默认清单当作理解业务的替代品。",
+            {"paths": {"type": "array", "items": {"type": "string"},
+                       "description": "由现场证据推导的路径列表（以 / 开头）"}}),
+    ]
 
 
 # ================================================================ Crypto 专项
@@ -1519,37 +1815,31 @@ class CTFCryptoAgent(CTFBaseAgent):
             if not target:
                 return _ToolOutcome(ok=False, text="没有可解码的目标串：请在 target 里给出密文。")
             decoded = _decode_chain(target, max_depth=4)
-            accepted = await self._harvest(decoded or "", task, "decode_chain")
             if not decoded or decoded == target:
                 return _ToolOutcome(ok=False, text="这串没有被 Base64/Hex/URL/Rot13 识别出可解码层。")
             return _ToolOutcome(
-                ok=True, value=0.3 + 0.6 * len(accepted),
-                findings=[{"type": "flag", "value": f} for f in accepted],
-                note=f"解码链结果 {len(decoded)} 字符 flag={len(accepted)}",
-                text="解码结果:\n" + decoded[:3000]
-                     + (f"\nFlag 已捕获并提交: {', '.join(accepted)}" if accepted else ""))
+                ok=True, value=0.3,
+                findings=[],
+                note=f"解码链结果 {len(decoded)} 字符",
+                text="解码结果:\n" + decoded[:3000])
         if name == "caesar_brute":
             hits = _caesar_brute(target)
             if not hits:
                 return _ToolOutcome(ok=False, text="目标串不是纯字母，凯撒爆破不适用。")
-            accepted = await self._harvest("\n".join(hits), task, "caesar")
             return _ToolOutcome(
-                ok=True, value=0.2 + 0.6 * len(accepted),
-                findings=[{"type": "flag", "value": f} for f in accepted],
-                note=f"凯撒爆破 {len(hits)} 个候选位移 flag={len(accepted)}",
-                text="26 个位移结果:\n" + "\n".join(hits)[:3000]
-                     + (f"\nFlag 已捕获并提交: {', '.join(accepted)}" if accepted else ""))
+                ok=True, value=0.2,
+                findings=[],
+                note=f"凯撒爆破 {len(hits)} 个候选位移",
+                text="26 个位移结果:\n" + "\n".join(hits)[:3000])
         if name == "rail_fence":
             hits = _rail_fence_brute(target)
             if not hits:
                 return _ToolOutcome(ok=False, text="目标串不是纯字母或太短，栅栏还原不适用。")
-            accepted = await self._harvest("\n".join(hits), task, "rail_fence")
             return _ToolOutcome(
-                ok=True, value=0.2 + 0.5 * len(accepted),
-                findings=[{"type": "flag", "value": f} for f in accepted],
-                note=f"栅栏还原 {len(hits)} 个候选栏数 flag={len(accepted)}",
-                text="各栏数还原结果:\n" + "\n".join(hits)[:3000]
-                     + (f"\nFlag 已捕获并提交: {', '.join(accepted)}" if accepted else ""))
+                ok=True, value=0.2,
+                findings=[],
+                note=f"栅栏还原 {len(hits)} 个候选栏数",
+                text="各栏数还原结果:\n" + "\n".join(hits)[:3000])
         return None
 
 
@@ -1592,15 +1882,14 @@ class CTFMiscAgent(CTFBaseAgent):
                     decoded = _decode_chain(s)
                     if decoded and decoded != s:
                         decoded_hits.append(decoded)
-        accepted = await self._harvest("\n".join(decoded_hits), task, "deep_strings")
+
         if not decoded_hits:
             return _ToolOutcome(ok=False, text="附件字符串里没有被识别出的编码串。")
         return _ToolOutcome(
-            ok=True, value=0.2 + 0.5 * len(accepted),
-            findings=[{"type": "flag", "value": f} for f in accepted],
-            note=f"字符串深挖：{len(decoded_hits)} 个可解码串 flag={len(accepted)}",
-            text="解码命中:\n" + "\n".join(h[:600] for h in decoded_hits[:20])
-                 + (f"\nFlag 已捕获并提交: {', '.join(accepted)}" if accepted else ""))
+            ok=True, value=0.2,
+            findings=[],
+            note=f"字符串深挖：{len(decoded_hits)} 个可解码串",
+            text="解码命中:\n" + "\n".join(h[:600] for h in decoded_hits[:20]))
 
 
 # ================================================================ Reverse 专项

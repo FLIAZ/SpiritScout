@@ -1,8 +1,13 @@
 """子 Agent 基座：路线生成 → 并发执行 → 健康度剪枝 → 局部反思 → 结果上报。
 
+路线是**交付目标**而非固定流程：strategy 声明本路线要产出的可核验结果
+（证据 → 结论），步骤只是探测单元与合规通道，怎么走到验证点由执行者
+按现场证据自定；灵枢任务包携带的任务意图（mission/node_title）随每次
+LLM 决策下发，执行者不持有全局提示词。
+
 硬约束 C2 落地：
-- 默认 3 条差异化路线（route_templates 按漏洞类/策略绑定流水线，
-  LLM 仅在模板槽位内做参数级增强，不自由发散）；
+- 差异化路线：route_templates 按交付目标绑定探测单元；LLM 只在声明了
+  动作白名单的子 Agent 上增广路线（提议→白名单校验→规则放行）；
 - 路线间经 LocalSharedCache 共享中间结果；
 - BranchHealthManager 每步评估、自动剪枝/合并；
 - 局部反思：每 3 步复盘，连续失败自动调整（毫秒级本地决策，6.4）。
@@ -12,6 +17,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import dataclasses
 import json
 import re
 import time
@@ -37,7 +43,7 @@ from spiritscout.core.models import (
 from spiritscout.gateway import ModelGateway
 from spiritscout.gateway.backends import extract_json
 from spiritscout.policy.engine import PolicyEngine
-from spiritscout.tools.registry import ToolRegistry
+from spiritscout.tools.registry import AgentToolView, ToolRegistry
 
 
 @dataclass
@@ -74,7 +80,7 @@ class SubAgentContext:
     blackboard: Blackboard
     convergence: ConvergenceEngine
     gateway: ModelGateway
-    tools: ToolRegistry
+    tools: ToolRegistry | AgentToolView
     policy: PolicyEngine
     audit: AuditLogger | None = None
     builtin_ctx: dict[str, Any] = field(default_factory=dict)  # guard/limiter 等
@@ -89,6 +95,9 @@ class SubAgentContext:
     # 外部 MCP 工具（mcp__<server>__<tool> → {client, server, tool, schema}）；
     # 会话基建建立时握手拉取，智能体初始化时并入自身工具目录
     mcp_tools: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # 模型发起的用户询问通道（ask_user 工具的后端：挂起-作答-回传；
+    # for_agent 的 replace 共享同一引用）
+    questions: Any = None
 
     def __post_init__(self) -> None:
         if self.audit is None:
@@ -99,16 +108,26 @@ class SubAgentContext:
             self.shared_cache = LocalSharedCache(default_ttl_seconds=3600)
 
     def for_agent(self, agent_key: str) -> SubAgentContext:
-        """按 Agent 绑定模型：该 Agent 有分配 → 网关包装注入模型 ID；
-        无分配 → 原样返回（共享上下文零开销，维持档位路由）。"""
+        """为角色绑定模型，并收窄工具与 MCP 目录。"""
         model = self.agent_models.get(agent_key, "")
-        if not model:
-            return self
-        import dataclasses
+        gateway = self.gateway
+        if model:
+            from spiritscout.gateway import AgentBoundGateway
 
-        from spiritscout.gateway import AgentBoundGateway
+            gateway = AgentBoundGateway(self.gateway, model)
+        tool_root = (self.tools._registry
+                     if isinstance(self.tools, AgentToolView) else self.tools)
+        tool_view = AgentToolView(tool_root, agent_key, audit=self.audit)
+        profile = tool_view.profile
         return dataclasses.replace(
-            self, gateway=AgentBoundGateway(self.gateway, model))
+            self,
+            gateway=gateway,
+            tools=tool_view,
+            mcp_tools={
+                name: entry for name, entry in self.mcp_tools.items()
+                if profile.allows_tool(name)
+            },
+        )
 
 
 class SubAgent(abc.ABC):
@@ -172,7 +191,7 @@ class SubAgent(abc.ABC):
     # ------------------------------------------------------------ 路线生成
 
     async def plan_routes(self, task: Task) -> list[RoutePlan]:
-        """生成差异化路线：模板为骨架，主 Agent 预算裁决条数，LLM 增广补缺。
+        """生成差异化路线：交付目标为骨架，主 Agent 预算裁决条数。
 
         条数语义：task.max_routes 是主 Agent 按复杂度决策的并发预算——
         超出则按模板优先级截断，不足则在声明了动作白名单的子 Agent 上由
@@ -190,9 +209,7 @@ class SubAgent(abc.ABC):
                                                       budget - len(plans))
         plans = plans[: self.max_routes]
         if self.ctx.knowledge is not None:
-            self._attach_kb_guidance(task, plans)   # 经验库检索接线（3.3.6 联动）
-        if self.enable_llm_planning:
-            plans = await self._llm_enrich(task, plans)
+            self._attach_kb_guidance(task, plans)   # 经验库核验参考接线（3.3.6 联动）
         return plans
 
     async def _llm_extend_routes(
@@ -220,12 +237,15 @@ class SubAgent(abc.ABC):
                         "constraints": (
                             "返回 JSON：{\"new_routes\": [{\"name\": 英文短名, "
                             "\"strategy\": 一句话策略, \"steps\": [{\"action\": "
-                            "白名单动作之一, ...参数字段}]}]}。新路线必须与既有路线"
+                            "白名单动作之一, ...参数字段}]}]}。每条新路线是一个"
+                            "可核验的交付目标：strategy 写清要产出什么、完成判据"
+                            "是什么，steps 只是最小验证动作。必须与既有路线"
                             "思路不同；每条 1~6 步；最多 slots 条。"),
                     }, ensure_ascii=False)},
                 ],
                 task_type="execution", response_format="json",
                 reasoning_effort=self.task_effort(task),
+                task=task,
             )
             data = extract_json(resp.content)
         except Exception as exc:  # noqa: BLE001 —— 增广失败保持模板路线
@@ -275,11 +295,11 @@ class SubAgent(abc.ABC):
         return steps
 
     def _attach_kb_guidance(self, task: Task, plans: list[RoutePlan]) -> None:
-        """按战术/技术 + 漏洞类检索红队/SRC 经验库，注入路线 meta（3.3.6）。
+        """按战术/技术 + 漏洞类检索经验库，注入**核验参考**（3.3.6 联动）。
 
-        - 红队经验库：按 DAG 下发的 tactic/technique 取 checklist 前置条件与步骤；
-        - SRC 经验库：按任务 vuln_classes 取挖洞模板（步骤 + 合规红线）；
-         guidance 是执行参考而非强制流程：路线仍以模板绑定为主。
+        只带核验面信息：前置条件、核验方法、常见坑与合规红线——不带步骤
+        序列：怎么走到验证点由执行者按现场证据自定，推送步骤等于规定打法；
+        经验库全量条目可经 kb_search 随需检索（CTF 方向），需要时自取。
         """
         kb = self.ctx.knowledge
         tactic = str(task.payload.get("tactic") or "") or None
@@ -303,7 +323,8 @@ class SubAgent(abc.ABC):
             ],
             "hunt_templates": [
                 {"template_id": t["template_id"], "scene": t["scene"],
-                 "steps": t.get("step_sequence", []),
+                 "precondition": t.get("precondition", ""),
+                 "common_pitfall": t.get("common_pitfall", ""),
                  "compliance_redline": t.get("compliance_redline", "")}
                 for t in hunt_templates[:5]
             ],
@@ -320,30 +341,6 @@ class SubAgent(abc.ABC):
     @abc.abstractmethod
     def route_templates(self, task: Task) -> list[RoutePlan]:
         """子类实现：按任务生成差异化路线模板（≥3 条，覆盖不同技术路径）。"""
-
-    async def _llm_enrich(self, task: Task, plans: list[RoutePlan]) -> list[RoutePlan]:
-        """LLM 在模板槽位内做参数级增强；失败静默回退模板（不影响主流程）。"""
-        try:
-            resp = await self.ctx.gateway.chat(
-                [
-                    {"role": "system", "content": self._system_prompt() + "\nROLE: route_planner"},
-                    {"role": "user", "content": json.dumps({
-                        "task": task.task_type, "target": task.target,
-                        "templates": [{"name": p.name, "strategy": p.strategy} for p in plans],
-                    }, ensure_ascii=False)},
-                ],
-                task_type="execution", response_format="json",
-                reasoning_effort=self.task_effort(task),
-            )
-            data = extract_json(resp.content)
-            hints = {r.get("name"): r for r in data.get("routes", []) if isinstance(r, dict)}
-            for plan in plans:
-                hint = hints.get(plan.name)
-                if hint:
-                    plan.meta["llm_hint"] = {k: v for k, v in hint.items() if k != "name"}
-        except Exception:  # noqa: BLE001, S110 —— LLM 增强失败不阻断（规则引擎裁决原则）
-            pass
-        return plans
 
     # ------------------------------------------------------------ 路线执行
 
@@ -517,16 +514,26 @@ class SubAgent(abc.ABC):
     async def _llm_chat_json(self, role: str, user_obj: dict[str, Any],
                              *, max_user_chars: int = 6000,
                              timeout_seconds: int | None = None,
-                             reasoning_effort: str = "") -> dict[str, Any] | None:
+                             reasoning_effort: str = "",
+                             task: Task | None = None) -> dict[str, Any] | None:
         """云端 LLM 决策调用（JSON 应答）；不可用/解析失败 → None（调用方回退规则）。
 
         统一的降级语义：LLM 是操作建议的主路径，规则模板是骨架与兜底；
         任何一步 LLM 失败都不阻断任务（规则引擎裁决原则 4.9.5 不动）。
         timeout_seconds 透传网关：重推理角色（如解题环）须放宽单次调用硬顶。
+        task 非空时把灵枢任务包携带的任务意图（mission/node_title）并入
+        决策上下文——开局提示词只进灵枢，执行者从任务包知道自己服务于
+        什么目标、交付什么。
         """
         if not self.enable_llm_planning:
             return None
         assert self.ctx.audit is not None
+        if task is not None:
+            intent = {"mission": str(task.payload.get("mission", ""))[:600],
+                      "node": str(task.payload.get("node_title", ""))[:120]}
+            intent = {k: v for k, v in intent.items() if v}
+            if intent:
+                user_obj = {**user_obj, "task_intent": intent}
         # 灵枢督导：主 Agent 按全局实时进度给出的方向建议（上下文而非指令）
         steering = (self.ctx.ring.steering_for(self.agent_type.value)
                     if self.ctx.ring is not None else None)
@@ -555,13 +562,11 @@ class SubAgent(abc.ABC):
 
     def _system_prompt(self) -> str:
         """分模式 system prompt（显式授权边界，防拒答亦防越界）。"""
+        from spiritscout.agents.profiles import agent_system_prompt
+
         scope = self.ctx.policy.guard.scope
         allowed = scope.allowed_domains + scope.allowed_cidrs + scope.allowed_urls
-        return (
-            f"你是灵探 SpiritScout 的 {self.agent_type.value} 子 Agent，执行已获授权的"
-            f"安全测试任务。授权范围严格限于: {allowed}。禁止访问范围外任何目标；"
-            f"禁止破坏性操作；所有发现必须有可复现证据。"
-        )
+        return agent_system_prompt(self.agent_type, allowed)
 
     @abc.abstractmethod
     async def execute_step(

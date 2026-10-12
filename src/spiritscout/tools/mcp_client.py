@@ -13,7 +13,7 @@
 不阻断开工（留痕后跳过）——MCP 是增益能力而非主链依赖。
 
 生命周期：官方 SDK 的会话是异步上下文管理器（进入=连接+协商，
-退出=断开），而灵探的 MCP 连接随一次会话存续、跨多次调用——因此每台
+退出=断开），而灵枢的 MCP 连接随一次会话存续、跨多次调用——因此每台
 服务器由一个常驻任务持有会话，调用请求经队列投递、结果回填 Future；
 任务退出（服务器断开）时唤醒全部等待者并拒绝后续调用。
 """
@@ -131,7 +131,10 @@ class McpClient:
                     self.tools = [
                         {"name": t.name,
                          "description": t.description or "",
-                         "inputSchema": getattr(t, "inputSchema", None) or {}}
+                         "inputSchema": getattr(t, "inputSchema", None) or {},
+                         "annotations": (
+                             t.annotations.model_dump(mode="json", exclude_none=True)
+                             if getattr(t, "annotations", None) is not None else {})}
                         for t in listed.tools
                     ]
                     if self._ready is not None and not self._ready.done():

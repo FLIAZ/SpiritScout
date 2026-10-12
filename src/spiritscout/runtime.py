@@ -37,6 +37,7 @@ from spiritscout.core.models import (
 )
 from spiritscout.ctf import FlagManager
 from spiritscout.ctf.flags import SubmitFn
+from spiritscout.ctf.writeup import build_digest, writeup_body
 from spiritscout.gateway import (
     AgentBoundGateway,
     CollabGateway,
@@ -52,6 +53,7 @@ from spiritscout.tools.builtin import (
     dns_resolve,
     file_analyze,
     http_probe,
+    tcp_scan,
 )
 from spiritscout.tools.executor import (
     DockerExecutor,
@@ -61,10 +63,61 @@ from spiritscout.tools.executor import (
 )
 from spiritscout.tools.registry import ToolRegistry
 from spiritscout.tools.sandbox import sandbox_exec
+from spiritscout.tools.spec import RiskLevel, ToolKind, ToolResult, ToolSpec
 from spiritscout.verify import VerifyPipeline
 
 if TYPE_CHECKING:
     from spiritscout.competition import CompetitionRules
+
+
+def _mcp_embedded_scope_targets(params: dict[str, Any]) -> list[str]:
+    """从 MCP 复合入参中提取网络目标。
+
+    Yakit ``http_fuzzer`` 的主目标位于 ``request`` 原始报文的
+    Host 头，而不是独立 ``url`` 字段。这里同时校验 absolute-form
+    请求行与 Host，避免二者不一致时绕过授权边界。
+    """
+    scheme = "https" if bool(params.get("isHttps")) else "http"
+    targets: list[str] = []
+
+    def add(value: Any) -> None:
+        raw = str(value or "").strip()
+        if not raw:
+            return
+        if raw.startswith(("http://", "https://")):
+            target = raw
+        elif any(ch.isspace() for ch in raw) or "/" in raw:
+            return
+        else:
+            target = f"{scheme}://{raw}/"
+        if target not in targets:
+            targets.append(target)
+
+    add(params.get("actualAddr"))
+    batch = params.get("batchTarget")
+    if isinstance(batch, (list, tuple, set)):
+        for item in batch:
+            add(item)
+
+    request = params.get("request")
+    if not isinstance(request, str) or not request.strip():
+        return targets
+    # 只解析首个 HTTP 头块；不读请求体，避免把体内文本误当目标。
+    header = request[:65536].replace("\r\n", "\n").split("\n\n", 1)[0]
+    lines = header.splitlines()
+    request_target = ""
+    if lines:
+        first = lines[0].strip().split()
+        if len(first) >= 2:
+            request_target = first[1]
+            if request_target.startswith(("http://", "https://")):
+                add(request_target)
+    hosts = [line.split(":", 1)[1].strip() for line in lines[1:]
+             if line.lower().startswith("host:")]
+    path = request_target if request_target.startswith("/") else "/"
+    for host in hosts:
+        add(f"{scheme}://{host}{path}")
+    return targets
 
 
 @dataclass
@@ -105,6 +158,7 @@ class _Infra:
     mcp_clients: list[Any] = field(default_factory=list)   # MCP 客户端（关停回收）
     mcp_tools: dict[str, dict[str, Any]] = field(
         default_factory=dict)   # mcp__<server>__<tool> → {client, server, tool, timeout}
+    questions: Any = None       # QuestionBroker（ask_user 工具后端；None=不可用）
 
     async def close(self) -> None:
         await self.bus.stop()
@@ -124,6 +178,7 @@ async def _build_infra(
     agent_models: dict[str, str] | None = None,
     approval_gate: Callable[[str, str], Awaitable[bool]] | None = None,
     ring: Any = None,
+    question_broker: Any = None,
 ) -> _Infra:
     # G1：授权未经人工确认/范围为空/时间窗过期 → 拒绝启动（异常中断，非静默）
     if not authorization.human_confirmed:
@@ -135,6 +190,8 @@ async def _build_infra(
     })
     guard = ScopeGuard(authorization.scope)
     guard.assert_operable()
+    if question_broker is not None:
+        question_broker.bind_guard(guard)   # 用户勾选扩围 → 写入会话批准集
     # 平台红线由知识库漏洞标准库装载（3.4 全量 7 平台规则，首次启动自动播种）
     knowledge = KnowledgeStore(cfg.knowledge.sqlite_path, auto_seed=True)
     platform_rule = knowledge.platform_rule_view(authorization.src_platform)
@@ -196,10 +253,20 @@ async def _build_infra(
     attachments = workspace / "attachments"
     attachments.mkdir(exist_ok=True)
     (workspace / "reports").mkdir(exist_ok=True)
+    # 浏览器/代理 HAR 附件 → 真实端点资产。只导入授权范围内的 URL，且不保存
+    # Cookie、Authorization、参数值或响应正文。
+    from spiritscout.traffic import import_har_directory
+
+    import_har_directory(
+        attachments, blackboard=blackboard, guard=guard, audit=audit)
+    sandbox_dir = workspace / "sandbox"
+    sandbox_dir.mkdir(exist_ok=True)
     builtin_ctx = {
         "guard": guard,
         "limiter": limiter,
-        "allowed_dirs": [str(attachments)],
+        # 附件与沙箱产物目录都在附件分析工具的允许清单内——脚本产物
+        # 可以直接接续 file_analyze/analyze_attachments
+        "allowed_dirs": [str(attachments), str(sandbox_dir)],
         "workspace_root": str(workspace),
     }
     # 外部 MCP 服务器：握手 + 工具清单并入智能体工具目录（失败留痕跳过，
@@ -227,15 +294,63 @@ async def _build_infra(
                 continue
             mcp_clients.append(client)
             for t in tools:
-                mcp_tools[f"mcp__{spec.name}__{t['name']}"] = {
+                exposed_name = f"mcp__{spec.name}__{t['name']}"
+                annotations = t.get("annotations") or {}
+                destructive = annotations.get(
+                    "destructiveHint", annotations.get("destructive_hint"))
+                read_only = annotations.get(
+                    "readOnlyHint", annotations.get("read_only_hint"))
+                if destructive is True:
+                    risk = RiskLevel.DESTRUCTIVE
+                elif read_only is True:
+                    risk = RiskLevel.READONLY
+                else:
+                    risk = RiskLevel(spec.default_risk)
+                properties = (t.get("inputSchema") or {}).get("properties") or {}
+                target_params = (() if spec.scope_enforcement == "none" else
+                                 tuple(p for p in spec.target_params if p in properties))
+                embedded_extractor = (
+                    _mcp_embedded_scope_targets
+                    if spec.scope_enforcement != "none"
+                    and {"request", "actualAddr", "batchTarget"} & set(properties)
+                    else None)
+                tool_spec = ToolSpec(
+                    name=exposed_name, kind=ToolKind.MCP,
+                    description=t.get("description") or t["name"], risk=risk,
+                    timeout_seconds=max(1, int(spec.timeout)),
+                    allowed_params=set(properties), target_params=target_params,
+                    scope_required=spec.scope_enforcement == "required",
+                    scope_target_extractor=embedded_extractor)
+
+                async def _call_mcp(*, _client=client, _tool=t["name"],
+                                    _timeout=float(spec.timeout),
+                                    _properties=frozenset(properties),
+                                    _name=exposed_name, **kwargs: Any) -> ToolResult:
+                    # ToolRegistry 会追加内置上下文；远端只接收 schema 声明的参数。
+                    arguments = {k: v for k, v in kwargs.items() if k in _properties}
+                    try:
+                        result = await _client.call(_tool, arguments, timeout=_timeout)
+                    except Exception as exc:  # noqa: BLE001 —— 归一为工具失败
+                        return ToolResult(tool=_name, ok=False, returncode=-2,
+                                          error=str(exc)[:300])
+                    return ToolResult(
+                        tool=_name, ok=not result.get("is_error"),
+                        returncode=1 if result.get("is_error") else 0,
+                        stdout=str(result.get("text", ""))[:16000])
+
+                registry.register_builtin(exposed_name, _call_mcp, tool_spec)
+                mcp_tools[exposed_name] = {
                     "client": client, "server": spec.name,
                     "tool": t["name"], "timeout": float(spec.timeout),
-                    "schema": t}
+                    "schema": t, "risk": risk.value,
+                    "target_params": list(target_params),
+                    "scope_enforcement": spec.scope_enforcement}
             audit.log("system.lifecycle", "runtime", {
                 "action": "mcp_server_ready", "server": spec.name,
                 "transport": spec.transport, "tools": [t["name"] for t in tools]})
     for name, fn in (("http_probe", http_probe), ("dns_resolve", dns_resolve),
-                     ("file_analyze", file_analyze), ("sandbox_exec", sandbox_exec)):
+                     ("tcp_scan", tcp_scan), ("file_analyze", file_analyze),
+                     ("sandbox_exec", sandbox_exec)):
         registry.register_builtin(name, fn, BUILTIN_SPECS[name])
     # 按 Agent 绑定的模型分配——失效模型（注册表已删）剔除并留痕，
     # 不静默绑定到不存在的模型导致路由期失败
@@ -255,6 +370,7 @@ async def _build_infra(
         agent_models=bound, ring=ring if ring is not None else RingLedger(audit),
         shared_cache=LocalSharedCache(default_ttl_seconds=3600),
         mcp_clients=mcp_clients, mcp_tools=mcp_tools,
+        questions=question_broker,
     )
 
 
@@ -269,6 +385,7 @@ def _sub_ctx(infra: _Infra) -> SubAgentContext:
         ring=infra.ring,             # 环形台账共持（避让登记 + 督导消费）
         shared_cache=infra.shared_cache,   # 环形共享缓存共持（同题现场/笔记/Flag）
         mcp_tools=infra.mcp_tools,   # 外部 MCP 工具（mcp__<server>__<tool>）
+        questions=infra.questions,   # 模型发起用户询问的通道（ask_user）
     )
 
 
@@ -313,6 +430,33 @@ async def _run_master(
     return run_summary
 
 
+def _write_report_file(path: Path, body: str, *, contest: str) -> Path:
+    header = (f"# 灵枢 SpiritScout CTF WriteUp\n\n> 生成时间："
+              f"{datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')} ｜ 赛制：{contest}\n\n")
+    path.write_text(header + body.strip() + "\n", encoding="utf-8")
+    return path
+
+
+async def _render_writeup(
+    infra: _Infra, challenges: list[dict[str, Any]], flag_manager: Any,
+    run_summary: dict[str, Any], report_path: str | Path, *, contest: str,
+    enable_llm: bool, fallback_context: dict[str, Any],
+) -> Path:
+    """WriteUp 优先由灵枢亲自撰写（全场脉络在它手里）；LLM 不可用回退模板。"""
+    body = None
+    if enable_llm:
+        body = await writeup_body(
+            AgentBoundGateway(infra.gateway, infra.agent_models.get("master", "")),
+            digest=build_digest(challenges=challenges, flags=flag_manager.all(),
+                                run_summary=run_summary, blackboard=infra.blackboard),
+            audit=infra.audit)
+    if body:
+        return _write_report_file(Path(report_path), body, contest=contest)
+    report = ReportAgent(infra.blackboard)
+    return report.generate_writeup(challenges, flag_manager.all(), report_path,
+                                   context=fallback_context)
+
+
 def _default_report_path(workspace: Path, prefix: str) -> Path:
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     return workspace / "reports" / f"{prefix}_{stamp}.md"
@@ -331,6 +475,7 @@ async def run_engagement(
     approval_gate: Callable[[str, str], Awaitable[bool]] | None = None,
     ring: Any = None,
     user_inbox: list[dict[str, Any]] | None = None,
+    question_broker: Any = None,
 ) -> EngagementResult:
     """SRC 模式任务入口：侦察 → 探测 → 全链路核验 → 报告。
 
@@ -341,7 +486,8 @@ async def run_engagement(
         raise SpiritScoutError("run_engagement 仅用于 SRC 模式（CTF/渗透赛请用专用入口）")
     infra = await _build_infra(cfg, models, authorization,
                                agent_models=agent_models,
-                               approval_gate=approval_gate, ring=ring)
+                               approval_gate=approval_gate, ring=ring,
+                               question_broker=question_broker)
     try:
         assembly = _make_assembler(infra, enable_llm_planning).assemble(RunMode.SRC)
         run_summary = await _run_master(
@@ -389,6 +535,7 @@ async def run_ctf_engagement(
     approval_gate: Callable[[str, str], Awaitable[bool]] | None = None,
     ring: Any = None,
     user_inbox: list[dict[str, Any]] | None = None,
+    question_broker: Any = None,
     resume: bool = False,
 ) -> EngagementResult:
     """CTF 专项任务入口（4.4/5.2）：五方向专项 Agent + Flag 统一管理。
@@ -403,7 +550,8 @@ async def run_ctf_engagement(
         raise SpiritScoutError("run_ctf_engagement 要求授权模式为 CTF")
     infra = await _build_infra(cfg, models, authorization,
                                agent_models=agent_models,
-                               approval_gate=approval_gate, ring=ring)
+                               approval_gate=approval_gate, ring=ring,
+                               question_broker=question_broker)
     try:
         flag_manager = FlagManager(
             flag_patterns=flag_patterns, submit_fn=flag_submit_fn,
@@ -427,12 +575,16 @@ async def run_ctf_engagement(
         flag_stats = flag_manager.stats()
 
         report_path = report_path or _default_report_path(infra.workspace, "ctf_writeup")
-        report = ReportAgent(infra.blackboard)
-        out = report.generate_writeup(
-            challenges, flag_manager.all(), report_path,
-            context={"contest_type": "ctf", "flag_stats": flag_stats,
-                     "submit_enabled": flag_manager.submit_fn is not None,
-                     "notes": assembly.notes},
+        out = await _render_writeup(
+            infra, challenges, flag_manager, run_summary, report_path,
+            contest="ctf", enable_llm=enable_llm_planning,
+            fallback_context={
+                "contest_type": "ctf", "flag_stats": flag_stats,
+                "submit_enabled": flag_manager.submit_fn is not None,
+                "notes": assembly.notes,
+                "current_task_ids": [
+                    task_id for node in run_summary.get("dag_nodes", [])
+                    for task_id in node.get("task_ids", [])]},
         )
         infra.audit.log("system.lifecycle", "runtime", {
             "action": "engagement_complete", "mode": "ctf", "report": str(out),
@@ -459,6 +611,7 @@ async def run_competition_engagement(
     approval_gate: Callable[[str, str], Awaitable[bool]] | None = None,
     ring: Any = None,
     user_inbox: list[dict[str, Any]] | None = None,
+    question_broker: Any = None,
 ) -> EngagementResult:
     """智能渗透赛任务入口（4.5/5.3）：赛制自适应调度。
 
@@ -479,7 +632,8 @@ async def run_competition_engagement(
         authorization = authorization.model_copy(update={"scope": merged_scope})
     infra = await _build_infra(cfg, models, authorization,
                                agent_models=agent_models,
-                               approval_gate=approval_gate, ring=ring)
+                               approval_gate=approval_gate, ring=ring,
+                               question_broker=question_broker)
     try:
         # 赛方禁止行为按工具名登记为动态禁用（4.5.1 规则冲突之外的运行时边界）
         for behavior in rules.forbidden_behaviors:
@@ -551,12 +705,17 @@ async def run_competition_engagement(
         else:
             report_path = report_path or _default_report_path(
                 infra.workspace, "competition_writeup")
-            out = report.generate_writeup(
-                ordered, flag_manager.all(), report_path,
-                context={"contest_type": rules.contest_type.value,
-                         "flag_stats": flag_stats,
-                         "submit_enabled": flag_manager.submit_fn is not None,
-                         "notes": assembly.notes},
+            out = await _render_writeup(
+                infra, ordered, flag_manager, run_summary, report_path,
+                contest=rules.contest_type.value, enable_llm=enable_llm_planning,
+                fallback_context={
+                    "contest_type": rules.contest_type.value,
+                    "flag_stats": flag_stats,
+                    "submit_enabled": flag_manager.submit_fn is not None,
+                    "notes": assembly.notes,
+                    "current_task_ids": [
+                        task_id for node in run_summary.get("dag_nodes", [])
+                        for task_id in node.get("task_ids", [])]},
             )
         infra.audit.log("system.lifecycle", "runtime", {
             "action": "engagement_complete", "mode": "competition",

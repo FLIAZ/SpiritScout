@@ -3,58 +3,59 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>灵探 SpiritScout</title>
+<title>灵枢 SpiritScout</title>
 <style>
-/* ================= 设计令牌 ================= */
+/* ================= 设计令牌：作战台基调（暖灰纸感 + 单一信号色 + 发丝线） ================= */
 :root {
-  --bg: #f5f6f9; --surface: #ffffff; --surface-2: #eef0f5;
-  --ink: #161b26; --ink-2: #57606f; --ink-3: #8a93a3;
-  --line: #e3e7ef;
-  --accent: #3b5bfd; --accent-strong: #2f4ae0; --accent-soft: #edf0fe; --accent-ink: #2b46c9;
-  --ok: #0f9d63; --ok-soft: #e4f6ed;
-  --warn: #ad6f0e; --warn-soft: #faf0da;
-  --bad: #d64343; --bad-soft: #fcebeb;
-  --gold: #a87f00; --gold-soft: #faf3d7;
-  --violet: #7a5af8; --violet-soft: #efecfe;
-  --agent-1: #2a78d6; --agent-2: #eb6834; --agent-3: #1baf7a; --agent-4: #eda100;
-  --agent-5: #e87ba4; --agent-6: #008300; --agent-7: #6250d6; --agent-8: #e34948;
-  --shadow: 0 1px 2px rgba(22,27,38,.05), 0 4px 16px rgba(22,27,38,.06);
-  --shadow-raise: 0 2px 4px rgba(22,27,38,.07), 0 10px 26px rgba(22,27,38,.1);
-  --radius: 10px;
+  --bg: #f2f1ed; --surface: #faf9f6; --surface-2: #e9e7e1;
+  --ink: #211f1b; --ink-2: #5c594f; --ink-3: #8f8b80;
+  --line: #ddd9d0; --line-strong: #c6c1b5;
+  --accent: #a4681e; --accent-strong: #8a5517; --accent-soft: rgba(164,104,30,.08); --accent-ink: #8a5517;
+  --ok: #4e7d58; --ok-soft: rgba(78,125,88,.09);
+  --warn: #9a6d1f; --warn-soft: rgba(154,109,31,.09);
+  --bad: #a84c44; --bad-soft: rgba(168,76,68,.09);
+  --gold: #8a6d2f; --gold-soft: rgba(138,109,47,.1);
+  --violet: #6d5f94; --violet-soft: rgba(109,95,148,.08);
+  --agent-1: #5b7d9e; --agent-2: #a0674a; --agent-3: #5f8a6e; --agent-4: #97824c;
+  --agent-5: #96647e; --agent-6: #5f7d5f; --agent-7: #726a9e; --agent-8: #a05a56;
+  --shadow: none;
+  --shadow-raise: 0 1px 3px rgba(20,18,12,.08);
+  --radius: 6px;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #0b0e15; --surface: #121724; --surface-2: #1a2130;
-    --ink: #e5eaf3; --ink-2: #96a0b3; --ink-3: #66718a;
-    --line: #222a3c;
-    --accent: #7489ff; --accent-strong: #8ba0ff; --accent-soft: #1a2142; --accent-ink: #a5b4ff;
-    --ok: #36c48c; --ok-soft: #10352a;
-    --warn: #d9a04f; --warn-soft: #372917;
-    --bad: #f06a6a; --bad-soft: #3b1b1b;
-    --gold: #d9b64f; --gold-soft: #352e14;
-    --violet: #9a86ff; --violet-soft: #251e47;
-    --agent-1: #3987e5; --agent-2: #d95926; --agent-3: #199e70; --agent-4: #c98500;
-    --agent-5: #d55181; --agent-6: #008300; --agent-7: #9085e9; --agent-8: #e66767;
-    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
-    --shadow-raise: 0 2px 4px rgba(0,0,0,.35), 0 10px 26px rgba(0,0,0,.3);
+    --bg: #121316; --surface: #191a1d; --surface-2: #202225;
+    --ink: #e6e4de; --ink-2: #9b9890; --ink-3: #6a675f;
+    --line: #27292c; --line-strong: #35383c;
+    --accent: #d99a4e; --accent-strong: #e8b271; --accent-soft: rgba(217,154,78,.1); --accent-ink: #e8b271;
+    --ok: #7fae8a; --ok-soft: rgba(127,174,138,.1);
+    --warn: #c99f5f; --warn-soft: rgba(201,159,95,.1);
+    --bad: #c97a72; --bad-soft: rgba(201,122,114,.1);
+    --gold: #c2a76b; --gold-soft: rgba(194,167,107,.1);
+    --violet: #9c8cc4; --violet-soft: rgba(156,140,196,.1);
+    --agent-1: #7fa0c0; --agent-2: #c08267; --agent-3: #7fa88e; --agent-4: #b89d63;
+    --agent-5: #b583a0; --agent-6: #7fa07f; --agent-7: #948cc2; --agent-8: #c07e79;
+    --shadow: none;
+    --shadow-raise: 0 2px 6px rgba(0,0,0,.35);
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
-  --bg: #0b0e15; --surface: #121724; --surface-2: #1a2130;
-  --ink: #e5eaf3; --ink-2: #96a0b3; --ink-3: #66718a;
-  --line: #222a3c;
-  --accent: #7489ff; --accent-strong: #8ba0ff; --accent-soft: #1a2142; --accent-ink: #a5b4ff;
-  --ok: #36c48c; --ok-soft: #10352a;
-  --warn: #d9a04f; --warn-soft: #372917;
-  --bad: #f06a6a; --bad-soft: #3b1b1b;
-  --gold: #d9b64f; --gold-soft: #352e14;
-  --violet: #9a86ff; --violet-soft: #251e47;
-  --agent-1: #3987e5; --agent-2: #d95926; --agent-3: #199e70; --agent-4: #c98500;
-  --agent-5: #d55181; --agent-6: #008300; --agent-7: #9085e9; --agent-8: #e66767;
-  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
+  --bg: #121316; --surface: #191a1d; --surface-2: #202225;
+  --ink: #e6e4de; --ink-2: #9b9890; --ink-3: #6a675f;
+  --line: #27292c; --line-strong: #35383c;
+  --accent: #d99a4e; --accent-strong: #e8b271; --accent-soft: rgba(217,154,78,.1); --accent-ink: #e8b271;
+  --ok: #7fae8a; --ok-soft: rgba(127,174,138,.1);
+  --warn: #c99f5f; --warn-soft: rgba(201,159,95,.1);
+  --bad: #c97a72; --bad-soft: rgba(201,122,114,.1);
+  --gold: #c2a76b; --gold-soft: rgba(194,167,107,.1);
+  --violet: #9c8cc4; --violet-soft: rgba(156,140,196,.1);
+  --agent-1: #7fa0c0; --agent-2: #c08267; --agent-3: #7fa88e; --agent-4: #b89d63;
+  --agent-5: #b583a0; --agent-6: #7fa07f; --agent-7: #948cc2; --agent-8: #c07e79;
+  --shadow: none;
+  --shadow-raise: 0 2px 6px rgba(0,0,0,.35);
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -85,9 +86,9 @@ code, .mono { font-family: var(--mono); font-size: .92em; }
   display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh;
 }
 .brand { padding: 18px 18px 14px; }
-.brand h1 { margin: 0; font-size: 19px; font-weight: 800; letter-spacing: -.02em; }
+.brand h1 { margin: 0; font-size: 17px; font-weight: 700; letter-spacing: .01em; }
 .brand h1 em { font-style: normal; color: var(--accent); }
-.brand small { color: var(--ink-3); font-size: 11px; letter-spacing: .04em; }
+.brand small { color: var(--ink-3); font-size: 10.5px; letter-spacing: .12em; font-family: var(--mono); }
 nav { padding: 4px 10px; display: flex; flex-direction: column; gap: 2px; }
 nav button {
   display: flex; align-items: center; gap: 9px; width: 100%;
@@ -161,28 +162,31 @@ main { min-width: 0; padding: 22px 26px 40px; }
 /* ================= 通用组件 ================= */
 .pill {
   display: inline-flex; align-items: center; gap: 6px;
-  font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 99px;
-  background: var(--surface-2); color: var(--ink-2); white-space: nowrap;
+  font-size: 11.5px; font-weight: 600; padding: 2px 9px; border-radius: 4px;
+  background: transparent; border: 1px solid var(--line-strong); color: var(--ink-2);
+  white-space: nowrap;
 }
-.pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-.pill.running { background: var(--accent-soft); color: var(--accent-ink); }
+.pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.pill.running { border-color: var(--accent); color: var(--accent-ink); }
 .pill.running::before { animation: blink 1.2s ease-in-out infinite; }
-.pill.completed { background: var(--ok-soft); color: var(--ok); }
-.pill.failed { background: var(--bad-soft); color: var(--bad); }
-.pill.created, .pill.stopped, .pill.interrupted { background: var(--surface-2); color: var(--ink-3); }
+.pill.completed { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); color: var(--ok); }
+.pill.failed { border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); color: var(--bad); }
+.pill.created, .pill.stopped, .pill.interrupted { color: var(--ink-3); }
 @keyframes blink { 50% { opacity: .25; } }
 .tag {
-  display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 8px;
-  border-radius: 6px; background: var(--surface-2); color: var(--ink-2);
+  display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px;
+  border-radius: 4px; background: transparent; border: 1px solid var(--line-strong); color: var(--ink-2);
+  font-family: var(--mono);
 }
-.tag.blue { background: var(--accent-soft); color: var(--accent-ink); }
-.tag.green { background: var(--ok-soft); color: var(--ok); }
-.tag.red { background: var(--bad-soft); color: var(--bad); }
-.tag.gold { background: var(--gold-soft); color: var(--gold); }
-.tag.orange { background: var(--warn-soft); color: var(--warn); }
+.tag.blue { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); color: var(--accent-ink); }
+.tag.green { border-color: color-mix(in srgb, var(--ok) 40%, var(--line)); color: var(--ok); }
+.tag.red { border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); color: var(--bad); }
+.tag.gold { border-color: color-mix(in srgb, var(--gold) 40%, var(--line)); color: var(--gold); }
+.tag.orange { border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); color: var(--warn); }
 .btn {
-  border: 1px solid var(--line); background: var(--surface); color: var(--ink);
-  border-radius: 8px; padding: 7px 14px; font-weight: 600; font-size: 13px;
+  border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink);
+  border-radius: 6px; padding: 7px 14px; font-weight: 600; font-size: 13px;
+  transition: border-color .15s, background .15s, color .15s;
 }
 .btn:hover { border-color: var(--ink-3); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -201,8 +205,14 @@ main { min-width: 0; padding: 22px 26px 40px; }
   min-height: calc(100vh - 62px); display: flex; flex-direction: column; }
 #view-home .hero { flex: 1; display: flex; flex-direction: column;
   justify-content: center; padding: 20px 0 30px; }
-#view-home .lead { font-size: 26px; font-weight: 800; letter-spacing: -.02em; margin: 0 0 6px; }
-#view-home .sub { color: var(--ink-2); margin: 0 0 22px; }
+#view-home .lead { font-size: 22px; font-weight: 700; letter-spacing: -.01em; margin: 0 0 6px; }
+#view-home .sub { color: var(--ink-2); margin: 0 0 22px; max-width: 560px; }
+.flow-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+  margin: 0 0 22px; }
+.flow-step { border: 1px solid var(--line); background: transparent; border-radius: 6px;
+  padding: 10px 11px; color: var(--ink-2); font-size: 11.5px; line-height: 1.45; }
+.flow-step b { display: block; color: var(--ink); font-size: 12px; margin-bottom: 2px; font-weight: 600; }
+.flow-step .n { color: var(--accent-ink); font-family: var(--mono); margin-right: 5px; font-size: 10px; }
 .composer { padding: 18px; }
 .composer textarea {
   width: 100%; min-height: 120px; resize: vertical; border: 0; padding: 6px 4px;
@@ -275,11 +285,11 @@ main { min-width: 0; padding: 22px 26px 40px; }
   font-size: 10.5px; color: var(--ink-3); pointer-events: none; }
 .hub {
   position: absolute; left: 0; top: 0; z-index: 2; display: flex; flex-direction: column; align-items: center; gap: 2px;
-  background: var(--surface); border: 1.5px solid var(--accent); color: var(--ink);
-  border-radius: 14px; padding: 10px 26px; box-shadow: var(--shadow);
+  background: var(--surface); border: 1px solid var(--accent); color: var(--ink);
+  border-radius: 8px; padding: 10px 26px;
 }
-.hub b { font-size: 15px; letter-spacing: .02em; }
-.hub small { color: var(--accent-ink); font-size: 11px; font-weight: 600; }
+.hub b { font-size: 14px; letter-spacing: .04em; }
+.hub small { color: var(--accent-ink); font-size: 10px; font-weight: 600; font-family: var(--mono); letter-spacing: .08em; }
 
 /* 用户意见节点：灵枢左侧，意见流经它进入决策环 */
 .unode { position: absolute; left: 0; top: 0; width: 216px; z-index: 2;
@@ -296,6 +306,10 @@ main { min-width: 0; padding: 22px 26px 40px; }
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
   overflow: hidden; word-break: break-word; }
 .unode small { font-size: 10px; color: var(--ink-3); }
+.unode .reply-txt { font-size: 11.5px; color: var(--ink); line-height: 1.5;
+  border-left: 2px solid var(--accent); padding-left: 8px;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden; word-break: break-word; }
 .hub::before, .hub::after {
   content: ""; position: absolute; inset: -1.5px; border-radius: 14px;
   border: 1.5px solid var(--accent); opacity: 0; pointer-events: none;
@@ -341,19 +355,16 @@ main { min-width: 0; padding: 22px 26px 40px; }
 .tcard .rt-note { font-size: 10.5px; color: var(--ink-3); line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .tcard .prog.fail i { background: var(--bad); }
 .steer { display: flex; flex-direction: column; gap: 6px; max-width: 560px; }
-.topo-steer { position: absolute; left: 12px; bottom: 12px; z-index: 5;
-  display: flex; flex-direction: column; gap: 6px; max-width: 380px;
-  max-height: 46%; overflow-y: auto; pointer-events: none; }
-.topo-steer > .steer { pointer-events: auto; }
-.steer-meta { font-size: 10.5px; color: var(--ink-3); text-align: center; }
-.steer-item {
-  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
-  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line));
-  border-radius: 10px; padding: 7px 12px; font-size: 12px;
-  display: flex; gap: 8px; align-items: baseline; box-shadow: var(--shadow);
-}
-.steer-item b { color: var(--accent-ink); flex: none; }
-.steer-item small { color: var(--ink-3); margin-left: auto; font-size: 10.5px; flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topo svg.edges path.steer-edge { stroke: var(--accent); stroke-dasharray: 2 5; opacity: .8; }
+.rnode { position: absolute; left: 0; top: 0; z-index: 2; display: flex; align-items: baseline; gap: 7px;
+  background: var(--surface); border: 1px dashed color-mix(in srgb, var(--ink-3) 45%, var(--line));
+  border-radius: 6px; padding: 6px 11px; cursor: default; }
+.rnode b { font-size: 11.5px; color: var(--ink-2); }
+.rnode .rn { font-family: var(--mono); font-size: 10px; color: var(--ink-3); }
+.steer-chip { font-size: 10.5px; color: var(--accent-ink); line-height: 1.45;
+  border-top: 1px dashed color-mix(in srgb, var(--accent) 35%, var(--line));
+  padding-top: 4px; display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
 
 /* ================= 表格与列表 ================= */
 table.list { width: 100%; border-collapse: collapse; background: var(--surface);
@@ -403,7 +414,7 @@ table.list tr:last-child td { border-bottom: 0; }
 .tl.tl-sys { --ag: var(--ink-3); }
 .tl.tl-flag { --ag: var(--gold); }
 .tl > .t { grid-column: 1; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3);
-  text-align: right; padding-top: 4px; white-space: nowrap; }
+  text-align: right; padding-top: 4px; white-space: nowrap; min-width: 44px; }
 .tl > .b { grid-column: 2; min-width: 0; position: relative; padding: 0 0 16px 15px;
   border-left: 2px solid color-mix(in srgb, var(--ag) 22%, var(--line)); }
 .tl:last-child > .b { padding-bottom: 2px; }
@@ -556,6 +567,16 @@ table.list tr:last-child td { border-bottom: 0; }
 .acard .h b { font-size: 15px; }
 .acard .h .en { font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
 .acard .duty { color: var(--ink-2); font-size: 12.5px; min-height: 2.6em; }
+.acard.planned { opacity: .68; background: var(--surface-2); }
+.acard .meta-row { display: flex; gap: 5px; flex-wrap: wrap; }
+.acard .mindset { font-size: 12px; line-height: 1.55; color: var(--ink-2);
+  border-left: 2px solid var(--accent); padding-left: 8px; }
+.acard .tools { display: flex; gap: 5px; flex-wrap: wrap; }
+.acard .tools .tag { font-family: var(--mono); font-size: 10px; }
+.acard ol { margin: 0; padding-left: 20px; color: var(--ink-2); font-size: 11.5px;
+  line-height: 1.55; }
+.acard .bind-note { font-size: 11.5px; color: var(--ink-3); padding: 7px 9px;
+  background: var(--surface-2); border-radius: 7px; }
 .acard .bind { display: flex; gap: 8px; align-items: center; }
 .acard .bind select { flex: 1; font-size: 12.5px; padding: 6px 8px; }
 
@@ -746,19 +767,77 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+/* ================= 能力勾选（模型弹窗） ================= */
+.cap-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.cap-chips label { display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12.5px; color: var(--ink-2); border: 1px solid var(--line-strong);
+  border-radius: 6px; padding: 5px 11px; cursor: pointer; }
+.cap-chips label:has(input:checked) { border-color: var(--accent); color: var(--accent-ink); }
+.cap-chips input { accent-color: var(--accent); margin: 0; }
+
+/* ================= 仪表盘 ================= */
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-bottom: 18px; }
+.tile { background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+  padding: 12px 14px; display: flex; flex-direction: column; gap: 3px; }
+.tile .tk { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3);
+  letter-spacing: .1em; text-transform: uppercase; }
+.tile .num { font-family: var(--mono); font-size: 24px; font-weight: 600; letter-spacing: -.01em; }
+.tile .num .sep { color: var(--ink-3); font-style: normal; font-weight: 400; }
+.tile .mu { font-size: 11px; color: var(--ink-3); }
+.tile.sm .num { font-size: 18px; }
+.dash-sec { font-family: var(--mono); font-size: 11px; letter-spacing: .12em;
+  color: var(--ink-3); margin: 20px 0 10px; text-transform: uppercase; }
+.mbars { display: flex; flex-direction: column; gap: 8px; }
+.mbar { display: grid; grid-template-columns: minmax(120px, 240px) 1fr 70px; gap: 10px;
+  align-items: center; font-size: 12px; }
+.mbar .mn { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mbar .mt { height: 8px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
+.mbar .mt i { display: block; height: 100%; background: var(--accent); opacity: .7;
+  transition: width .4s; }
+.mbar .mv { text-align: right; font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+
+/* ================= 提问卡（ask_user） ================= */
+.ask-targets { display: flex; flex-direction: column; gap: 5px; margin-top: 8px; }
+.ask-target { display: flex; gap: 7px; align-items: center; font-size: 12px;
+  color: var(--ink-2); word-break: break-all; }
+.ask-ops { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.ask-free { display: flex; gap: 8px; margin-top: 10px; }
+.ask-free input { flex: 1; }
+
+/* ================= 拓扑叠加层：提问/审批卡在图内，不占输入区 ================= */
+.topo-ops { position: absolute; left: 12px; top: 12px; z-index: 7;
+  width: min(430px, 62%); max-height: 72%; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 10px; pointer-events: none; }
+.topo-ops > div { pointer-events: auto; }
+.topo-ops > div:empty { display: none; }
+.topo-ops .apv { background: color-mix(in srgb, var(--surface) 94%, transparent);
+  border: 1px solid var(--warn); box-shadow: var(--shadow-raise); }
+/* 路由分支节点：进度 + 笔记 + 推理摘要 */
+.bnode { width: 260px; }
+.bnode .rt-note { font-size: 10.5px; color: var(--ink-3); line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.mind-digest { font-size: 10.5px; color: var(--ink-3); line-height: 1.5;
+  border-top: 1px dashed color-mix(in srgb, var(--ink-3) 30%, transparent);
+  padding-top: 5px; display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden; }
 </style>
 </head>
 <body>
 <div id="app">
   <aside class="side">
     <div class="brand">
-      <h1>灵探<em>·</em>SpiritScout</h1>
+      <h1>灵枢<em>·</em>SpiritScout</h1>
       <small>渗透测试智能体集群</small>
     </div>
     <nav>
       <button data-nav="home" class="on">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5"/></svg>
         任务
+      </button>
+      <button data-nav="dash">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 4v3M5.6 6.6l2.1 2.1M3 13h3M18.4 6.6l-2.1 2.1M21 13h-3"/><path d="M5 19a7 7 0 0 1 14 0"/><path d="M9.5 19a2.5 2.5 0 0 1 5 0"/></svg>
+        仪表盘
       </button>
       <button data-nav="agents">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="8" cy="8" r="3"/><circle cx="16.5" cy="9.5" r="2.5"/><path d="M3.5 19c.6-3 2.6-4.5 4.5-4.5s3.9 1.5 4.5 4.5M13.5 19c.4-2.2 1.7-3.4 3-3.4s2.6 1.2 3 3.4"/></svg>
@@ -782,10 +861,16 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
     <section id="view-home">
       <div class="hero">
         <p class="lead">下达任务，剩下的交给灵枢。</p>
-        <p class="sub">用自然语言描述目标与意图——灵枢会自行判断这是 SRC 渗透、CTF 解题还是渗透赛，组队开工。</p>
+        <p class="sub">灵枢先体验正常业务，再根据已观测证据做安全验证。上传脱敏 HAR 可补足登录后与多角色流程。</p>
+        <div class="flow-strip" aria-label="安全评估流程">
+          <div class="flow-step"><b><span class="n">01</span>体验业务</b>访问入口与真实导航</div>
+          <div class="flow-step"><b><span class="n">02</span>建立上下文</b>区分事实、假设和缺口</div>
+          <div class="flow-step"><b><span class="n">03</span>证据验证</b>只测试已观测入口</div>
+          <div class="flow-step"><b><span class="n">04</span>复现报告</b>保留来源与业务影响</div>
+        </div>
       </div>
       <div class="card composer">
-        <textarea id="c-mission" placeholder="例如：对 https://testphp.vulnweb.com 做 Web 渗透，重点 SQL 注入与 XSS；或：解这道 CTF 题 https://ctf.example.com/chal1（flag 格式：SCTF{...}）；也可以只上传题目附件"></textarea>
+        <textarea id="c-mission" placeholder="请写清目标、授权范围和业务目标。例如：评估 https://example.com 的商品浏览与搜索流程；如需覆盖登录后流程，可同时上传已脱敏 HAR。"></textarea>
         <div class="comp-files" id="home-files"></div>
         <div class="bar">
           <button class="icon-btn" id="home-attach" type="button" title="上传题目附件（随任务一起交给灵枢）" aria-label="上传附件">
@@ -813,12 +898,10 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
         <div class="ops" id="s-ops"></div>
       </div>
       <div id="s-err"></div>
-      <div id="apv-box"></div>
       <div class="chips" id="s-chips"></div>
       <div class="tabs" id="s-tabs">
         <button data-tab="chat" class="on">会话</button>
         <button data-tab="topo">拓扑</button>
-        <button data-tab="tasks">任务</button>
         <button data-tab="vulns">漏洞</button>
         <button data-tab="flags">Flag</button>
         <button data-tab="events">事件</button>
@@ -829,8 +912,9 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
           <div class="trace" id="trace-box"></div>
           <button id="trace-jump" type="button" hidden aria-label="回到最新轨迹" title="回到最新轨迹">↓ 回到最新</button>
         </div></div>
-        <div id="tab-topo" hidden><div class="card topo" id="topo"></div></div>
-        <div id="tab-tasks" hidden></div>
+        <div id="tab-topo" hidden><div class="card topo" id="topo">
+          <div class="topo-ops" id="topo-ops"><div id="topo-ops-apv"></div><div id="topo-ops-ask"></div></div>
+        </div></div>
         <div id="tab-vulns" hidden></div>
         <div id="tab-flags" hidden></div>
         <div id="tab-events" hidden><div class="events" id="events"></div></div>
@@ -852,12 +936,23 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
       </div>
     </section>
 
+    <!-- 仪表盘：实时 token 消耗与会话态势 -->
+    <section id="view-dash" hidden>
+      <div class="models-head">
+        <div>
+          <h2 style="margin:0 0 4px;font-size:19px">仪表盘</h2>
+          <span class="muted" style="font-size:12.5px">全部会话的累计消耗与态势总览；点击明细行进入对应会话。</span>
+        </div>
+      </div>
+      <div id="dash-body"></div>
+    </section>
+
     <!-- 编队 -->
     <section id="view-agents" hidden>
       <div class="models-head">
         <div>
           <h2 style="margin:0 0 4px;font-size:19px">编队</h2>
-          <span class="muted" style="font-size:12.5px">为每个智能体指派模型；不指派则按档位自动路由。改动对之后发起的会话生效。</span>
+          <span class="muted" style="font-size:12.5px">查看实际装配角色、工作法与工具边界。只有可运行角色支持模型指派；规划中角色不会参与调度。</span>
         </div>
       </div>
       <div class="agents-grid" id="agents-grid"></div>
@@ -925,27 +1020,24 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
     <div class="dlg-sec">身份</div>
     <label><span>模型 ID *</span><input id="m-model" placeholder="如 ark-code-latest 或 ep-xxx"></label>
     <label><span>归属供应商</span><select id="m-pref"></select></label>
-    <label><span>档位</span><select id="m-tier">
-      <option value="flagship">旗舰档</option><option value="rigorous">严谨档</option>
-      <option value="code">代码档</option>
-      <option value="fast" selected>快速档</option><option value="light">轻量档</option>
-    </select></label>
     <div class="dlg-sec">能力画像</div>
     <label><span>上下文窗口（token）</span><input id="m-ctx" type="number" value="0" min="0" step="1000" placeholder="0 表示未知"></label>
-    <div class="eff-field"><span>思考强度取值（点选；各模型支持的档位不同，不确定就留空）</span>
+    <div class="eff-field"><span>思考强度取值（点选；各模型支持的取值不同，不确定就留空）</span>
       <div class="eff-chips" id="m-eff-chips"></div>
       <div class="eff-add"><input id="m-eff-custom" placeholder="自定义取值，如 4096（Anthropic 思考预算）">
         <button class="btn sm" id="m-eff-add" type="button">添加</button></div>
     </div>
-    <label class="wide"><span>能力标签（逗号分隔）</span><input id="m-caps" placeholder="reasoning,code,chinese,security"></label>
-    <label class="wide"><span>作为哪些模型的备（逗号分隔）</span><input id="m-fb" placeholder="可空"></label>
-    <div class="dlg-sec">预算与限额</div>
-    <label><span>输入单价（元/百万 token）</span><input id="m-ci" type="number" value="0" min="0" step="0.01"></label>
-    <label><span>输出单价（元/百万 token）</span><input id="m-co" type="number" value="0" min="0" step="0.01"></label>
-    <label><span>速率上限 RPM</span><input id="m-rpm" type="number" value="60" min="1"></label>
-    <label><span>质量分（0~1）</span><input id="m-quality" type="number" value="1" min="0" max="1" step="0.01"></label>
+    <div class="eff-field"><span>能力（勾选该模型实际支持的）</span>
+      <div class="cap-chips" id="m-caps-box">
+        <label><input type="checkbox" value="text">文本推理</label>
+        <label><input type="checkbox" value="image">图像</label>
+        <label><input type="checkbox" value="embedding">向量</label>
+        <label><input type="checkbox" value="video">视频</label>
+        <label><input type="checkbox" value="audio">音频</label>
+      </div>
+    </div>
     <div class="muted" style="grid-column:1/-1;font-size:11.5px;line-height:1.6">
-      按该模型实际支持的思考档位选择（不确定就留空，不影响正常使用）。
+      按该模型实际支持的思考强度取值选择（不确定就留空，不影响正常使用）。
       密钥在所属供应商里填，不在这里填。</div>
   </div>
   <div class="dlg-ops">
@@ -974,7 +1066,7 @@ const $ = s => document.querySelector(s);
 const S = { view: "home", cur: null, tab: "chat", sessions: [], state: null,
             agents: null, models: null, evSeen: 0, es: null, poll: null, medit: null,
             providers: null, pedit: null, fprov: "", presets: null, effSel: [],
-            topoView: null, compFiles: [], homeFiles: [] };
+            topoView: null, compFiles: [], homeFiles: [], think: new Map() };
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
 async function api(path, opt = {}) {
@@ -1001,7 +1093,7 @@ const TERMINAL = new Set(["completed", "failed", "stopped", "interrupted"]);
 const STATUS_CN = { created: "排队中", running: "运行中", completed: "已完成",
                     failed: "失败", stopped: "已停止", interrupted: "已中断" };
 const MODE_CN = { src: "SRC 渗透", ctf: "CTF 解题", competition: "渗透赛" };
-const TASK_CN = { recon: "侦察测绘", port_scan: "端口扫描", web_probe: "Web 探测",
+const TASK_CN = { business_context: "业务体验与上下文", recon: "侦察测绘", port_scan: "端口扫描", web_probe: "Web 探测",
                   host_probe: "主机探测", post_exploit: "后渗透", report: "报告生成",
                   ctf_web: "Web 题", ctf_pwn: "Pwn 题", ctf_reverse: "逆向题",
                   ctf_crypto: "密码题", ctf_misc: "杂项题" };
@@ -1018,6 +1110,19 @@ function actorName(actor) {
   if (!S.agents) return actor || "—";
   const a = S.agents.roster.find(x => x.key === base || x.key === actor);
   return a ? a.name : (actor || "—");
+}
+function fmtElapsed(sec) {
+  sec = Math.max(0, Math.round(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), ss = sec % 60;
+  const pad = n => String(n).padStart(2, "0");
+  return h ? `${h}:${pad(m)}:${pad(ss)}` : `${m}:${pad(ss)}`;
+}
+/* 事件时刻 = 任务累积时间（相对会话开始的 0:00 计时，免疫时区） */
+function evElapsed(ts) {
+  const t0 = S.state && S.state.session && S.state.session.started_at;
+  if (!t0 || !ts) return "";
+  const t = new Date(ts).getTime();
+  return isFinite(t) ? fmtElapsed(t / 1000 - t0) : "";
 }
 function fmtDur(a, b) {
   if (!a) return "—";
@@ -1042,7 +1147,8 @@ $("#btn-theme").onclick = () => {
 try { applyTheme(localStorage.getItem("ss-theme") || "system"); } catch {}
 
 /* ================= 视图切换 ================= */
-const VIEWS = { home: "#view-home", session: "#view-session", agents: "#view-agents", models: "#view-models" };
+const VIEWS = { home: "#view-home", session: "#view-session", dash: "#view-dash",
+                agents: "#view-agents", models: "#view-models" };
 function show(view) {
   S.view = view;
   for (const [k, sel] of Object.entries(VIEWS)) $(sel).hidden = k !== view;
@@ -1050,6 +1156,7 @@ function show(view) {
     b.classList.toggle("on", b.dataset.nav === (view === "session" ? "home" : view)));
   if (view === "agents") loadAgents();
   if (view === "models") loadModels();
+  if (view === "dash") renderDash();
   if (view !== "session") stopStreams();
 }
 document.querySelectorAll("nav button").forEach(b =>
@@ -1062,6 +1169,7 @@ async function refreshSessions() {
     const d = await api("/api/sessions");
     S.sessions = d.sessions;
     renderSessions();
+    if (S.view === "dash") renderDash();
     if (S.cur) {
       const cur = S.sessions.find(x => x.session_id === S.cur);
       if (cur && TERMINAL.has(cur.status) && S.state &&
@@ -1159,7 +1267,7 @@ async function doDelete(id) {
 }
 
 /* ================= 会话详情 ================= */
-const TABS = ["chat", "topo", "tasks", "vulns", "flags", "events", "report"];
+const TABS = ["chat", "topo", "vulns", "flags", "events", "report"];
 function openSession(id) {
   S.cur = id; S.tab = "chat"; S.evSeen = 0; S.topoView = null;
   show("session");
@@ -1182,9 +1290,10 @@ async function refreshState() {
   if (!S.cur) return;
   try {
     S.state = await api(`/api/sessions/${S.cur}/state`);
-    renderSessionHead(); renderChips(); renderApprovals();
+    renderSessionHead(); renderChips(); renderApprovals(); renderQuestions();
+    renderDash();
     if (S.tab === "topo") drawTopo();
-    renderTasks(); renderVulns(); renderFlags();
+    renderVulns(); renderFlags();
   } catch (e) { toast(e.message, true); }
 }
 
@@ -1193,7 +1302,7 @@ const APV_CN = { reverse_shell: "反弹连接", webshell_upload: "上传 WebShel
                  container_escape: "容器逃逸", brute_force: "口令爆破" };
 function renderApprovals() {
   const list = (S.state && S.state.pending_approvals) || [];
-  $("#apv-box").innerHTML = list.map(a => `
+  $("#topo-ops-apv").innerHTML = list.map(a => `
     <div class="apv">
       <div class="apv-title">⚠ 高风险动作待确认：${esc(APV_CN[a.action] || a.action)}</div>
       <div class="apv-detail">${esc(a.detail || "")}<br>允许后本次会话内该动作不再询问；拒绝只拦截本次调用，其余分支照常推进。</div>
@@ -1202,7 +1311,7 @@ function renderApprovals() {
         <button class="btn sm" data-apv="${esc(a.approval_id)}" data-allow="0">拒绝</button>
       </div>
     </div>`).join("");
-  $("#apv-box").querySelectorAll("[data-apv]").forEach(b => b.onclick = async () => {
+  $("#topo-ops-apv").querySelectorAll("[data-apv]").forEach(b => b.onclick = async () => {
     try {
       await api(`/api/sessions/${S.cur}/approvals/${b.dataset.apv}`,
         { method: "POST", body: JSON.stringify({ allow: b.dataset.allow === "1" }) });
@@ -1210,6 +1319,81 @@ function renderApprovals() {
       refreshState();
     } catch (e) { toast(e.message, true); refreshState(); }
   });
+}
+
+/* 模型发起的提问：问题与选项由模型撰写；勾选目标 = 用户授权扩围 */
+function renderQuestions() {
+  const box = $("#topo-ops-ask");
+  if (!box) return;
+  const list = (S.state && S.state.pending_questions) || [];
+  box.innerHTML = list.map(q => `
+    <div class="apv ask">
+      <div class="apv-title">${esc(agentName(q.agent) || q.agent || "智能体")} 向你提问</div>
+      <div class="apv-detail">${esc(q.question || "")}</div>
+      ${q.targets && q.targets.length ? `<div class="ask-targets">${q.targets.map(t =>
+        `<label class="ask-target"><input type="checkbox" data-qtarget="${esc(q.question_id)}" value="${esc(t)}">将 ${esc(t)} 加入本会话范围</label>`).join("")}</div>` : ""}
+      <div class="ask-ops">
+        ${(q.options || []).map((o, i) =>
+          `<button class="btn primary sm" data-qask="${esc(q.question_id)}" data-qchoice="${i}">${esc(o)}</button>`).join("")}
+      </div>
+      <div class="ask-free"><input placeholder="或者直接输入你的意见…" data-qfree="${esc(q.question_id)}">
+        <button class="btn sm" data-qsend="${esc(q.question_id)}">答复</button></div>
+    </div>`).join("");
+  box.querySelectorAll("[data-qask]").forEach(b => b.onclick = () =>
+    answerQuestion(b.dataset.qask, { choice: Number(b.dataset.qchoice),
+                                     addTargets: collectTargets(b.dataset.qask) }));
+  box.querySelectorAll("[data-qsend]").forEach(b => b.onclick = () => {
+    const input = box.querySelector(`[data-qfree="${b.dataset.qsend}"]`);
+    const text = (input.value || "").trim();
+    if (!text) { toast("先填写答复内容", true); return; }
+    answerQuestion(b.dataset.qsend, { text, addTargets: collectTargets(b.dataset.qsend) });
+  });
+}
+function collectTargets(qid) {
+  return [...document.querySelectorAll(`[data-qtarget="${qid}"]:checked`)].map(c => c.value);
+}
+async function answerQuestion(qid, body) {
+  try {
+    await api(`/api/sessions/${S.cur}/questions/${qid}`,
+      { method: "POST", body: JSON.stringify(body) });
+    toast("已答复，智能体将继续");
+    refreshState();
+  } catch (e) { toast(e.message, true); refreshState(); }
+}
+
+/* 仪表盘：实时 token 消耗与会话态势（数据面 = /state） */
+const fmtK = n => n >= 1e6 ? (n / 1e6).toFixed(2) + "M"
+  : n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n ?? 0);
+function renderDash() {
+  const box = $("#dash-body");
+  if (!box) return;
+  const list = S.sessions || [];
+  const running = list.filter(x => !TERMINAL.has(x.status)).length;
+  const tokens = list.reduce((a, x) => a + (x.tokens || 0), 0);
+  const cost = list.reduce((a, x) => a + (x.cost_usd || 0), 0);
+  const flagCell = f => !f || !f.total ? "—"
+    : (f.submitted ? `${f.accepted}/${f.submitted}` : `${f.total}`);
+  box.innerHTML = `
+    <div class="tiles">
+      <div class="tile"><span class="tk">token</span><b class="num">${fmtK(tokens)}</b><span class="mu">全部会话累计</span></div>
+      <div class="tile"><span class="tk">费用</span><b class="num">$${cost.toFixed(3)}</b><span class="mu">按单价估算</span></div>
+      <div class="tile"><span class="tk">会话</span><b class="num">${list.length}</b><span class="mu">${running} 个运行中</span></div>
+    </div>
+    <div class="dash-sec">会话明细</div>
+    ${list.length ? `<table class="list"><thead><tr>
+      <th>会话</th><th>模式</th><th>状态</th><th>轮次</th><th>token</th><th>费用</th><th>Flag</th><th>用时</th></tr></thead>
+      <tbody>${list.map(x => `<tr class="dash-row" data-open="${esc(x.session_id)}">
+        <td>${esc(x.title || x.target || x.session_id)}</td>
+        <td>${esc(MODE_CN[x.mode] || x.mode || "")}</td>
+        <td><span class="pill ${x.status}">${STATUS_CN[x.status] || x.status}</span></td>
+        <td class="mono">${x.rounds || 0}</td>
+        <td class="mono">${fmtK(x.tokens || 0)}</td>
+        <td class="mono">$${Number(x.cost_usd || 0).toFixed(3)}</td>
+        <td class="mono">${esc(flagCell(x.flag_stats))}</td>
+        <td class="mono">${fmtDur(x.started_at, x.finished_at)}</td></tr>`).join("")}</tbody></table>`
+      : '<div class="empty-note">还没有会话——回「任务」页下达第一个任务</div>'}`;
+  box.querySelectorAll("[data-open]").forEach(row =>
+    row.onclick = () => openSession(row.dataset.open));
 }
 
 function renderSessionHead() {
@@ -1253,7 +1437,17 @@ function renderChips() {
   const mu = st.model_usage || {};
   const tokens = mu.used_tokens ?? mu.total_tokens ?? mu.tokens;
   const rounds = (st.round_views || []).length;
+  const bc = st.business_context || {};
+  const coverage = { observed_transaction_flow: "交易流", public_flow: "公开流程",
+                     entry_only: "仅入口", none: "无" }[bc.coverage];
+  const phase = { queued: "等待调度", starting: "启动任务", mode_routing: "判断任务类型",
+    model_preflight: "检查模型", runtime_starting: "初始化工具与智能体",
+    executing: "执行中", completed: "已完成", failed: "失败", stopped: "已停止",
+    interrupted: "已中断" }[st.session.phase] || st.session.phase || "等待启动";
+  const firstChip = st.session.mode === "src" && coverage
+    ? ["业务覆盖", coverage] : ["当前阶段", phase];
   $("#s-chips").innerHTML = [
+    firstChip,
     ["收录漏洞", v.accepted || 0], ["候选/核验中", (v.candidate || 0) + (v.verifying || 0)],
     ["Flag", flagChipValue(st.flags)],
     ["决策轮次", rounds || "—"],
@@ -1360,13 +1554,14 @@ function drawTopo() {
     const tot = t.routes_total || 0, done = t.routes_done || 0;
     const pct = tot ? Math.round(done / tot * 100) : (t.status === "done" ? 100 : 0);
     const stCls = t.status === "done" ? "green" : t.status === "failed" ? "red" : "blue";
-    return `<div class="tcard">
+    const steer = (ring.steering || {})[t.agent_type];
+    return `<div class="tcard" data-agent="${esc(t.agent_type || "")}">
       <div class="row1"><span class="who">${esc(agentName(t.agent_type))}</span>
         <span class="what">${esc(TASK_CN[t.task_type] || t.task_type || "")}</span>
         <span class="tag ${stCls} st">${esc(t.status || "")}</span></div>
       ${tot ? `<div class="prog ${done === tot ? "done" : ""}"><i style="width:${pct}%"></i></div>` : ""}
       <div class="steps">${tot ? `路线 ${done}/${tot} · ` : ""}步骤 ${t.steps || 0}</div>
-      ${(t.routes || []).length ? `<div class="rts">${t.routes.map(routeRow).join("")}</div>` : ""}
+      ${steer ? `<div class="steer-chip" title="${esc(steer.rationale || "")}">灵枢：${esc(steer.hint || "")}</div>` : ""}
     </div>`;
   };
 
@@ -1384,9 +1579,89 @@ function drawTopo() {
     layerIds[0].push(ORPHAN);
     depthIndex.set(ORPHAN, 0);
   }
+  // 路由分支层：每个任务的路线作为子分支节点挂在其后（推理摘要并入分支）
+  const taskById = new Map((S.state.topology.tasks || []).map(t => [t.task_id, t]));
+  const routeMeta = new Map();
+  const digestFor = agentType => {
+    for (const [k, v] of S.think) {
+      if (String(k).replace(/-[0-9a-f]{8,}$/i, "").replace(/-/g, "_") === agentType)
+        return (v.tail || "").replace(/\s+/g, " ").slice(-150);
+    }
+    return "";
+  };
+  const routesAll = [];
+  const routeSeen = new Map();
+  nodes.filter(n => depthIndex.has(n.node_id)).forEach(n => {
+    (n.task_ids || []).forEach(tid => {
+      const t = taskById.get(tid);
+      ((t && t.routes) || []).forEach(r => {
+        const key = `${n.node_id}|${r.name || ""}`;
+        const prev = routeSeen.get(key);
+        if (prev) {
+          prev.status = prev.status === "done" ? "done" : r.status;
+          prev.progress = Math.max(prev.progress || 0, r.progress || 0);
+          if (r.note) prev.note = r.note;
+        } else {
+          const item = { parent: n.node_id, agent: t.agent_type,
+                         name: r.name, status: r.status,
+                         progress: r.progress, note: r.note };
+          routeSeen.set(key, item);
+          routesAll.push(item);
+        }
+      });
+    });
+  });
+  if (routesAll.length) {
+    const layerIdx = layerIds.length;
+    layerIds.push([]);
+    routesAll.forEach((r, i) => {
+      const id = `__route_${i}`;
+      layerIds[layerIdx].push(id);
+      depthIndex.set(id, layerIdx);
+      routeMeta.set(id, r);
+      nodes.push({ node_id: id, title: r.name || "路线",
+                   tactic: `${Math.round((r.progress || 0) * 100)}%`,
+                   status: r.status === "running" ? "running" : r.status,
+                   depends_on: [] });
+    });
+  }
+
+  // 发现组：共享笔记/入口/Flag 落黑板后作为互连元素挂在最右列（链式相连）
+  const findings = (S.state && S.state.findings) || [];
+  // 概括显示：入口/资产去重合并，笔记与 Flag 只留最近的——不把 URL 刷成一片
+  const uniqAssets = [...new Map(
+    findings.filter(f => f.type === "asset")
+            .map(f => [String(f.url || f.text || ""), f])).values()];
+  const dispFindings = [];
+  if (uniqAssets.length) {
+    dispFindings.push({ type: "asset", count: uniqAssets.length,
+      text: uniqAssets.slice(0, 2).map(f => String(f.url || f.text).slice(0, 70)).join("\n")
+            + (uniqAssets.length > 2 ? `\n…等 ${uniqAssets.length} 个入口` : "") });
+  }
+  findings.filter(f => f.type === "note").slice(-4)
+          .forEach(f => dispFindings.push(f));
+  findings.filter(f => f.type === "flag").slice(-1)
+          .forEach(f => dispFindings.push(f));
+  const FNODE = i => `__finding_${i}`;
+  if (dispFindings.length) {
+    const layerIdx = layerIds.length;
+    layerIds.push([]);
+    dispFindings.forEach((f, i) => {
+      const id = FNODE(i);
+      layerIds[layerIdx].push(id);
+      depthIndex.set(id, layerIdx);
+      const kind = ({ note: "笔记", flag: "Flag", asset: `入口 ×${f.count || 1}` })[f.type]
+        || f.type || "发现";
+      nodes.push({ node_id: id, title: String(f.text || "").slice(0, 90),
+                   tactic: kind, status: f.type === "flag" ? "done" : "running",
+                   depends_on: [] });
+    });
+  }
   const ids = [...depthIndex.keys()];
   if (!ids.length) {
-    box.innerHTML = `<div class="empty-note">等待灵枢规划——任务拓扑将在此实时展开</div>`;
+    box.innerHTML = `<div class="empty-note">等待灵枢规划——任务拓扑将在此实时展开</div>${OPS}`;
+    renderApprovals();
+    renderQuestions();
     return;
   }
   const nodeOf = new Map(nodes.map(n => [n.node_id, n]));
@@ -1399,9 +1674,41 @@ function drawTopo() {
       succs.get(dep).push(n.node_id);
     }
   }
+  // 路由分支连线：路线节点 ← 产生它的任务节点
+  routesAll.forEach((r, i) => {
+    const id = `__route_${i}`;
+    if (depthIndex.has(r.parent)) {
+      preds.get(id).push(r.parent);
+      succs.get(r.parent).push(id);
+    }
+  });
+  // 发现连线：从锚点（路线层/任务层首个节点）星形展开到每个发现节点
+  if (dispFindings.length) {
+    const prevLayer = layerIds[depthIndex.get(FNODE(0)) - 1] || [];
+    const anchor = prevLayer.find(id => id !== ORPHAN) || prevLayer[0];
+    if (anchor) {
+      for (let i = 0; i < dispFindings.length; i++) {
+        preds.get(FNODE(i)).push(anchor);
+        succs.get(anchor).push(FNODE(i));
+      }
+    }
+  }
   topoReorder(layerIds, preds, succs);
 
   const cardHtml = n => {
+    if (String(n.node_id).startsWith("__route_")) {
+      const r = routeMeta.get(n.node_id) || {};
+      const pct = Math.round((r.progress || 0) * 100);
+      const st = nodeStatus(r.status);
+      const digest = digestFor(r.agent);
+      return `<div class="tnode bnode" data-node="${esc(n.node_id)}" style="visibility:hidden">
+        <div class="tact"><span class="dot ${st}"></span><b>${esc(agentName(r.agent))} · ${esc(r.name || "")}</b>
+          <span class="tac">${pct}%</span></div>
+        <div class="prog ${pct === 100 ? "done" : ""}"><i style="width:${pct}%"></i></div>
+        ${r.note ? `<div class="rt-note">${esc(r.note)}</div>` : ""}
+        ${digest ? `<div class="mind-digest">✦ ${esc(digest)}</div>` : ""}
+      </div>`;
+    }
     const st = nodeStatus(n.status);
     return `<div class="tnode ${st === "active" ? "active" : ""}" data-node="${esc(n.node_id)}"
       style="visibility:hidden">
@@ -1413,16 +1720,15 @@ function drawTopo() {
       <div class="tact"><span class="dot ${running ? "active" : "done"}"></span><b>下发任务</b></div>
       <div class="tcards">${orphans.map(taskCard).join("")}</div></div>`;
   const steerItems = Object.entries(ring.steering || {});
-  const steerHtml = (steerItems.length || ring.attempts) ? `<div class="topo-steer"><div class="steer">
-      ${ring.attempts ? `<div class="steer-meta">环形共享 · 已尝试登记 ${ring.attempts} 条——同伴无产出的入口自动避让</div>` : ""}
-      ${steerItems.map(([k, v]) => `<div class="steer-item"><b>灵枢 → ${esc(agentName(k))}</b><span>${esc(v.hint || "")}</span>${v.rationale ? `<small title="${esc(v.rationale)}">${esc(v.rationale)}</small>` : ""}</div>`).join("")}
-    </div></div>` : "";
   const opinions = (S.state && S.state.user_opinions) || [];
   const latestOp = opinions.length ? opinions[opinions.length - 1] : null;
-  const unodeHtml = latestOp ? `<div class="unode" id="topo-unode" style="visibility:hidden" title="${esc(latestOp.text || "")}">
+  const replies = (S.state && S.state.master_replies) || [];
+  const latestReply = replies.length ? replies[replies.length - 1] : null;
+  const unodeHtml = (latestOp || latestReply) ? `<div class="unode" id="topo-unode" style="visibility:hidden">
       <b>你<span class="utag">意见 ${opinions.length}</span></b>
-      <div class="txt">${esc(latestOp.text || "")}</div>
-      <small>经灵枢进入决策环，督导/复盘消费</small></div>` : "";
+      ${latestOp ? `<div class="txt">${esc(latestOp.text || "")}</div>` : ""}
+      ${latestReply ? `<div class="reply-txt" title="${esc(latestReply.text || "")}">灵枢：${esc(latestReply.text || "")}</div>` : ""}
+      <small>消息直达灵枢并转达执行中的智能体</small></div>` : "";
 
   box.innerHTML = `<div id="topo-stage">
       <svg class="edges"></svg>
@@ -1431,13 +1737,18 @@ function drawTopo() {
       ${ids.filter(id => id !== ORPHAN).map(id => cardHtml(nodeOf.get(id))).join("")}
       ${orphans.length ? orphanCard : ""}
     </div>
+    <div class="topo-ops" id="topo-ops"><div id="topo-ops-apv"></div><div id="topo-ops-ask"></div></div>
     <div class="topo-tools">
       <button id="topo-zin" title="放大">＋</button>
       <button id="topo-zout" title="缩小">－</button>
       <button id="topo-fit" title="适应窗口">⤢</button>
     </div>
     <div class="topo-hint">滚轮缩放 · 拖拽平移 · 双击复位</div>
-    ${steerHtml}`;
+    <div class="rnode" id="topo-ring" style="visibility:hidden"
+      title="环形共享台账：已尝试登记 ${ring.attempts} 条，同伴无产出的入口自动避让">
+      <b>环形台账</b><span class="rn">${ring.attempts} 条登记</span></div>`;
+  renderApprovals();
+  renderQuestions();
 
   // ---- 先隐藏渲染量高，再按层堆叠定位（节点高度随路线卡片数变化）
   const stage = box.querySelector("#topo-stage");
@@ -1480,6 +1791,11 @@ function drawTopo() {
     unodeEl.style.visibility = "";
   }
   hubEl.style.visibility = "";
+  const ringEl = box.querySelector("#topo-ring");
+  if (ringEl) {
+    ringEl.style.transform = `translate(${hubXpos}px, ${centerY + hubH / 2 + 16}px)`;
+    ringEl.style.visibility = "";
+  }
   stage.style.width = stageW + "px";
   stage.style.height = stageH + "px";
 
@@ -1489,9 +1805,9 @@ function drawTopo() {
   svg.setAttribute("height", stageH);
   svg.setAttribute("viewBox", `0 0 ${stageW} ${stageH}`);
   const hubX = hubXpos + hubW, hubY = centerY;
-  const link = (x1, y1, x2, y2, cls) => {
+  const link = (x1, y1, x2, y2, cls, title = "") => {
     const dx = Math.max(30, (x2 - x1) * 0.42);
-    return `<path class="${cls}" d="M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}"/>`;
+    return `<path class="${cls}" d="M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}">${title ? `<title>${esc(title)}</title>` : ""}</path>`;
   };
   const midY = id => yOf.get(id) + heights.get(id) / 2;
   let paths = "";
@@ -1511,6 +1827,16 @@ function drawTopo() {
   }
   if (orphans.length) {
     paths += link(hubX, hubY, xOf.get(ORPHAN), midY(ORPHAN), running ? "active" : "done");
+  }
+  // 督导连线：灵枢 → 建议所指向的角色任务节点（悬停看完整建议）
+  for (const [agent, v] of steerItems) {
+    const el = stage.querySelector(`.tcard[data-agent="${CSS.escape(agent)}"]`);
+    const tn = el && el.closest("[data-node]");
+    const nid = tn && tn.dataset.node;
+    if (nid && xOf.has(nid)) {
+      paths += link(hubX, hubY, xOf.get(nid), midY(nid), "steer-edge",
+                    `灵枢 → ${agentName(agent)}：${v.hint || ""}`);
+    }
   }
   svg.innerHTML = paths;
 
@@ -1564,20 +1890,14 @@ function drawTopo() {
 window.addEventListener("resize", () => { if (S.tab === "topo" && S.state) drawTopo(); });
 
 /* ================= 任务/漏洞/Flag ================= */
-function renderTasks() {
-  const ts = S.state.tasks || [];
-  $("#tab-tasks").innerHTML = ts.length ? `<table class="list">
-    <thead><tr><th>任务</th><th>Agent</th><th>状态</th><th>轮次</th><th>路线</th><th>结果摘要</th></tr></thead>
-    <tbody>${ts.map(t => `<tr>
-      <td><b>${esc(TASK_CN[t.task_type] || t.task_type || "—")}</b><br>
-        <span class="mono muted" style="font-size:10.5px">${esc(t.task_id || "")}</span></td>
-      <td>${esc(agentName(t.agent_type))}</td>
-      <td><span class="tag ${t.status === "done" ? "green" : t.status === "failed" ? "red" : "blue"}">${esc(t.status || "")}</span></td>
-      <td>${t.round_no ?? "—"}</td>
-      <td>${(t.routes || []).map(r => `<span class="tag ${r.status === "done" ? "green" : r.status === "failed" ? "red" : "blue"}" title="进度 ${Math.round((r.progress || 0) * 100)}% · 步骤 ${r.steps_executed || 0}">${esc(r.name)}</span>`).join(" ")}</td>
-      <td class="muted" style="max-width:320px">${esc(t.result_summary || "—")}</td>
-    </tr>`).join("")}</tbody></table>` : `<div class="empty-note">尚无任务记录</div>`;
+/* ================= 事件流 ================= */
+function evLine(e) {
+  const t = evElapsed(e.ts);
+  const de = typeof e.detail === "object" ? JSON.stringify(e.detail) : String(e.detail ?? "");
+  return `<div class="ev"><span class="ts">${esc(t)}</span><span class="ty">${esc(e.type || "")}</span>
+    <span class="ac">${esc(e.actor || "")}</span><span class="de">${esc(de.slice(0, 220))}</span></div>`;
 }
+
 function renderVulns() {
   const vs = S.state.vulns.items || [];
   $("#tab-vulns").innerHTML = vs.length ? `<div class="grid-cards">${vs.map(v => {
@@ -1604,27 +1924,18 @@ function renderFlags() {
     : `<div class="empty-note">尚无 Flag 记录</div>`;
 }
 
-/* ================= 事件流 ================= */
-function evLine(e) {
-  const t = String(e.ts || "").slice(11, 19);
-  const de = typeof e.detail === "object" ? JSON.stringify(e.detail) : String(e.detail ?? "");
-  return `<div class="ev"><span class="ts">${esc(t)}</span><span class="ty">${esc(e.type || "")}</span>
-    <span class="ac">${esc(e.actor || "")}</span><span class="de">${esc(de.slice(0, 220))}</span></div>`;
-}
-
 /* ---- 解题轨迹：按真实发生顺序还原成一条可读时间线 ---- */
 let traceStick = true;
 const TRACE_AGENT_SLOTS = new Map();
 function traceReset() {
   $("#trace-box").innerHTML = '<div class="empty-note">等待灵枢开工——过程将按真实时间顺序在此展开</div>';
   TRACE_AGENT_SLOTS.clear();
+  S.think.clear();
   traceStick = true;
   $("#trace-jump").hidden = true;
 }
 function traceClock(ts) {
-  const raw = String(ts || "");
-  const m = raw.match(/T?(\d{2}:\d{2}:\d{2})/);
-  return m ? m[1] : "";
+  return evElapsed(ts);
 }
 const fmtSize = n => n == null || n === "" ? "" :
   n >= 1048576 ? (n / 1048576).toFixed(1) + "MB"
@@ -1708,7 +2019,7 @@ function tracePush(e) {
       traceFinishThinking(traceTurn(actor));
       const turn = traceAppend(e, `<div class="hd"><span class="who">${esc(actorName(actor))}</span>
         <span class="k">第 ${esc(d.turn || "?")} 回合${d.forced_finish ? " · 正在收尾" : ""}</span></div>
-        ${d.angle ? `<div class="ang">${esc(d.angle)}</div>` : ""}<div class="flow"></div>`, "tl-turn");
+        ${d.turn === 1 && d.angle ? `<div class="ang">${esc(d.angle)}</div>` : ""}<div class="flow"></div>`, "tl-turn");
       turn.dataset.turn = String(d.turn || "");
       break;
     }
@@ -1717,7 +2028,9 @@ function tracePush(e) {
       const turn = traceTurn(actor);
       if (!turn) break;
       if (kind === "reset") {
-        turn.querySelectorAll(".tl-say,.tl-think").forEach(el => el.remove());
+        turn.querySelectorAll(".tl-say,.tl-think,.tl-thinkchip").forEach(el => el.remove());
+        const rec = S.think.get(actor);
+        if (rec) { rec.chars = 0; rec.tail = ""; }
         break;
       }
       if (kind === "tool_call") break;
@@ -1726,24 +2039,30 @@ function tracePush(e) {
       if (kind === "reasoning") {
         const text = d.text || "";
         if (!text) break;
-        let el = flow.querySelector(".tl-think.live");
-        if (!el) {
-          flow.insertAdjacentHTML("beforeend", '<details class="tl-think live"><summary>思考中</summary><div class="bd"></div></details>');
-          el = flow.lastElementChild;
+        // 推理过程聚合到拓扑页的推理栏（renderMind），会话流只留一枚计数章
+        let rec = S.think.get(actor);
+        if (!rec) { rec = { chars: 0, tail: "" }; S.think.set(actor, rec); }
+        rec.chars += text.length;
+        rec.tail = (rec.tail + text).slice(-6000);
+        let chip = flow.querySelector(".tl-thinkchip");
+        if (!chip) {
+          flow.insertAdjacentHTML("beforeend",
+            '<div class="tl-thinkchip" title="推理过程在「拓扑」页右侧推理栏查看"></div>');
+          chip = flow.lastElementChild;
         }
-        el.querySelector(".bd").textContent += text;
-      } else {
-        const text = d.text || "";
-        if (!text) break;
-        traceCloseThinking(turn);   // 文本开始：只关思考气泡，不渲染半截文本
-        let el = flow.querySelector(".tl-say:last-child");
-        if (el && el.classList.contains("md")) el = null;   // 已渲染块不回填原文
-        if (!el) {
-          flow.insertAdjacentHTML("beforeend", '<div class="tl-say"></div>');
-          el = flow.lastElementChild;
-        }
-        el.textContent += text;
+        chip.textContent = `✦ 推理 ${fmtK(rec.chars)} 字`;
+        break;
       }
+      const text = d.text || "";
+      if (!text) break;
+      traceCloseThinking(turn);   // 文本开始：只关思考气泡，不渲染半截文本
+      let el = flow.querySelector(".tl-say:last-child");
+      if (el && el.classList.contains("md")) el = null;   // 已渲染块不回填原文
+      if (!el) {
+        flow.insertAdjacentHTML("beforeend", '<div class="tl-say"></div>');
+        el = flow.lastElementChild;
+      }
+      el.textContent += text;
       traceScroll();
       break;
     }
@@ -1867,6 +2186,12 @@ function tracePush(e) {
       }
       break;
     }
+    case "master.reply":
+      traceAppend(e, `<div class="tl-reply md">${mdRender(d.text || "")}</div>`, "tl-master");
+      break;
+    case "agent.ask_user":
+      traceAppend(e, `<div class="tl-ask">向你提问 · ${esc(d.question || "")}</div>`, "tl-sys");
+      break;
   }
 }
 const traceBox = $("#trace-box");
@@ -1962,25 +2287,30 @@ async function loadReport() {
 }
 
 /* ================= 编队 ================= */
-const TIER_CN = { flagship: "旗舰档", rigorous: "严谨档", code: "代码档", fast: "快速档", light: "轻量档" };
 async function loadAgents() {
   try {
     S.agents = await api("/api/agents");
     const g = $("#agents-grid");
     g.innerHTML = S.agents.roster.map(a => {
       const bound = S.agents.assignments[a.key] || "";
-      return `<div class="card acard">
-        <div class="h"><b>${esc(a.name)}</b><span class="en">${esc(a.key)}</span>
-          <span class="tag" style="margin-left:auto">${TIER_CN[a.default_tier] || a.default_tier}</span></div>
-        <div class="duty">${esc(a.duty)}</div>
-        <div class="bind">
+      const available = a.status === "available";
+      const bind = a.configurable ? `<div class="bind">
           <select data-agent="${esc(a.key)}">
-            <option value="">按档位路由（默认）</option>
-            ${S.agents.models.map(m => `<option value="${esc(m.model)}" ${m.model === bound ? "selected" : ""}>${esc(m.model)}（${TIER_CN[m.tier] || esc(m.tier)}）</option>`).join("")}
+            <option value="">不指派（按模型列表顺序路由）</option>
+            ${S.agents.models.map(m => `<option value="${esc(m.model)}" ${m.model === bound ? "selected" : ""}>${esc(m.model)}</option>`).join("")}
             ${S.agents.models.length ? "" : `<option value="" disabled>（「模型」页还没有启用模型）</option>`}
           </select>
           <button class="btn sm save-agent" data-agent="${esc(a.key)}" disabled>保存</button>
-        </div>
+        </div>` : `<div class="bind-note">${available ? "确定性只读角色，不调用模型" : "尚未装配，不参与任务调度"}</div>`;
+      return `<div class="card acard ${available ? "" : "planned"}">
+        <div class="h"><b>${esc(a.name)}</b><span class="en">${esc(a.key)}</span>
+          <span class="tag ${available ? "green" : "orange"}" style="margin-left:auto">${available ? "可运行" : "规划中"}</span></div>
+        <div class="duty">${esc(a.duty)}</div>
+        <div class="meta-row">${(a.modes || []).map(m => `<span class="tag blue">${esc(MODE_CN[m] || m)}</span>`).join("")}</div>
+        <div class="mindset">${esc(a.mindset || "")}</div>
+        <ol>${(a.workflow || []).map(step => `<li>${esc(step)}</li>`).join("")}</ol>
+        <div class="tools">${(a.tools || []).map(tool => `<span class="tag">${esc(tool)}</span>`).join("")}</div>
+        ${bind}
       </div>`;
     }).join("");
     g.querySelectorAll("select").forEach(sel => sel.onchange = () => {
@@ -1992,7 +2322,7 @@ async function loadAgents() {
       try {
         S.agents = await api(`/api/agents/${encodeURIComponent(key)}`,
           { method: "PUT", body: JSON.stringify({ model }) });
-        toast(model ? `已为「${agentName(key)}」指派 ${model}` : `「${agentName(key)}」恢复按档位路由`);
+        toast(model ? `已为「${agentName(key)}」指派 ${model}` : `「${agentName(key)}」恢复默认路由`);
         loadAgents();
       } catch (e) { toast(e.message, true); }
     });
@@ -2026,7 +2356,7 @@ function modelTile(m) {
   const eff = m.reasoning_effort_levels || [];
   const q = m.quality_score;
   return `<div class="mtile">
-    <div class="mt-id"><b>${esc(m.model)}</b><span class="tag tier-${esc(m.tier || "")}">${TIER_CN[m.tier] || esc(m.tier)}</span></div>
+    <div class="mt-id"><b>${esc(m.model)}</b></div>
     <div class="mt-caps">${caps || `<span class="muted" style="font-size:11.5px">未声明能力标签</span>`}</div>
     <div class="mt-stats">
       <div class="mstat"><div class="k">上下文窗口</div><div class="v">${fmtCtx(m.context_window)}</div></div>
@@ -2134,26 +2464,23 @@ window.modelEdit = model => {
   $("#m-dlg-title").textContent = `编辑模型 ${model}`;
   $("#m-model").value = m.model || "";
   fillPrefs(m.provider_ref || "");
-  $("#m-tier").value = m.tier || "fast";
   $("#m-ctx").value = m.context_window || 0;
   S.effSel = [...(m.reasoning_effort_levels || [])];
   renderEffChips();
-  $("#m-caps").value = (m.capabilities || []).join(",");
-  $("#m-ci").value = m.cost_input_per_mtok || 0; $("#m-co").value = m.cost_output_per_mtok || 0;
-  $("#m-rpm").value = m.rate_limit_rpm || 60; $("#m-quality").value = m.quality_score ?? 1;
-  $("#m-fb").value = (m.is_fallback_for || []).join(",");
+  $("#m-caps-box").querySelectorAll("input").forEach(c =>
+    c.checked = (m.capabilities || []).includes(c.value));
   $("#m-dlg").showModal();
 };
 
 window.modelAddTo = ref => {
   S.medit = null;
   $("#m-dlg-title").textContent = "手动添加模型";
-  for (const id of ["m-model", "m-caps", "m-fb"]) $("#" + id).value = "";
+  $("#m-model").value = "";
+  $("#m-caps-box").querySelectorAll("input").forEach(c => c.checked = false);
   S.effSel = []; $("#m-eff-custom").value = "";
   renderEffChips();
   fillPrefs(ref);
-  $("#m-tier").value = "fast"; $("#m-ctx").value = 0;
-  $("#m-ci").value = 0; $("#m-co").value = 0; $("#m-rpm").value = 60; $("#m-quality").value = 1;
+  $("#m-ctx").value = 0;
   $("#m-dlg").showModal();
 };
 
@@ -2165,15 +2492,14 @@ window.modelDel = async model => {
 
 $("#m-cancel").onclick = () => $("#m-dlg").close();
 $("#m-save").onclick = async () => {
-  const split = s => s.split(",").map(x => x.trim()).filter(Boolean);
   const body = {
     model: $("#m-model").value.trim(), provider_ref: $("#m-pref").value,
-    tier: $("#m-tier").value, context_window: +$("#m-ctx").value || 0,
+    context_window: +$("#m-ctx").value || 0,
     reasoning_effort_levels: [...S.effSel],
-    capabilities: split($("#m-caps").value),
-    cost_input_per_mtok: +$("#m-ci").value || 0, cost_output_per_mtok: +$("#m-co").value || 0,
-    rate_limit_rpm: +$("#m-rpm").value || 60, quality_score: +$("#m-quality").value || 1,
-    is_fallback_for: split($("#m-fb").value),
+    capabilities: [...$("#m-caps-box").querySelectorAll("input:checked")]
+      .map(c => c.value),
+    cost_input_per_mtok: 0, cost_output_per_mtok: 0,
+    rate_limit_rpm: 60, quality_score: 1, is_fallback_for: [],
   };
   if (!body.model) { toast("模型 ID 必填", true); return; }
   try {
@@ -2322,7 +2648,7 @@ window.providerFetch = async name => {
     const known = new Set((S.models.models || []).map(x => x.model));
     $("#fm-body").innerHTML = `
       <div class="muted" style="font-size:12px;margin-bottom:9px">来自 ${esc(d.url)}，共 ${d.models.length} 个可用模型。
-        勾选后按下面的档位批量启用，之后可在模型行里逐个调整画像。</div>
+        勾选后批量启用，之后可在模型行里逐个调整画像。</div>
       <div class="fm-list">${d.models.map(x => {
         const on = known.has(x.id);
         return `<label class="fm-row"><input type="checkbox" value="${esc(x.id)}" ${on ? "disabled" : "checked"}>
@@ -2330,11 +2656,7 @@ window.providerFetch = async name => {
           ${x.display_name && x.display_name !== x.id ? `<span class="muted" style="font-size:11.5px">${esc(x.display_name)}</span>` : ""}
           ${on ? `<span class="tag green" style="margin-left:auto">已启用</span>` : ""}</label>`;
       }).join("")}</div>
-      <label style="display:flex;gap:9px;align-items:center;margin-top:11px;font-size:12px;font-weight:600;color:var(--ink-2)">
-        批量档位 <select id="fm-tier" style="width:auto">
-          <option value="flagship">旗舰档</option><option value="rigorous">严谨档</option>
-          <option value="code">代码档</option>
-          <option value="fast" selected>快速档</option><option value="light">轻量档</option></select></label>`;
+      <label style="display:flex;gap:9px;align-items:center;margin-top:11px;font-size:12px;font-weight:600;color:var(--ink-2)"></label>`;
     const boxes = [...$("#fm-body").querySelectorAll("input[type=checkbox]:not(:disabled)")];
     const sync = () => { $("#fm-add").disabled = !boxes.some(b => b.checked); };
     boxes.forEach(b => b.onchange = sync); sync();
@@ -2349,7 +2671,7 @@ $("#fm-add").onclick = async () => {
   if (!ids.length) return;
   try {
     const d = await api("/api/models/batch", { method: "POST",
-      body: JSON.stringify({ provider_ref: S.fprov, models: ids, tier: $("#fm-tier").value }) });
+      body: JSON.stringify({ provider_ref: S.fprov, models: ids }) });
     $("#fm-dlg").close();
     toast(`已启用 ${d.added.length} 个模型${d.added.length < ids.length ? `（${ids.length - d.added.length} 个已存在，跳过）` : ""}`);
     loadModels();

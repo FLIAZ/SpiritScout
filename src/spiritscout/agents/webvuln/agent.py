@@ -61,15 +61,6 @@ SSRF_PARAM_HINTS = {"url", "uri", "link", "callback", "fetch", "target", "dest",
                     "redirect", "path", "src", "source", "feed", "proxy"}
 SSRF_CANARY_PATH = "/.well-known/spir-ssrf-canary"
 SSRF_CANARY_TOKEN = "SPIR-SSRF-CANARY"
-# 疑似带参端点的路径启发（无爬虫工具的 MVP 最小集）
-ENDPOINT_GUESSES = [
-    ("/login", ["username", "password", "id", "q"]),
-    ("/search", ["q", "keyword", "query", "id"]),
-    ("/user", ["id", "uid", "name"]),
-    ("/detail", ["id", "pid"]),
-    ("/fetch", ["url"]),
-    ("/api/user", ["id", "name"]),
-]
 # 布尔差异判定阈值（长度差比例； 可配置化项）
 DIFF_LEN_RATIO = 0.05
 # LLM 步骤决策边界：单参数 payload 数上限（限请求扇出）与单条长度上限
@@ -91,36 +82,54 @@ class WebVulnAgent(SubAgent):
 
     def route_templates(self, task: Task) -> list[RoutePlan]:
         endpoints = self._collect_endpoints(task)
-        routes = [
-            RoutePlan(
-                name="sqli_pipeline",
-                strategy="SQLi：报错特征初筛 → 布尔差异二次信号（不取数据，G4）",
-                steps=[{"action": "sqli_probe", "endpoint": ep, "params": ps}
-                       for ep, ps in endpoints],
-            ),
-            RoutePlan(
-                name="xss_pipeline",
-                strategy="XSS：唯一 canary 反射检测 + 编码判定",
-                steps=[{"action": "xss_probe", "endpoint": ep, "params": ps}
-                       for ep, ps in endpoints],
-            ),
-            RoutePlan(
-                name="ssrf_pipeline",
-                strategy="SSRF：参数名启发 + 授权内 canary 自校验",
-                steps=[{"action": "ssrf_probe", "endpoint": ep, "params": ps}
-                       for ep, ps in endpoints
-                       if SSRF_PARAM_HINTS & {p.lower() for p in ps}],
-            ),
-        ]
+        business = self._business_context()
+        routes: list[RoutePlan] = []
+        if endpoints and business.get("ready_for_testing"):
+            routes.extend((
+                RoutePlan(
+                    name="sqli_pipeline",
+                    strategy="交付可核验结果：每个已观测端点参数的注入判定——"
+                             "报错特征/布尔差异/引用核验信号作证据，无证据即排除"
+                             "（不取数据，G4）",
+                    steps=[{"action": "sqli_probe", "endpoint": ep, "params": ps}
+                           for ep, ps in endpoints],
+                ),
+                RoutePlan(
+                    name="xss_pipeline",
+                    strategy="交付可核验结果：每个端点参数的反射判定——唯一 canary "
+                             "原样反射（附响应片段证据）或排除",
+                    steps=[{"action": "xss_probe", "endpoint": ep, "params": ps}
+                           for ep, ps in endpoints],
+                ),
+            ))
+            ssrf_steps = [
+                {"action": "ssrf_probe", "endpoint": ep, "params": ps}
+                for ep, ps in endpoints
+                if SSRF_PARAM_HINTS & {p.lower() for p in ps}
+            ]
+            if ssrf_steps:
+                routes.append(RoutePlan(
+                    name="ssrf_pipeline",
+                    strategy="交付可核验结果：带取址参数端点的出网判定——"
+                             "授权内 canary 自证（附响应证据）或排除",
+                    steps=ssrf_steps,
+                ))
+        else:
+            routes.append(RoutePlan(
+                name="coverage_gap",
+                strategy="业务证据覆盖不足时停止主动猜测，并明确需要补充的流程",
+                steps=[{"action": "context_gap"}],
+            ))
         clues = self.ctx.blackboard.query(BlackboardLayer.RECON_CLUE, limit=200)
         hit_clues = [c for c in clues
                      if c["data"].get("clue_type") == "sensitive_path"
-                     and c["data"].get("detail", {}).get("marker_hit")]
+                     and c["data"].get("detail", {}).get("exposure_confirmed")]
         if hit_clues:
             # 弹性路线：侦察线索跟进（敏感路径 → 信息泄露候选）
             routes.append(RoutePlan(
                 name="clue_followup",
-                strategy="侦察线索跟进：确认敏感路径暴露并产出信息泄露候选",
+                strategy="交付可核验结果：敏感路径暴露的确认或排除"
+                         "（内容证据判定，仅可达不构成泄露）",
                 steps=[{"action": "clue_verify", "clue": c["data"]} for c in hit_clues],
             ))
         return routes
@@ -134,6 +143,7 @@ class WebVulnAgent(SubAgent):
             "xss_probe": self._step_xss,
             "ssrf_probe": self._step_ssrf,
             "clue_verify": self._step_clue_verify,
+            "context_gap": self._step_context_gap,
         }.get(action)
         if handler is None:
             return StepResult(ok=False, note=f"未知步骤动作: {action}")
@@ -159,13 +169,15 @@ class WebVulnAgent(SubAgent):
             "vuln_class": vuln_class, "endpoint": endpoint, "param": param,
             "baseline_digest": baseline_body[:500],
             "candidate_payloads": candidates,
+            "business_context": self._compact_business_context(),
             "max_payloads": LLM_PAYLOAD_CAP,
             "constraints": (
-                f"返回 JSON：{{\"payloads\": [{{\"payload\": str, \"purpose\": str}}], "
+                "目的：为该参数产出可核验的判定结论，payload 是最小对照实验，"
+                f"不是攻击流程。返回 JSON：{{\"payloads\": [{{\"payload\": str, \"purpose\": str}}], "
                 f"\"rationale\": str}}。可在骨架候选上裁剪/修改/新增；每条 ≤{LLM_PAYLOAD_MAXLEN} 字符"
                 + (f"且必须原样包含探测标记 {require_token}" if require_token else "")
                 + "；不构造取数/拖库/破坏性载荷（G4）。"),
-        }, reasoning_effort=self.task_effort(task))
+        }, reasoning_effort=self.task_effort(task), task=task)
         if data is None:
             return None
         out: list[str] = []
@@ -207,7 +219,7 @@ class WebVulnAgent(SubAgent):
                 "\"signal_type\": str, \"confidence\": 0~1, \"rationale\": str, "
                 "\"evidence_quote\": str}]}。evidence_quote 必须逐字摘自对应响应 "
                 "digest，不得杜撰；无把握不输出信号。"),
-        }, reasoning_effort=self.task_effort(task))
+        }, reasoning_effort=self.task_effort(task), task=task)
         if data is None:
             return []
         bodies = {(o["param"], o["payload"]): o["_body"] for o in observations}
@@ -241,7 +253,7 @@ class WebVulnAgent(SubAgent):
 
     async def _step_sqli(self, task: Task, step: dict) -> StepResult:
         endpoint = step["endpoint"]
-        base_url = task.target.rstrip("/") + endpoint
+        base_url = self._resolve_endpoint(task, endpoint)
         findings: list[dict[str, Any]] = []
         notes = []
         for param in step["params"]:
@@ -334,7 +346,7 @@ class WebVulnAgent(SubAgent):
 
     async def _step_xss(self, task: Task, step: dict) -> StepResult:
         endpoint = step["endpoint"]
-        base_url = task.target.rstrip("/") + endpoint
+        base_url = self._resolve_endpoint(task, endpoint)
         findings: list[dict[str, Any]] = []
         for param in step["params"]:
             # LLM 决策上下文感知 payload（必含 canary；不可用回退骨架）
@@ -363,7 +375,9 @@ class WebVulnAgent(SubAgent):
                         severity=Severity.MEDIUM, confidence=0.7,
                         evidence=[{"method": "canary_reflect", "url": base_url,
                                    "param": param, "payload": payload,
-                                   "reflection": body[:300], "encoded": False}],
+                                   "reflection": self._evidence_snippet(
+                                       body, XSS_CANARY),
+                                   "encoded": False}],
                     )
                     _, is_new, _ = self.ctx.convergence.merge_vulnerability(vuln, self.agent_type)
                     if is_new:
@@ -377,7 +391,7 @@ class WebVulnAgent(SubAgent):
 
     async def _step_ssrf(self, task: Task, step: dict) -> StepResult:
         endpoint = step["endpoint"]
-        base_url = task.target.rstrip("/") + endpoint
+        base_url = self._resolve_endpoint(task, endpoint)
         canary_url = task.target.rstrip("/") + SSRF_CANARY_PATH
         findings: list[dict[str, Any]] = []
         for param in step["params"]:
@@ -391,7 +405,8 @@ class WebVulnAgent(SubAgent):
                     severity=Severity.MEDIUM, confidence=0.75,
                     evidence=[{"method": "in_scope_canary", "url": base_url, "param": param,
                                "canary_url": canary_url,
-                               "response": res.stdout[:300]}],
+                               "response": self._evidence_snippet(
+                                   res.stdout, SSRF_CANARY_TOKEN)}],
                 )
                 _, is_new, _ = self.ctx.convergence.merge_vulnerability(vuln, self.agent_type)
                 if is_new:
@@ -428,7 +443,7 @@ class WebVulnAgent(SubAgent):
             endpoint=urlparse(url).path, parameter="",
             severity=Severity.MEDIUM if marker else Severity.LOW, confidence=0.8,
             evidence=[{"method": "http_recheck", "url": url,
-                       "marker": marker, "response": res.stdout[:300]}],
+                       "marker": marker, "content_length": len(res.stdout)}],
         )
         _, is_new, _ = self.ctx.convergence.merge_vulnerability(vuln, self.agent_type)
         return StepResult(ok=True, value=0.4 if is_new else 0.1,
@@ -436,6 +451,40 @@ class WebVulnAgent(SubAgent):
                           note=f"线索复核确认泄露: {url}")
 
     # ------------------------------------------------------------ 内部
+
+    async def _step_context_gap(self, task: Task, step: dict) -> StepResult:
+        context = self._business_context()
+        gaps = context.get("gaps") or ["未观测到带参数的 GET/HEAD 业务端点"]
+        return StepResult(
+            ok=True,
+            value=0.1,
+            findings=[{"type": "coverage_gap", "gaps": gaps[:10]}],
+            note=("未进行接口猜测；业务覆盖不足：" + "；".join(
+                str(item) for item in gaps[:5])),
+            final_note=True,
+        )
+
+    def _business_context(self) -> dict[str, Any]:
+        return (self.ctx.blackboard.read(
+            BlackboardLayer.TOPOLOGY, "business-context") or {})
+
+    def _compact_business_context(self) -> dict[str, Any]:
+        context = self._business_context()
+        return {
+            key: context.get(key)
+            for key in ("coverage", "roles", "objects", "workflows", "facts", "gaps")
+            if context.get(key)
+        }
+
+    @staticmethod
+    def _evidence_snippet(body: str, marker: str, radius: int = 100) -> str:
+        """只保留命中标记附近的最小证据，避免把整段业务响应写入黑板。"""
+        index = body.find(marker)
+        if index < 0:
+            return marker
+        start = max(0, index - radius)
+        end = min(len(body), index + len(marker) + radius)
+        return body[start:end]
 
     async def _probe(self, url: str, params: dict[str, str]):
         res = await self.ctx.tools.call(
@@ -453,22 +502,35 @@ class WebVulnAgent(SubAgent):
         return any(marker in body for marker in WAF_BLOCK_MARKERS)
 
     def _collect_endpoints(self, task: Task) -> list[tuple[str, list[str]]]:
-        """端点来源：资产层 endpoint + 内置猜测表（去重，保序）。"""
+        """只消费 HAR、真实 HTML 表单等已经观测到的端点。"""
         endpoints: list[tuple[str, list[str]]] = []
-        seen: set[str] = set()
+        seen: set[tuple[str, str]] = set()
         for rec in self.ctx.blackboard.query(BlackboardLayer.ASSET, limit=500):
             data = rec["data"]
             if data.get("asset_type") != "endpoint":
                 continue
-            path = urlparse(data.get("value", "")).path
-            if path and path not in seen:
-                seen.add(path)
-                endpoints.append((path, data.get("attrs", {}).get("params", ["id", "q"])))
-        for path, params in ENDPOINT_GUESSES:
-            if path not in seen:
-                seen.add(path)
-                endpoints.append((path, params))
+            attrs = data.get("attrs", {})
+            # 当前确定性 payload 管线使用查询参数；非 GET 请求先保留在黑板，
+            # 等请求重放器消费，避免把真实 POST 错测成 GET。
+            if str(attrs.get("method") or "GET").upper() not in {"GET", "HEAD"}:
+                continue
+            value = str(data.get("value") or "")
+            key = (str(attrs.get("method") or "GET").upper(), value)
+            if value and key not in seen:
+                seen.add(key)
+                query_params = [p for p in attrs.get("params", [])
+                                if attrs.get("param_locations", {}).get(p, "query") == "query"]
+                if query_params:
+                    # HAR 资产保留完整 URL，避免授权目标已带路径时
+                    # 把 /app/search 误拼为 /app/app/search。
+                    endpoints.append((value, query_params))
         return endpoints
+
+    @staticmethod
+    def _resolve_endpoint(task: Task, endpoint: str) -> str:
+        if urlparse(endpoint).scheme in {"http", "https"}:
+            return endpoint
+        return task.target.rstrip("/") + "/" + endpoint.lstrip("/")
 
     @staticmethod
     def _evidence(url: str, param: str, error_hit: str | None,

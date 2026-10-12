@@ -197,8 +197,8 @@ def upsert_entry(path: str | Path, entry: dict[str, Any], *,
     return entries
 
 
-def add_entries(path: str | Path, provider_ref: str, model_ids: list[str], *,
-                tier: str = "fast") -> tuple[list[dict[str, Any]], list[str]]:
+def add_entries(path: str | Path, provider_ref: str,
+                model_ids: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
     """批量启用某供应商下的模型（从云端拉取的可用列表里勾选）。
 
     返回 (全部模型, 本次新增的模型 ID)；已存在的跳过（不覆盖既有画像设置）。
@@ -212,7 +212,7 @@ def add_entries(path: str | Path, provider_ref: str, model_ids: list[str], *,
         mid = str(raw_id).strip()
         if not mid or mid in existing:
             continue
-        entries.append({"model": mid, "provider_ref": provider_ref, "tier": tier,
+        entries.append({"model": mid, "provider_ref": provider_ref,
                         "capabilities": [], "context_window": 0,
                         "reasoning_effort_levels": [], "is_fallback_for": []})
         existing.add(mid)

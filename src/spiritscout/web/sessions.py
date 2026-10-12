@@ -27,6 +27,7 @@ from spiritscout.core.exceptions import SpiritScoutError
 from spiritscout.core.models import RunMode
 from spiritscout.launch import LaunchPlan, LaunchRequest, prepare_launch
 from spiritscout.policy.approvals import ApprovalBroker
+from spiritscout.policy.questions import QuestionBroker
 from spiritscout.web import agentcfg, vault
 
 
@@ -48,7 +49,7 @@ async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
     try:
         resp = await gateway.chat(
             [{"role": "system", "content": (
-                "你是灵探的任务路由。通读用户的任务描述，判断它属于哪一类安全"
+                "你是灵枢的任务路由。通读用户的任务描述，判断它属于哪一类安全"
                 "测试分支，只输出 JSON。ROLE: mode_router")},
              {"role": "user", "content": json.dumps({
                  "mission": mission[:2000],
@@ -61,7 +62,8 @@ async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
                  "answer": '{"mode": "src|ctf|competition", "rationale": "一句话"}',
              }, ensure_ascii=False)}],
             task_type="classification", response_format="json",
-            reasoning_effort="low")
+            reasoning_effort="low",
+            timeout_seconds=min(45, cfg.gateway.request_timeout_seconds))
     except Exception as exc:
         audit.log("system.lifecycle", "mode_router", {
             "action": "model_preflight_failed", "error": str(exc)[:300]})
@@ -85,26 +87,19 @@ async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
 TERMINAL_STATES = frozenset({"completed", "failed", "stopped", "interrupted"})
 
 
-async def _preflight_models(cfg: SystemConfig, models: list[ModelEntry],
-                            audit: AuditLogger) -> None:
-    """开工前模型预检：LLM 是系统的脑——一次最小调用全链失败即熔断，
-    会话落 failed 并明示原因（不静默降级为模板跑批交付垃圾报告）。
+def _preflight_models(cfg: SystemConfig, models: list[ModelEntry],
+                      audit: AuditLogger) -> None:
+    """开工前预检（静态，毫秒级）：模型注册表非空。
 
-    仅一次 ~8 token 的调用，成本可忽略；mock 后端照常应答（离线测试无感）。
+    连通性不再用 LLM 调用证明——重推理端点上一次「就绪检查」曾花 10s+，
+    多题并发时是纯浪费；语义路由分支由路由调用兼任预检，静态路由分支的
+    连通性由首个真实模型调用证明（失败在时间线上即时可见）。
     """
-    from spiritscout.gateway import ModelGateway, ModelRegistry
-
-    gateway = ModelGateway(ModelRegistry(models), config=cfg.gateway, audit=audit)
-    try:
-        await gateway.chat(
-            [{"role": "user", "content": "就绪检查：回复 ok 即可"}],
-            task_type="preflight", max_tokens=8, reasoning_effort="low")
-    except Exception as exc:
+    if not models:
         audit.log("system.lifecycle", "preflight", {
-            "action": "model_preflight_failed", "error": str(exc)[:300]})
+            "action": "model_preflight_failed", "error": "模型注册表为空"})
         raise SpiritScoutError(
-            f"模型不可用，会话未开工：{exc}。请在「模型」页检查接入配置"
-            f"与密钥后重新发起") from exc
+            "模型注册表为空，会话未开工。请在「模型」页配置至少一个模型后重试")
 
 
 @dataclass
@@ -118,6 +113,7 @@ class Session:
     title: str = ""                                          # 会话名（可重命名；空 = 自动摘要）
     request: dict[str, Any] = field(default_factory=dict)   # 启动参数（展示用）
     status: str = "created"      # created/running/completed/failed/stopped/interrupted
+    phase: str = "queued"        # 细粒度启动/执行阶段，避免把启动等待误报成业务覆盖
     created_at: float = 0.0
     started_at: float | None = None
     finished_at: float | None = None
@@ -127,6 +123,9 @@ class Session:
     # 高风险动作即时确认队列（G5 交互形态；进程内状态，会话终态即失效）
     approvals: ApprovalBroker = field(
         default_factory=ApprovalBroker, repr=False, compare=False)
+    # 模型发起的用户询问队列（ask_user 工具后端；问题与选项由模型撰写）
+    questions: QuestionBroker = field(
+        default_factory=QuestionBroker, repr=False, compare=False)
     # 环形协同台账：子 Agent 已尝试登记 + 灵枢督导建议（进程内，随会话消亡）
     ring: RingLedger = field(
         default_factory=RingLedger, repr=False, compare=False)
@@ -188,9 +187,17 @@ class Session:
             "session_id": self.session_id, "mode": self.mode,
             "title": self.display_title(), "renamed": bool(self.title),
             "target": self.target, "status": self.status,
+            "phase": self.phase,
             "created_at": self.created_at, "started_at": self.started_at,
             "finished_at": self.finished_at, "error": self.error,
         }
+        # 仪表盘总览的轻量指标（从运行摘要提取，不走完整 summary）
+        run = (self.summary or {}).get("run", {}) if isinstance(self.summary, dict) else {}
+        usage = run.get("model_usage") or {}
+        out["tokens"] = usage.get("used_tokens", 0)
+        out["cost_usd"] = usage.get("used_usd", 0.0)
+        out["rounds"] = run.get("rounds_executed", 0)
+        out["flag_stats"] = run.get("flag_stats")
         if include_summary:
             out["summary"] = self.summary
         return out
@@ -237,6 +244,7 @@ class SessionManager:
                 launch_request=data.get("launch_request", {}),
                 opinions=data.get("opinions", []),
                 status=data.get("status", "interrupted"),
+                phase=data.get("phase", "interrupted"),
                 created_at=data.get("created_at", 0.0),
                 started_at=data.get("started_at"),
                 finished_at=data.get("finished_at"),
@@ -244,6 +252,7 @@ class SessionManager:
             )
             if session.status not in TERMINAL_STATES:
                 session.status = "interrupted"
+                session.phase = "interrupted"
                 session.finished_at = session.finished_at or time.time()
                 self._persist(session)
             self._sessions[session.session_id] = session
@@ -255,7 +264,8 @@ class SessionManager:
             "request": session.request,
             "launch_request": session.launch_request,
             "opinions": session.opinions[-8:],
-            "status": session.status, "created_at": session.created_at,
+            "status": session.status, "phase": session.phase,
+            "created_at": session.created_at,
             "started_at": session.started_at, "finished_at": session.finished_at,
             "summary": session.summary, "error": session.error,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -266,6 +276,17 @@ class SessionManager:
 
     def get(self, session_id: str) -> Session | None:
         return self._sessions.get(session_id)
+
+    def _set_phase(self, session: Session, phase: str,
+                   audit: AuditLogger | None = None) -> None:
+        """持久化用户可见阶段；审计存在时同步留痕。"""
+        if session.phase == phase:
+            return
+        session.phase = phase
+        self._persist(session)
+        if audit is not None:
+            audit.log("system.lifecycle", "runtime", {
+                "action": "phase_changed", "phase": phase})
 
     # ------------------------------------------------------------ 生命周期
 
@@ -296,20 +317,49 @@ class SessionManager:
         """从创建队列取会话并 spawn 执行任务（不隶属任何请求作用域）。"""
         while True:
             session, cfg, plan, no_llm, models, resume = await self._queue.get()
-            if resume:
+            try:
+                if resume:
+                    if session.status != "running":
+                        continue        # 续传排队期间状态被并发改动（如再次停止）
+                elif session.status != "created":
+                    continue            # 排队期间已被停止/删除
+                session.status = "running"
+                session.phase = "starting"
+                session.started_at = session.started_at or time.time()
+                self._persist(session)
+                session.task = asyncio.create_task(
+                    self._run(session, cfg, plan, no_llm, models, resume),
+                    name=f"spiritscout-{session.session_id}",
+                )
+                session.task.add_done_callback(
+                    lambda task, current=session: self._settle_task(current, task))
                 if session.status != "running":
-                    continue        # 续传排队期间状态被并发改动（如再次停止）
-            elif session.status != "created":
-                continue            # 排队期间已被停止/删除
-            session.status = "running"
-            session.started_at = session.started_at or time.time()
-            self._persist(session)
-            session.task = asyncio.create_task(
-                self._run(session, cfg, plan, no_llm, models, resume),
-                name=f"spiritscout-{session.session_id}",
-            )
-            if session.status != "running":
-                session.task.cancel()   # spawn 瞬间被并发 stop：立即取消
+                    session.task.cancel()   # spawn 瞬间被并发 stop：立即取消
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 —— 监督器不能因单会话退出
+                session.status = "failed"
+                session.phase = "failed"
+                session.error = f"启动监督失败：{type(exc).__name__}: {exc}"[:500]
+                session.finished_at = time.time()
+                self._persist(session)
+            finally:
+                self._queue.task_done()
+
+    def _settle_task(self, session: Session, task: asyncio.Task) -> None:
+        """兜住执行协程 try 块之外的异常，禁止会话永久留在 running。"""
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            exc = None
+        if session.status in TERMINAL_STATES:
+            return
+        session.status = "failed" if exc is not None else "stopped"
+        session.phase = session.status
+        if exc is not None:
+            session.error = f"执行任务异常退出：{type(exc).__name__}: {exc}"[:500]
+        session.finished_at = time.time()
+        self._persist(session)
 
     async def aclose(self) -> None:
         """应用关停：停监督协程，再停所有未终态会话（幂等）。"""
@@ -358,6 +408,7 @@ class SessionManager:
 
         cfg = self._session_cfg(session, payload.get("budget_tokens"))
         session.approvals = ApprovalBroker(AuditLogger(cfg.audit_log_path))
+        session.questions = QuestionBroker(AuditLogger(cfg.audit_log_path))
         session.ring = RingLedger(AuditLogger(cfg.audit_log_path))
         no_llm = bool(payload.get("no_llm", False))
         # 暂存附件材料化：移入工作区 attachments/ + 注入无附件的赛题载荷
@@ -395,8 +446,11 @@ class SessionManager:
         if not req:
             return None
         try:
+            # 自动模式且尚未创建黑板，说明旧进程在真正开工前中断；应按原始
+            # 用户意图重新判定，而不是把当时的临时兜底模式永久钉死。
+            untouched_auto = bool(req.get("mode_auto")) and not session.bb_path.exists()
             plan = prepare_launch(LaunchRequest(
-                mode=RunMode(session.mode),   # 续传钉住已定模式，不再改判
+                mode=None if untouched_auto else RunMode(session.mode),
                 target=req.get("target") or None,
                 extra_scope=list(req.get("scope") or []),
                 platform=req.get("platform") or None,
@@ -407,6 +461,7 @@ class SessionManager:
                 rules_yaml=req.get("rules_yaml") or None,
                 accept_rule_conflicts=bool(req.get("accept_rule_conflicts", False)),
                 mission=req.get("mission") or None,
+                has_uploads=(session.workspace / "attachments").is_dir(),
             ))
         except (SpiritScoutError, TypeError, ValueError):
             return None
@@ -419,6 +474,64 @@ class SessionManager:
                     if not ch.get("attachments"):
                         ch["attachments"] = files
         return plan
+
+    def _cancel_stale_tasks(self, session: Session) -> int:
+        """续传前归档上一次被中断的黑板任务。
+
+        进程停止时子 Agent 已不存在，黑板中仍为 pending/running 的任务不可能
+        继续执行。将其原位更新为 cancelled，避免状态页和后续报告把历史残留
+        当成当前活跃任务。
+        """
+        if not session.bb_path.exists():
+            return 0
+        from spiritscout.blackboard import Blackboard
+        from spiritscout.core.models import AgentType, BlackboardLayer
+
+        active = {"pending", "dispatched", "running"}
+        changed = 0
+        bb = Blackboard(session.bb_path, bus=None)
+        try:
+            for rec in bb.query(BlackboardLayer.TASK_STATE, limit=10000):
+                data = rec["data"]
+                if "dag_snapshot" in data:
+                    dirty = False
+                    for node in data.get("dag_snapshot", []):
+                        if node.get("status") in active:
+                            node["status"] = "cancelled"
+                            dirty = True
+                    if dirty:
+                        bb.write(
+                            BlackboardLayer.TASK_STATE, rec["record_id"], data,
+                            agent_type=AgentType.MASTER,
+                            updated_by="session-resume",
+                            expected_version=rec["version"],
+                        )
+                    continue
+                task = data.get("task") or {}
+                if task.get("status") not in active:
+                    continue
+                task["status"] = "cancelled"
+                for route in data.get("routes", []):
+                    if route.get("status") in active:
+                        route["status"] = "cancelled"
+                summary = data.setdefault("summary", {})
+                summary["interrupted"] = True
+                summary["reason"] = "上一次会话在任务终态写入前停止"
+                bb.write(
+                    BlackboardLayer.TASK_STATE, rec["record_id"], data,
+                    agent_type=AgentType.MASTER,
+                    updated_by="session-resume",
+                    dedup_key=f"task|{rec['record_id']}",
+                    expected_version=rec["version"],
+                )
+                changed += 1
+        finally:
+            bb.close()
+        if changed:
+            AuditLogger(session.audit_path).log(
+                "system.lifecycle", "session-resume", {
+                    "action": "stale_tasks_cancelled", "count": changed})
+        return changed
 
     async def resume(self, session_id: str) -> Session:
         """续传：终态会话带用户新来的意见重新开工（同一工作区/审计/Flag 库）。
@@ -439,17 +552,24 @@ class SessionManager:
             raise SpiritScoutError(
                 "该会话缺少启动信息（由不支持续传的旧版本创建），无法续传——"
                 "请基于现有报告与审计新开任务")
+        # 开工前中断的自动模式会在 _rebuild_plan 中重新确定装配模式。
+        if not session.bb_path.exists():
+            session.mode = session.plan.authorization.mode.value
+            session.target = session.plan.target
+        self._cancel_stale_tasks(session)
         models = vault.apply_keys(load_model_config(self._cfg.models_config_path))
         if not models:
             raise SpiritScoutError(
                 f"模型注册表为空: {self._cfg.models_config_path}（请在「模型」页检查）")
         session.resume_prev_status = session.status
         session.status = "running"
+        session.phase = "queued"
         session.finished_at = None
         session.error = ""
         self._persist(session)
         cfg = self._session_cfg(session, session.request.get("budget_tokens"))
         session.approvals = ApprovalBroker(AuditLogger(cfg.audit_log_path))
+        session.questions = QuestionBroker(AuditLogger(cfg.audit_log_path))
         session.ring = RingLedger(AuditLogger(cfg.audit_log_path))
         no_llm = bool(session.request.get("no_llm", False))
         self.start()
@@ -464,15 +584,17 @@ class SessionManager:
         resume=True 为续传运行：同一工作区/审计/Flag 库重开一轮，
         模式不再改判（会话模式已定），失败时恢复原终态（原成果不丢）。
         """
-        from spiritscout.runtime import (
-            run_competition_engagement,
-            run_ctf_engagement,
-            run_engagement,
-        )
+        try:
+            async with self._sem:
+                # 导入、模式解析和信号量等待都必须在故障隔离范围内；任何一步
+                # 出错都落终态，不能留下只有 meta.json 的假 running 会话。
+                from spiritscout.runtime import (
+                    run_competition_engagement,
+                    run_ctf_engagement,
+                    run_engagement,
+                )
 
-        mode = RunMode(session.mode)
-        async with self._sem:
-            try:
+                mode = RunMode(session.mode)
                 # 开工即有声：先落一条事件让用户立刻看到灵枢动起来了
                 # （随后的模型调用期间时间线不再静默）
                 audit = AuditLogger(cfg.audit_log_path)
@@ -480,13 +602,15 @@ class SessionManager:
                     "action": "session_kickoff", "resume": resume})
                 routed = None
                 if not no_llm and models:
-                    if not resume and plan.mode_auto and plan.mission:
+                    if not resume and plan.needs_mode_routing and plan.mission:
                         # 语义路由兼任开工预检（开工前唯一模型调用，调用成功
                         # 即模型全链可用），不为预检单付一次串行等待
+                        self._set_phase(session, "mode_routing", audit)
                         routed = await _llm_route_mode(
                             cfg, models, plan.mission, mode, audit)
                     else:
-                        await _preflight_models(cfg, models, audit)
+                        self._set_phase(session, "model_preflight", audit)
+                        _preflight_models(cfg, models, audit)
                 if routed is not None and routed != mode and plan.source_request:
                     try:
                         plan = prepare_launch(LaunchRequest(**{
@@ -494,6 +618,7 @@ class SessionManager:
                         mode = routed
                         session.mode = routed.value
                         session.target = plan.target
+                        cfg.mode = routed
                     except SpiritScoutError as exc:
                         # 改判缺必需输入（如判渗透赛但无赛制 YAML）：
                         # 不静默跟随——留痕并按兜底执行
@@ -501,7 +626,9 @@ class SessionManager:
                             "action": "llm_mode_route_rejected",
                             "llm_mode": routed.value, "kept": mode.value,
                             "reason": str(exc)[:300]})
+                self._set_phase(session, "runtime_starting", audit)
                 agent_models = agentcfg.read_assignments(cfg.agent_models_path)
+                self._set_phase(session, "executing", audit)
                 if mode == RunMode.CTF:
                     result = await run_ctf_engagement(
                         cfg=cfg, models=models,
@@ -513,6 +640,7 @@ class SessionManager:
                         approval_gate=session.approvals.ask,
                         ring=session.ring,
                         user_inbox=session.user_inbox,
+                        question_broker=session.questions,
                         resume=resume)
                 elif mode == RunMode.COMPETITION:
                     result = await run_competition_engagement(
@@ -523,7 +651,8 @@ class SessionManager:
                         agent_models=agent_models,
                         approval_gate=session.approvals.ask,
                         ring=session.ring,
-                        user_inbox=session.user_inbox)
+                        user_inbox=session.user_inbox,
+                        question_broker=session.questions)
                 else:
                     result = await run_engagement(
                         cfg=cfg, models=models,
@@ -534,29 +663,34 @@ class SessionManager:
                         agent_models=agent_models,
                         approval_gate=session.approvals.ask,
                         ring=session.ring,
-                        user_inbox=session.user_inbox)
+                        user_inbox=session.user_inbox,
+                        question_broker=session.questions)
                 session.status = "completed"
+                session.phase = "completed"
                 session.summary = {
                     "run": result.run_summary,
                     "verify": result.verify_stats,
                     "flags": result.flag_stats,
                     "report": result.report_path,
                 }
-            except asyncio.CancelledError:
-                # stop() 主动取消：runtime finally 已关闭 infra；落 stopped 终态后
-                # 正常结束（不向上 re-raise——任务目的即被终止）
-                session.status = "stopped"
-            except Exception as exc:  # noqa: BLE001 —— 会话故障隔离：单会话失败不影响其他会话
-                if resume and session.resume_prev_status:
-                    # 续传未开工/中途失败：恢复原终态，原成果与摘要不丢
-                    session.status = session.resume_prev_status
-                    session.error = f"续传未完成：{type(exc).__name__}: {exc}"[:500]
-                else:
-                    session.status = "failed"
-                    session.error = f"{type(exc).__name__}: {exc}"[:500]
-            finally:
-                session.finished_at = time.time()
-                self._persist(session)
+        except asyncio.CancelledError:
+            # stop() 主动取消：runtime finally 已关闭 infra；落 stopped 终态后
+            # 正常结束（不向上 re-raise——任务目的即被终止）
+            session.status = "stopped"
+            session.phase = "stopped"
+        except Exception as exc:  # noqa: BLE001 —— 会话故障隔离：单会话失败不影响其他会话
+            if resume and session.resume_prev_status:
+                # 续传未开工/中途失败：恢复原终态，原成果与摘要不丢
+                session.status = session.resume_prev_status
+                session.phase = session.status
+                session.error = f"续传未完成：{type(exc).__name__}: {exc}"[:500]
+            else:
+                session.status = "failed"
+                session.phase = "failed"
+                session.error = f"{type(exc).__name__}: {exc}"[:500]
+        finally:
+            session.finished_at = time.time()
+            self._persist(session)
 
     async def stop(self, session_id: str) -> Session | None:
         """幂等停止：取消执行任务（数据保留）；已终态直接返回。"""
@@ -564,6 +698,7 @@ class SessionManager:
         if session is None:
             return None
         session.approvals.cancel_all()
+        session.questions.cancel_all()
         task = session.task
         if task is not None and not task.done():
             task.cancel()
@@ -573,6 +708,7 @@ class SessionManager:
                 pass
         if session.status not in TERMINAL_STATES:
             session.status = "stopped"
+            session.phase = "stopped"
             session.finished_at = time.time()
             self._persist(session)
         return session

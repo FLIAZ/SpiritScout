@@ -53,7 +53,7 @@ class ReportAgent:
 
     # ------------------------------------------------------------ 数据装配
 
-    def collect(self) -> dict[str, Any]:
+    def collect(self, current_task_ids: set[str] | None = None) -> dict[str, Any]:
         assets = [r["data"] for r in self.bb.query(BlackboardLayer.ASSET, limit=10000)]
         vulns = [Vulnerability.model_validate(r["data"])
                  for r in self.bb.query(BlackboardLayer.VULN, limit=10000)]
@@ -64,6 +64,10 @@ class ReportAgent:
             if v.status != VulnStatus.ACCEPTED:
                 rejected_stats[v.status.value] = rejected_stats.get(v.status.value, 0) + 1
         tasks = [r["data"] for r in self.bb.query(BlackboardLayer.TASK_STATE, limit=10000)]
+        if current_task_ids:
+            tasks = [data for data in tasks
+                     if str((data.get("task") or {}).get("task_id"))
+                     in current_task_ids]
         clues = [r["data"] for r in self.bb.query(BlackboardLayer.RECON_CLUE, limit=10000)]
         return {
             "assets": assets,
@@ -86,7 +90,12 @@ class ReportAgent:
 
     def generate(self, authorization: Authorization, target: str,
                  out_path: str | Path, run_summary: dict[str, Any] | None = None) -> Path:
-        data = self.collect()
+        current_task_ids = {
+            str(task_id)
+            for node in (run_summary or {}).get("dag_nodes", [])
+            for task_id in node.get("task_ids", [])
+        }
+        data = self.collect(current_task_ids)
         template = self._env.get_template("src_report.md.j2")
         rendered = template.render(
             target=target,
@@ -129,6 +138,15 @@ class ReportAgent:
         task_states = [r["data"] for r in
                        self.bb.query(BlackboardLayer.TASK_STATE, limit=10000)
                        if "dag_snapshot" not in r["data"]]
+        current_task_ids = {
+            str(task_id) for task_id in (context or {}).get("current_task_ids", [])
+        }
+        if current_task_ids:
+            task_states = [
+                data for data in task_states
+                if str((data.get("task") or {}).get("task_id"))
+                in current_task_ids
+            ]
         template = self._env.get_template("ctf_writeup.md.j2")
         rendered = template.render(
             generated_at=datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),

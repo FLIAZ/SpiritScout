@@ -13,6 +13,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from spiritscout.agents.business import BusinessContextAgent
+from spiritscout.agents.hostops import HostVulnAgent, PortScanAgent, PostExploitAgent
 from spiritscout.agents.recon import ReconAgent
 from spiritscout.agents.sub.base import SubAgent, SubAgentContext
 from spiritscout.agents.webvuln import WebVulnAgent
@@ -80,18 +82,20 @@ def classify_challenge(challenge: dict[str, Any]) -> str:
 def _candidate_directions(ch: dict[str, Any]) -> list[str]:
     """按赛题形态列出可用解题方向（优先级序，去重保序）——重攻轮换角度用。
 
-    只列该形态下真正说得通的方向（有 URL 才是 web/misc 的场，二进制附件
-    才谈 pwn/reverse），不摆一套对本题无意义的通用清单。
+    只列该形态下真正说得通的方向：misc 的场是附件（其专属工具面依赖
+    附件与编码/隐写），pwn/reverse 的场是二进制附件；纯 URL 的 Web 题
+    不轮换到杂项——方向试尽即回主方向重开对话换角度（新会话不带旧
+    对话的偏见），分支并行在主方向内部以多路线展开。
     """
     order = [classify_challenge(ch)]
-    if str(ch.get("url") or "").startswith(("http://", "https://")):
-        order += ["web", "misc"]
     names = [str(a).lower() for a in ch.get("attachments", [])]
     if any(n.endswith((".elf", ".bin", ".exe", ".out", ".so")) for n in names):
-        order += ["pwn", "reverse", "misc"]
-    elif names:
-        order += ["misc", "crypto", "reverse"]
-    order += ["misc"]
+        order += ["pwn", "reverse"]
+    if names:
+        order += ["misc", "crypto"]
+    if (str(ch.get("url") or "").startswith(("http://", "https://"))
+            and classify_challenge(ch) != "web"):
+        order += ["web"]          # 有 URL 但主判非 Web：Web 视角兜底
     seen: set[str] = set()
     out: list[str] = []
     for d in order:
@@ -105,8 +109,9 @@ def _parallel_directions(ch: dict[str, Any]) -> list[str]:
     """首轮并行方向：默认单方向起步，第二个方向必须有本方向的专属线索面。
 
     misc 的场是附件与编码/隐写类题面（其专属工具 deep_strings 依赖附件）；
-    纯 URL 题并行 misc 只会让两个 Agent 打同一入口做同质重复功，杂项视角
-    留给重攻轮换角度（_candidate_directions）。
+    纯 URL 题不并行杂项、重攻时也不轮换到杂项（没有附件就没有杂项的
+    专属线索面）——并行分支在主方向内部以多路线展开（路线预算由灵枢
+    按复杂度裁定，分支共享现场相互接力）。
     """
     primary = classify_challenge(ch)
     has_url = str(ch.get("url") or "").startswith(("http://", "https://"))
@@ -208,10 +213,14 @@ class ModeAssembler:
         return ModeAssembly(
             mode=RunMode.SRC,
             agents={
+                AgentType.BUSINESS_CONTEXT: BusinessContextAgent(self.ctx, **self.kw),
                 AgentType.RECON: ReconAgent(self.ctx, **self.kw),
+                AgentType.PORT_SCAN: PortScanAgent(self.ctx, **self.kw),
                 AgentType.WEB_VULN: WebVulnAgent(self.ctx, **self.kw),
+                AgentType.HOST_VULN: HostVulnAgent(self.ctx, **self.kw),
+                AgentType.POST_EXPLOIT: PostExploitAgent(self.ctx, **self.kw),
             },
-            notes=["SRC 模式：侦察 → Web 探测 → 全链路核验 → 报告"],
+            notes=["SRC 模式：业务体验 → 侦察/测绘 → 主机审计 → Web 探测 → 横向 → 全链路核验 → 报告"],
         )
 
     # ------------------------------------------------------------ CTF
@@ -281,8 +290,12 @@ class ModeAssembler:
             assembly.notes.append("靶场渗透赛：常规渗透链路，提交切换为赛方接口（5.3.4）")
         else:  # AWD：攻击线（含端口扫描，赛方授权段内）+ 防守线骨架
             agents: dict[AgentType, SubAgent] = {
+                AgentType.BUSINESS_CONTEXT: BusinessContextAgent(self.ctx, **self.kw),
                 AgentType.RECON: ReconAgent(self.ctx, **self.kw),
+                AgentType.PORT_SCAN: PortScanAgent(self.ctx, **self.kw),
                 AgentType.WEB_VULN: WebVulnAgent(self.ctx, **self.kw),
+                AgentType.HOST_VULN: HostVulnAgent(self.ctx, **self.kw),
+                AgentType.POST_EXPLOIT: PostExploitAgent(self.ctx, **self.kw),
             }
             assembly = ModeAssembly(
                 mode=RunMode.COMPETITION, agents=agents,

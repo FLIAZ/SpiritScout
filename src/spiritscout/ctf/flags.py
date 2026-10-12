@@ -100,6 +100,28 @@ class FlagManager:
             self._persist()
         return new_candidates
 
+    def register(self, value: str, *, challenge_id: str,
+                 found_by: str) -> FlagCandidate | None:
+        """登记模型判定提交的 Flag 值（判定权在模型；去重；格式匹配只作登记信息）。
+
+        与 extract() 的正则扫描不同：这里不做任何内容判断——模型带着证据
+        来提交什么就登记什么，格式匹配与否仅记录在 format_ok 供人工复核。
+        """
+        value = str(value or "").strip()
+        if not value or value in self._flags:
+            return None
+        cand = FlagCandidate(
+            flag_id=new_id("flag"), challenge_id=challenge_id, value=value,
+            format_ok=bool(extract_flags(value, self.patterns)), found_by=found_by,
+        )
+        self._flags[value] = cand
+        self.audit.log("flag.registered", "flag_manager", {
+            "flag_id": cand.flag_id, "challenge_id": challenge_id,
+            "found_by": found_by, "format_ok": cand.format_ok,
+            "value_preview": value[:12] + "..."})
+        self._persist()
+        return cand
+
     # ------------------------------------------------------------ 提交
 
     async def submit(self, cand: FlagCandidate) -> FlagCandidate:

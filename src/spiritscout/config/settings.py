@@ -73,7 +73,6 @@ class BlackboardConfig(BaseModel):
 class GatewayConfig(BaseModel):
     """多模型网关：预算与协作策略（4.9、6.10）。"""
 
-    default_tier: str = "fast"
     budget_tokens: int = Field(default=2_000_000, description="运行预算 token 硬顶（超顶熔断）")
     budget_usd: float = Field(default=20.0, description="运行预算美元硬顶")
     mode_budget_tokens: dict[str, int] = Field(
@@ -123,9 +122,14 @@ class ReportConfig(BaseModel):
 class WebConfig(BaseModel):
     """Web 控制台。"""
 
-    host: str = "127.0.0.1"               # 默认仅回环；非回环绑定启动时打印显著警告
+    host: str = "127.0.0.1"               # 默认仅回环
     port: int = 8000
     max_concurrent_sessions: int = Field(default=4, description="并发会话上限（信号量）")
+    remote_auth_required: bool = Field(
+        default=True, description="非回环绑定必须配置管理密码，否则拒绝启动")
+    password_env: str = Field(
+        default="SPIRITSCOUT_SERVER_PASSWORD",
+        description="管理密码所在环境变量；配置后本机访问也要求 Basic Auth")
 
 
 class McpServerConfig(BaseModel):
@@ -146,6 +150,14 @@ class McpServerConfig(BaseModel):
     url: str = ""                         # http：MCP 端点
     headers: dict[str, str] = Field(default_factory=dict)
     timeout: float = 180.0                # 单次工具调用硬顶（秒）
+    default_risk: Literal["readonly", "intrusive", "destructive"] = "intrusive"
+    scope_enforcement: Literal["required", "best_effort", "none"] = Field(
+        default="required",
+        description="required=无法从参数提取目标时拒绝；best_effort=有目标才校验；none=纯本地分析")
+    target_params: list[str] = Field(
+        default_factory=lambda: [
+            "url", "urls", "target", "targets", "host", "ip", "domain", "endpoint"],
+        description="若 MCP 工具 schema 含这些参数，调用前必须通过 ScopeGuard")
     enabled: bool = True
 
 
@@ -219,7 +231,6 @@ class ModelEntry(BaseModel):
     base_url: str = ""
     api_key: str = ""                     # 由供应商合并而来（密钥库注入）
     api_format: Literal["auto", "chat_completions", "responses", "anthropic_messages"] = "auto"
-    tier: str = "fast"                    # flagship / fast / code / rigorous / light
     capabilities: list[str] = Field(default_factory=list)  # reasoning/code/chinese/security
     context_window: int = 0               # 上下文窗口（token）；0 = 未声明
     # 思考强度取值：由每个模型自行声明（如 low/medium/high，或某模型特有的

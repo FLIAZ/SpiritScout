@@ -1,4 +1,4 @@
-# 灵探 SpiritScout CTF WriteUp
+# 灵枢 SpiritScout CTF WriteUp
 
 > 生成时间：{{ generated_at }}{% if context.contest_type %} ｜ 赛制：{{ context.contest_type }}{% endif %}
 
@@ -18,6 +18,7 @@
 
 {% if ch.category %}- **考点**：{{ ch.category }}
 {% endif %}- **入口**：{% if ch.url %}`{{ ch.url }}`{% else %}附件/题面{% endif %}
+
 {% set flags = flags_by_challenge.get(ch.id|string, []) %}
 {% if flags %}
 {% for f in flags %}

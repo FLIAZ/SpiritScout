@@ -642,6 +642,31 @@ class MockBackend(ChatBackend):
         if role == "response_analyst":
             # 步骤分析：mock 不做幻觉信号（保守空集）；LLM 信号路径由单测覆盖
             return json.dumps({"signals": []}, ensure_ascii=False)
+        if role == "business_analyst":
+            try:
+                evidence = list(json.loads(user).get("evidence") or [])
+            except ValueError:
+                evidence = []
+            page_refs = [item.get("id") for item in evidence
+                         if item.get("kind") == "page" and item.get("id")]
+            tx_refs = [item.get("id") for item in evidence
+                       if item.get("kind") == "har_transaction" and item.get("id")]
+            facts = ([{"statement": "已观测到公开入口与页面导航",
+                       "evidence_refs": page_refs[:3]}] if page_refs else [])
+            workflows = ([{"name": "公开页面访问路径",
+                           "steps": ["按页面中实际导航访问公开功能"],
+                           "evidence_refs": page_refs[:8]}] if page_refs else [])
+            if tx_refs:
+                workflows.append({
+                    "name": "HAR 中已观测的 HTTP 交易顺序",
+                    "steps": ["按 HAR 首次出现顺序访问端点"],
+                    "evidence_refs": tx_refs[:8],
+                })
+            return json.dumps({
+                "roles": [], "objects": [], "workflows": workflows,
+                "trust_boundaries": [], "facts": facts, "hypotheses": [],
+                "unknowns": ["离线 mock 不推断未观测的账号角色与权限"],
+            }, ensure_ascii=False)
         if role == "path_planner":
             return json.dumps({"paths": [], "rationale": "mock：无新增"},
                               ensure_ascii=False)

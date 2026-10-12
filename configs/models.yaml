@@ -19,13 +19,18 @@ models:
 - model: ark-code-latest
   provider_ref: ark
   tier: flagship
+  context_window: 0
+  reasoning_effort_levels:
+  - low
+  - medium
+  - high
+  - xhigh
+  - max
   capabilities:
   - reasoning
   - code
   - chinese
   - security
-  context_window: 0
-  reasoning_effort_levels: []
   cost_input_per_mtok: 0.8
   cost_output_per_mtok: 2
   rate_limit_rpm: 300
@@ -41,7 +46,8 @@ models:
   - high
   - xhigh
   - max
-  capabilities: []
+  capabilities:
+  - text
   cost_input_per_mtok: 0
   cost_output_per_mtok: 0
   rate_limit_rpm: 60

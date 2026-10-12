@@ -14,17 +14,20 @@ import asyncio
 import contextlib
 import json
 import operator
+import time
 from dataclasses import dataclass, field
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, StateGraph
 
 from spiritscout.agents.master.dag import TaskDAG
+from spiritscout.agents.profiles import agent_system_prompt, get_profile
 from spiritscout.agents.sub.base import SubAgent
 from spiritscout.blackboard import ConvergenceEngine
 from spiritscout.blackboard.store import Blackboard
 from spiritscout.bus.base import EventBus
 from spiritscout.core.audit import AuditLogger, NullAuditLogger
+from spiritscout.core.exceptions import SpiritScoutError
 from spiritscout.core.ids import new_id
 from spiritscout.core.models import (
     AgentType,
@@ -36,13 +39,16 @@ from spiritscout.core.models import (
 )
 from spiritscout.gateway import ModelGateway
 from spiritscout.gateway.backends import extract_json
-from spiritscout.gateway.registry import TASK_TIER_MAP
 from spiritscout.policy.engine import PolicyEngine
 
 # 战术 → 子 Agent 映射（3.3.6 子Agent↔战术映射；MVP 装配 recon/web_vuln）
 TACTIC_AGENT_MAP: dict[str, tuple[AgentType, str]] = {
+    "BUSINESS-CONTEXT": (AgentType.BUSINESS_CONTEXT, "business_context"),
     "TA0043": (AgentType.RECON, "recon"),          # 侦察
     "TA0001": (AgentType.WEB_VULN, "web_probe"),   # 初始访问（T1190 Web 打点）
+    "TA0007": (AgentType.PORT_SCAN, "port_scan"),  # 发现（端口与服务测绘）
+    "HOST-VULN": (AgentType.HOST_VULN, "host_probe"),  # 主机与服务审计
+    "TA0006": (AgentType.POST_EXPLOIT, "post_exploit"),  # 凭据线索与横向测绘
 }
 
 
@@ -137,7 +143,16 @@ class MasterAgent:
             "stop_reason": "",
             "plan_source": "",
         }
-        final = await self._graph.ainvoke(initial)
+        # 用户直达通道：与派发/督导隔离，整场运行期间并行消费用户消息
+        chat_task = (asyncio.create_task(self._user_chat_watch())
+                     if self.ctx.enable_llm_planning else None)
+        try:
+            final = await self._graph.ainvoke(initial)
+        finally:
+            if chat_task is not None:
+                chat_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await chat_task
         final_dag = TaskDAG.from_dict(final["dag"])
         summary = {
             "target": target,
@@ -170,6 +185,8 @@ class MasterAgent:
                 if plan is None:
                     plan = self._rule_plan(state)
                     plan_source = "rule"
+            plan["dag_nodes"] = self._ensure_business_gate(
+                plan.get("dag_nodes", []))
             created = dag.upsert_from_plan(plan.get("dag_nodes", []), round_no)
             ctx.audit.log("decision.change", self.agent_id, {
                 "action": "meta_plan", "round": round_no, "source": plan_source,
@@ -196,7 +213,6 @@ class MasterAgent:
                 dag.mark(node.node_id, TaskStatus.CANCELLED)
                 node.meta["skip_reason"] = "agent_not_assembled"
                 continue
-            attack_paths = self._kb_attack_paths(node.tactic)
             # 赛题绑定：规划器节点自带；复盘新增节点按 id 匹配/单题沿用，
             # 保证 CTF 任务永远带着赛题载荷下发（载荷为空的节点无题可解）
             challenge = node.meta.get("challenge") or self._bind_challenge(dag, node)
@@ -209,13 +225,9 @@ class MasterAgent:
                 parent_dag_node=node.node_id,
                 payload={"tactic": node.tactic, "technique": node.technique or "",
                          "node_title": node.title,
-                         "attack_paths": attack_paths,
+                         "mission": self._mission(),
                          "challenge": challenge or None},
             )
-            if attack_paths:
-                ctx.audit.log("kb.guidance", self.agent_id, {
-                    "task_id": task.task_id, "tactic": node.tactic,
-                    "attack_paths": [p["path_id"] for p in attack_paths]})
             dag.attach_task(node.node_id, task.task_id)
             dag.mark(node.node_id, TaskStatus.RUNNING)
             task_objs.append((task, node.node_id))
@@ -263,8 +275,7 @@ class MasterAgent:
                 task.agent_type.value, "") or "")
         if bound and registry.has(bound):
             return list(registry.get(bound).reasoning_effort_levels)
-        entries = (registry.find_by_tier(TASK_TIER_MAP.get("execution", "fast"))
-                   or registry.all())
+        entries = registry.all()
         out: list[str] = []
         for e in entries:
             for level in e.reasoning_effort_levels:
@@ -275,9 +286,9 @@ class MasterAgent:
     async def _assign_dispatch_plan(self, task_objs: list[tuple[Task, str]]) -> None:
         """下发前决策（灵枢）：按任务复杂度裁定并发分支路线预算与思考强度。
 
-        路线预算 1~8：LLM 建议，规则只做边界钳制（防扇出失控）。CTF 解题任务
-        的路线预算固定为 1（单线起步，未破题由复盘轮换角度重攻）——但思考
-        强度仍由 LLM 裁定，解题环正是 token 消耗大头。
+        路线预算 1~8：LLM 建议，规则只做边界钳制（防扇出失控）——解题任务
+        同样按题面信息量与线索面发散并行分支（分支共享现场相互接力，任一
+        分支夺旗其余收尾）。
         思考强度：取值必须落在该任务可用模型自己声明的档位内（见
         _effort_options；各模型档位不同，后端不预设候选）；模型没声明就只能
         留空（用端点默认档），裁定结果非法则丢弃并留痕，不猜、不代填。
@@ -289,31 +300,16 @@ class MasterAgent:
         digest = []
         options: dict[int, list[str]] = {}
         for i, (t, _) in enumerate(task_objs):
-            if t.task_type == "ctf_solve":
-                t.max_routes = 1          # 单线起步是策略，不是复杂度判断
             levels = self._effort_options(t)
             options[i] = levels
             digest.append({
                 "index": i, "task_type": t.task_type, "agent": t.agent_type.value,
                 "target": t.target, "title": str(t.payload.get("node_title", "")),
-                "route_budget_fixed": 1 if t.task_type == "ctf_solve" else None,
                 "effort_options": levels,
                 "challenge": {k: v for k, v in (t.payload.get("challenge") or {}).items()
                               if k in ("title", "direction", "category", "points",
                                        "description")},
             })
-        # 无可裁量项即不调用模型（省一次往返，不损质量——没有选择就没有决策）：
-        # 全部为 CTF 解题任务（路线预算固定）且每个任务的可用模型至多一个
-        # 思考档位（或未声明，用端点默认档）
-        if (all(t.task_type == "ctf_solve" for t, _ in task_objs)
-                and all(len(opts) <= 1 for opts in options.values())):
-            for i, (t, _) in enumerate(task_objs):
-                if options[i]:
-                    t.reasoning_effort = options[i][0]
-            ctx.audit.log("decision.change", self.agent_id, {
-                "action": "dispatch_plan_skipped", "count": len(task_objs),
-                "reason": "路线预算固定且思考档位无可选空间，按声明档直接采用"})
-            return
         try:
             resp = await ctx.gateway.chat(
                 [
@@ -324,8 +320,7 @@ class MasterAgent:
                         "constraints": (
                             "先判断每个任务的复杂度，再据此给出：并发分支路线预算"
                             " route_budget（1~8 的整数；复杂/高价值目标 5~8，常规 "
-                            "3~4，简单/窄面 1~2；route_budget_fixed 非空的任务此项"
-                            "固定，不用给）与思考强度 reasoning_effort。"
+                            "3~4，简单/窄面 1~2）与思考强度 reasoning_effort。"
                             "reasoning_effort 只能从该任务自己的 effort_options 里"
                             "原样挑一个——各模型支持的档位不同，选项就是该任务可用"
                             "模型的真实档位，列表为空表示该模型不吃思考强度，此时"
@@ -364,14 +359,11 @@ class MasterAgent:
             if item is None:
                 continue
             record: dict[str, Any] = {"task_id": t.task_id}
-            if t.task_type != "ctf_solve":
-                try:
-                    t.max_routes = max(1, min(int(item["route_budget"]), 8))
-                    record["route_budget"] = t.max_routes
-                except (KeyError, TypeError, ValueError):
-                    record["route_budget"] = None
-            else:
+            try:
+                t.max_routes = max(1, min(int(item["route_budget"]), 8))
                 record["route_budget"] = t.max_routes
+            except (KeyError, TypeError, ValueError):
+                record["route_budget"] = None
             want = str(item.get("reasoning_effort") or "").strip()
             if want and want in options[i]:
                 t.reasoning_effort = want
@@ -424,9 +416,6 @@ class MasterAgent:
         round_specs = [t for t in state["tasks_dispatched"]
                        if Task.model_validate(t["task"]).round_no == state["round_no"]]
         round_tasks = [Task.model_validate(s["task"]) for s in round_specs]
-        for t in round_tasks:
-            if t.task_type == "ctf_solve":
-                t.max_routes = 1          # 单线起步是策略，先于执行落定（无竞态）
 
         async def _run_one(spec: dict[str, Any], task: Task) -> tuple[str, bool]:
             agent = ctx.agents[task.agent_type]
@@ -451,9 +440,8 @@ class MasterAgent:
         # 按全局态势给方向建议（建议经环形台账投递，子 Agent 在 LLM 决策上下文消费）
         watch = None
         if ctx.ring is not None and ctx.enable_llm_planning and round_tasks:
-            watch = asyncio.create_task(self._steering_watch(
-                [t.task_id for t in round_tasks],
-                agents=[t.agent_type.value for t in round_tasks]))
+            watch = asyncio.create_task(
+                self._steering_watch([t.task_id for t in round_tasks]))
         try:
             results = await asyncio.gather(
                 *(_run_one(s, t) for s, t in zip(round_specs, round_tasks)))
@@ -472,14 +460,121 @@ class MasterAgent:
         self._write_dag_snapshot(dag)
         return {"dag": dag.to_dict()}
 
+    # ------------------------------------------------------------ 用户直达通道
+
+    _CHAT_INTERVAL = 1.0      # 消息轮询节拍（秒）——用户消息 1s 内直达灵枢
+    _CHAT_HISTORY_MAX = 12    # 灵枢↔用户对话保留轮数（独立上下文，不占派发）
+
+    async def _user_chat_watch(self) -> None:
+        """用户 ↔ 灵枢的即时对话通道（与子 Agent 的派发/督导完全隔离）。
+
+        用户会话中发来的消息 1 秒内直达灵枢，不等待子 Agent 的回合边界：
+        灵枢在自己的独立对话里直接回答用户（reply 经审计流实时可见），
+        需要子 Agent 调整方向或分析新附件时经环形台账下发建议——子 Agent
+        在其下一回合消费（执行中的模型调用无法被打断，这是两条通道之间
+        唯一的交接点）。通道失败不影响主链路。
+        """
+        assert self.ctx.audit is not None
+        history: list[dict[str, str]] = []
+        while True:
+            await asyncio.sleep(self._CHAT_INTERVAL)
+            feed = self._drain_user_feed()
+            if not feed:
+                continue
+            messages = [str(item.get("text") or "").strip()
+                        for item in feed if isinstance(item, dict)]
+            messages = [m for m in messages if m]
+            attachments = [str(item.get("path"))
+                           for item in feed if isinstance(item, dict)
+                           and item.get("path")]
+            if not messages and not attachments:
+                continue
+            reply, steering = await self._llm_user_chat(
+                messages, attachments, history)
+            for message in messages:
+                history.append({"role": "user", "content": message[:1000]})
+            if not reply:
+                # 应答失败也要给用户可见的回执（意见内容已留在意见流不丢失）
+                reply = ("已收到你的消息并转达给执行中的智能体；灵枢应答通道"
+                         "暂时不可用，稍后会继续跟进。")
+            history.append({"role": "assistant", "content": reply[:2000]})
+            del history[:-self._CHAT_HISTORY_MAX]
+            self.ctx.audit.log("master.reply", self.agent_id, {
+                "text": reply[:4000]})
+            # 应答落黑板：拓扑图「你 → 灵枢」节点的回执数据源
+            with contextlib.suppress(Exception):
+                self.ctx.blackboard.write(
+                    BlackboardLayer.TOPOLOGY, new_id("reply"),
+                    {"kind": "reply", "text": reply[:1000],
+                     "about": messages[0][:300] if messages else "",
+                     "ts": time.time()},
+                    agent_type=AgentType.MASTER, updated_by=self.agent_id,
+                    dedup_key=f"reply|{time.time()}")
+            for item in steering:
+                self.ctx.ring.steer(item["agent"], item["hint"],
+                                    rationale=item.get("rationale", ""))
+            if steering:
+                self.ctx.audit.log("decision.change", self.agent_id, {
+                    "action": "user_chat_steering", "count": len(steering)})
+
+    async def _llm_user_chat(self, messages: list[str], attachments: list[str],
+                             history: list[dict[str, str]]
+                             ) -> tuple[str, list[dict[str, str]]]:
+        """灵枢回答用户（独立上下文）：直接答复 + 可选的子 Agent 方向建议。"""
+        roster = "；".join(
+            f"{get_profile(agent_type).name}({agent_type.value})"
+            for agent_type in self.ctx.agents)
+        payload = {
+            "mission": self._mission()[:1000],
+            "agents": [a.value for a in self.ctx.agents],
+            "roster": roster,
+            "chat_history": history[-self._CHAT_HISTORY_MAX:],
+            "new_messages": messages,
+            "attachments": attachments,
+            "constraints": (
+                "你是灵枢，安全测试负责人。用户在会话进行中直接向你发消息，"
+                "这条对话与子 Agent 的执行互不干扰。reply 用简洁的中文直接"
+                "回答用户：确认收到指导意见、回答疑问、简述当前态势与下一步"
+                "打算。需要子 Agent 调整方向或分析新上传的附件时，同时在 "
+                "steering 里给出建议（agent 必须取自 agents 列表，hint 一句话，"
+                "涉及附件写明文件路径，子 Agent 可直接读取）；无需调整则 "
+                "steering 给空列表。返回 JSON：{\"reply\": str, \"steering\": "
+                "[{\"agent\": str, \"hint\": str, \"rationale\": str}]}"),
+        }
+        try:
+            resp = await self.ctx.gateway.chat(
+                [
+                    {"role": "system", "content": self._system_prompt()
+                     + "\nROLE: user_chat"},
+                    {"role": "user",
+                     "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+                task_type="meta_planning", response_format="json",
+                reasoning_effort="low",   # 对话应答要快，不与重推理抢档
+            )
+            data = extract_json(resp.content) or {}
+            reply = str(data.get("reply") or "").strip()[:4000]
+            valid = {a.value for a in self.ctx.agents}
+            steering = [
+                {"agent": str(i["agent"]), "hint": str(i["hint"])[:300],
+                 "rationale": str(i.get("rationale", ""))[:200]}
+                for i in (data.get("steering") or [])
+                if isinstance(i, dict) and i.get("agent") in valid
+                and isinstance(i.get("hint"), str) and i["hint"].strip()]
+            return reply, steering
+        except (SpiritScoutError, OSError, ValueError, TypeError) as exc:
+            # 对话通道失败不影响主链路，但留痕可见
+            self.ctx.audit.log("master.reply_failed", self.agent_id,
+                               {"error": str(exc)[:200]})
+            return "", []
+
     # ------------------------------------------------------------ 环形督导
 
     _STEER_INTERVAL = 2.0   # 观察节拍（秒）；无进展变化不调用 LLM
     _STEER_MAX_CALLS = 3    # 单轮派发内督导 LLM 调用上限（预算护栏）
-    _STEER_FEED_MAX_CALLS = 6   # 用户意见触发的督导调用单独预算（不挤占自动督导）
 
     def _drain_user_feed(self) -> list[dict[str, Any]]:
-        """取走用户会话中发来的意见与附件记录（不重不漏地抵达一个决策点）。"""
+        """取走用户会话中发来的消息与附件记录（用户直达通道的消费点）。"""
         inbox = self.ctx.extra.get("user_inbox")
         if not inbox:
             return []
@@ -487,47 +582,28 @@ class MasterAgent:
         inbox.clear()
         return items
 
-    def _return_user_feed(self, feed: list[dict[str, Any]]) -> None:
-        """决策调用失败时把用户意见原样退回收件箱（不丢用户的话）。"""
-        if feed:
-            self.ctx.extra.setdefault("user_inbox", [])[:0] = feed
-
-    async def _steering_watch(self, task_ids: list[str],
-                              agents: list[str] | None = None) -> None:
-        """派发期并发督导：读各任务实时路线笔记 + 用户发来的意见 → LLM 判读
-        全局 → 写方向建议。
+    async def _steering_watch(self, task_ids: list[str]) -> None:
+        """派发期并发督导：读各任务实时路线笔记 → LLM 判读全局 → 写方向建议。
 
         确定性边界：本函数只做「读进度、问模型、投递建议」；建议是否采纳由
         子 Agent 的 LLM 在其决策上下文中自行权衡，执行仍走原确定性通道。
-        用户意见优先于进度摘要：每个节拍先取意见——即使首份实时进度还没落
-        到黑板（摘要为空时按派发的 Agent 名单兜底路由），意见也会在本节拍内
-        被消费，不会滞留在收件箱。用户意见绕过进度指纹门（意见本身就是新
-        信息），预算单独计；模型不可用/输出不合规 → 意见退回收件箱留给
-        下一个决策点，不丢。
+        用户消息不在这里消费——它们走独立的直达通道（_user_chat_watch），
+        两条通道并行互不阻塞。
         """
         assert self.ctx.audit is not None
         last_fingerprint = ""
         calls = 0
-        feed_calls = 0
-        agent_fallback = sorted({a for a in (agents or []) if a})
         while True:
             await asyncio.sleep(self._STEER_INTERVAL)
-            feed = (self._drain_user_feed()
-                    if feed_calls < self._STEER_FEED_MAX_CALLS else [])
             digest = self._progress_digest(task_ids)
-            if not feed and not digest["tasks"]:
+            if not digest["tasks"]:
                 continue
             fingerprint = json.dumps(digest, ensure_ascii=False, sort_keys=True)
-            if not feed and (fingerprint == last_fingerprint
-                             or calls >= self._STEER_MAX_CALLS):
+            if fingerprint == last_fingerprint or calls >= self._STEER_MAX_CALLS:
                 continue
             last_fingerprint = fingerprint
-            steering = await self._llm_steer(digest, user_feed=feed,
-                                             agent_fallback=agent_fallback)
-            if feed:
-                feed_calls += 1
-            else:
-                calls += 1
+            steering = await self._llm_steer(digest)
+            calls += 1
             for item in steering:
                 self.ctx.ring.steer(item["agent"], item["hint"],
                                     rationale=item.get("rationale", ""))
@@ -583,22 +659,11 @@ class MasterAgent:
                 })
         return routes
 
-    async def _llm_steer(self, digest: dict[str, Any],
-                         user_feed: list[dict[str, Any]] | None = None,
-                         *,
-                         agent_fallback: list[str] | None = None
-                         ) -> list[dict[str, Any]]:
-        """LLM 判读全局进度，产出需调整方向的子 Agent 建议（白名单校验）。
-
-        user_feed：用户会话中发来的意见与附件记录——优先响应；失败原样退回。
-        agent_fallback：实时进度未落到黑板时，按派发名单路由用户意见。
-        """
+    async def _llm_steer(self, digest: dict[str, Any]) -> list[dict[str, Any]]:
+        """LLM 判读全局进度，产出需调整方向的子 Agent 建议（白名单校验）。"""
         valid_agents = sorted({t["agent"] for t in digest["tasks"]
-                               if t.get("agent")}) \
-            or sorted({a for a in (agent_fallback or []) if a})
-        feed = list(user_feed or [])
+                               if t.get("agent")})
         if not valid_agents:
-            self._return_user_feed(feed)
             return []
         try:
             payload: dict[str, Any] = {
@@ -615,18 +680,6 @@ class MasterAgent:
                             "{\"steering\": [{\"agent\": 仅 agents 列表之一, "
                             "\"hint\": 一句话方向建议, \"rationale\": 判断依据}]}"),
             }
-            if feed:
-                payload["user_feed"] = feed
-                payload["constraints"] += (
-                    " user_feed 是用户在会话进行中直接发来的意见（message）与上传的"
-                    "附件（attachment，文件已放在会话工作区 attachments/ 下，子 "
-                    "Agent 可直接读取）。优先响应意见：给出与用户意图一致的方向"
-                    "建议；附件则建议合适的 Agent 尽快分析，hint 里写明文件路径。"
-                    "用户正在等灵枢的反应，除非确实无需调整，不要返回空列表。")
-                if not digest["tasks"]:
-                    payload["constraints"] += (
-                        " progress 为空——本轮尚未产生实时进度，请基于用户意见"
-                        "本身判断该路由给哪个 Agent。")
             resp = await self.ctx.gateway.chat(
                 [
                     {"role": "system", "content": self._system_prompt()
@@ -647,14 +700,8 @@ class MasterAgent:
                 if isinstance(i, dict) and i.get("agent") in valid_agents
                 and isinstance(i.get("hint"), str) and i["hint"].strip()
             ]
-            if feed:
-                assert self.ctx.audit is not None
-                self.ctx.audit.log("decision.change", self.agent_id, {
-                    "action": "user_feed_consumed", "channel": "steering",
-                    "count": len(feed), "hints": len(out)})
             return out
-        except Exception:  # noqa: BLE001 —— 督导失败意见退回，不拖垮派发
-            self._return_user_feed(feed)
+        except Exception:  # noqa: BLE001 —— 督导失败不拖垮派发
             return []
 
     # ------------------------------------------------------------ 节点：汇聚
@@ -663,7 +710,8 @@ class MasterAgent:
         view = self.ctx.convergence.aggregate_round_view(state["round_no"])
         flag_manager = self.ctx.extra.get("flag_manager")
         if flag_manager is not None:
-            view["flags"] = flag_manager.stats()
+            view["flags"] = {**flag_manager.stats(),
+                             "submit_enabled": flag_manager.submit_fn is not None}
         await self.ctx.bus.publish(Event(topic="round.view", data_id=f"round-{state['round_no']}",
                                          source=self.agent_id, payload=view))
         return {"round_views": [view]}
@@ -689,18 +737,15 @@ class MasterAgent:
             stop_reason = "DAG 全部完成且核验流水线清空"
 
         # CTF/渗透赛：骨架路线跑完 ≠ 题解尽——Flag 未收时硬收敛门放行，
-        # 交由 LLM 复盘决定换思路再攻还是收手；连续无进展则由规则引擎熔断
-        if flags_pending and self._ctf_stale_rounds(state) >= 2:
-            stop_reason = "连续 2 轮 Flag 无进展，规则引擎熔断收敛"
-            flags_pending = False
+        # 交由 LLM 复盘决定换思路再攻还是收手；不设「连续无进展熔断」，
+        # 何时收手由模型复盘判断或用户手动停止（后端规则不做进度的刽子手）
 
         # LLM 全局复盘（建议者）；规则引擎裁决：DAG 未竟时否决收敛建议。
-        # 收敛已由规则确定且无用户意见待消费时，复盘建议无从发挥作用——
-        # 直接跳过（省一次往返；建议本就不会被采纳，不损质量）
-        pending_feed = bool(self.ctx.extra.get("user_inbox"))
+        # 规则已确定收敛时复盘建议无从发挥作用——直接跳过（省一次往返）；
+        # 用户消息走独立的直达通道（_user_chat_watch），不在这里消费
         llm_decision = (await self._llm_review(state, view)
-                        if ctx.enable_llm_planning and (not stop_reason or pending_feed)
-                        else None)
+                        if ctx.enable_llm_planning and not stop_reason else None)
+        deferred_replan = False
         if llm_decision and not stop_reason:
             if not llm_decision.get("continue_iteration", False):
                 if dag.has_unfinished():
@@ -718,10 +763,16 @@ class MasterAgent:
                         "action": "llm_nodes_deferred", "round": state["round_no"],
                         "count": len(nodes),
                         "titles": [str(n.get("title", ""))[:80] for n in nodes[:6]]})
+                    # 模式规划器负责生成下一轮的完整节点，因此这里不直接把模型
+                    # 建议写入 DAG；但“延后交给下一轮规划”本身就是继续条件。
+                    # 旧逻辑随后看到 DAG 已清空，反而立刻收敛，导致明确的继续
+                    # 决策永远到不了下一轮。
+                    deferred_replan = bool(nodes)
                 else:
                     dag.upsert_from_plan(nodes, next_round)
 
-        if not stop_reason and not dag.ready_nodes() and not dag.has_unfinished():
+        if (not stop_reason and not deferred_replan
+                and not dag.ready_nodes() and not dag.has_unfinished()):
             if flags_pending:
                 stop_reason = ("Flag 未收且复盘不可用（LLM 未应答/未启用），收敛"
                                if llm_decision is None
@@ -733,6 +784,7 @@ class MasterAgent:
         ctx.audit.log("decision.change", self.agent_id, {
             "action": "review", "round": state["round_no"],
             "continue": continue_iteration, "stop_reason": stop_reason,
+            "deferred_replan": deferred_replan,
             "llm_reason": str((llm_decision or {}).get("reason", ""))[:400],
             "view": view, "verdicts": verdicts})
         return {"dag": dag.to_dict(), "round_no": next_round,
@@ -744,46 +796,6 @@ class MasterAgent:
         """CTF/渗透赛语境且 Flag 尚未收录：硬收敛门让位于 LLM 复盘。"""
         flags = view.get("flags")
         return bool(flags) and not flags.get("accepted")
-
-    @staticmethod
-    def _ctf_stale_rounds(state: MasterState) -> int:
-        """连续无 Flag 进展的轮数（accepted 与 extracted 均无增长）。"""
-        stale = 0
-        last_key: tuple[int, int] | None = None
-        for v in reversed(state["round_views"]):
-            flags = v.get("flags")
-            if not flags:
-                break
-            key = (flags.get("accepted", 0), flags.get("extracted", 0))
-            if last_key is None:
-                last_key = key
-                stale = 1
-                continue
-            if key == last_key:
-                stale += 1
-            else:
-                break
-        return stale
-
-    def _kb_attack_paths(self, tactic: str) -> list[dict[str, Any]]:
-        """按战术检索攻击路径模板注入任务包（3.3.6：related_tactics 用于 DAG 生成）。
-
-        敏感路径（钓鱼/外泄）仅在授权范围显式允许敏感动作时放行；
-        路径为执行参考（步骤标题序列），不替代子 Agent 路线模板。
-        """
-        kb = self.ctx.knowledge
-        if kb is None or not tactic:
-            return []
-        allow_sensitive = bool(
-            getattr(self.ctx.policy.guard.scope, "allow_sensitive_actions", False))
-        paths = kb.attack_paths(include_sensitive=allow_sensitive)
-        matched = [p for p in paths if tactic in p.get("related_tactics", [])]
-        return [
-            {"path_id": p["path_id"], "scenario": p["scenario"],
-             "entry_conditions": p["entry_conditions"],
-             "steps": [s.get("action", "") for s in p.get("step_sequence", [])][:12]}
-            for p in matched[:2]
-        ]
 
     @staticmethod
     def _needs_replan(dag: TaskDAG, state: MasterState) -> bool:
@@ -844,8 +856,12 @@ class MasterAgent:
                         "constraints": (
                             "返回 JSON：{\"analysis\": str, \"dag_nodes\": [{\"tactic\": "
                             "仅可用战术之一, \"title\": str, \"technique\": str, "
-                            "\"depends_on\": [战术]}]}。按当前态势决定下一步最有价值的"
-                            "探测方向；不重复已完成节点。"),
+                            "\"depends_on\": [战术]}]}。每个节点是一个可核验的交付"
+                            "目标——title 写清要产出什么、完成判据是什么（产经验证的"
+                            "结论/证据），不写动作步骤；侦察与扫描是手段，本身不构成"
+                            "目标。按当前态势决定最有价值的交付缺口；不重复已完成"
+                            "节点。有 BUSINESS-CONTEXT 时必须先建立业务上下文，其他"
+                            "安全测试节点依赖它。"),
                     }, ensure_ascii=False)[:8000]},
                 ],
                 task_type="meta_planning", response_format="json",
@@ -895,10 +911,13 @@ class MasterAgent:
             "clues_total": len(clues),
             "clue_types": sorted({str(c["data"].get("clue_type")) for c in clues}),
             "vulns_by_status": by_status,
+            "business_context": (
+                self.ctx.blackboard.read(BlackboardLayer.TOPOLOGY, "business-context")
+                or {}
+            ),
         }
 
     async def _llm_review(self, state: MasterState, view: dict) -> dict[str, Any] | None:
-        feed = self._drain_user_feed()
         try:
             tactic_map = self.ctx.tactic_map or TACTIC_AGENT_MAP
             payload: dict[str, Any] = {
@@ -917,17 +936,16 @@ class MasterAgent:
                             "round_routes 是各子 Agent 路线的执行笔记（观察与结论），"
                             "据此判断还有哪些未试过的方向；笔记含「LLM 不可用/调查"
                             "停摆」属基础设施问题而非无解题空间——应继续迭代重试。"
+                            "本题未配置提交接口时（flags.submit_enabled=false），"
+                            "submitted/accepted 恒为 0 属正常：Flag 已提取即战果，"
+                            "由用户人工提交，不要为提交状态发起新节点。"
+                            "新节点按可核验交付物描述——title 写清要产出什么、完成"
+                            "判据是什么，不写动作步骤。"
                             "若 Flag/核心目标未收且仍有未试过的思路，"
                             "continue_iteration=true 并给出换思路的新节点"
                             "（dag_nodes 必填，否则等于收手）；"
                             "确认无解题空间时 continue_iteration=false 并说明理由。"),
             }
-            if feed:
-                payload["user_feed"] = feed
-                payload["constraints"] += (
-                    " user_feed 是用户在会话中发来的意见与上传的附件（attachment "
-                    "的文件在工作区 attachments/ 下，构造新节点时可在 title 里点明"
-                    "分析目标）。请优先结合用户意图决策。")
             resp = await self.ctx.gateway.chat(
                 [
                     {"role": "system", "content": self._system_prompt() + "\nROLE: meta_planner"},
@@ -937,25 +955,53 @@ class MasterAgent:
                 reasoning_effort=self._MASTER_EFFORT,
             )
             data = extract_json(resp.content)
-            if feed:
-                assert self.ctx.audit is not None
-                self.ctx.audit.log("decision.change", self.agent_id, {
-                    "action": "user_feed_consumed", "channel": "review",
-                    "count": len(feed)})
             return data
         except Exception:  # noqa: BLE001
-            self._return_user_feed(feed)
             return None
 
     def _rule_plan(self, state: MasterState) -> dict[str, Any]:
-        """规则化初始规划（LLM 不可用兜底）：侦察 → Web 漏洞探测。"""
+        """规则化初始规划：业务体验 → 侦察 → 端口测绘 → 主机审计 → Web 探测 → 横向。"""
         return {
-            "analysis": "规则规划：按 ATT&CK 战术拆解 TA0043→TA0001",
+            "analysis": "规则规划：先建立业务上下文，再按证据做测绘与漏洞验证",
             "dag_nodes": [
-                {"tactic": "TA0043", "title": "侦察与资产测绘", "depends_on": []},
-                {"tactic": "TA0001", "title": "Web 漏洞探测（T1190）", "depends_on": ["TA0043"]},
+                {"tactic": "BUSINESS-CONTEXT", "title": "体验正常业务流程并建立上下文",
+                 "depends_on": []},
+                {"tactic": "TA0043", "title": "侦察与资产测绘",
+                 "depends_on": ["BUSINESS-CONTEXT"]},
+                {"tactic": "TA0007", "title": "端口与服务测绘",
+                 "depends_on": ["TA0043"]},
+                {"tactic": "HOST-VULN", "title": "主机与服务暴露面审计",
+                 "depends_on": ["TA0007"]},
+                {"tactic": "TA0001", "title": "Web 漏洞探测（T1190）",
+                 "depends_on": ["BUSINESS-CONTEXT"]},
+                {"tactic": "TA0006", "title": "凭据线索与横向测绘",
+                 "depends_on": ["HOST-VULN"]},
             ],
         }
+
+    def _ensure_business_gate(self, plan_nodes: list[Any]) -> list[dict[str, Any]]:
+        """SRC 编队强制先体验业务；CTF 等未装配该角色的模式保持原计划。"""
+        tactic_map = self.ctx.tactic_map or TACTIC_AGENT_MAP
+        if (AgentType.BUSINESS_CONTEXT not in self.ctx.agents
+                or "BUSINESS-CONTEXT" not in tactic_map):
+            return [node for node in plan_nodes if isinstance(node, dict)]
+        clean = [dict(node) for node in plan_nodes if isinstance(node, dict)]
+        business = next(
+            (node for node in clean if node.get("tactic") == "BUSINESS-CONTEXT"),
+            {"tactic": "BUSINESS-CONTEXT", "title": "体验正常业务流程并建立上下文",
+             "depends_on": []},
+        )
+        business["depends_on"] = []
+        ordered = [business]
+        for node in clean:
+            if node.get("tactic") == "BUSINESS-CONTEXT":
+                continue
+            deps = list(node.get("depends_on") or [])
+            if "BUSINESS-CONTEXT" not in deps:
+                deps.insert(0, "BUSINESS-CONTEXT")
+            node["depends_on"] = deps
+            ordered.append(node)
+        return ordered
 
     def _mission(self) -> str:
         """用户任务意图：用户在控制台告诉主 Agent 的自然语言合约/目标。"""
@@ -969,18 +1015,22 @@ class MasterAgent:
             f"用户任务意图（合约范围与目标由用户口述如下，你据此自行决策"
             f"并下发任务给子 Agent）：\n「{mission}」\n"
             if mission else "")
+        actual_agents = [get_profile(agent_type) for agent_type in self.ctx.agents]
+        roster = "；".join(
+            f"{profile.name}({profile.key.value})：{profile.duty}"
+            for profile in actual_agents
+        )
         return (
-            f"你是灵探 SpiritScout 的主 Agent「灵枢」，一次已获授权安全测试的"
-            f"最高决策者。"
+            agent_system_prompt(AgentType.MASTER, allowed)
+            + "\n"
             f"{mission_block}"
             f"你全权决定：战术拆解（可参考 ATT&CK，也可按目标特点自由组合）、"
             f"任务下发与优先级、子 Agent 分工、迭代节奏与收敛时机。"
-            f"依据黑板上的实时态势（资产/线索/漏洞流水线/子 Agent 回报）独立"
+            f"本会话实际装配的执行角色只有：{roster or '无'}。不得虚构未装配角色"
+            f"或声称它们已经执行。依据黑板上的实时态势（业务上下文/资产/线索/"
+            f"漏洞流水线/子 Agent 回报）独立"
             f"判断：走进死路主动换方向，发现高价值线索主动深挖，不必等待用户"
-            f"确认。你麾下的子 Agent 各有专长（侦察/漏洞探测/后渗透/CTF 各方向），"
-            f"把合适的任务交给合适的 Agent，并给足上下文让它们放手执行。"
-            f"不可逾越的边界只有三条：① 一切动作严格限于授权范围 {allowed}；"
-            f"② 不伪造证据、不臆断漏洞——结论必须有可复现证据支撑；"
-            f"③ 预算有限，把算力花在最有价值的方向上。"
+            f"确认。SRC 模式先完成 BUSINESS-CONTEXT；没有观察到的接口、角色、"
+            f"权限和状态转换必须写成信息缺口，不得补猜。"
             f"只输出 JSON。"
         )
