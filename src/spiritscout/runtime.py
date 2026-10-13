@@ -407,6 +407,7 @@ async def _run_master(
     mission: str = "",
     user_inbox: list[dict[str, Any]] | None = None,
     standing_rules: str = "",
+    experience: Any = None,
 ) -> dict[str, Any]:
     """装配主 Agent 并运行多轮闭环，返回 run_summary。"""
     master = MasterAgent(MasterContext(
@@ -426,6 +427,15 @@ async def _run_master(
     ))
     run_summary = await master.run(authorization=infra.authorization, target=target)
     run_summary["model_usage"] = infra.gateway.usage_report()
+
+    # 灵枢收尾提炼经验：从全场审计与结论中提炼解题思维（非步骤），存入经验库
+    if enable_llm_planning and experience:
+        try:
+            await _extract_experience(
+                infra.gateway, experience, run_summary, infra.audit)
+        except (SpiritScoutError, OSError, ValueError, TypeError):
+            pass
+
     run_summary["mode_notes"] = assembly.notes
     if mission:
         run_summary["mission"] = mission
@@ -457,6 +467,47 @@ async def _render_writeup(
     report = ReportAgent(infra.blackboard)
     return report.generate_writeup(challenges, flag_manager.all(), report_path,
                                    context=fallback_context)
+
+
+async def _extract_experience(gateway, experience, run_summary, audit):
+    """灵枢收尾提炼经验：从全场数据中提炼可复用的解题思维（非步骤）。
+
+    不是解题步骤（模型已经会做），而是「这类场景下我学到了什么」——
+    平台特性、绕过手法的适用条件、容易踩的坑。存入全局经验库供
+    后续会话检索。
+    """
+    import json as _json
+
+    from spiritscout.gateway.backends import extract_json
+
+    flags = run_summary.get("flag_stats", {})
+    digest = {
+        "flags": flags,
+        "rounds": run_summary.get("rounds_executed", 0),
+        "target": str(run_summary.get("target", "")),
+    }
+    resp = await gateway.chat(
+        [{"role": "system", "content": (
+            "你是灵枢。一场安全测试刚结束。从以下数据中提炼出 3~5 条"
+            "可复用的解题思维——不是解题步骤（模型已经会做），而是"
+            "「这类场景下我学到了什么」：平台特性、绕过手法的适用条件、"
+            "容易踩的坑、判读信号。每条一句话，独立可复用。"
+            "没有值得提炼的就返回空数组。"
+            '返回 JSON：{"insights": [{"insight": str, "context": str, '
+            '"tags": [str]}]}')},
+         {"role": "user", "content": _json.dumps(digest, ensure_ascii=False)[:6000]}],
+        task_type="meta_planning", response_format="json",
+        max_tokens=1024, reasoning_effort="low",
+        timeout_seconds=60)
+    data = extract_json(resp.content) or {}
+    for item in (data.get("insights") or [])[:5]:
+        if isinstance(item, dict) and item.get("insight"):
+            experience.add(
+                item["insight"][:600],
+                context=item.get("context", "")[:300],
+                tags=item.get("tags", []),
+                source_session=str(run_summary.get("target", "")),
+                source_model="master")
 
 
 def _default_report_path(workspace: Path, prefix: str) -> Path:
@@ -496,7 +547,8 @@ async def run_engagement(
         run_summary = await _run_master(
             infra, assembly, target, enable_llm_planning=enable_llm_planning,
             mission=mission, user_inbox=user_inbox,
-            standing_rules=standing_rules)
+            standing_rules=standing_rules,
+            experience=infra.experience)
 
         # ---- 全链路核验（4.3）：仅 ACCEPTED 漏洞入报告收录池
         # 接入知识库（误报特征/P0~P4 分级/PoC 模板/verify_method 联动）
@@ -573,7 +625,8 @@ async def run_ctf_engagement(
         run_summary = await _run_master(
             infra, assembly, target, enable_llm_planning=enable_llm_planning,
             user_inbox=user_inbox,
-            standing_rules=standing_rules)
+            standing_rules=standing_rules,
+            experience=infra.experience)
 
         # ---- Flag 统一提交（4.4.6：格式校验/去重/频率控制/退避重试）
         submit_stats = await flag_manager.submit_all()
@@ -683,7 +736,8 @@ async def run_competition_engagement(
         run_summary = await _run_master(
             infra, assembly, target, enable_llm_planning=enable_llm_planning,
             user_inbox=user_inbox,
-            standing_rules=standing_rules)
+            standing_rules=standing_rules,
+            experience=infra.experience)
 
         # 靶场/AWD 攻击线产出漏洞 → 全链路核验（4.3， 接入知识库）
         verify_stats: dict[str, int] = {}

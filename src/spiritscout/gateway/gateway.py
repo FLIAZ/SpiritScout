@@ -55,13 +55,22 @@ class BudgetTracker:
     per_model_tokens: dict[str, int] = field(default_factory=dict)
     per_mode_tokens: dict[str, int] = field(default_factory=dict)
     mode: str = ""
+    call_log: list[dict] = field(default_factory=list)
 
-    def record(self, model: str, tokens: int, usd: float) -> None:
+    def record(self, model: str, tokens: int, usd: float, ts: float = 0) -> None:
         self.used_tokens += tokens
         self.used_usd += usd
         self.per_model_tokens[model] = self.per_model_tokens.get(model, 0) + tokens
         if self.mode:
             self.per_mode_tokens[self.mode] = self.per_mode_tokens.get(self.mode, 0) + tokens
+        import time as _t
+        self.call_log.append({
+            "ts": ts or _t.time(), "model": model,
+            "tokens": tokens, "cost_usd": usd, "mode": self.mode})
+
+    def call_series(self) -> list[dict]:
+        """逐笔调用记录（时序图表数据源）。"""
+        return list(self.call_log)
 
 
 class ModelGateway:
@@ -207,7 +216,7 @@ class ModelGateway:
             raw["prompt_tokens"] / 1e6 * entry.cost_input_per_mtok
             + raw["completion_tokens"] / 1e6 * entry.cost_output_per_mtok
         )
-        self.budget.record(entry.model, total_tokens, cost)
+        self.budget.record(entry.model, total_tokens, cost, ts=started)
         self.audit.log(
             "model.call", "gateway",
             {"model": entry.model, "tokens": total_tokens,
@@ -249,6 +258,7 @@ class ModelGateway:
             "per_model_tokens": dict(self.budget.per_model_tokens),
             "per_mode_tokens": dict(self.budget.per_mode_tokens),
             "mode": self.budget.mode,
+            "call_series": self.budget.call_series(),
         }
 
 
