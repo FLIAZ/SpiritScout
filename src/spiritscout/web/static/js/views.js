@@ -106,12 +106,49 @@ function renderDash() {
   const cost = list.reduce((a, x) => a + (x.cost_usd || 0), 0);
   const flagCell = f => !f || !f.total ? "—"
     : (f.submitted ? `${f.accepted}/${f.submitted}` : `${f.total}`);
+
+  // 按天聚合 token（从 call_series 取，或从 session 汇总）
+  const daily = {};
+  for (const x of list) {
+    const day = x.started_at ? new Date(x.started_at * 1000).toISOString().slice(0, 10) : "未知";
+    daily[day] = (daily[day] || 0) + (x.tokens || 0);
+  }
+  const dailyArr = Object.entries(daily).sort((a, b) => a[0].localeCompare(b[0]));
+  const maxDaily = Math.max(...dailyArr.map(([, v]) => v), 1);
+
+  // 按模型聚合
+  const modelAgg = {};
+  for (const x of list) {
+    const mu = x.summary?.run?.model_usage?.per_model_tokens || {};
+    for (const [m, t] of Object.entries(mu))
+      modelAgg[m] = (modelAgg[m] || 0) + t;
+  }
+  const modelArr = Object.entries(modelAgg).sort((a, b) => b[1] - a[1]);
+  const maxModel = Math.max(...modelArr.map(([, v]) => v), 1);
+
+  // 发现台账
+  const findings = (S.cur && S.state && S.state.findings) || [];
+  const exps = (S.state && S.state.experience_insights) || [];
+
   box.innerHTML = `
     <div class="tiles">
       <div class="tile"><span class="tk">token</span><b class="num">${fmtK(tokens)}</b><span class="mu">全部会话累计</span></div>
       <div class="tile"><span class="tk">费用</span><b class="num">$${cost.toFixed(3)}</b><span class="mu">按单价估算</span></div>
       <div class="tile"><span class="tk">会话</span><b class="num">${list.length}</b><span class="mu">${running} 个运行中</span></div>
+      <div class="tile"><span class="tk">Flag</span><b class="num">${list.reduce((a, x) => a + (x.flag_stats?.total || 0), 0)}</b><span class="mu">全部提取</span></div>
     </div>
+    <div class="dash-sec">每日 Token 消耗</div>
+    ${dailyArr.length ? `<div class="bar-chart">${dailyArr.map(([day, t]) => `
+      <div class="bar-row"><span class="bar-label mono">${day}</span>
+        <div class="bar-track"><i style="width:${Math.round(t / maxDaily * 100)}%"></i></div>
+        <span class="bar-val mono">${fmtK(t)}</span></div>`).join("")}</div>`
+      : '<div class="empty-note" style="padding:16px 0">暂无数据</div>'}
+    <div class="dash-sec">按模型消耗</div>
+    ${modelArr.length ? `<div class="bar-chart">${modelArr.map(([m, t]) => `
+      <div class="bar-row"><span class="bar-label mono">${esc(m)}</span>
+        <div class="bar-track"><i style="width:${Math.round(t / maxModel * 100)}%"></i></div>
+        <span class="bar-val mono">${fmtK(t)}</span></div>`).join("")}</div>`
+      : '<div class="empty-note" style="padding:16px 0">暂无模型调用</div>'}
     <div class="dash-sec">会话明细</div>
     ${list.length ? `<table class="list"><thead><tr>
       <th>会话</th><th>模式</th><th>状态</th><th>轮次</th><th>token</th><th>费用</th><th>Flag</th><th>用时</th></tr></thead>
@@ -124,10 +161,16 @@ function renderDash() {
         <td class="mono">$${Number(x.cost_usd || 0).toFixed(3)}</td>
         <td class="mono">${esc(flagCell(x.flag_stats))}</td>
         <td class="mono">${fmtDur(x.started_at, x.finished_at)}</td></tr>`).join("")}</tbody></table>`
-      : '<div class="empty-note">还没有会话——回「任务」页下达第一个任务</div>'}`;
+      : '<div class="empty-note">还没有会话——回「任务」页下达第一个任务</div>'}
+    ${findings.length ? `
+    <div class="dash-sec">最近发现</div>
+    <div class="dash-findings">${findings.slice(-6).reverse().map(f => `
+      <div class="find-card"><span class="fc-tag ${f.type || ""}">${esc(f.type || "")}</span>
+        <span class="fc-txt">${esc(f.text || "")}</span></div>`).join("")}</div>` : ""}`;
   box.querySelectorAll("[data-open]").forEach(row =>
     row.onclick = () => openSession(row.dataset.open));
 }
+
 
 function renderSessionHead() {
   const s = S.state.session;

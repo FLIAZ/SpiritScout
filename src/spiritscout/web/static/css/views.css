@@ -628,6 +628,27 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
 .cap-chips input { accent-color: var(--accent); margin: 0; }
 
 /* ================= 仪表盘 ================= */
+.bar-chart { display: flex; flex-direction: column; gap: 8px; }
+.bar-row { display: grid; grid-template-columns: minmax(80px, 140px) 1fr 60px;
+  gap: 10px; align-items: center; font-size: 12px; }
+.bar-label { font-family: var(--mono); font-size: 11px; color: var(--ink-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+.bar-track { height: 10px; background: var(--surface-2); border-radius: 5px;
+  overflow: hidden; }
+.bar-track i { display: block; height: 100%; background: var(--accent);
+  opacity: .55; border-radius: 5px; transition: width .4s; }
+.bar-val { text-align: right; font-family: var(--mono); font-size: 11px;
+  color: var(--ink-3); }
+.dash-findings { display: flex; flex-direction: column; gap: 6px; }
+.find-card { display: flex; align-items: baseline; gap: 8px; font-size: 12px;
+  padding: 7px 10px; border-radius: 6px; background: var(--surface);
+  border: 1px solid var(--line); }
+.fc-tag { font-family: var(--mono); font-size: 10px; color: var(--accent-ink);
+  flex: none; font-weight: 600; }
+.fc-txt { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; flex: 1; }
+
+/* ================= 仪表盘 ================= */
 .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-bottom: 18px; }
 .tile { background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
   padding: 12px 14px; display: flex; flex-direction: column; gap: 3px; }

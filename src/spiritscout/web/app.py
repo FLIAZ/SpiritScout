@@ -411,6 +411,38 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             raise HTTPException(409, f"待确认项不存在或已裁决: {approval_id}")
         return {"approval_id": approval_id, "allow": allow}
 
+    @app.get("/api/dashboard")
+    async def dashboard_data() -> dict[str, Any]:
+        """仪表盘聚合数据：跨会话 token 消耗、资产总览、关键发现。"""
+        sessions = manager.list()
+        total_tokens = 0
+        total_cost = 0.0
+        running = 0
+        per_model = {}
+        daily = {}
+        for sess in sessions:
+            run = (sess.summary or {}).get("run", {}) if isinstance(sess.summary, dict) else {}
+            mu = run.get("model_usage", {})
+            t = mu.get("used_tokens", 0)
+            c = mu.get("used_usd", 0.0)
+            total_tokens += t
+            total_cost += c
+            if sess.status == "running":
+                running += 1
+            for m, mt in (mu.get("per_model_tokens") or {}).items():
+                per_model[m] = per_model.get(m, 0) + mt
+            for ev in mu.get("call_series", []):
+                day = time.strftime("%Y-%m-%d", time.gmtime(ev.get("ts", 0)))
+                daily[day] = daily.get(day, 0) + ev.get("tokens", 0)
+        return {
+            "total_tokens": total_tokens,
+            "total_cost": round(total_cost, 4),
+            "total_sessions": len(sessions),
+            "running": running,
+            "per_model": per_model,
+            "daily": dict(sorted(daily.items())),
+        }
+
     @app.post("/api/sessions/{session_id}/questions/{question_id}")
     async def answer_question(session_id: str, question_id: str,
                               payload: dict[str, Any]) -> dict[str, Any]:
