@@ -45,6 +45,7 @@ from spiritscout.gateway import (
     ModelRegistry,
 )
 from spiritscout.knowledge import KnowledgeStore
+from spiritscout.knowledge.experience import ExperienceStore
 from spiritscout.modes import ModeAssembler
 from spiritscout.policy import PolicyEngine, ScopeGuard
 from spiritscout.tools.builtin import (
@@ -159,6 +160,7 @@ class _Infra:
     mcp_tools: dict[str, dict[str, Any]] = field(
         default_factory=dict)   # mcp__<server>__<tool> → {client, server, tool, timeout}
     questions: Any = None       # QuestionBroker（ask_user 工具后端；None=不可用）
+    experience: Any = None      # ExperienceStore（全局经验库，跨会话持久）
 
     async def close(self) -> None:
         await self.bus.stop()
@@ -250,6 +252,7 @@ async def _build_infra(
     registry = ToolRegistry(executor, policy=policy, audit=audit)
     workspace = Path(cfg.workspace.root)
     workspace.mkdir(parents=True, exist_ok=True)
+    experience = ExperienceStore(workspace / "experience.db", audit=audit)
     attachments = workspace / "attachments"
     attachments.mkdir(exist_ok=True)
     (workspace / "reports").mkdir(exist_ok=True)
@@ -371,6 +374,7 @@ async def _build_infra(
         shared_cache=LocalSharedCache(default_ttl_seconds=3600),
         mcp_clients=mcp_clients, mcp_tools=mcp_tools,
         questions=question_broker,
+        experience=experience,
     )
 
 
