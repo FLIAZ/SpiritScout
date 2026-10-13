@@ -521,7 +521,12 @@ function drawTopo() {
       <button id="topo-zout" title="缩小">－</button>
       <button id="topo-fit" title="适应窗口">⤢</button>
     </div>
-    <div class="topo-hint">滚轮缩放 · 拖拽平移 · 双击复位</div>
+    <div class="topo-hint">滚轮缩放 · 拖拽平移 · 双击复位 · 点击节点看详情</div>
+    <div class="topo-detail" id="topo-detail" hidden>
+      <div class="td-head"><b id="td-title"></b>
+        <button class="td-close" id="td-close">×</button></div>
+      <div class="td-body" id="td-body"></div>
+    </div>
     <div class="rnode" id="topo-ring" style="visibility:hidden"
       title="环形共享台账：已尝试登记 ${ring.attempts} 条，同伴无产出的入口自动避让">
       <b>环形台账</b><span class="rn">${ring.attempts} 条登记</span></div>`;
@@ -644,9 +649,13 @@ function drawTopo() {
     topoApplyView(box, v);
   }, { passive: false });
   let drag = null;
+  let downPos = null;
+  let downTarget = null;
   box.addEventListener("pointerdown", (ev) => {
     ev.preventDefault();
     if (ev.button !== 0 || !S.topoView || ev.target.closest(".topo-tools")) return;
+    downPos = { x: ev.clientX, y: ev.clientY };
+    downTarget = ev.target.closest("[data-node]");
     drag = { x: ev.clientX, y: ev.clientY, tx: S.topoView.tx, ty: S.topoView.ty };
     box.setPointerCapture(ev.pointerId);
     box.classList.add("grabbing");
@@ -657,15 +666,18 @@ function drawTopo() {
     S.topoView.ty = drag.ty + ev.clientY - drag.y;
     topoApplyView(box, S.topoView);
   });
-  const stop = () => { drag = null; box.classList.remove("grabbing"); };
-  box.addEventListener("click", (ev) => {
-    const node = ev.target.closest("[data-node]");
-    if (!node || ev.target.closest(".topo-tools")) return;
-    const id = node.dataset.node;
-    S.topoExpand = S.topoExpand || {};
-    S.topoExpand[id] = !S.topoExpand[id];
-    drawTopo();
-  });
+  const stop = (ev) => {
+    if (downPos && ev && ev.type === "pointerup") {
+      const dx = Math.abs(ev.clientX - downPos.x);
+      const dy = Math.abs(ev.clientY - downPos.y);
+      if (dx < 6 && dy < 6 && downTarget) {
+        const id = downTarget.dataset.node;
+        if (id) showNodeDetail(id, downTarget);
+      }
+    }
+    drag = null; downPos = null; downTarget = null;
+    box.classList.remove("grabbing");
+  };
   box.addEventListener("pointerup", stop);
   box.addEventListener("pointercancel", stop);
   box.addEventListener("dblclick", (ev) => {
@@ -683,6 +695,39 @@ function evLine(e) {
   const de = typeof e.detail === "object" ? JSON.stringify(e.detail) : String(e.detail ?? "");
   return `<div class="ev"><span class="ts">${esc(t)}</span><span class="ty">${esc(e.type || "")}</span>
     <span class="ac">${esc(e.actor || "")}</span><span class="de">${esc(de.slice(0, 220))}</span></div>`;
+}
+
+function showNodeDetail(nodeId) {
+  const panel = $("#topo-detail");
+  if (!panel) return;
+  if (panel.hidden === false && panel._curId === nodeId) {
+    panel.hidden = true; panel._curId = null; return;
+  }
+  panel._curId = nodeId;
+  panel.hidden = false;
+  const nodes = (S.state?.topology?.dag_nodes || []);
+  const node = nodes.find(n => n.node_id === nodeId);
+  const tasks = (S.state?.topology?.tasks || []).filter(t => t.parent_dag_node === nodeId);
+  $("#td-title").textContent = node?.title || nodeId;
+  let body = "";
+  if (!tasks.length) {
+    body = '<div class="td-empty">暂无任务数据</div>';
+  } else {
+    for (const t of tasks) {
+      body += `<div class="td-task">
+        <div class="td-agent">${esc(agentName(t.agent_type))} · ${esc(t.status || "")}</div>`;
+      for (const r of t.routes || []) {
+        body += `<div class="td-route">
+          <div class="td-route-h"><b>${esc(r.name || "")}</b>
+            <span class="mono">${Math.round((r.progress || 0) * 100)}%</span></div>
+          ${r.note ? `<div class="td-note">${esc(r.note)}</div>` : ""}
+        </div>`;
+      }
+      body += `</div>`;
+    }
+  }
+  $("#td-body").innerHTML = body;
+  panel.querySelector("#td-close").onclick = () => { panel.hidden = true; };
 }
 
 function renderVulns() {

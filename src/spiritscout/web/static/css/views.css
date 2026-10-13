@@ -215,6 +215,36 @@
   padding-top: 4px; display: -webkit-box; -webkit-line-clamp: 2;
   -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
 
+/* ================= 拓扑节点详情面板 ================= */
+.topo-detail { position: absolute; right: 8px; top: 8px; bottom: 8px;
+  width: min(360px, 50%); z-index: 8; overflow-y: auto;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+  border: 1px solid var(--line-strong); border-radius: 10px;
+  box-shadow: 0 4px 20px rgba(0,0,0,.12); }
+.td-head { display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 14px; border-bottom: 1px solid var(--line); position: sticky; top: 0;
+  background: var(--surface); z-index: 1; }
+.td-head b { font-size: 13.5px; word-break: break-all; }
+.td-close { border: 0; background: none; color: var(--ink-3); cursor: pointer;
+  font-size: 18px; line-height: 1; padding: 2px 6px; border-radius: 4px; }
+.td-close:hover { color: var(--ink); background: var(--surface-2); }
+.td-body { padding: 10px 14px; }
+.td-task { margin-bottom: 12px; padding-bottom: 8px;
+  border-bottom: 1px solid var(--line); }
+.td-task:last-child { border-bottom: 0; }
+.td-agent { font-size: 12px; font-weight: 600; color: var(--accent-ink); margin-bottom: 4px; }
+.td-status { font-size: 10.5px; color: var(--ink-3); font-family: var(--mono); }
+.td-route { margin: 8px 0; }
+.td-route-h { display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 12px; margin-bottom: 4px; }
+.td-route-h b { color: var(--ink); }
+.td-route-h .mono { color: var(--ink-3); font-size: 10.5px; }
+.td-note { font-size: 11.5px; color: var(--ink-2); line-height: 1.6;
+  white-space: pre-wrap; word-break: break-word; background: var(--surface-2);
+  border-radius: 6px; padding: 8px 10px; margin-top: 4px; }
+.td-empty { font-size: 12px; color: var(--ink-3); text-align: center; padding: 20px 0; }
+
 /* ================= 表格与列表 ================= */
 table.list { width: 100%; border-collapse: collapse; background: var(--surface);
   border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
