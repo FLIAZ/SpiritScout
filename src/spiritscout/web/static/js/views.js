@@ -1021,6 +1021,14 @@ function tracePush(e) {
     case "master.reply":
       traceAppend(e, `<div class="tl-reply md">${mdRender(d.text || "")}</div>`, "tl-master");
       break;
+    case "agent.spawn":
+      traceAppend(e, `<div class="m">🔮 派生分支 · ${esc(d.child || "")}</div>`, "tl-sys");
+      break;
+    case "agent.spawn_done":
+      traceAppend(e, `<div class="m">🔮 分支 ${esc(d.child || "")} 收尾（Flag ${d.flags || 0}）</div>`, "tl-sys");
+      break;
+      traceAppend(e, `<div class="tl-reply md">${mdRender(d.text || "")}</div>`, "tl-master");
+      break;
     case "agent.ask_user":
       traceAppend(e, `<div class="tl-ask">向你提问 · ${esc(d.question || "")}</div>`, "tl-sys");
       break;

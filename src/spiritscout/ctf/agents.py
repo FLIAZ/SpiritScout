@@ -649,10 +649,11 @@ class CTFBaseAgent(SubAgent):
         （主 Agent 明确要求多角度并发）时才由 LLM 按题提出 K 个角度。
         """
         # 下发决策与执行并行（不挡开工），首轮 plan 常在裁定落地前运行：
-        # 未裁定时默认双分支即时起步（主视角 + 互补视角，零额外延迟），
+        # 未裁定时默认单分支起步（CTF 解题是串行推进，并行分支做重复功；
+        # 灵枢裁定 k>1 时才并行，由模型提出互不重叠的角度），
         # 裁定后的轮次按预算由 LLM 提出互不重叠的角度。
         decided = task.max_routes is not None
-        k = max(1, min(int(task.max_routes if decided else 2), self.max_routes))
+        k = max(1, min(int(task.max_routes if decided else 1), self.max_routes))
         plans: list[RoutePlan] = []
         if k > 1 and decided:
             angles = await self._llm_propose_angles(task, k)
@@ -906,10 +907,13 @@ class CTFBaseAgent(SubAgent):
                  if int(f.get("round", 0) or 0) == rnd and f["value"] not in mine]
         if fresh:
             state["concluded"] = True
+            state["conclusion_text"] = f"同伴路线已夺旗（{', '.join(fresh[:2])}），交叉验证收尾"
             self.ctx.audit.log("agent.conclude", self.agent_id, {
                 "route": route.name, "challenge": self.challenge_id(task),
                 "turn": state["turn"]})
-            return StepResult(ok=True, value=0.0)
+            return StepResult(ok=True, value=0.0,
+                              note=state["conclusion_text"],
+                              final_note=True)
 
         boot_value, boot_note = 0.0, ""
         if not state["messages"]:
@@ -1001,6 +1005,8 @@ class CTFBaseAgent(SubAgent):
             summary = (resp.content or "").strip()
             state["conclusion_text"] = summary[:2000]
             state["concluded"] = True
+            if not state["conclusion_text"].strip():
+                state["conclusion_text"] = "（模型未输出结论文本，最后动作为工具调用）"
             self._record_conclusion(task, route, summary or "模型未给出结论文本")
             self.ctx.audit.log("agent.conclude", self.agent_id, {
                 "route": route.name, "challenge": self.challenge_id(task),
@@ -1439,6 +1445,15 @@ class CTFBaseAgent(SubAgent):
         # 不再发请求；需要重新获取（页面状态可能已变化）时模型显式加
         # refresh 参数。Range 等头不同的请求键不同，分段取原文不受影响。
         refresh = bool(args.get("refresh"))
+        # 跨分支共享缓存：同伴路线已读取过的地址直接回放，不重复发请求
+        shared_fetch = self.cache.get(self.shared_namespace, f"fetch|{url}")
+        if shared_fetch and not refresh and method == "GET":
+            state["observations"].append({
+                "action": desc,
+                "result": "跨分支记录回放（同伴已读取，本次未重复请求）"})
+            return _ToolOutcome(ok=True, value=0.0,
+                note=f"{desc} → 跨分支回放",
+                text=str(shared_fetch)[:_FETCH_RECORD_CAP])
         hsig = ""
         if headers:
             hsig = "|" + "|".join(sorted(
@@ -1501,6 +1516,8 @@ class CTFBaseAgent(SubAgent):
         obs = _http_observation(desc, res, url, [])
         state["observations"].append(obs)
         fetches[rkey] = {"round": int(state.get("turn") or 0), "obs": obs}
+        self.cache.put(self.shared_namespace, f"fetch|{url}",
+                       _obs_text(obs)[:_FETCH_RECORD_CAP])
         # 环形共享缓存：入口与关键信号登记，同伴不再重复探同一入口
         signal = _signal_line(obs)
         self._record_site(task, url, f"{status}{signal}")
