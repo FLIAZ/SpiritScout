@@ -216,3 +216,42 @@ src/spiritscout/
 ### 7. 最终声明
 
 本工具严禁非法滥用。任何违法使用行为，由行为人独立承担全部法律责任，与项目开发、维护、贡献团队无关。
+
+## 致谢
+
+### 知识库数据来源
+
+- [PayloadsAllTheThings](https://github.com/swisskyrepo/PayloadsAllTheThings)（MIT）——载荷与方法论主体来源，按本项目条目结构重写并补充靶场实测验证
+- [NoorQureshi/security-skills](https://github.com/NoorQureshi/security-skills)（MIT）——206 条安全技能（Web/云/AD/移动/逆向/社工），原样接入供智能体检索
+
+### 参考的开源 Agent 项目
+
+- [carlospolop/HackTricks](https://github.com/carlospolop/HackTricks)（CC BY-NC-SA）——方法论思路参考，内容未直接使用
+- [OWASP WSTG](https://github.com/OWASP/wstg)（CC BY-SA-4.0）——测试标准思路参考，内容未直接使用
+- [GTFOBins](https://github.com/GTFOBins/GTFOBins.github.io)（GPL-3.0）——Unix 二进制利用思路参考，内容未直接使用
+- [VoltAgent/awesome-agent-skills](https://github.com/VoltAgent/awesome-agent-skills)（MIT）——智能体技能目录（1000+ 条）
+
+### 项目使用的 MCP 服务器
+
+以下 MCP 服务器在 `configs/system.yaml` 中已配置或提供示例，智能体开工时自动握手并按角色权限收窄后并入工具目录：
+
+| MCP | 许可 | 状态 | 用途 |
+| --- | --- | --- | --- |
+| [ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp) | 自定义 | ✅ 已启用 | 逆向：反编译 / 交叉引用 / 函数与类型检索（无头 idalib） |
+| [yakit](https://github.com/yaklang/yakit) | 自定义 | ✅ 已启用 | Web 渗透：编解码 / HTTP 流量 / 模糊测试 / 指纹 / 端口 / 反序列化 |
+| [playwright-mcp](https://github.com/microsoft/playwright-mcp) | Apache-2.0 | ✅ 已启用 | 浏览器自动化：JS 渲染 DOM / 点击 / 表单 / 截图 |
+| pentester-mcp | 自定义 | 按需 | 一站式渗透工具箱：nmap / nuclei / sqlmap / ffuf / impacket / hydra |
+| burp-mcp | 自定义 | 按需 | Web 漏洞扫描与模糊测试（PortSwigger 官方扩展） |
+| shodan-mcp | MIT | 按需 | 资产情报（出网至第三方服务） |
+| virustotal-mcp | MIT | 按需 | 文件 / 域名情报（VirusTotal 官方托管端点） |
+
+### 技能源
+
+- [obra/superpowers](https://github.com/obra/superpowers)（MIT）——通用工程方法论技能集
+- [anthropics/skills](https://github.com/anthropics/skills)——SKILL.md 格式规范参考（无 LICENSE，仅格式参考，内容未使用）
+- [VoltAgent/awesome-agent-skills](https://github.com/VoltAgent/awesome-agent-skills)（MIT）——智能体技能目录（1000+ 条）
+
+### 用户
+
+
+
