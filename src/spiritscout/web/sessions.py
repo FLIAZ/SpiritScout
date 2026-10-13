@@ -33,13 +33,18 @@ from spiritscout.web import agentcfg, vault
 
 async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
                           mission: str, heuristic: RunMode,
-                          audit: AuditLogger) -> RunMode | None:
-    """智能模式的 LLM 语义路由，并**兼任开工预检**（开工前唯一模型调用）。
+                          audit: AuditLogger) -> tuple[RunMode | None, str]:
+    """LLM 语义路由（兼任开工预检）：一次调用裁决「模式 + 意图」。
 
-    - 网关调用失败（连接/认证/超时）→ 抛出：等同模型预检失败，会话不
-      开工（LLM-first：无脑不开工）——一次调用同时完成「模型可用性」与
-      「模式裁决」两件事，不再为预检单付一次串行等待；
-    - 模型应答但解析不出模式 → 返回 None：模型活着，按装配层结构化兜底走。
+    意图四分类（判断完全在提示词内，后端不写死规则）：
+    - task：明确的可执行任务（有具体目标/题目/清晰的行动指令）→ 开工派工；
+    - task_with_rules：任务与规则同时下发 → 规则入库后开工；
+    - rules：规则/流程/手册说明（含占位凭证），尚无题目或目标 →
+      灵枢确认规则并等待，绝不派工（手册里的示例地址不是目标）；
+    - dialogue：普通对话/提问 → 灵枢回复，不开工。
+
+    - 网关调用失败 → 抛出：等同模型预检失败，会话不开工并明示原因；
+    - 应答解析失败 → 返回 (None, "task")：按装配层结构化兜底走。
     低思考档提示：分类是小判断，不值得重推理（模型未声明低档时忽略）。
     """
     from spiritscout.gateway import ModelGateway, ModelRegistry
@@ -49,17 +54,28 @@ async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
     try:
         resp = await gateway.chat(
             [{"role": "system", "content": (
-                "你是灵枢的任务路由。通读用户的任务描述，判断它属于哪一类安全"
-                "测试分支，只输出 JSON。ROLE: mode_router")},
+                "你是灵枢的任务路由与意图判读。通读用户输入，判断两件事："
+                "属于哪类安全测试分支、用户此刻的意图类型，只输出 JSON。"
+                "ROLE: mode_router")},
              {"role": "user", "content": json.dumps({
-                 "mission": mission[:2000],
+                 "mission": mission[:3000],
                  "branches": {
                      "src": "授权安全测试/渗透：对站点、系统或业务做侦察→漏洞"
                             "探测→核验→报告（含 SRC 漏洞挖掘场景）",
                      "ctf": "CTF 解题：目标是具体赛题、以夺取 flag 为目的",
                      "competition": "渗透赛/攻防对抗：有赛制、排名、AWD 等规则"},
+                 "intent_types": {
+                     "task": "明确的可执行任务：有具体目标/题目/清晰的行动指令",
+                     "task_with_rules": "任务与规则同时下发：既有目标或行动指令，"
+                                        "又附带流程/约束/API 约定等执行规则",
+                     "rules": "规则/流程/手册/约定：讲的是「应该怎么做」——接口"
+                              "清单、步骤、约束、终止条件，或凭证为占位符；"
+                              "没有可直接执行的具体目标或题目",
+                     "dialogue": "普通对话/提问/闲聊：无需派工，灵枢正常回复"},
                  "fallback_guess": heuristic.value,
-                 "answer": '{"mode": "src|ctf|competition", "rationale": "一句话"}',
+                 "answer": '{"mode": "src|ctf|competition", '
+                           '"intent": "task|task_with_rules|rules|dialogue", '
+                           '"rationale": "一句话"}',
              }, ensure_ascii=False)}],
             task_type="classification", response_format="json",
             reasoning_effort="low",
@@ -77,14 +93,50 @@ async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
         audit.log("decision.change", "mode_router", {
             "action": "llm_mode_route_fallback",
             "heuristic": heuristic.value, "reason": f"应答不可解析: {exc}"[:160]})
-        return None
+        return None, "task"
+    intent = str((data or {}).get("intent", "task")).strip().lower()
+    if intent not in ("task", "task_with_rules", "rules", "dialogue"):
+        intent = "task"
     audit.log("decision.change", "mode_router", {
         "action": "llm_mode_route", "llm_mode": mode.value,
-        "heuristic": heuristic.value,
+        "intent": intent, "heuristic": heuristic.value,
         "rationale": str((data or {}).get("rationale", ""))[:200]})
-    return mode
+    return mode, intent
 
 TERMINAL_STATES = frozenset({"completed", "failed", "stopped", "interrupted"})
+
+
+async def _master_reply(cfg: SystemConfig, models: list[ModelEntry],
+                        user_text: str, audit, *, kind: str) -> str:
+    """灵枢对非派工输入的应答（dialogue 正常对话 / rules 规则确认）。
+
+    LLM 不可用时回退固定话术——用户至少能看到确定的反馈。
+    """
+    from spiritscout.gateway import ModelGateway, ModelRegistry
+
+    system = ("你是灵枢。用中文写一段简短、自然的回复。"
+              if kind == "dialogue" else
+              "你是灵枢。用户刚下发了执行规则/流程手册（不是具体题目或目标）。"
+              "写一段简短确认：记住了哪些关键约定（3~5 条要点），正在等待"
+              "用户提供什么（题目/目标/真实凭证）。")
+    try:
+        gateway = ModelGateway(ModelRegistry(models), config=cfg.gateway, audit=audit)
+        resp = await gateway.chat(
+            [{"role": "system", "content": system},
+             {"role": "user", "content": user_text[:4000]}],
+            task_type="meta_planning", max_tokens=1024,
+            timeout_seconds=min(60, cfg.gateway.request_timeout_seconds))
+        text = (resp.content or "").strip()
+        if text:
+            return text[:2500]
+    except (SpiritScoutError, OSError, ValueError, TypeError) as exc:
+        # 应答失败回退固定话术，输入已持久化不丢
+        audit.log("master.reply_failed", "master", {"error": str(exc)[:200]})
+    if kind == "rules":
+        return ("已收到执行规则并完整记录：灵枢将严格按该约定行事。"
+                "请下发具体题目或目标（以及真实凭证），我再开工。")
+    return ("已收到你的消息。当前没有可执行的任务指令——下发目标或题目"
+            "后我立即安排。")
 
 
 def _preflight_models(cfg: SystemConfig, models: list[ModelEntry],
@@ -601,16 +653,43 @@ class SessionManager:
                 audit.log("system.lifecycle", "runtime", {
                     "action": "session_kickoff", "resume": resume})
                 routed = None
+                intent = "task"
                 if not no_llm and models:
                     if not resume and plan.needs_mode_routing and plan.mission:
                         # 语义路由兼任开工预检（开工前唯一模型调用，调用成功
                         # 即模型全链可用），不为预检单付一次串行等待
                         self._set_phase(session, "mode_routing", audit)
-                        routed = await _llm_route_mode(
+                        routed, intent = await _llm_route_mode(
                             cfg, models, plan.mission, mode, audit)
                     else:
                         self._set_phase(session, "model_preflight", audit)
                         _preflight_models(cfg, models, audit)
+                # 意图分流（LLM 裁决，后端只搬运结果）：
+                # dialogue/rules 不派工——灵枢回复后收尾，规则持久化，
+                # 等用户下发真正的任务（发送消息即带现场续传）
+                if intent in ("rules", "dialogue", "task_with_rules") \
+                        and plan.mission:
+                    if intent != "dialogue":
+                        session.standing_rules = plan.mission
+                        if isinstance(session.launch_request, dict) \
+                                and session.launch_request.get("mission"):
+                            session.launch_request["mission"] = ""
+                    self._persist(session)
+                    self._set_phase(session, "master_reply", audit)
+                    reply = await _master_reply(
+                        cfg, models, plan.mission, audit,
+                        kind="rules" if intent == "rules" else "dialogue")
+                    audit.log("master.reply", "master", {"text": reply[:4000]})
+                    session.status = "completed"
+                    session.phase = "completed"
+                    session.finished_at = time.time()
+                    session.summary = {
+                        "note": ("已记录执行规则，等待题目/目标下发"
+                                 if intent == "rules" else
+                                 "已回复用户；未识别到可执行任务"),
+                        "intent": intent}
+                    self._persist(session)
+                    return
                 if routed is not None and routed != mode and plan.source_request:
                     try:
                         plan = prepare_launch(LaunchRequest(**{

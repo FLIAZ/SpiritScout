@@ -169,7 +169,10 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
     mission = (req.mission or "").strip()
     m_urls, m_domains = extract_targets(mission)
     mode_auto = req.mode is None
-    needs_mode_routing = mode_auto and declared_mode(req) is None
+    # 长文本即使含声明词也要过一次 LLM 判读：声明词可能只是规则/手册
+    # 在描述流程（如跑分手册里的「提交 flag」），意图由模型裁决
+    needs_mode_routing = mode_auto and (declared_mode(req) is None
+                                        or len(mission) > 400)
     if mode_auto:
         req = LaunchRequest(**{**req.__dict__, "mode": fallback_mode(req)})
     if mission and not req.target and m_urls:

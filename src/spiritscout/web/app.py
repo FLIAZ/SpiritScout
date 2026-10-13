@@ -31,6 +31,7 @@ from fastapi.responses import (
     PlainTextResponse,
     StreamingResponse,
 )
+from fastapi.staticfiles import StaticFiles
 
 from spiritscout import __version__
 from spiritscout.blackboard import Blackboard
@@ -48,6 +49,7 @@ from spiritscout.web.events import stream_audit
 from spiritscout.web.sessions import TERMINAL_STATES, Session, SessionManager
 
 _STATIC = Path(__file__).parent / "static" / "index.html"
+_STATIC_DIR = Path(__file__).parent / "static"
 
 
 def _read_state(session: Session) -> dict[str, Any]:
@@ -252,6 +254,8 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
         return HTMLResponse(_STATIC.read_text(encoding="utf-8"))
+
+    app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
     # ------------------------------------------------------------ 会话 CRUD
 

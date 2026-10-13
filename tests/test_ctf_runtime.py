@@ -250,5 +250,39 @@ class DirectionRotationTests(unittest.TestCase):
         self.assertIn("crypto", dirs)
 
 
+class SpawnGuardTests(unittest.IsolatedAsyncioTestCase):
+    """spawn：层级护栏（子→孙）与参数校验；深度不越界不派工。"""
+
+    def _agent(self):
+        agent = object.__new__(CTFBaseAgent)
+        agent.agent_id = "a"
+        agent.agent_type = AgentType.CTF_WEB
+        agent.direction = "web"
+
+        async def _no_solve(*a, **k):
+            raise AssertionError("超深的 spawn 不应再起对话")
+        agent._solve_turn = _no_solve
+        return agent
+
+    async def test_depth_cap_refuses_grandchild_of_grandchild(self) -> None:
+        agent = self._agent()
+        state = {"depth": 2, "child_seq": 0, "observations": []}
+        out = await agent._tool_spawn(
+            None, SimpleNamespace(name="solve"), state, {"brief": "再派一层"})
+
+        self.assertFalse(out.ok)
+        self.assertIn("上限", out.text)
+
+    async def test_spawn_requires_brief(self) -> None:
+        agent = self._agent()
+        state = {"depth": 0, "child_seq": 0, "observations": []}
+
+        out = await agent._tool_spawn(
+            None, SimpleNamespace(name="solve"), state, {})
+
+        self.assertFalse(out.ok)
+        self.assertIn("brief", out.text)
+
+
 if __name__ == "__main__":
     unittest.main()

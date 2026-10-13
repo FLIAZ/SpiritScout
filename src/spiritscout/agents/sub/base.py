@@ -531,6 +531,9 @@ class SubAgent(abc.ABC):
         if task is not None:
             intent = {"mission": str(task.payload.get("mission", ""))[:600],
                       "node": str(task.payload.get("node_title", ""))[:120]}
+            rules = str(task.payload.get("rules", "")).strip()
+            if rules:
+                intent["rules"] = rules[:600]
             intent = {k: v for k, v in intent.items() if v}
             if intent:
                 user_obj = {**user_obj, "task_intent": intent}

@@ -40,6 +40,7 @@ import re
 import time
 import urllib.parse
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, ClassVar
 
 from spiritscout.agents.ring import attempt_key
@@ -568,6 +569,16 @@ class CTFBaseAgent(SubAgent):
              "note": {"type": "string",
                       "description": "判定依据（一句话：来源与推导）"}},
             required=["flag"]),
+        _fn("spawn",
+            "派生一个分支执行者去独立推进一个子问题，其最终结论会回传给你。"
+            "brief 写清：为什么需要这个分支、它专属的任务是什么、解决什么"
+            "问题、与当前工作的边界（它不做什么）；expect 写清期望回传的"
+            "结论。各司其职：子问题值得独立推进时才派，顺手能做的不要派。",
+            {"brief": {"type": "string",
+                       "description": "分支任务简报（为什么派/做什么/边界）"},
+             "expect": {"type": "string",
+                        "description": "期望回传的结论"}},
+            required=["brief"]),
     ]
     # 方向知识（思路启发，不是步骤；LLM 按题面证据自选方向）
     direction_brief: ClassVar[str] = ""
@@ -974,6 +985,7 @@ class CTFBaseAgent(SubAgent):
         if not calls:
             # 不再调用工具 = 调查结束，这条消息就是结论
             summary = (resp.content or "").strip()
+            state["conclusion_text"] = summary[:2000]
             state["concluded"] = True
             self._record_conclusion(task, route, summary or "模型未给出结论文本")
             self.ctx.audit.log("agent.conclude", self.agent_id, {
@@ -1074,6 +1086,8 @@ class CTFBaseAgent(SubAgent):
                 out = await self._tool_ask_user(task, route, state, args)
             elif name == "submit_flag":
                 out = await self._tool_submit_flag(task, route, state, args)
+            elif name == "spawn":
+                out = await self._tool_spawn(task, route, state, args)
             elif name == "probe_paths":
                 out = await self._tool_probe_paths(task, route, state, args)
             elif name.startswith("mcp__"):
@@ -1171,6 +1185,54 @@ class CTFBaseAgent(SubAgent):
             ok=True, value=0.9 if result.accepted is not False else 0.2,
             findings=[{"type": "flag", "value": cand.value}],
             note=f"Flag 提交 {cand.value} → {verdict}", text=text)
+
+    async def _tool_spawn(self, task: Task, route, state: dict[str, Any],
+                          args: dict[str, Any]) -> _ToolOutcome:
+        """派生分支执行者：以当前任务 + 模型撰写的简报起一条独立解题对话，
+        阻塞至其收尾，最终结论回灌给当前对话。
+
+        派生时机、数量与分工由模型按任务复杂度自行决策（brief 须说明
+        为什么/做什么/边界）；层级上限两代（子→孙）是唯一护栏——防的
+        是无限递归，不是进度。分支与父分支共享题级现场（笔记/入口/
+        Flag 即时互通，任一路线夺旗全体收敛）。
+        """
+        depth = int(state.get("depth") or 0)
+        if depth >= 2:
+            return _ToolOutcome(ok=False, text=(
+                "分支层级已达上限（子→孙）：更深的子问题请并入当前工作推进，"
+                "或把要点用 note 交给同伴。"))
+        brief = str(args.get("brief", "") or "").strip()
+        if not brief:
+            return _ToolOutcome(ok=False, text="spawn 需要 brief 参数（派什么/为什么/边界）。")
+        expect = str(args.get("expect", "") or "").strip()
+        seq = int(state.get("child_seq") or 0) + 1
+        state["child_seq"] = seq
+        child_route = SimpleNamespace(name=f"{route.name}·子{seq}")
+        child_plan = RoutePlan(name=f"spawn{seq}", strategy=brief[:200],
+                               steps=[{"action": "investigate"}])
+        child_state = self._inv_state(task, child_route)
+        child_state["depth"] = depth + 1
+        self.ctx.audit.log("agent.spawn", self.agent_id, {
+            "route": route.name, "challenge": self.challenge_id(task),
+            "child": child_route.name, "depth": depth + 1,
+            "brief": brief[:400], "expect": expect[:200]})
+        state["observations"].append(
+            {"action": f"spawn {child_route.name}",
+             "result": f"派生分支：{brief[:120]}"})
+        while not child_state.get("concluded") and not child_state.get("stall"):
+            await self._solve_turn(task, child_route, child_plan)
+        conclusion = str(child_state.get("conclusion_text")
+                         or child_state.get("stall")
+                         or "（分支未给出结论文本）")
+        flags = len(child_state.get("flags") or [])
+        self.ctx.audit.log("agent.spawn_done", self.agent_id, {
+            "route": route.name, "child": child_route.name,
+            "flags": flags, "conclusion": conclusion[:400]})
+        text = (f"分支「{brief[:120]}」已收尾，结论：\n{conclusion[:2400]}"
+                + (f"\n（该分支捕获 Flag {flags} 个）" if flags else ""))
+        return _ToolOutcome(ok=True, value=0.4 if flags else 0.2,
+                            note=f"分支 {child_route.name} 收尾 flag={flags}",
+                            text=text)
 
     async def _tool_ask_user(self, task: Task, route, state: dict[str, Any],
                              args: dict[str, Any]) -> _ToolOutcome:
@@ -1636,6 +1698,10 @@ class CTFBaseAgent(SubAgent):
             "提问：遇到授权范围外的目标或需要用户拍板的分叉，用 ask_user 向"
             "用户提问——问题与选项用你自己的话写清楚；用户同意的目标会被"
             "加入本会话范围，之后可正常测试。\n"
+            "团队扩展：把任务拆成多个可独立验证的子问题——用 spawn 派生"
+            "分支执行者并行推进，brief 写清「为什么需要它、它专属的任务、"
+            "解决什么问题、与当前工作的边界」；其结论会回传给你。各司其职："
+            "每个分支只做分内之事，顺手能做的不要派。\n"
             "收尾：判定拿到 Flag 时先用 submit_flag 提交（写明依据），拿到平台"
             "应答再收尾；当你不再调用工具时，最后一条消息就是交给主 Agent 的"
             "结论——简明写清「拿到了什么（Flag 原文）、依据是什么、还差什么」。"
@@ -1684,6 +1750,10 @@ class CTFBaseAgent(SubAgent):
             "notes": len(self._shared_notes(task)),
             "concl": len(self._shared_conclusions(task)),
             "flags": peer_flags})
+        rules = str((task.payload or {}).get("rules") or "")
+        if rules:
+            parts.append("## 用户既定规则（全程遵守，含终止条件）\n"
+                         + rules[:1800])
         angle = str(plan.strategy or "").strip()
         if angle:
             parts.append("## 本路线调查角度（与并行分支分工，不重复做功）\n"

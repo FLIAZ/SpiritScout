@@ -226,6 +226,7 @@ class MasterAgent:
                 payload={"tactic": node.tactic, "technique": node.technique or "",
                          "node_title": node.title,
                          "mission": self._mission(),
+                         "rules": self._rules()[:1500],
                          "challenge": challenge or None},
             )
             dag.attach_task(node.node_id, task.task_id)
@@ -1003,6 +1004,10 @@ class MasterAgent:
             ordered.append(node)
         return ordered
 
+    def _rules(self) -> str:
+        """用户既定执行规则（随任务持久化，全程遵守）。"""
+        return str(self.ctx.extra.get("standing_rules", "") or "")
+
     def _mission(self) -> str:
         """用户任务意图：用户在控制台告诉主 Agent 的自然语言合约/目标。"""
         return str(self.ctx.extra.get("mission", "") or "")
@@ -1015,6 +1020,10 @@ class MasterAgent:
             f"用户任务意图（合约范围与目标由用户口述如下，你据此自行决策"
             f"并下发任务给子 Agent）：\n「{mission}」\n"
             if mission else "")
+        rules = self._rules()
+        rules_block = (f"用户既定执行规则（全程严格遵守，与其冲突的临时判断"
+                       f"以规则为准）：\n「{rules[:2500]}」\n"
+                       if rules else "")
         actual_agents = [get_profile(agent_type) for agent_type in self.ctx.agents]
         roster = "；".join(
             f"{profile.name}({profile.key.value})：{profile.duty}"
@@ -1024,6 +1033,7 @@ class MasterAgent:
             agent_system_prompt(AgentType.MASTER, allowed)
             + "\n"
             f"{mission_block}"
+            f"{rules_block}"
             f"你全权决定：战术拆解（可参考 ATT&CK，也可按目标特点自由组合）、"
             f"任务下发与优先级、子 Agent 分工、迭代节奏与收敛时机。"
             f"本会话实际装配的执行角色只有：{roster or '无'}。不得虚构未装配角色"
