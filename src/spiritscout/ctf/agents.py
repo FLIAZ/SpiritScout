@@ -906,11 +906,10 @@ class CTFBaseAgent(SubAgent):
                  if int(f.get("round", 0) or 0) == rnd and f["value"] not in mine]
         if fresh:
             state["concluded"] = True
-            summary = "同伴路线已夺旗，本路线收尾"
             self.ctx.audit.log("agent.conclude", self.agent_id, {
                 "route": route.name, "challenge": self.challenge_id(task),
-                "turn": state["turn"], "summary": summary})
-            return StepResult(ok=True, value=0.0, note=summary)
+                "turn": state["turn"]})
+            return StepResult(ok=True, value=0.0)
 
         boot_value, boot_note = 0.0, ""
         if not state["messages"]:

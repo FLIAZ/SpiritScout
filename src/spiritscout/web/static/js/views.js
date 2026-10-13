@@ -223,7 +223,7 @@ const nodeStatus = s => ({ done: "done", completed: "done", active: "active",
                            running: "active" }[String(s || "").toLowerCase()] || "pending");
 
 /* 左→右分层 DAG 布局（dagre 式）：层内重心排序减少交叉，逐层错落堆叠 */
-const TOPO_GEO = { NODE_W: 292, GAP_X: 96, GAP_Y: 24, PAD: 40, HUB_GAP: 64 };
+const TOPO_GEO = { NODE_W: 292, GAP_X: 110, GAP_Y: 28, PAD: 44, HUB_GAP: 90 };
 
 function topoReorder(layerIds, preds, succs) {
   const order = new Map();
@@ -428,17 +428,19 @@ function drawTopo() {
   }
   topoReorder(layerIds, preds, succs);
 
+  const expanded = S.topoExpand || {};
   const cardHtml = n => {
     if (String(n.node_id).startsWith("__route_")) {
       const r = routeMeta.get(n.node_id) || {};
       const pct = Math.round((r.progress || 0) * 100);
       const st = nodeStatus(r.status);
       const digest = digestFor(r.agent);
+      const isExp = expanded[n.node_id];
       return `<div class="tnode bnode" data-node="${esc(n.node_id)}" style="visibility:hidden">
         <div class="tact"><span class="dot ${st}"></span><b>${esc(agentName(r.agent))} · ${esc(r.name || "")}</b>
           <span class="tac">${pct}%</span></div>
         <div class="prog ${pct === 100 ? "done" : ""}"><i style="width:${pct}%"></i></div>
-        ${r.note ? `<div class="rt-note">${esc(r.note)}</div>` : ""}
+        ${r.note ? `<div class="rt-note">${esc(isExp ? r.note : (r.note || "").slice(0, 120))}</div>` : ""}
         ${digest ? `<div class="mind-digest">✦ ${esc(digest)}</div>` : ""}
       </div>`;
     }
@@ -600,6 +602,7 @@ function drawTopo() {
   }, { passive: false });
   let drag = null;
   box.addEventListener("pointerdown", (ev) => {
+    ev.preventDefault();
     if (ev.button !== 0 || !S.topoView || ev.target.closest(".topo-tools")) return;
     drag = { x: ev.clientX, y: ev.clientY, tx: S.topoView.tx, ty: S.topoView.ty };
     box.setPointerCapture(ev.pointerId);
@@ -612,6 +615,14 @@ function drawTopo() {
     topoApplyView(box, S.topoView);
   });
   const stop = () => { drag = null; box.classList.remove("grabbing"); };
+  box.addEventListener("click", (ev) => {
+    const node = ev.target.closest("[data-node]");
+    if (!node || ev.target.closest(".topo-tools")) return;
+    const id = node.dataset.node;
+    S.topoExpand = S.topoExpand || {};
+    S.topoExpand[id] = !S.topoExpand[id];
+    drawTopo();
+  });
   box.addEventListener("pointerup", stop);
   box.addEventListener("pointercancel", stop);
   box.addEventListener("dblclick", (ev) => {

@@ -742,8 +742,14 @@ class MasterAgent:
         # 何时收手由模型复盘判断或用户手动停止（后端规则不做进度的刽子手）
 
         # LLM 全局复盘（建议者）；规则引擎裁决：DAG 未竟时否决收敛建议。
-        # 规则已确定收敛时复盘建议无从发挥作用——直接跳过（省一次往返）；
-        # 用户消息走独立的直达通道（_user_chat_watch），不在这里消费
+        # Flag 已收且 DAG 全 done → 不需要 LLM 复盘来确认"该收手了"
+        flag_done = (not flags_pending
+                     and not dag.has_unfinished()
+                     and not view.get("vuln_in_pipeline"))
+        if flag_done:
+            stop_reason = "核心目标已达成，全部节点完成"
+        elif not stop_reason and not dag.has_unfinished() and not flags_pending:
+            pass   # 还有其他收敛判定逻辑
         llm_decision = (await self._llm_review(state, view)
                         if ctx.enable_llm_planning and not stop_reason else None)
         deferred_replan = False

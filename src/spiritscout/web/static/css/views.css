@@ -102,6 +102,7 @@
 .topo {
   position: relative; overflow: hidden; padding: 0; min-height: 380px;
   height: clamp(380px, 66vh, 760px); cursor: grab; touch-action: none;
+  user-select: none; -webkit-user-select: none;
   background:
     radial-gradient(ellipse 70% 60% at 16% 50%, color-mix(in srgb, var(--accent) 5%, transparent), transparent),
     var(--surface);
@@ -166,6 +167,7 @@
 @keyframes radar { 0% { opacity: .7; transform: scale(1); } 100% { opacity: 0; transform: scale(1.35); } }
 .tnode {
   position: absolute; left: 0; top: 0; width: 292px;
+  cursor: pointer;
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 10px 12px; box-shadow: var(--shadow);
   display: flex; flex-direction: column; gap: 8px;
