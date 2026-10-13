@@ -420,6 +420,8 @@ async def _run_master(
         tactic_map=assembly.tactic_map, plan_override=assembly.plan_provider,
         extra={"mode_notes": assembly.notes, "mission": mission,
                "standing_rules": standing_rules,
+               "recent_experience": [
+                   e["insight"] for e in (experience.recent(limit=5) if experience else [])],
                "flag_manager": getattr(assembly, "flag_manager", None),
                "user_inbox": user_inbox if user_inbox is not None else []},
         knowledge=infra.knowledge,   # 主 Agent 攻击路径模板接线（3.3.6）
@@ -436,6 +438,9 @@ async def _run_master(
         except (SpiritScoutError, OSError, ValueError, TypeError):
             pass
 
+    # 刷新灵枢 extra 中的经验（新提炼的经验立即可用于下一轮规划）
+    recent_exp = experience.recent(limit=5) if experience else []
+    master.ctx.extra["recent_experience"] = [e["insight"] for e in recent_exp]
     run_summary["mode_notes"] = assembly.notes
     if mission:
         run_summary["mission"] = mission

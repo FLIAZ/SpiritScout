@@ -227,6 +227,7 @@ class MasterAgent:
                          "node_title": node.title,
                          "mission": self._mission(),
                          "rules": self._rules()[:1500],
+                         "recent_experience": (self.ctx.extra.get("recent_experience") or [])[-3:],
                          "challenge": challenge or None},
             )
             dag.attach_task(node.node_id, task.task_id)
@@ -1010,6 +1011,13 @@ class MasterAgent:
             ordered.append(node)
         return ordered
 
+    def _recent_experience(self) -> str:
+        """全局经验库的近期洞察（跨会话自我进化）。"""
+        exps = self.ctx.extra.get("recent_experience") or []
+        if not exps:
+            return ""
+        return "\n".join(f"- {e}" for e in exps[-5:])
+
     def _rules(self) -> str:
         """用户既定执行规则（随任务持久化，全程遵守）。"""
         return str(self.ctx.extra.get("standing_rules", "") or "")
@@ -1030,6 +1038,9 @@ class MasterAgent:
         rules_block = (f"用户既定执行规则（全程严格遵守，与其冲突的临时判断"
                        f"以规则为准）：\n「{rules[:2500]}」\n"
                        if rules else "")
+        exp_block = self._recent_experience()
+        exp_block = (f"实战经验（前几次会话积累的解题思维，供参考）：\n{exp_block}\n"
+                     if exp_block else "")
         actual_agents = [get_profile(agent_type) for agent_type in self.ctx.agents]
         roster = "；".join(
             f"{profile.name}({profile.key.value})：{profile.duty}"
@@ -1040,6 +1051,7 @@ class MasterAgent:
             + "\n"
             f"{mission_block}"
             f"{rules_block}"
+            f"{exp_block}"
             f"你全权决定：战术拆解（可参考 ATT&CK，也可按目标特点自由组合）、"
             f"任务下发与优先级、子 Agent 分工、迭代节奏与收敛时机。"
             f"本会话实际装配的执行角色只有：{roster or '无'}。不得虚构未装配角色"

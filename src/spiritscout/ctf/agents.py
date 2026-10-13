@@ -1786,6 +1786,10 @@ class CTFBaseAgent(SubAgent):
         if rules:
             parts.append("## 用户既定规则（全程遵守，含终止条件）\n"
                          + rules[:1800])
+        exps = task.payload.get("recent_experience") or []
+        if exps:
+            parts.append("## 实战经验（历史会话积累的解题思维，供参考）\n"
+                         + "\n".join(f"· {e}" for e in exps[-5:]))
         angle = str(plan.strategy or "").strip()
         if angle:
             parts.append("## 本路线调查角度（与并行分支分工，不重复做功）\n"

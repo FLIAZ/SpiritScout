@@ -534,6 +534,9 @@ class SubAgent(abc.ABC):
             rules = str(task.payload.get("rules", "")).strip()
             if rules:
                 intent["rules"] = rules[:600]
+            exps = task.payload.get("recent_experience") or []
+            if exps:
+                intent["experience"] = [str(e)[:200] for e in exps[-3:]]
             intent = {k: v for k, v in intent.items() if v}
             if intent:
                 user_obj = {**user_obj, "task_intent": intent}
