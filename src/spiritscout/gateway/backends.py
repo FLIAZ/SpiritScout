@@ -238,8 +238,9 @@ class LiteLLMBackend(ChatBackend):
         streaming = on_delta is not None
         if streaming:
             kwargs["stream"] = True
-            if not anthropic:
-                kwargs["stream_options"] = {"include_usage": True}
+            # Anthropic 兼容端点也需要 usage：不设 stream_options 时
+            # 流式响应可能不含 usage 块，token 计数会归零
+            kwargs["stream_options"] = {"include_usage": True}
 
         try:
             resp = await litellm.acompletion(**kwargs)
