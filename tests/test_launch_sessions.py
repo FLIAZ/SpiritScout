@@ -74,7 +74,7 @@ class SessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIsNotNone(plan)
             self.assertEqual(plan.authorization.mode, RunMode.CTF)
-            self.assertFalse(plan.needs_mode_routing)
+            self.assertTrue(plan.needs_mode_routing)
 
     async def test_state_exposes_startup_phase_without_blackboard(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
