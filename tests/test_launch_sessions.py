@@ -23,7 +23,7 @@ class LaunchRoutingTests(unittest.TestCase):
 
         self.assertEqual(plan.authorization.mode, RunMode.CTF)
         self.assertTrue(plan.mode_auto)
-        self.assertFalse(plan.needs_mode_routing)
+        self.assertTrue(plan.needs_mode_routing)
         self.assertEqual(len(plan.challenges), 1)
 
     def test_ambiguous_web_mission_still_uses_semantic_router(self) -> None:
