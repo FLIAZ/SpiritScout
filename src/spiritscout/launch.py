@@ -177,15 +177,19 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
         req = LaunchRequest(**{**req.__dict__, "mode": fallback_mode(req)})
     if mission and not req.target and m_urls:
         req = LaunchRequest(**{**req.__dict__, "target": m_urls[0]})
-    if req.mode == RunMode.SRC and not req.target:
+    # 目标硬校验只对用户显式选择的模式生效。智能模式（mode_auto）下
+    # 不在创建时拦——「你好」这类普通对话、纯规则说明都不该被目标
+    # 校验挡在门外；意图（对话/规则/任务）由运行期 LLM 路由裁决，
+    # 真任务缺目标时灵枢会主动向用户询问。
+    if req.mode == RunMode.SRC and not req.target and not mode_auto:
         hint = ("；任务描述中未识别到目标 URL——请写明 http(s):// 地址"
                 if mission else "——或在任务描述中写明目标")
         raise SpiritScoutError(f"SRC 模式需要目标 URL{hint}")
-    if req.mode == RunMode.CTF and not req.challenges_yaml and not m_urls \
-            and not req.has_uploads:
+    if (req.mode == RunMode.CTF and not req.challenges_yaml and not m_urls
+            and not req.has_uploads and not mode_auto):
         raise SpiritScoutError(
             "CTF 模式需要赛题清单——粘贴赛题 YAML，写明赛题 URL，或上传题目附件")
-    if req.mode == RunMode.COMPETITION and not req.rules_yaml:
+    if req.mode == RunMode.COMPETITION and not req.rules_yaml and not mode_auto:
         raise SpiritScoutError(
             "渗透赛模式需要赛制规则 YAML（contest_type/flag_patterns/submit 等"
             "结构化裁决输入），暂不支持从任务描述推导")
