@@ -40,6 +40,7 @@ import re
 import time
 import urllib.parse
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
@@ -51,6 +52,20 @@ from spiritscout.ctf.flags import FlagManager
 
 # 题面中疑似编码串的最小长度（降噪）
 _MIN_BLOB_LEN = 12
+# 外部安全技能库（NoorQureshi/security-skills，MIT，206 条）——
+# 内存检索，kb_search 时按关键词匹配返回
+_SEC_SKILLS: list[dict[str, Any]] | None = None
+
+def _load_sec_skills() -> list[dict[str, Any]]:
+    global _SEC_SKILLS
+    if _SEC_SKILLS is None:
+        f = Path(__file__).parent.parent / "knowledge" / "data" / "security_skills.json"
+        try:
+            import json as _json
+            _SEC_SKILLS = _json.loads(f.read_text())
+        except (OSError, ValueError):
+            _SEC_SKILLS = []
+    return _SEC_SKILLS
 # 喂给 LLM 的单条观察摘录上限（控制 token 扇出）
 _OBS_EXCERPT_CAP = 3000
 # 对话字符预算：超出后从最旧消息开始折叠工具结果（长对话的上下文治理）
@@ -1285,6 +1300,22 @@ class CTFBaseAgent(SubAgent):
             hits = kb.search(query, limit=6)
         except Exception as exc:  # noqa: BLE001 —— 检索失败作为结果回灌
             return _ToolOutcome(ok=False, text=f"知识库检索失败: {exc}")
+        # 安全技能库检索（NoorQureshi/security-skills，MIT）：关键词匹配
+        skill_hits = []
+        q_lower = query.lower()
+        for sk in _load_sec_skills():
+            hay = (sk.get("skill_id", "") + " " + sk.get("description", "")).lower()
+            if any(w in hay for w in q_lower.split() if len(w) >= 2):
+                skill_hits.append(sk)
+        if skill_hits:
+            body_lines = ["\n=== 安全技能库命中（NoorQureshi/security-skills，MIT）==="]
+            for sk in skill_hits[:3]:
+                body_lines.append(f"[{sk['skill_id']}] {sk['description'][:120]}")
+                body_lines.append(sk["body"][:1500])
+                body_lines.append("---")
+            body = "\n".join(body_lines)[:4000]
+        else:
+            body = None
         if not hits:
             return _ToolOutcome(ok=False, text=(
                 f"经验库没有命中「{query[:60]}」——按你收集到的信息自行分析。"))
@@ -1294,10 +1325,12 @@ class CTFBaseAgent(SubAgent):
             if entry:
                 blocks.append(self._kb_entry_digest(h["base"], entry))
         titles = "、".join(str(h.get("title", ""))[:24] for h in hits[:4])
+        kb_text = "\n\n".join(blocks)[:_TOOL_RESULT_CAP] or "（条目内容为空）"
+        skill_text = ("\n\n" + body if body else "")
         return _ToolOutcome(ok=True, value=0.15,
-                            note=f"经验库命中 {len(blocks)} 条: {titles}",
-                            text=("\n\n".join(blocks)[:_TOOL_RESULT_CAP]
-                                  or "（条目内容为空）"))
+                            note=f"经验库命中 {len(blocks)} 条: {titles}"
+                                 + (f" + 安全技能 {len(skill_hits)} 条" if skill_hits else ""),
+                            text=(kb_text + skill_text)[:_TOOL_RESULT_CAP])
 
     @staticmethod
     def _kb_entry_digest(base: str, e: dict[str, Any]) -> str:
