@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "灵探（SpiritScout）渗透测试智能体系统 —— 主Agent集中决策 + 环形子Agent集群 + 黑板架构 + 漏洞全链路核验"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Proprietary" }
+license = "Apache-2.0"
 dependencies = [
     "pydantic>=2.10",
     "pyyaml>=6.0",
