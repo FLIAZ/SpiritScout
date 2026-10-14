@@ -24,3 +24,8 @@ configs/agent_models.yaml
 # 日志
 *.log
 .idea/
+
+# 本地部署凭据（绝不入库）：控制台管理密码 / API Token
+.env
+.env.*
+!.env.example

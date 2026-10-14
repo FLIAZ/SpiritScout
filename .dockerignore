@@ -1,0 +1,28 @@
+# 构建上下文裁剪：源码与 pyproject/README 之外的本地状态一律不进镜像
+.git
+.gitignore
+.dockerignore
+Dockerfile
+docker-compose.yml
+
+# 本地环境与缓存
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# 运行数据与本地凭据（绝不进镜像层）
+.spiritscout/
+.tools/
+.env
+.env.*
+!.env.example
+
+# 编辑器与日志
+.idea/
+.vscode/
+*.log
