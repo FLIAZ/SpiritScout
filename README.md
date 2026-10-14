@@ -64,19 +64,49 @@
 | `verify/` | 漏洞全链路核验（复现/误报/合规，多模型投票） |
 | `web/` | FastAPI 控制台：SSE 实时流、拓扑、仪表盘、会话管理 |
 
-## 快速开始
+## 部署方式
+
+两种方式并存，共用同一份源码与同一个运行数据目录 `.spiritscout/`；
+同一时间只启动一个实例监听同一端口。
+
+### 方式一：本地 Python（默认）
 
 ```bash
 git clone https://github.com/FLIAZ/SpiritScout.git
 cd SpiritScout
 python3 -m venv .venv && .venv/bin/pip install -e '.[toolkit]'
 
-./launch.sh                # 前台启动，Ctrl+C 停止
+./launch.sh                # 前台启动，Ctrl+C 停止（默认 8000）
 ./launch.sh stop           # 停止控制台（有运行中会话时会拒绝，需 --force）
 ./launch.sh --host 0.0.0.0 # 其余参数原样透传给程序
+./launch.sh --port 10010   # 指定端口
 ```
 
-打开 `http://127.0.0.1:8000` 后按顺序配置：
+沙箱依赖 bubblewrap（`sudo dnf install bubblewrap` 或发行版等价命令）。
+
+### 方式二：Docker（沙箱开箱可用，主机无需 Python/venv）
+
+镜像内已装好 bubblewrap，主机不必安装：
+
+```bash
+cp .env.example .env        # 填入控制台管理密码
+docker compose up -d --build
+docker compose logs -f      # 看日志
+docker compose down         # 停止
+```
+
+- 端口默认 `127.0.0.1:10010`（只发布到回环）；源码以 `./:/app` 挂载，
+  改代码立即生效，无需重建镜像；
+- 运行数据与本地部署一致，会话/审计/报告都落在 `.spiritscout/`；
+- 换国内源重建：
+  `docker compose build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple`；
+- 需要 CTF 工具箱（pwntools / pycryptodome / z3 / scapy / binwalk / sqlmap 等）：
+  `docker compose build --build-arg INSTALL_TOOLKIT=1`（镜像更大、构建更慢）。
+
+### 启动后配置
+
+打开控制台（本地 Python 默认 `http://127.0.0.1:8000`，Docker 默认
+`http://127.0.0.1:10010`）后按顺序配置：
 
 1. **模型**：「模型」页添加供应商（地址 + API Key，密钥加密存本机），
    获取或手填模型 ID，声明思考强度取值与能力；
@@ -85,12 +115,12 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[toolkit]'
 3. **下达任务**：首页描述目标与授权范围（Flag 格式可自动识别），可随附
    脱敏 HAR 或题目附件。
 
-沙箱依赖 bubblewrap（`sudo dnf install bubblewrap` 或发行版等价命令）；
 MCP 服务器（ida/yakit 等）在 `configs/system.yaml` 配置，开工时握手，
 不可达只留痕不阻断。
 
-监听非回环地址必须设置 `SPIRITSCOUT_SERVER_PASSWORD`（Basic Auth，
-用户名 `spiritscout`），并在前端配置 HTTPS 反向代理。
+两种方式监听非回环地址时都必须设置 `SPIRITSCOUT_SERVER_PASSWORD`
+（Basic Auth，用户名 `spiritscout`），并在前端配置 HTTPS 反向代理；
+Docker 方式由 compose 从 `.env` 注入该变量。
 
 ## 使用指南
 
@@ -130,6 +160,9 @@ MCP 服务器（ida/yakit 等）在 `configs/system.yaml` 配置，开工时握�
 | `configs/models.yaml` | 供应商与模型注册表（也可在控制台「模型」页维护） |
 | `configs/agent_models.yaml` | 角色到模型的指派（「编队」页维护） |
 | `configs/system.example.yaml` | 带注释的配置示例 |
+| `Dockerfile` | Docker 部署：镜像构建（Python 3.11 + bubblewrap 沙箱） |
+| `docker-compose.yml` | Docker 部署：端口发布、密码注入、源码与数据挂载 |
+| `.env` / `.env.example` | 本地管理密码与构建参数（`.env` 不入库，模板见 `.env.example`） |
 
 ## 目录结构
 
