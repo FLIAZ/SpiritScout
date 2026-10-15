@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -56,6 +57,8 @@ class BudgetTracker:
     per_mode_tokens: dict[str, int] = field(default_factory=dict)
     mode: str = ""
     call_log: list[dict] = field(default_factory=list)
+    # 记账钩子：每笔调用后把用量快照外发（控制台实时展示，不等终场汇总）
+    on_record: Any = None
 
     def record(self, model: str, tokens: int, usd: float, ts: float = 0) -> None:
         self.used_tokens += tokens
@@ -67,6 +70,22 @@ class BudgetTracker:
         self.call_log.append({
             "ts": ts or _t.time(), "model": model,
             "tokens": tokens, "cost_usd": usd, "mode": self.mode})
+        if self.on_record is not None:
+            # 展示面失败不拖累记账主链（sink 自身须可容错，如落盘瞬时失败）
+            with contextlib.suppress(Exception):
+                self.on_record(self.live_snapshot())
+
+    def live_snapshot(self) -> dict:
+        """轻量实时快照（不含逐笔时序——文件随写随读，保持小体积）。"""
+        return {
+            "used_tokens": self.used_tokens,
+            "used_usd": round(self.used_usd, 6),
+            "per_model_tokens": dict(self.per_model_tokens),
+            "per_mode_tokens": dict(self.per_mode_tokens),
+            "mode": self.mode,
+            "calls": len(self.call_log),
+            "live": True,
+        }
 
     def call_series(self) -> list[dict]:
         """逐笔调用记录（时序图表数据源）。"""

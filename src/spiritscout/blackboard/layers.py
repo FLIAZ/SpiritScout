@@ -35,6 +35,7 @@ LAYER_WRITE_PERMISSIONS: dict[AgentType, set[BlackboardLayer]] = {
         BlackboardLayer.TASK_STATE,
     },
     AgentType.POST_EXPLOIT: {
+        BlackboardLayer.ASSET,          # 横向测绘发现的存活服务即资产
         BlackboardLayer.CREDENTIAL,
         BlackboardLayer.TOPOLOGY,
         BlackboardLayer.VULN,

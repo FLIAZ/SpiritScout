@@ -83,6 +83,13 @@
 .sess-head .ops { display: flex; gap: 8px; flex-wrap: wrap; }
 .err-banner { background: var(--bad-soft); color: var(--bad); border-radius: 8px;
   padding: 9px 12px; font-size: 13px; margin-bottom: 14px; word-break: break-all; }
+/* 暂停横幅与状态 pill：琥珀调静置（区别于错误的红色、运行中的绿色） */
+.pause-banner { background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+  color: var(--accent-ink); border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+  border-radius: 8px; padding: 9px 12px; font-size: 13px; margin-bottom: 14px; }
+.pill.paused { border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  color: var(--accent-ink); }
+.pill.paused::before { animation: blink 1.2s ease-in-out infinite; }
 .chips { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
 .chip { background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
   padding: 7px 13px; font-size: 12px; color: var(--ink-2); }
@@ -351,6 +358,22 @@ table.list tr:last-child td { border-bottom: 0; }
   white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; }
 .tl-act.open > pre { display: block; }
 
+/* 工具足迹：回合尾汇总「已使用 N 个工具」+ 逐行命令原文 */
+.tl-tools { margin: 6px 0 2px; border: 1px solid var(--line); border-radius: 9px;
+  background: color-mix(in srgb, var(--surface-2) 55%, var(--surface)); overflow: hidden; }
+.tl-tools > .th { display: flex; align-items: center; gap: 6px; padding: 6px 10px;
+  font-size: 11.5px; font-weight: 700; color: var(--ink-2);
+  border-bottom: 1px solid var(--line); }
+.tl-tools > .th svg { flex: none; width: 13px; height: 13px; color: var(--accent); }
+.tl-tools > .th b { color: var(--accent-ink); }
+.tl-tools > .lines { max-height: 190px; overflow-y: auto; padding: 3px 0; }
+.tl-tools .ln { display: flex; align-items: baseline; gap: 8px; padding: 2.5px 10px;
+  font-family: var(--mono); font-size: 11px; }
+.tl-tools .tn { flex: none; max-width: 160px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--accent-ink); font-size: 10.5px; font-weight: 700; }
+.tl-tools .ln code { min-width: 0; white-space: pre-wrap; word-break: break-all;
+  color: var(--ink-2); line-height: 1.55; }
+
 .tl-concl { padding: 8px 12px; border-radius: 9px; font-size: 12.5px; line-height: 1.65;
   white-space: pre-wrap; word-break: break-word;
   background: color-mix(in srgb, var(--ok) 8%, var(--surface));
@@ -372,22 +395,58 @@ table.list tr:last-child td { border-bottom: 0; }
   .tl > .t { display: none; }
 }
 
-/* 用户消息：时间线里的右侧气泡；灵枢的回执与督导指令用紫调卡片 */
+/* ===== 灵枢↔用户 直达子会话：脱出账脊的对话信笺 =====
+   时间线是作战账册（脊线+刻点+等宽时刻），而灵枢与用户的往来是落入账册的
+   信函：对话行不挂脊线，信笺自带提纸阴影与指向小角；灵枢以宋体名章为记，
+   用户信笺不落款——一印一白，左右对答，与督导/复盘等账内卡片一眼可辨。 */
 .tl-user { --ag: var(--accent); }
+.tl-master { --ag: var(--violet); }
+.tl-user > .b, .tl-conv > .b { border-left: 0; padding-left: 0; }
+.tl-user > .b::before, .tl-conv > .b::before { display: none; }
 .tl-user > .b { display: flex; justify-content: flex-end; }
-.tl-user .bubble { max-width: min(640px, 94%);
-  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
-  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line));
-  border-radius: 12px 12px 3px 12px; padding: 8px 13px;
-  font-size: 13px; line-height: 1.65; }
+.tl-conv > .b { display: flex; justify-content: flex-start; align-items: flex-start; gap: 8px; }
+
+.tl-user .bubble, .tl-conv .bubble { position: relative; max-width: min(600px, 88%);
+  padding: 9px 14px; font-size: 13px; line-height: 1.65; box-shadow: var(--shadow-raise); }
+.tl-user .bubble { background: color-mix(in srgb, var(--accent) 11%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+  border-radius: 13px 13px 4px 13px; }
+.tl-conv .bubble { background: color-mix(in srgb, var(--violet) 9%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--violet) 30%, var(--line));
+  border-radius: 4px 13px 13px 13px; }
+/* 信笺指向角：旋转方片半埋入笺缘，两外侧棱带框线 */
+.tl-user .bubble::after, .tl-conv .bubble::after { content: ""; position: absolute;
+  width: 9px; height: 9px; transform: rotate(45deg); background: inherit; }
+.tl-user .bubble::after { right: -5.5px; bottom: 11px;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+  border-right: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line)); }
+.tl-conv .bubble::after { left: -5.5px; top: 12px;
+  border-left: 1px solid color-mix(in srgb, var(--violet) 30%, var(--line));
+  border-bottom: 1px solid color-mix(in srgb, var(--violet) 30%, var(--line)); }
+
+/* 灵枢名章：紫泥小印「灵」，微倾如钤于笺首，即身份（故笺内不再缀文字名签） */
+.seal { flex: none; width: 25px; height: 25px; margin-top: 5px; user-select: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: "Songti SC", "STSong", "SimSun", serif; font-style: normal;
+  font-size: 14px; line-height: 1; color: var(--violet);
+  background: var(--surface);
+  border: 1.5px solid color-mix(in srgb, var(--violet) 62%, var(--line));
+  border-radius: 6px; transform: rotate(-3.5deg); box-shadow: var(--shadow-raise); }
+
 .tl-user .btxt { white-space: pre-wrap; word-break: break-word; }
 .tl-user .bpath { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3);
   margin-top: 5px; word-break: break-all; }
-.tl-master { --ag: var(--violet); }
+.tl-conv .btxt { word-break: break-word; }
+
+/* 灵枢的督导/回执：账内派发卡片（虚边紫调），非对话信笺 */
 .tl-reply { padding: 7px 11px; border-radius: 9px; font-size: 12.5px; line-height: 1.65;
   white-space: pre-wrap; word-break: break-word;
   background: color-mix(in srgb, var(--violet) 7%, var(--surface));
   border: 1px dashed color-mix(in srgb, var(--violet) 32%, var(--line)); }
+
+/* 回合卡：行首缀色块，把执行者钉回其色槽（与拓扑节点同色） */
+.tl-turn .hd .who::before { content: ""; display: inline-block; width: 7px; height: 7px;
+  border-radius: 2px; background: var(--ag); margin-right: 7px; }
 
 /* Markdown 渲染块（回合收尾后的发言/结论/灵枢回执） */
 .md { white-space: normal; }
@@ -461,6 +520,8 @@ table.list tr:last-child td { border-bottom: 0; }
   background: var(--surface-2); border-radius: 7px; }
 .acard .bind { display: flex; gap: 8px; align-items: center; }
 .acard .bind select { flex: 1; font-size: 12.5px; padding: 6px 8px; }
+.acard .bind .selx { flex: 1; }
+.acard .bind .selx-btn { font-size: 12.5px; padding: 6px 8px; border-radius: 7px; }
 
 /* ================= 模型 ================= */
 .models-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; gap: 10px; flex-wrap: wrap; }

@@ -10,7 +10,7 @@ async function loadAgents() {
       const bind = a.configurable ? `<div class="bind">
           <select data-agent="${esc(a.key)}">
             <option value="">不指派（按模型列表顺序路由）</option>
-            ${S.agents.models.map(m => `<option value="${esc(m.model)}" ${m.model === bound ? "selected" : ""}>${esc(m.model)}</option>`).join("")}
+            ${S.agents.models.map(m => `<option value="${esc(m.model)}" data-prov="${esc(m.provider || "")}" ${m.model === bound ? "selected" : ""}>${esc(m.model)}</option>`).join("")}
             ${S.agents.models.length ? "" : `<option value="" disabled>（「模型」页还没有启用模型）</option>`}
           </select>
           <button class="btn sm save-agent" data-agent="${esc(a.key)}" disabled>保存</button>
@@ -453,9 +453,7 @@ async function compSend() {
     if (text) {
       const resp = await api(`/api/sessions/${S.cur}/messages`,
         { method: "POST", body: JSON.stringify({ content: text }) });
-      toast(resp.resumed
-        ? "灵枢带着现场重新开工——你的消息已进入它的决策环"
-        : "已送达灵枢，将在最近的决策点（督导/复盘）被消费");
+      toast("已送达灵枢");
       if (resp.resumed) refreshSessions();
     }
     compInput.value = "";

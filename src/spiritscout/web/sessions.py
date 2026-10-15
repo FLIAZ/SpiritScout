@@ -25,15 +25,33 @@ from spiritscout.config.settings import ModelEntry, SystemConfig
 from spiritscout.core.audit import AuditLogger
 from spiritscout.core.exceptions import SpiritScoutError
 from spiritscout.core.models import RunMode
+from spiritscout.core.pause import PauseGate
 from spiritscout.launch import LaunchPlan, LaunchRequest, prepare_launch
 from spiritscout.policy.approvals import ApprovalBroker
 from spiritscout.policy.questions import QuestionBroker
 from spiritscout.web import agentcfg, vault
 
 
+def _bound_model(cfg: SystemConfig, models: list[ModelEntry],
+                 agent: str = "master") -> str:
+    """编队页指派给该 Agent 的模型（须仍在注册表中）。
+
+    对话链路（语义路由/灵枢应答）的说话人是灵枢本人——与运行中的
+    AgentBoundGateway 同一绑定语义：空指派 = 不干预（注册表顺序首个
+    兜底）；指派的条目已从注册表移除（改过名/删过行）= 同样不干预。
+    """
+    try:
+        assigned = agentcfg.read_assignments(cfg.agent_models_path).get(agent, "")
+    except (SpiritScoutError, OSError, ValueError):
+        return ""
+    return assigned if any(m.model == assigned for m in models) else ""
+
+
 async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
                           mission: str, heuristic: RunMode,
-                          audit: AuditLogger) -> tuple[RunMode | None, str]:
+                          audit: AuditLogger,
+                          history: list[dict[str, str]] | None = None
+                          ) -> tuple[RunMode | None, str]:
     """LLM 语义路由（兼任开工预检）：一次调用裁决「模式 + 意图」。
 
     意图四分类（判断完全在提示词内，后端不写死规则）：
@@ -43,6 +61,8 @@ async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
       灵枢确认规则并等待，绝不派工（手册里的示例地址不是目标）；
     - dialogue：普通对话/提问 → 灵枢回复，不开工。
 
+    history 为此前的对话往来（续传轮传入）：指代性输入（「继续」「按你
+    说的办」）要结合上文才能判准是接着聊还是接着干。
     - 网关调用失败 → 抛出：等同模型预检失败，会话不开工并明示原因；
     - 应答解析失败 → 返回 (None, "task")：按装配层结构化兜底走。
     低思考档提示：分类是小判断，不值得重推理（模型未声明低档时忽略）。
@@ -56,9 +76,16 @@ async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
             [{"role": "system", "content": (
                 "你是灵枢的任务路由与意图判读。通读用户输入，判断两件事："
                 "属于哪类安全测试分支、用户此刻的意图类型，只输出 JSON。"
+                "recent_chat 是此前的对话记录（可能为空）——输入是「继续」"
+                "「按你说的办」这类指代性说法时，先看上文再判：接着当前话题"
+                "聊是 dialogue，上文是未竟任务且输入是推进指令则是 task。"
                 "ROLE: mode_router")},
              {"role": "user", "content": json.dumps({
                  "mission": mission[:3000],
+                 "recent_chat": [
+                     {"role": str(e.get("role")),
+                      "content": str(e.get("content"))[:300]}
+                     for e in (history or [])[-6:]],
                  "branches": {
                      "src": "授权安全测试/渗透：对站点、系统或业务做侦察→漏洞"
                             "探测→核验→报告（含 SRC 漏洞挖掘场景）",
@@ -78,7 +105,7 @@ async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
                            '"rationale": "一句话"}',
              }, ensure_ascii=False)}],
             task_type="classification", response_format="json",
-            reasoning_effort="low",
+            reasoning_effort="low", model=_bound_model(cfg, models),
             timeout_seconds=min(45, cfg.gateway.request_timeout_seconds))
     except Exception as exc:
         audit.log("system.lifecycle", "mode_router", {
@@ -105,26 +132,71 @@ async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
 
 TERMINAL_STATES = frozenset({"completed", "failed", "stopped", "interrupted"})
 
+# 会话对话史封顶（条数）：用户↔灵枢的完整往来，跨续传与重启保留。
+# 超出只裁最旧的——大厂网页对话形态：会话末尾随时可接着聊
+DIALOGUE_HISTORY_MAX = 40
+
+
+def _self_view(cfg: SystemConfig) -> str:
+    """对话通道的系统自况：编队名册 + MCP 配置清单。
+
+    对话分支不建 infra、不做 MCP 握手——接入状态如实写成「已配置、
+    开工时握手、由专项智能体调用」，避免灵枢对自身系统一无所知、
+    凭通用模型常识答出「我没有连接任何 MCP 工具」。
+    """
+    from spiritscout.agents.profiles import PROFILES
+
+    roster = "、".join(
+        f"{p.name}（{p.duty.split('：')[0]}）"
+        for p in PROFILES
+        if p.status == "available" and p.key.value != "master")
+    servers = [s for s in cfg.mcp_servers if s.enabled]
+    if servers:
+        mcp = (f"系统已配置 {len(servers)} 台 MCP 服务器："
+               + "、".join(f"{s.name}（{s.transport}）" for s in servers)
+               + "。MCP 工具在正式开工时握手接入，按角色权限并入对应专项"
+                 "智能体的工具目录、由它们调用——你（灵枢）负责元决策与"
+                 "调度，不直接持有这些工具。")
+    else:
+        mcp = "系统当前未配置 MCP 服务器（configs/system.yaml 的 mcp_servers 段）。"
+    return (f"【系统自况】你是灵枢（SpiritScout）多智能体安全测试系统的主"
+            f"智能体，麾下专项编队：{roster}。{mcp}"
+            "用户问及系统自身能力时按此如实回答。")
+
+
+def _remember_reply(session: Session, reply: str) -> None:
+    """灵枢应答落对话史（封顶保留）；用户消息由 /messages 端点随发随落。"""
+    session.dialogue_history.append(
+        {"role": "assistant", "content": (reply or "")[:4000]})
+    del session.dialogue_history[:-DIALOGUE_HISTORY_MAX]
+
 
 async def _master_reply(cfg: SystemConfig, models: list[ModelEntry],
-                        user_text: str, audit, *, kind: str) -> str:
+                        user_text: str, audit, *, kind: str,
+                        history: list[dict[str, str]] | None = None) -> str:
     """灵枢对非派工输入的应答（dialogue 正常对话 / rules 规则确认）。
 
+    history 为此前的对话往来（不含本条 user_text）——会话终态后继续发
+    消息时灵枢带着上文接着聊，与运行中直达通道共用同一份对话史。
     LLM 不可用时回退固定话术——用户至少能看到确定的反馈。
     """
     from spiritscout.gateway import ModelGateway, ModelRegistry
 
-    system = ("你是灵枢。用中文写一段简短、自然的回复。"
+    system = ("你是灵枢。用中文写一段简短、自然的回复。\n" + _self_view(cfg)
               if kind == "dialogue" else
               "你是灵枢。用户刚下发了执行规则/流程手册（不是具体题目或目标）。"
               "写一段简短确认：记住了哪些关键约定（3~5 条要点），正在等待"
               "用户提供什么（题目/目标/真实凭证）。")
+    messages = [{"role": "system", "content": system},
+                *[{"role": str(e.get("role")), "content": str(e.get("content"))[:2000]}
+                  for e in (history or [])[-20:]],
+                {"role": "user", "content": user_text[:4000]}]
     try:
         gateway = ModelGateway(ModelRegistry(models), config=cfg.gateway, audit=audit)
         resp = await gateway.chat(
-            [{"role": "system", "content": system},
-             {"role": "user", "content": user_text[:4000]}],
+            messages,
             task_type="meta_planning", max_tokens=1024,
+            model=_bound_model(cfg, models),
             timeout_seconds=min(60, cfg.gateway.request_timeout_seconds))
         text = (resp.content or "").strip()
         if text:
@@ -171,6 +243,9 @@ class Session:
     finished_at: float | None = None
     summary: dict[str, Any] = field(default_factory=dict)
     error: str = ""
+    # 用户下发的执行规则（rules/task_with_rules 意图入库）：随每次开工
+    # 下发到灵枢与各智能体；跨轮次与续传保留
+    standing_rules: str = ""
     task: asyncio.Task | None = field(default=None, repr=False, compare=False)
     # 高风险动作即时确认队列（G5 交互形态；进程内状态，会话终态即失效）
     approvals: ApprovalBroker = field(
@@ -194,9 +269,18 @@ class Session:
     # 用户历史意见（最新在后，封顶保留；拓扑图与状态面展示用）
     opinions: list[dict[str, Any]] = field(
         default_factory=list, repr=False, compare=False)
+    # 会话对话史（用户↔灵枢，最新在后）：首条即任务原文，续传轮以末尾
+    # 为新输入，灵枢每次开口都带着它——大厂网页对话形态，会话任意时刻
+    # 可从末尾接着聊。落 meta.json，跨重启保留；封顶见 DIALOGUE_HISTORY_MAX
+    dialogue_history: list[dict[str, str]] = field(
+        default_factory=list, repr=False, compare=False)
     # 续传前的终态（续传失败时恢复，原成果不丢）
     resume_prev_status: str | None = field(
         default=None, repr=False, compare=False)
+    # 暂停门 + 用时扣账 + 执行间隙检测（进程内，随会话任务共持；
+    # paused 态持久化到 meta.json，控制台重启后续传仍保持暂停）
+    pause_gate: PauseGate = field(
+        default_factory=PauseGate, repr=False, compare=False)
 
     # ---- 路径（隔离边界）
     @property
@@ -242,12 +326,23 @@ class Session:
             "phase": self.phase,
             "created_at": self.created_at, "started_at": self.started_at,
             "finished_at": self.finished_at, "error": self.error,
+            "paused": self.pause_gate.paused,
+            "excluded_seconds": round(self.pause_gate.excluded_seconds, 1),
         }
         # 仪表盘总览的轻量指标（从运行摘要提取，不走完整 summary）
         run = (self.summary or {}).get("run", {}) if isinstance(self.summary, dict) else {}
         usage = run.get("model_usage") or {}
         out["tokens"] = usage.get("used_tokens", 0)
         out["cost_usd"] = usage.get("used_usd", 0.0)
+        # 运行中实时用量优先：网关逐笔落盘的 usage.json（列表/仪表盘随轮询跳动）
+        usage_file = self.workspace / "usage.json"
+        if usage_file.exists():
+            try:
+                live = json.loads(usage_file.read_text(encoding="utf-8"))
+                out["tokens"] = live.get("used_tokens", out["tokens"])
+                out["cost_usd"] = live.get("used_usd", out["cost_usd"])
+            except (OSError, ValueError):
+                pass
         out["rounds"] = run.get("rounds_executed", 0)
         out["flag_stats"] = run.get("flag_stats")
         if include_summary:
@@ -295,13 +390,21 @@ class SessionManager:
                 request=data.get("request", {}),
                 launch_request=data.get("launch_request", {}),
                 opinions=data.get("opinions", []),
+                dialogue_history=[
+                    e for e in data.get("dialogue_history", [])
+                    if isinstance(e, dict)
+                    and e.get("role") and e.get("content")],
                 status=data.get("status", "interrupted"),
                 phase=data.get("phase", "interrupted"),
                 created_at=data.get("created_at", 0.0),
                 started_at=data.get("started_at"),
                 finished_at=data.get("finished_at"),
                 summary=data.get("summary", {}), error=data.get("error", ""),
+                standing_rules=data.get("standing_rules", ""),
             )
+            # 暂停态与扣账跨重启恢复：静默置门（不补记审计）
+            session.pause_gate.restore(bool(data.get("paused")),
+                                       data.get("excluded_seconds", 0.0))
             if session.status not in TERMINAL_STATES:
                 session.status = "interrupted"
                 session.phase = "interrupted"
@@ -315,11 +418,15 @@ class SessionManager:
             "target": session.target, "title": session.title,
             "request": session.request,
             "launch_request": session.launch_request,
+            "standing_rules": session.standing_rules,
             "opinions": session.opinions[-8:],
+            "dialogue_history": session.dialogue_history[-DIALOGUE_HISTORY_MAX:],
             "status": session.status, "phase": session.phase,
             "created_at": session.created_at,
             "started_at": session.started_at, "finished_at": session.finished_at,
             "summary": session.summary, "error": session.error,
+            "paused": session.pause_gate.paused,
+            "excluded_seconds": round(session.pause_gate.excluded_seconds, 1),
         }, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def list(self) -> list[Session]:
@@ -346,7 +453,13 @@ class SessionManager:
         """会话级配置副本：全部状态路径重定向到会话工作区（隔离核心）。"""
         cfg = self._cfg.model_copy(deep=True)
         ws = session.workspace
-        cfg.mode = RunMode(session.mode)
+        try:
+            cfg.mode = RunMode(session.mode)
+        except ValueError:
+            # 对话/规则展示态会话（session.mode=dialogue/rules）：配置副本
+            # 只服务回复/审计路径，不派工——借用主配置模式，别让 RunMode
+            # 构造崩掉续传（续传是否派工由语义路由重新裁决）
+            cfg.mode = self._cfg.mode
         cfg.workspace.root = str(ws)
         cfg.blackboard.sqlite_path = str(session.bb_path)
         cfg.knowledge.sqlite_path = str(ws / "kb.db")
@@ -455,6 +568,11 @@ class SessionManager:
         session.plan = plan
         session.launch_request = {k: v for k, v in payload.items()
                                   if k != "upload_ids"}
+        # 对话史首条：用户的任务原文即这段会话的第一句话（与会话页首颗
+        # 气泡同源），此后的续传对话从这里接着长
+        if plan.mission:
+            session.dialogue_history.append(
+                {"role": "user", "content": plan.mission[:4000]})
         self._sessions[session.session_id] = session
         self._persist(session)
 
@@ -462,6 +580,7 @@ class SessionManager:
         session.approvals = ApprovalBroker(AuditLogger(cfg.audit_log_path))
         session.questions = QuestionBroker(AuditLogger(cfg.audit_log_path))
         session.ring = RingLedger(AuditLogger(cfg.audit_log_path))
+        session.pause_gate = PauseGate(AuditLogger(cfg.audit_log_path))
         no_llm = bool(payload.get("no_llm", False))
         # 暂存附件材料化：移入工作区 attachments/ + 注入无附件的赛题载荷
         # （方向判类/附件分析工具/题面视图直接可用）+ 种入灵枢收件箱
@@ -492,8 +611,14 @@ class SessionManager:
         await self._queue.put((session, cfg, plan, no_llm, models, False))
         return session
 
-    def _rebuild_plan(self, session: Session) -> LaunchPlan | None:
-        """控制台重启后从持久化的启动参数重建计划（同一输入 → 同一装配）。"""
+    def _rebuild_plan(self, session: Session, *, mission: str | None = None,
+                      extra_scope: list[str] | None = None) -> LaunchPlan | None:
+        """控制台重启后从持久化的启动参数重建计划（同一输入 → 同一装配）。
+
+        mission/extra_scope 供续传真任务的计划重建覆盖：新任务消息替换
+        原任务原文，既有授权范围并入 extra_scope（用户追加目标时不缩
+        既有边界——授权只增不减，禁打列表仍是唯一硬边界）。
+        """
         req = session.launch_request or {}
         if not req:
             return None
@@ -501,10 +626,16 @@ class SessionManager:
             # 自动模式且尚未创建黑板，说明旧进程在真正开工前中断；应按原始
             # 用户意图重新判定，而不是把当时的临时兜底模式永久钉死。
             untouched_auto = bool(req.get("mode_auto")) and not session.bb_path.exists()
+            try:
+                mode_override = RunMode(session.mode)
+            except ValueError:
+                # 对话/规则等展示态不是业务分支：交回语义路由重新裁决
+                # （对话会话重启后续传此前会在此摔成「缺少启动信息」）
+                mode_override = None
             plan = prepare_launch(LaunchRequest(
-                mode=None if untouched_auto else RunMode(session.mode),
+                mode=None if untouched_auto else mode_override,
                 target=req.get("target") or None,
-                extra_scope=list(req.get("scope") or []),
+                extra_scope=[*(req.get("scope") or []), *(extra_scope or [])],
                 platform=req.get("platform") or None,
                 allow_sensitive=bool(req.get("allow_sensitive", False)),
                 rps=float(req.get("rps", 10.0)),
@@ -512,7 +643,8 @@ class SessionManager:
                 challenges_yaml=req.get("challenges_yaml") or None,
                 rules_yaml=req.get("rules_yaml") or None,
                 accept_rule_conflicts=bool(req.get("accept_rule_conflicts", False)),
-                mission=req.get("mission") or None,
+                mission=mission if mission is not None
+                        else (req.get("mission") or None),
                 has_uploads=(session.workspace / "attachments").is_dir(),
             ))
         except (SpiritScoutError, TypeError, ValueError):
@@ -586,11 +718,12 @@ class SessionManager:
         return changed
 
     async def resume(self, session_id: str) -> Session:
-        """续传：终态会话带用户新来的意见重新开工（同一工作区/审计/Flag 库）。
+        """续传：终态会话从对话末尾接着进行（同一工作区/审计/Flag 库）。
 
         复用启动计划——进程内持有则直接用；控制台重启过则从 meta.json 的
-        原始启动参数确定性重建。CTF 已破题的赛题不再重解，未破题的与用户
-        意见一起进入新一轮决策环。
+        原始启动参数确定性重建。这一轮的输入是对话史末尾的用户消息，
+        是否开工、进哪个分支由 _run 的语义路由结合上下文裁决；
+        CTF 已破题的赛题不再重解，未破题的与用户意见一起进入新一轮决策环。
         """
         from spiritscout.config import load_model_config
         session = self._sessions.get(session_id)
@@ -604,8 +737,12 @@ class SessionManager:
             raise SpiritScoutError(
                 "该会话缺少启动信息（由不支持续传的旧版本创建），无法续传——"
                 "请基于现有报告与审计新开任务")
-        # 开工前中断的自动模式会在 _rebuild_plan 中重新确定装配模式。
-        if not session.bb_path.exists():
+        # 开工前中断的自动模式会在 _rebuild_plan 中重新确定装配模式；
+        # 对话/规则会话没有开工记录，展示态模式保持不动——新消息是否
+        # 开工、进哪个分支由 _run 的语义路由重新裁决
+        if not session.bb_path.exists() \
+                and str((session.summary or {}).get("intent") or "") \
+                not in ("dialogue", "rules"):
             session.mode = session.plan.authorization.mode.value
             session.target = session.plan.target
         self._cancel_stale_tasks(session)
@@ -614,16 +751,23 @@ class SessionManager:
             raise SpiritScoutError(
                 f"模型注册表为空: {self._cfg.models_config_path}（请在「模型」页检查）")
         session.resume_prev_status = session.status
+        # 配置副本与通道先于状态翻转构建——构建失败会话保持原终态，
+        # 不会卡出「运行中/等待调度」的僵尸态
+        cfg = self._session_cfg(session, session.request.get("budget_tokens"))
+        session.approvals = ApprovalBroker(AuditLogger(cfg.audit_log_path))
+        session.questions = QuestionBroker(AuditLogger(cfg.audit_log_path))
+        session.ring = RingLedger(AuditLogger(cfg.audit_log_path))
+        # 暂停门换新（带本轮审计器），暂停态跨续传保留：用户没手动继续前
+        # 重开的任务在检查点挂起等待
+        was_paused = session.pause_gate.paused
+        session.pause_gate = PauseGate(AuditLogger(cfg.audit_log_path))
+        session.pause_gate.restore(was_paused)
+        no_llm = bool(session.request.get("no_llm", False))
         session.status = "running"
         session.phase = "queued"
         session.finished_at = None
         session.error = ""
         self._persist(session)
-        cfg = self._session_cfg(session, session.request.get("budget_tokens"))
-        session.approvals = ApprovalBroker(AuditLogger(cfg.audit_log_path))
-        session.questions = QuestionBroker(AuditLogger(cfg.audit_log_path))
-        session.ring = RingLedger(AuditLogger(cfg.audit_log_path))
-        no_llm = bool(session.request.get("no_llm", False))
         self.start()
         await self._queue.put((session, cfg, session.plan, no_llm, models, True))
         return session
@@ -646,40 +790,80 @@ class SessionManager:
                     run_engagement,
                 )
 
-                mode = RunMode(session.mode)
+                try:
+                    mode = RunMode(session.mode)
+                except ValueError:
+                    # 对话/规则收尾落下的展示态模式（dialogue/rules）：
+                    # 兜底取装配模式，真实模式由下方语义路由按消息重新裁决
+                    mode = plan.authorization.mode
                 # 开工即有声：先落一条事件让用户立刻看到灵枢动起来了
                 # （随后的模型调用期间时间线不再静默）
                 audit = AuditLogger(cfg.audit_log_path)
+                # 用户首条消息（任务/提问原文）先于开工事件落时间线——会话页
+                # 第一颗完整气泡，与后续 /messages 的消息气泡同构。只在首跑
+                # 记录：续传与对话消息已由 /messages 端点即时落过，重放会重复
+                if not resume and plan.mission:
+                    audit.log("user.message", "user", {"content": plan.mission})
                 audit.log("system.lifecycle", "runtime", {
                     "action": "session_kickoff", "resume": resume})
                 routed = None
                 intent = "task"
+                # 路由对象消息：续传轮取对话史末尾的用户消息——大厂网页
+                # 对话形态，会话从上次结束的地方接着说，新消息就是这一轮
+                # 的输入，不再把原任务整跑一遍；无对话史（旧会话/接口直调
+                # 续传）回退原任务原文
+                prev_intent = str((session.summary or {}).get("intent") or "")
+                last_user_text = next(
+                    (str(e.get("content") or "") for e in
+                     reversed(session.dialogue_history)
+                     if e.get("role") == "user"), "")
+                resume_turn = bool(resume and last_user_text)
+                route_mission = last_user_text if resume_turn else plan.mission
+                # 路由带对话上文：指代性输入（「继续」「按你说的办」）
+                # 要结合上文才能判准是接着聊还是接着干
+                route_history = session.dialogue_history[:-1] \
+                    if resume_turn else None
                 if not no_llm and models:
-                    if not resume and plan.needs_mode_routing and plan.mission:
+                    if route_mission and (
+                            (not resume and plan.needs_mode_routing)
+                            or resume_turn):
                         # 语义路由兼任开工预检（开工前唯一模型调用，调用成功
                         # 即模型全链可用），不为预检单付一次串行等待
                         self._set_phase(session, "mode_routing", audit)
                         routed, intent = await _llm_route_mode(
-                            cfg, models, plan.mission, mode, audit)
+                            cfg, models, route_mission, mode, audit,
+                            history=route_history)
                     else:
                         self._set_phase(session, "model_preflight", audit)
                         _preflight_models(cfg, models, audit)
+                # 任务+规则同来：规则入库后照常开工——把带目标的任务弹回
+                # 「等待确认」同样是把用户输入拒之门外
+                if intent == "task_with_rules" and route_mission:
+                    session.standing_rules = route_mission
                 # 意图分流（LLM 裁决，后端只搬运结果）：
                 # dialogue/rules 不派工——灵枢回复后收尾，规则持久化，
                 # 等用户下发真正的任务（发送消息即带现场续传）
-                if intent in ("rules", "dialogue", "task_with_rules") \
-                        and plan.mission:
-                    if intent != "dialogue":
-                        session.standing_rules = plan.mission
+                if intent in ("rules", "dialogue") and route_mission:
+                    session.mode = intent      # 展示态：对话/规则，不冒充业务分支
+                    if intent == "rules":
+                        session.standing_rules = route_mission
                         if isinstance(session.launch_request, dict) \
                                 and session.launch_request.get("mission"):
                             session.launch_request["mission"] = ""
                     self._persist(session)
                     self._set_phase(session, "master_reply", audit)
                     reply = await _master_reply(
-                        cfg, models, plan.mission, audit,
-                        kind="rules" if intent == "rules" else "dialogue")
+                        cfg, models, route_mission, audit,
+                        kind="rules" if intent == "rules" else "dialogue",
+                        history=session.dialogue_history[:-1])
                     audit.log("master.reply", "master", {"text": reply[:4000]})
+                    _remember_reply(session, reply)
+                    # 收件箱消费语义：本轮已答复的消息移出（对话史已留痕，
+                    # 运行中直达通道不会重复吃到旧消息）
+                    session.user_inbox[:] = [
+                        m for m in session.user_inbox
+                        if not (m.get("kind") == "message"
+                                and m.get("text") == route_mission)]
                     session.status = "completed"
                     session.phase = "completed"
                     session.finished_at = time.time()
@@ -690,6 +874,54 @@ class SessionManager:
                         "intent": intent}
                     self._persist(session)
                     return
+                # 续传轮来了真任务：以新消息为任务意图重建启动计划（原计划
+                # 可能是对话装配或旧任务），既有授权范围并入 extra_scope——
+                # 用户追加目标时不缩既有边界；指代性续作（「继续」）提取不
+                # 出新目标时，靠并入的既有范围照常开工
+                if resume_turn and intent in ("task", "task_with_rules"):
+                    old_scope = plan.authorization.scope
+                    merged = [*old_scope.allowed_domains,
+                              *old_scope.allowed_cidrs,
+                              *old_scope.allowed_urls]
+                    try:
+                        new_plan = self._rebuild_plan(
+                            session, mission=route_mission, extra_scope=merged)
+                        if new_plan is None:
+                            # 旧版本会话无持久化启动参数：退回进程内原始请求
+                            base = plan.source_request or LaunchRequest(
+                                mission=route_mission)
+                            new_plan = prepare_launch(LaunchRequest(
+                                **{**base.__dict__, "mission": route_mission,
+                                   "extra_scope": [*base.extra_scope, *merged]}))
+                    except SpiritScoutError as exc:
+                        # 新消息仍缺装配要素：不硬拒——灵枢说明缺口，
+                        # 会话留在对话态等用户补齐
+                        self._set_phase(session, "master_reply", audit)
+                        reply = await _master_reply(
+                            cfg, models,
+                            f"{route_mission}\n\n（装配提示：{exc}）",
+                            audit, kind="dialogue",
+                            history=session.dialogue_history[:-1])
+                        audit.log("master.reply", "master",
+                                  {"text": reply[:4000]})
+                        _remember_reply(session, reply)
+                        session.status = "completed"
+                        session.phase = "completed"
+                        session.finished_at = time.time()
+                        session.summary = {
+                            "note": "任务缺目标/赛题等装配要素，灵枢已说明；"
+                                    "补齐后发送即自动开工",
+                            "intent": prev_intent}
+                        self._persist(session)
+                        return
+                    plan = new_plan
+                    mode = plan.authorization.mode
+                    session.mode = mode.value
+                    session.target = plan.target
+                    cfg.mode = mode
+                    if isinstance(session.launch_request, dict):
+                        session.launch_request["mission"] = route_mission
+                    self._persist(session)
                 if routed is not None and routed != mode and plan.source_request:
                     try:
                         plan = prepare_launch(LaunchRequest(**{
@@ -705,9 +937,36 @@ class SessionManager:
                             "action": "llm_mode_route_rejected",
                             "llm_mode": routed.value, "kept": mode.value,
                             "reason": str(exc)[:300]})
+                # 真任务缺任何授权对象（范围空）：不派工也不硬拒——让会话
+                # 以 ScopeViolation 摔死在启动门，续传还会再摔一次。灵枢
+                # 向用户说明缺口，补齐后发送即自动开工
+                if intent in ("task", "task_with_rules") \
+                        and plan.authorization.scope.is_empty():
+                    self._set_phase(session, "master_reply", audit)
+                    reply = await _master_reply(
+                        cfg, models,
+                        f"{route_mission}\n\n（装配提示：任务中未识别到任何"
+                        "授权目标——域名/网段/URL 均为空，无法开工。请向用户"
+                        "说明需要提供什么：SRC 给目标地址，CTF 给赛题链接或"
+                        "附件）", audit, kind="dialogue",
+                        history=session.dialogue_history[:-1])
+                    audit.log("master.reply", "master", {"text": reply[:4000]})
+                    _remember_reply(session, reply)
+                    session.status = "completed"
+                    session.phase = "completed"
+                    session.finished_at = time.time()
+                    session.summary = {
+                        "note": "任务未识别到授权目标，灵枢已向用户说明；"
+                                "补齐后发送即自动开工",
+                        "intent": prev_intent or "task"}
+                    self._persist(session)
+                    return
                 self._set_phase(session, "runtime_starting", audit)
                 agent_models = agentcfg.read_assignments(cfg.agent_models_path)
                 self._set_phase(session, "executing", audit)
+                # 执行间隙检测（合盖待机/Ctrl+Z/VM 快照）：墙钟心跳缺口，
+                # 全平台一致；用时扣账与时间线标记由门内完成
+                session.pause_gate.start_gap_watch()
                 if mode == RunMode.CTF:
                     result = await run_ctf_engagement(
                         cfg=cfg, models=models,
@@ -720,6 +979,9 @@ class SessionManager:
                         ring=session.ring,
                         user_inbox=session.user_inbox,
                         question_broker=session.questions,
+                        standing_rules=session.standing_rules,
+                        pause_gate=session.pause_gate,
+                        dialogue_history=session.dialogue_history,
                         resume=resume)
                 elif mode == RunMode.COMPETITION:
                     result = await run_competition_engagement(
@@ -731,7 +993,10 @@ class SessionManager:
                         approval_gate=session.approvals.ask,
                         ring=session.ring,
                         user_inbox=session.user_inbox,
-                        question_broker=session.questions)
+                        question_broker=session.questions,
+                        standing_rules=session.standing_rules,
+                        pause_gate=session.pause_gate,
+                        dialogue_history=session.dialogue_history)
                 else:
                     result = await run_engagement(
                         cfg=cfg, models=models,
@@ -743,7 +1008,10 @@ class SessionManager:
                         approval_gate=session.approvals.ask,
                         ring=session.ring,
                         user_inbox=session.user_inbox,
-                        question_broker=session.questions)
+                        question_broker=session.questions,
+                        standing_rules=session.standing_rules,
+                        pause_gate=session.pause_gate,
+                        dialogue_history=session.dialogue_history)
                 session.status = "completed"
                 session.phase = "completed"
                 session.summary = {
@@ -768,6 +1036,7 @@ class SessionManager:
                 session.phase = "failed"
                 session.error = f"{type(exc).__name__}: {exc}"[:500]
         finally:
+            await session.pause_gate.stop_gap_watch()
             session.finished_at = time.time()
             self._persist(session)
 
@@ -789,6 +1058,23 @@ class SessionManager:
             session.status = "stopped"
             session.phase = "stopped"
             session.finished_at = time.time()
+            self._persist(session)
+        return session
+
+    async def set_paused(self, session_id: str, paused: bool) -> Session | None:
+        """暂停/继续切换（幂等）：仅运行中生效并即时持久化。
+
+        暂停是协作式的——灵枢图节点与子 Agent 步骤在各自检查点挂起，
+        在途动作跑完才停；直达对话与审批不经此门，照常可用。
+        """
+        session = self._sessions.get(session_id)
+        if session is None:
+            return None
+        if session.status == "running":
+            if paused:
+                session.pause_gate.pause()
+            else:
+                session.pause_gate.resume()
             self._persist(session)
         return session
 

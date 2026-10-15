@@ -160,7 +160,7 @@ function renderDash() {
         <td class="mono">${fmtK(x.tokens || 0)}</td>
         <td class="mono">$${Number(x.cost_usd || 0).toFixed(3)}</td>
         <td class="mono">${esc(flagCell(x.flag_stats))}</td>
-        <td class="mono">${fmtDur(x.started_at, x.finished_at)}</td></tr>`).join("")}</tbody></table>`
+        <td class="mono">${fmtDur(x.started_at ? x.started_at + (x.excluded_seconds || 0) : x.started_at, x.finished_at)}</td></tr>`).join("")}</tbody></table>`
       : '<div class="empty-note">还没有会话——回「任务」页下达第一个任务</div>'}
     ${findings.length ? `
     <div class="dash-sec">最近发现</div>
@@ -174,27 +174,40 @@ function renderDash() {
 
 function renderSessionHead() {
   const s = S.state.session;
+  const running = !TERMINAL.has(s.status);
   $("#s-title").textContent = s.title || s.target || s.session_id;
   $("#s-title").title = s.target || "";
   $("#op-rename").onclick = () => startRename(S.cur, $("#s-title"));
   $("#s-meta").innerHTML = [
     `<span class="pill ${s.status}">${STATUS_CN[s.status] || s.status}</span>`,
+    running && s.paused ? `<span class="pill paused">已暂停</span>` : "",
     `<span class="tag blue">${MODE_CN[s.mode] || s.mode}</span>`,
-    s.started_at ? `<span class="tag">用时 ${fmtDur(s.started_at, s.finished_at)}</span>` : "",
+    // 用时扣除暂停与执行间隙区间（门内累计，实时随轮询刷新）
+    s.started_at ? `<span class="tag">用时 ${fmtDur(s.started_at + (s.excluded_seconds || 0), s.finished_at)}</span>` : "",
     `<span class="tag mono">${esc(s.session_id)}</span>`,
   ].join("");
-  $("#s-err").innerHTML = s.error ? `<div class="err-banner">${esc(s.error)}</div>` : "";
-  const running = !TERMINAL.has(s.status);
+  $("#s-err").innerHTML = [
+    running && s.paused
+      ? `<div class="pause-banner">⏸ 已暂停——智能体将在当前步骤完成后停下；你仍可与灵枢对话，审批照常</div>` : "",
+    s.error ? `<div class="err-banner">${esc(s.error)}</div>` : "",
+  ].join("");
   $("#comp-send").disabled = false;
   $("#comp-attach").disabled = false;
   $("#comp-input").placeholder = running
     ? "给灵枢提意见、补充线索或上传附件…"
-    : "会话已结束——继续提问或布置新方向，灵枢带着现场重新开工";
+    : "继续对话——灵枢带着这段会话的完整上下文";
   $("#s-ops").innerHTML = `
+    ${running ? `<button class="btn sm" id="op-pause">${s.paused ? "▶ 继续" : "⏸ 暂停"}</button>` : ""}
     ${running ? `<button class="btn danger sm" id="op-stop">停止</button>` : ""}
     <a class="btn sm" href="/api/sessions/${S.cur}/report/download" download>下载报告</a>
     <a class="btn sm" href="/api/sessions/${S.cur}/audit/download" download>导出审计</a>
     <button class="btn danger sm" id="op-del" ${running ? "disabled" : ""}>删除</button>`;
+  if (running) $("#op-pause").onclick = async () => {
+    const url = `/api/sessions/${S.cur}/${s.paused ? "resume" : "pause"}`;
+    try { await api(url, { method: "POST", body: "{}" });
+      toast(s.paused ? "已继续" : "已暂停——在途步骤跑完即停"); refreshState(); }
+    catch (e) { toast(e.message, true); }
+  };
   if (running) $("#op-stop").onclick = async () => {
     try { await api(`/api/sessions/${S.cur}/stop`, { method: "POST", body: "{}" });
       toast("已发送停止"); refreshState(); } catch (e) { toast(e.message, true); }
@@ -508,6 +521,10 @@ function drawTopo() {
       ${latestReply ? `<div class="reply-txt" title="${esc(latestReply.text || "")}">灵枢：${esc(latestReply.text || "")}</div>` : ""}
       <small>消息直达灵枢并转达执行中的智能体</small></div>` : "";
 
+  // 节点详情的数据源随图一并留存（点击路线/发现/孤儿节点时取用）
+  S.topoRouteMeta = routeMeta;
+  S.topoFindings = dispFindings;
+  S.topoOrphans = orphans;
   box.innerHTML = `<div id="topo-stage">
       <svg class="edges"></svg>
       ${unodeHtml}
@@ -705,27 +722,55 @@ function showNodeDetail(nodeId) {
   }
   panel._curId = nodeId;
   panel.hidden = false;
-  const nodes = (S.state?.topology?.dag_nodes || []);
-  const node = nodes.find(n => n.node_id === nodeId);
-  const tasks = (S.state?.topology?.tasks || []).filter(t => t.parent_dag_node === nodeId);
-  $("#td-title").textContent = node?.title || nodeId;
-  let body = "";
-  if (!tasks.length) {
-    body = '<div class="td-empty">暂无任务数据</div>';
-  } else {
-    for (const t of tasks) {
-      body += `<div class="td-task">
-        <div class="td-agent">${esc(agentName(t.agent_type))} · ${esc(t.status || "")}</div>`;
-      for (const r of t.routes || []) {
-        body += `<div class="td-route">
-          <div class="td-route-h"><b>${esc(r.name || "")}</b>
-            <span class="mono">${Math.round((r.progress || 0) * 100)}%</span></div>
-          ${r.note ? `<div class="td-note">${esc(r.note)}</div>` : ""}
-        </div>`;
-      }
-      body += `</div>`;
+  let title = nodeId, body = "";
+  const taskDetail = t => {
+    let h = `<div class="td-task">
+      <div class="td-agent">${esc(agentName(t.agent_type))} · ${esc(t.status || "")}</div>`;
+    for (const r of t.routes || []) {
+      h += `<div class="td-route">
+        <div class="td-route-h"><b>${esc(r.name || "")}</b>
+          <span class="mono">${Math.round((r.progress || 0) * 100)}%</span></div>
+        ${r.note ? `<div class="td-note">${esc(r.note)}</div>` : ""}
+      </div>`;
     }
+    return h + `</div>`;
+  };
+  if (nodeId.startsWith("__route_")) {
+    // 路线分支节点：执行现场全量呈现（agent / 状态 / 进度 / 最新笔记）
+    const r = (S.topoRouteMeta || new Map()).get(nodeId);
+    if (r) {
+      title = `${agentName(r.agent)} · ${r.name || "路线"}`;
+      const pct = Math.round((r.progress || 0) * 100);
+      body = `<div class="td-task">
+        <div class="td-route-h"><b>${esc(r.status || "")}</b><span class="mono">${pct}%</span></div>
+        <div class="prog ${pct === 100 ? "done" : ""}"><i style="width:${pct}%"></i></div>
+        ${r.note ? `<div class="td-note">${esc(r.note)}</div>`
+                : '<div class="td-empty">路线尚无现场笔记</div>'}
+      </div>`;
+    }
+  } else if (nodeId.startsWith("__finding_")) {
+    // 发现节点：完整内容（节点卡上只是截断摘要）
+    const f = (S.topoFindings || [])[Number(nodeId.slice(10))];
+    if (f) {
+      title = ({ note: "共享笔记", flag: "Flag", asset: "入口 / 资产" })[f.type] || "发现";
+      body = `<div class="td-task"><div class="td-note"
+        style="white-space:pre-wrap">${esc(f.text || "")}</div></div>`;
+    }
+  } else if (nodeId === "__orphan__") {
+    title = "下发任务";
+    const list = S.topoOrphans || [];
+    body = list.map(taskDetail).join("");
   }
+  if (!body) {
+    // DAG 方向节点：列出挂在该节点下的任务与路线
+    const nodes = (S.state?.topology?.dag_nodes || []);
+    const node = nodes.find(n => n.node_id === nodeId);
+    title = node?.title || nodeId;
+    const tasks = (S.state?.topology?.tasks || []).filter(t => t.parent_dag_node === nodeId);
+    body = tasks.length ? tasks.map(taskDetail).join("")
+                        : '<div class="td-empty">暂无任务数据</div>';
+  }
+  $("#td-title").textContent = title;
   $("#td-body").innerHTML = body;
   panel.querySelector("#td-close").onclick = () => { panel.hidden = true; };
 }
@@ -835,8 +880,43 @@ function argBrief(name, args) {
   if (name === "note") return one(args.text).slice(0, 180);
   if (name === "analyze_text") return "分析题面文本";
   if (name === "analyze_attachments") return "分析全部附件";
+  if (name.startsWith("mcp__")) {
+    const parts = name.split("__");
+    const server = parts[1] || "mcp";
+    const tool = parts.slice(2).join("__") || "?";
+    const first = Object.values(args).find(v =>
+      (typeof v === "string" || typeof v === "number" || typeof v === "boolean") &&
+      String(v).trim() !== "");
+    return `${one(server)} · ${one(tool)}${first !== undefined ? `(${one(String(first)).slice(0, 60)})` : ""}`;
+  }
   const compact = one(JSON.stringify(args));
   return compact === "{}" ? "执行" : compact.slice(0, 180);
+}
+/* 工具足迹条：回合尾逐行列出模型实际使用的工具与命令原文 */
+const TOOLS_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>';
+function toolFootprint(name, args) {
+  args = args && typeof args === "object" ? args : {};
+  const cut = s => { s = String(s ?? "").trim(); return s.length > 400 ? s.slice(0, 400) + " …" : s; };
+  if (name === "shell") return cut(args.command);
+  if (name === "python") return cut(String(args.code ?? "").split("\n")[0]);
+  if (name === "http_request") {
+    let target = String(args.path || args.url || "/");
+    try { if (/^https?:\/\//i.test(target)) { const u = new URL(target); target = u.host + u.pathname + u.search; } } catch {}
+    return cut(`${String(args.method || "GET").toUpperCase()} ${target}`);
+  }
+  return cut(argBrief(name, args));
+}
+function traceToolsStrip(turn) {
+  const flow = turn?.querySelector(".flow");
+  if (!flow) return null;
+  let strip = flow.querySelector(".tl-tools");
+  if (!strip) {
+    flow.insertAdjacentHTML("beforeend", `<div class="tl-tools"><div class="th">${TOOLS_SVG}
+      <span>已使用 <b class="n">0</b> 个工具</span></div><div class="lines"></div></div>`);
+    strip = flow.lastElementChild;
+  }
+  flow.append(strip);   // 始终钉在回合流末尾，后续动作卡插在其前
+  return strip;
 }
 function tracePush(e) {
   const box = $("#trace-box");
@@ -915,6 +995,17 @@ function tracePush(e) {
           btn.setAttribute("aria-expanded", String(act.classList.contains("open")));
         };
       }
+      // 工具足迹：计数逐次累加，命令逐行追加（回放时按事件序重建）
+      const strip = traceToolsStrip(turn);
+      if (strip && (d.calls || []).length) {
+        const n = strip.querySelector(".n");
+        const lines = strip.querySelector(".lines");
+        for (const c of (d.calls || [])) {
+          n.textContent = String(Number(n.textContent || "0") + 1);
+          lines.insertAdjacentHTML("beforeend",
+            `<div class="ln"><span class="tn">${esc(c.name || "?")}</span><code>${esc(toolFootprint(c.name, c.arguments))}</code></div>`);
+        }
+      }
       traceScroll();
       break;
     }
@@ -982,6 +1073,16 @@ function tracePush(e) {
       if (d.action === "session_kickoff")
         traceAppend(e, `<div class="m">灵枢开工准备中——检查模型链路并判定任务模式…</div>`, "tl-sys");
       break;
+    case "engagement.paused":
+      traceAppend(e, `<div class="m">⏸ 已暂停——在途步骤跑完即停，对话与审批照常</div>`, "tl-sys");
+      break;
+    case "engagement.resumed":
+      traceAppend(e, `<div class="m">▶ 已继续${d.paused_seconds ? `（暂停 ${fmtElapsed(d.paused_seconds)}，不计入用时）` : ""}</div>`, "tl-sys");
+      break;
+    case "system.gap":
+      // 执行间隙（合盖待机/Ctrl+Z/VM 快照）：时间线如实标记，区间不计入用时
+      traceAppend(e, `<div class="m">💤 检测到执行间隙 ${fmtElapsed(d.gap_seconds || 0)}——控制台刚刚未在运行，该区间不计入用时</div>`, "tl-sys");
+      break;
     case "user.attachment": {
       const sz = fmtSize(d.size);
       traceAppend(e, `<div class="bubble"><div class="btxt">📎 ${esc(d.name || "")}${sz ? ` <span class="k">${esc(sz)}</span>` : ""}</div>
@@ -995,9 +1096,12 @@ function tracePush(e) {
       break;
     case "decision.change": {
       if (d.action === "llm_mode_route") {
+        const verdict = (d.intent === "dialogue" || d.intent === "rules")
+          ? (d.intent === "dialogue" ? "对话" : "规则")
+          : (MODE_CN[d.llm_mode] || d.llm_mode || "?");
         traceAppend(e, `<div class="hd"><span class="who">灵枢</span>
           <span class="k">任务模式判定</span></div>
-          <div class="ang">→ ${esc(MODE_CN[d.llm_mode] || d.llm_mode || "?")}${d.rationale ? ` · ${esc(d.rationale)}` : ""}</div>`, "tl-master");
+          <div class="ang">→ ${esc(verdict)}${d.rationale ? ` · ${esc(d.rationale)}` : ""}</div>`, "tl-master");
       } else if (d.action === "dispatch_plan" || d.action === "dispatch_plan_skipped") {
         traceAppend(e, `<div class="m">灵枢已定下发计划（任务复杂度 · 路线预算 · 思考强度）</div>`, "tl-sys");
       } else if (d.action === "meta_plan") {
@@ -1019,15 +1123,20 @@ function tracePush(e) {
       break;
     }
     case "master.reply":
-      traceAppend(e, `<div class="tl-reply md">${mdRender(d.text || "")}</div>`, "tl-master");
+      // 灵枢↔用户直达子会话的左气泡：名章为身份（无文字标签订），与用户右气泡成对
+      traceAppend(e, `<i class="seal" aria-label="灵枢">灵</i><div class="bubble">
+        <div class="btxt md">${mdRender(d.text || "")}</div></div>`, "tl-master tl-conv");
+      break;
+    case "master.reply_failed":
+      // 应答通道失败必须可见——否则用户消息像被吞掉
+      traceAppend(e, `<i class="seal" aria-label="灵枢">灵</i><div class="bubble">
+        <div class="btxt">应答暂时失败（${esc(d.error || "未知原因")}）——你的消息已留存，不会丢失</div></div>`, "tl-master tl-conv");
       break;
     case "agent.spawn":
       traceAppend(e, `<div class="m">🔮 派生分支 · ${esc(d.child || "")}</div>`, "tl-sys");
       break;
     case "agent.spawn_done":
       traceAppend(e, `<div class="m">🔮 分支 ${esc(d.child || "")} 收尾（Flag ${d.flags || 0}）</div>`, "tl-sys");
-      break;
-      traceAppend(e, `<div class="tl-reply md">${mdRender(d.text || "")}</div>`, "tl-master");
       break;
     case "agent.ask_user":
       traceAppend(e, `<div class="tl-ask">向你提问 · ${esc(d.question || "")}</div>`, "tl-sys");
@@ -1041,35 +1150,66 @@ traceBox.addEventListener("scroll", () => {
   $("#trace-jump").hidden = traceStick || traceBox.scrollHeight <= traceBox.clientHeight + 2;
 }, {passive: true});
 $("#trace-jump").onclick = () => traceScroll(true);
-function startStreams() {
+function startStreams(rebuild = true) {
   stopStreams();
   if (!S.cur) return;
-  traceReset();
-  const es = new EventSource(`/api/sessions/${S.cur}/events`);
+  if (rebuild) { S.evSeen = 0; traceReset(); }
+  S.esTick = Date.now();
+  // 断点续传：看门狗重连带 ?last=已收行号，只补缺口不做全量回放
+  const es = new EventSource(`/api/sessions/${S.cur}/events`
+    + (S.evSeen ? `?last=${S.evSeen}` : ""));
   S.es = es;
   // 审计帧是具名事件（event: audit），onmessage 收不到——必须按事件名监听
   es.addEventListener("audit", m => {
+    S.esTick = Date.now();
     try {
       const e = JSON.parse(m.data);
-      if (e.seq <= S.evSeen) return;
-      S.evSeen = e.seq;
+      // 去重游标用 SSE 事件 id（审计文件行号，跨写入者单调）；
+      // 载荷 seq 是各写入实例各自计数，多写入者会撞车回退，不能用于去重
+      const lid = Number(m.lastEventId) || 0;
+      if (lid) {
+        if (lid <= S.evSeen) return;
+        S.evSeen = lid;
+      }
       tracePush(e);
       if (e.type !== "agent.delta") {       // 流式文本进轨迹，原始事件面板不刷屏
         const box = $("#events");
         box.insertAdjacentHTML("afterbegin", evLine(e));
         while (box.children.length > 250) box.lastChild.remove();
       }
-      if (/task\.|decision\.|vuln\.|flag\.|system\./.test(e.type || "")) refreshState();
+      if (/task\.|decision\.|vuln\.|flag\.|system\.|model\.call/.test(e.type || "")) refreshState();
     } catch {}
   });
   es.addEventListener("done", () => { refreshState(); });
   es.onerror = () => {};
   S.poll = setInterval(() => { refreshState(); refreshSessions(); }, 3000);
+  // 断流看门狗：合盖休眠/网络切换后 EventSource 会静默僵死（readyState 不可信），
+  // 会话仍在运行却长时间无帧即判死，增量重连补齐缺口（已渲染行保留）
+  S.esDog = setInterval(() => {
+    if (S.view !== "session" || !S.cur) return;
+    if (TERMINAL.has(S.state?.session?.status)) return;
+    // 暂停态无帧是正常态（智能体已挂起），豁免看门狗避免空转重连
+    if (S.state?.session?.paused) return;
+    const dead = !S.es || S.es.readyState === EventSource.CLOSED;
+    const stale = Date.now() - (S.esTick || 0) > 45000;
+    if (dead || stale) startStreams(false);
+  }, 15000);
 }
 function stopStreams() {
   if (S.es) { S.es.close(); S.es = null; }
   if (S.poll) { clearInterval(S.poll); S.poll = null; }
+  if (S.esDog) { clearInterval(S.esDog); S.esDog = null; }
 }
+// 唤醒即自救：回到前台立刻刷状态，连接不新鲜就增量重连
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible" || S.view !== "session" || !S.cur) return;
+  refreshState(); refreshSessions();
+  if (TERMINAL.has(S.state?.session?.status)) return;
+  // 暂停态同样豁免：连接不再也要刷新，但不为无帧空转重连
+  if (S.state?.session?.paused) return;
+  if (!S.es || S.es.readyState !== EventSource.OPEN || Date.now() - (S.esTick || 0) > 10000)
+    startStreams(false);
+});
 
 /* ================= 报告 ================= */
 function mdRender(md) {

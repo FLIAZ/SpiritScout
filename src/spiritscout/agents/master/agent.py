@@ -82,6 +82,7 @@ class MasterContext:
     extra: dict[str, Any] = field(default_factory=dict)
     knowledge: Any = None       # KnowledgeStore（攻击路径模板接线，None=不接）
     ring: Any = None            # RingLedger 环形台账（与子 Agent 共持；None=不督导）
+    pause_gate: Any = None      # 暂停门（与子 Agent 共持；None=无暂停能力）
 
     def __post_init__(self) -> None:
         if self.audit is None:
@@ -169,9 +170,15 @@ class MasterAgent:
 
     # ------------------------------------------------------------ 节点：元规划
 
+    async def _gate_wait(self) -> None:
+        """暂停门检查点：图节点边界挂起（在途节点跑完才停）。"""
+        if self.ctx.pause_gate is not None:
+            await self.ctx.pause_gate.wait()
+
     async def _meta_plan(self, state: MasterState) -> dict[str, Any]:
         ctx = self.ctx
         assert ctx.audit is not None
+        await self._gate_wait()
         dag = TaskDAG.from_dict(state["dag"])
         round_no = state["round_no"]
         plan_source = "llm"
@@ -412,6 +419,7 @@ class MasterAgent:
 
     async def _dispatch(self, state: MasterState) -> dict[str, Any]:
         ctx = self.ctx
+        await self._gate_wait()
         dag = TaskDAG.from_dict(state["dag"])
         # 取本轮任务（meta_plan 刚按 round_no 生成）；任务对象只重建一次，
         # 与执行侧共享同一实例——思考强度裁定落定后对后续每次调用即时生效
@@ -465,7 +473,7 @@ class MasterAgent:
     # ------------------------------------------------------------ 用户直达通道
 
     _CHAT_INTERVAL = 1.0      # 消息轮询节拍（秒）——用户消息 1s 内直达灵枢
-    _CHAT_HISTORY_MAX = 12    # 灵枢↔用户对话保留轮数（独立上下文，不占派发）
+    _CHAT_HISTORY_MAX = 12    # 单次应答携带的对话窗口（上限；有会话对话史时取史末尾）
 
     async def _user_chat_watch(self) -> None:
         """用户 ↔ 灵枢的即时对话通道（与子 Agent 的派发/督导完全隔离）。
@@ -477,7 +485,12 @@ class MasterAgent:
         唯一的交接点）。通道失败不影响主链路。
         """
         assert self.ctx.audit is not None
-        history: list[dict[str, str]] = []
+        # 对话上下文：会话对话史（跨续传持久化，用户消息已由 /messages
+        # 随发随落）优先——灵枢应答原地追加、封顶由会话层负责；无对话史
+        # 的装配（测试/离线）退回进程内独立窗口，行为同旧
+        seed = self.ctx.extra.get("dialogue_history")
+        own_history = not isinstance(seed, list)
+        history: list[dict[str, str]] = [] if own_history else seed
         while True:
             await asyncio.sleep(self._CHAT_INTERVAL)
             feed = self._drain_user_feed()
@@ -493,14 +506,16 @@ class MasterAgent:
                 continue
             reply, steering = await self._llm_user_chat(
                 messages, attachments, history)
-            for message in messages:
-                history.append({"role": "user", "content": message[:1000]})
+            if own_history:
+                for message in messages:
+                    history.append({"role": "user", "content": message[:1000]})
             if not reply:
                 # 应答失败也要给用户可见的回执（意见内容已留在意见流不丢失）
                 reply = ("已收到你的消息并转达给执行中的智能体；灵枢应答通道"
                          "暂时不可用，稍后会继续跟进。")
             history.append({"role": "assistant", "content": reply[:2000]})
-            del history[:-self._CHAT_HISTORY_MAX]
+            if own_history:
+                del history[:-self._CHAT_HISTORY_MAX]
             self.ctx.audit.log("master.reply", self.agent_id, {
                 "text": reply[:4000]})
             # 应答落黑板：拓扑图「你 → 灵枢」节点的回执数据源
@@ -526,16 +541,20 @@ class MasterAgent:
         roster = "；".join(
             f"{get_profile(agent_type).name}({agent_type.value})"
             for agent_type in self.ctx.agents)
+        paused = bool(self.ctx.pause_gate is not None and self.ctx.pause_gate.paused)
         payload = {
             "mission": self._mission()[:1000],
             "agents": [a.value for a in self.ctx.agents],
             "roster": roster,
+            "engagement_paused": paused,
             "chat_history": history[-self._CHAT_HISTORY_MAX:],
             "new_messages": messages,
             "attachments": attachments,
             "constraints": (
                 "你是灵枢，安全测试负责人。用户在会话进行中直接向你发消息，"
-                "这条对话与子 Agent 的执行互不干扰。reply 用简洁的中文直接"
+                "这条对话与子 Agent 的执行互不干扰。engagement_paused 为真表示"
+                "用户手动暂停了任务推进——你照常回答问题、聊方向，但不要在回复里"
+                "承诺立即推进执行（恢复由用户操作）。reply 用简洁的中文直接"
                 "回答用户：确认收到指导意见、回答疑问、简述当前态势与下一步"
                 "打算。需要子 Agent 调整方向或分析新上传的附件时，同时在 "
                 "steering 里给出建议（agent 必须取自 agents 列表，hint 一句话，"
@@ -709,6 +728,7 @@ class MasterAgent:
     # ------------------------------------------------------------ 节点：汇聚
 
     async def _aggregate(self, state: MasterState) -> dict[str, Any]:
+        await self._gate_wait()
         view = self.ctx.convergence.aggregate_round_view(state["round_no"])
         flag_manager = self.ctx.extra.get("flag_manager")
         if flag_manager is not None:
@@ -723,6 +743,7 @@ class MasterAgent:
     async def _review(self, state: MasterState) -> dict[str, Any]:
         ctx = self.ctx
         assert ctx.audit is not None
+        await self._gate_wait()
         dag = TaskDAG.from_dict(state["dag"])
         view = state["round_views"][-1]
         next_round = state["round_no"] + 1

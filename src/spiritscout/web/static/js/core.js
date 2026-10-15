@@ -31,7 +31,8 @@ function toast(msg, err = false) {
 const TERMINAL = new Set(["completed", "failed", "stopped", "interrupted"]);
 const STATUS_CN = { created: "排队中", running: "运行中", completed: "已完成",
                     failed: "失败", stopped: "已停止", interrupted: "已中断" };
-const MODE_CN = { src: "SRC 渗透", ctf: "CTF 解题", competition: "渗透赛" };
+const MODE_CN = { src: "SRC 渗透", ctf: "CTF 解题", competition: "渗透赛",
+                  dialogue: "对话", rules: "规则" };
 const TASK_CN = { business_context: "业务体验与上下文", recon: "侦察测绘", port_scan: "端口扫描", web_probe: "Web 探测",
                   host_probe: "主机探测", post_exploit: "后渗透", report: "报告生成",
                   ctf_web: "Web 题", ctf_pwn: "Pwn 题", ctf_reverse: "逆向题",
@@ -205,3 +206,126 @@ async function doDelete(id) {
   } catch (e) { toast(e.message, true); }
 }
 
+
+/* ================= 自定义下拉：全站 <select> 增强 ================= */
+/* 原生 select 留在 DOM 管值与 change 事件（既有监听不动，元素身份不变），
+   视觉与交互由触发框 + 浮层面板接管：键盘可达（↑↓ Enter Esc Home End）、
+   点外即关、选中打勾、贴视口下缘自动上翻。不依赖试验性的
+   appearance:base-select（Firefox/Safari 尚未默认支持，跨浏览器一致）。 */
+function selxSync(sel) {
+  const wrap = sel.closest(".selx");
+  if (!wrap) return;
+  const o = sel.selectedOptions[0];
+  const prov = o?.dataset.prov || "";
+  wrap.querySelector(".selx-label").textContent =
+    prov ? `${prov} ｜ ${o.textContent}` : (o?.textContent ?? "");
+  wrap.querySelector(".selx-btn").disabled = sel.disabled;
+}
+function selxRebuild(sel) {
+  const list = sel.closest(".selx").querySelector(".selx-list");
+  list.innerHTML = "";
+  for (const o of sel.options) {
+    if (o.hidden) continue;
+    const row = document.createElement("div");
+    row.className = "selx-opt" + (o.selected ? " on" : "") + (o.disabled ? " dis" : "");
+    row.dataset.value = o.value;
+    const prov = o.dataset.prov || "";
+    row.innerHTML = (prov ? `<span class="selx-prov">${esc(prov)}</span>` : "") +
+      `<span class="selx-txt">${esc(o.textContent)}</span>` +
+      (o.selected ? `<i class="selx-check"></i>` : "");
+    list.append(row);
+  }
+}
+function enhanceSelect(sel) {
+  if (sel.dataset.selx || sel.multiple) return;
+  sel.dataset.selx = "1";
+  const wrap = document.createElement("div");
+  wrap.className = "selx";
+  sel.replaceWith(wrap);
+  wrap.append(sel);
+  sel.classList.add("selx-native");
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "selx-btn";
+  btn.innerHTML = `<span class="selx-label"></span><i class="selx-chev"></i>`;
+  const panel = document.createElement("div");
+  panel.className = "selx-panel";
+  const list = document.createElement("div");
+  list.className = "selx-list";
+  panel.append(list);
+  wrap.append(btn, panel);
+
+  const paint = () => [...list.children].forEach((r, i) =>
+    r.classList.toggle("cur", i === cur));
+  const choose = (row) => {
+    if (!row || row.classList.contains("dis")) return;
+    if (sel.value !== row.dataset.value) {
+      sel.value = row.dataset.value;
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    selxSync(sel);
+    close();
+    btn.focus();
+  };
+  const close = () => wrap.classList.remove("open");
+  let cur = -1;
+  const open = () => {
+    selxRebuild(sel);
+    selxSync(sel);
+    wrap.classList.add("open");
+    const on = list.querySelector(".on");
+    cur = Math.max(0, [...list.children].indexOf(on));
+    paint();
+    // 贴视口下缘翻到上方展开
+    const r = btn.getBoundingClientRect();
+    wrap.classList.toggle("up",
+      r.bottom + Math.min(panel.scrollHeight, 300) + 14 > innerHeight &&
+      r.top - Math.min(panel.scrollHeight, 300) - 14 > 0);
+    panel.scrollTop = on ? Math.max(0, on.offsetTop - 120) : 0;
+  };
+
+  btn.addEventListener("click", () => wrap.classList.contains("open") ? close() : open());
+  btn.addEventListener("keydown", (e) => {
+    const keys = ["ArrowDown", "ArrowUp", "Enter", " "];
+    if (!wrap.classList.contains("open") && keys.includes(e.key)) {
+      e.preventDefault(); open(); return;
+    }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      cur = Math.min(Math.max(cur + (e.key === "ArrowDown" ? 1 : -1), 0),
+                     list.children.length - 1);
+      paint();
+      list.children[cur]?.scrollIntoView({ block: "nearest" });
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault(); choose(list.children[cur]);
+    } else if (e.key === "Escape") { close(); }
+    else if (e.key === "Home") { e.preventDefault(); cur = 0; paint(); }
+    else if (e.key === "End") {
+      e.preventDefault(); cur = list.children.length - 1; paint();
+    }
+  });
+  list.addEventListener("click", (e) => {
+    const row = e.target.closest(".selx-opt");
+    if (row) choose(row);
+  });
+  selxSync(sel);
+}
+function enhanceAllSelects(root = document) {
+  root.querySelectorAll("select").forEach(enhanceSelect);
+}
+/* 动态渲染的 select（编队卡/弹窗模板）落进 DOM 即增强 */
+new MutationObserver((muts) => {
+  for (const m of muts) for (const n of m.addedNodes) {
+    if (n.nodeType !== 1) continue;
+    if (n.tagName === "SELECT") enhanceSelect(n);
+    else if (n.querySelector) n.querySelectorAll("select").forEach(enhanceSelect);
+  }
+}).observe(document.body, { childList: true, subtree: true });
+/* 点面板外即收起（pointerdown 捕获触发框内外的边界情形） */
+document.addEventListener("pointerdown", (e) => {
+  document.querySelectorAll(".selx.open").forEach(w => {
+    if (!w.contains(e.target)) w.classList.remove("open");
+  });
+});
+enhanceAllSelects();

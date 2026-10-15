@@ -278,7 +278,8 @@ class PostExploitAgent(SubAgent):
             return StepResult(ok=False, note=f"未知步骤动作: {step['action']}")
         return await handler(task, step)
 
-    async def _step_credential(self, task: Task) -> StepResult:
+    async def _step_credential(self, task: Task,
+                               step: dict[str, Any] | None = None) -> StepResult:
         """凭据类证据台账：值一律打码——位置与类型才进黑板。"""
         found: list[dict[str, str]] = []
         for rec in self.ctx.blackboard.query(BlackboardLayer.RECON_CLUE, limit=200):

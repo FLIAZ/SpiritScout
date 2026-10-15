@@ -46,7 +46,12 @@ from spiritscout.core.models import BlackboardLayer, RunMode
 from spiritscout.launch import LaunchRequest, prepare_launch
 from spiritscout.web import agentcfg, modelcfg, vault
 from spiritscout.web.events import stream_audit
-from spiritscout.web.sessions import TERMINAL_STATES, Session, SessionManager
+from spiritscout.web.sessions import (
+    DIALOGUE_HISTORY_MAX,
+    TERMINAL_STATES,
+    Session,
+    SessionManager,
+)
 
 _STATIC = Path(__file__).parent / "static" / "index.html"
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -59,6 +64,14 @@ def _read_state(session: Session) -> dict[str, Any]:
     flags.json），输出 JSON 而非文本面板。
     """
     run_summary: dict[str, Any] = session.summary.get("run", {})
+    # 实时用量：运行中由网关逐笔落盘（usage.json），终态回退运行汇总
+    live_usage: dict[str, Any] | None = None
+    usage_file = session.workspace / "usage.json"
+    if usage_file.exists():
+        try:
+            live_usage = json.loads(usage_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            live_usage = None
     state: dict[str, Any] = {
         "session": session.brief(include_summary=False),
         "layers": {}, "tasks": [],
@@ -69,7 +82,7 @@ def _read_state(session: Session) -> dict[str, Any]:
         "ring": session.ring.snapshot(),
         "user_opinions": session.opinions[-8:],
         "round_views": run_summary.get("round_views", []),
-        "model_usage": run_summary.get("model_usage"),
+        "model_usage": live_usage or run_summary.get("model_usage"),
         "verify": session.summary.get("verify"),
         "business_context": None,
         "topology": {"dag_nodes": [], "tasks": []},
@@ -312,7 +325,8 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     def _agents_view() -> dict[str, Any]:
         from spiritscout.agents.roster import roster_view
         from spiritscout.config import load_model_config
-        models = [{"model": m.model, "capabilities": list(m.capabilities),
+        models = [{"model": m.model, "provider": m.provider_ref,
+                   "capabilities": list(m.capabilities),
                    "context_window": m.context_window}
                   for m in load_model_config(cfg.models_config_path)]
         return {"roster": roster_view(),
@@ -378,7 +392,9 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     async def session_events(session_id: str, request: Request) -> StreamingResponse:
         session = _require(session_id)
         try:
-            last = int(request.headers.get("last-event-id", "0") or 0)
+            # ?last=N 供前端看门狗显式断点续传（EventSource 自动重连走头部）
+            last = int(request.query_params.get("last")
+                       or request.headers.get("last-event-id", "0") or 0)
         except ValueError:
             last = 0
         return StreamingResponse(
@@ -391,6 +407,22 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     @app.post("/api/sessions/{session_id}/stop")
     async def stop_session(session_id: str) -> dict[str, Any]:
         session = await manager.stop(session_id)
+        if session is None:
+            raise HTTPException(404, f"会话不存在: {session_id}")
+        return session.brief(include_summary=False)
+
+    @app.post("/api/sessions/{session_id}/pause")
+    async def pause_session(session_id: str) -> dict[str, Any]:
+        """协作式暂停：灵枢图节点与子 Agent 步骤在检查点挂起（在途动作跑完）。"""
+        session = await manager.set_paused(session_id, True)
+        if session is None:
+            raise HTTPException(404, f"会话不存在: {session_id}")
+        return session.brief(include_summary=False)
+
+    @app.post("/api/sessions/{session_id}/resume")
+    async def resume_paused_session(session_id: str) -> dict[str, Any]:
+        """从暂停继续（与「续传」不同：会话从未停止，只是检查点放行）。"""
+        session = await manager.set_paused(session_id, False)
         if session is None:
             raise HTTPException(404, f"会话不存在: {session_id}")
         return session.brief(include_summary=False)
@@ -534,12 +566,13 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     @app.post("/api/sessions/{session_id}/messages")
     async def post_message(session_id: str,
                            payload: dict[str, Any]) -> dict[str, Any]:
-        """会话途中用户给灵枢发意见：入会话收件箱 + 审计留痕（事件流可见）。
+        """会话任意时刻给灵枢发消息：入会话收件箱 + 落对话史 + 审计留痕。
 
         灵枢在最近的决策点取走消费：派发期督导（~2s 节拍，化为对子 Agent
         的方向建议）或轮末复盘；消费动作有审计事件，意见不重不漏。
-        会话已终态时消息触发续传——灵枢带着同一工作区、审计与 Flag 库
-        重新开工，在最近的决策点消费用户意见（提问即回答，布置新方向即派工）。
+        会话已终态时消息即这一轮对话的输入（对话史末尾接着聊）——灵枢带着
+        同一工作区、审计与 Flag 库和全部上下文继续，提问即回答，
+        布置新方向即派工，与网页版大模型对话同一形态。
         """
         session = _require(session_id)
         content = str(payload.get("content") or "").strip()
@@ -551,6 +584,10 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         # 拓扑图/状态面展示用：历史意见（收件箱是消费语义，另一份不可变留档）
         session.opinions.append({"text": content, "ts": time.time()})
         del session.opinions[:-8]
+        # 对话史随发随落：运行中被直达通道共读，终态后续传以史末尾为
+        # 这一轮的输入——灵枢应答始终带着此前全部往来
+        session.dialogue_history.append({"role": "user", "content": content})
+        del session.dialogue_history[:-DIALOGUE_HISTORY_MAX]
         AuditLogger(session.audit_path).log(
             "user.message", "user", {"content": content})
         resumed = False
@@ -560,6 +597,11 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                 resumed = True
             except SpiritScoutError as exc:
                 raise HTTPException(409, str(exc)) from exc
+            except Exception as exc:
+                # 续传失败必须可读，不能以 internal error 蒙用户
+                # （会话状态由 resume 自身保证不翻转）
+                raise HTTPException(
+                    503, f"续传未完成：{type(exc).__name__}: {exc}") from exc
         return {"queued": True, "resumed": resumed}
 
     @app.post("/api/sessions/{session_id}/attachments")

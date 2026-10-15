@@ -12,7 +12,7 @@ import re
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 _SENSITIVE_KEYS = re.compile(
     r"(api_?key|secret|password|passwd|token|authorization|cookie|credential)", re.IGNORECASE
@@ -32,13 +32,30 @@ def _redact(value: Any) -> Any:
 
 
 class AuditLogger:
-    """线程安全的 JSONL 审计记录器。"""
+    """线程安全的 JSONL 审计记录器。
+
+    序号按文件路径全进程共享：同一审计文件可以有多个写入实例（执行链路
+    常驻记录器、Web 层为用户消息/审批等事件临时创建的记录器），各自从 0
+    计数会让同一文件里的 seq 撞车回退，下游按 seq 去重时会吞事件。
+    """
+
+    _file_seqs: ClassVar[dict[str, int]] = {}
+    _file_seqs_lock: ClassVar[threading.Lock] = threading.Lock()
 
     def __init__(self, path: str | Path):
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._seq = 0
+        self._key = str(self._path)
+        with AuditLogger._file_seqs_lock:
+            if self._key not in AuditLogger._file_seqs:
+                # 续接磁盘已有行数（重启/后到的写入实例不从 0 重排）
+                n = 0
+                if self._path.exists():
+                    with self._path.open("r", encoding="utf-8") as fh:
+                        for _ in fh:
+                            n += 1
+                AuditLogger._file_seqs[self._key] = n
 
     def log(self, event_type: str, actor: str, detail: dict[str, Any]) -> dict[str, Any]:
         """写入一条审计记录。event_type 约定：
@@ -47,18 +64,19 @@ class AuditLogger:
         flag.submit / scope.violation / policy.violation / model.call /
         budget.exceeded / human.approval / system.lifecycle
         """
-        with self._lock:
-            self._seq += 1
-            record = {
-                "seq": self._seq,
-                "ts": datetime.now(UTC).isoformat(),
-                "type": event_type,
-                "actor": actor,
-                "detail": _redact(detail),
-            }
-            with self._path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-            return record
+        with AuditLogger._file_seqs_lock:
+            AuditLogger._file_seqs[self._key] += 1
+            seq = AuditLogger._file_seqs[self._key]
+        record = {
+            "seq": seq,
+            "ts": datetime.now(UTC).isoformat(),
+            "type": event_type,
+            "actor": actor,
+            "detail": _redact(detail),
+        }
+        with self._lock, self._path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return record
 
     def export(self, dest: str | Path) -> Path:
         """一键导出审计日志（4.7 审计报告导出的原始数据）。"""

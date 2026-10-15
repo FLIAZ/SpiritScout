@@ -8,6 +8,7 @@ run_ctf_engagement() / run_competition_engagement() 赛事实例化装配：
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -161,6 +162,7 @@ class _Infra:
         default_factory=dict)   # mcp__<server>__<tool> → {client, server, tool, timeout}
     questions: Any = None       # QuestionBroker（ask_user 工具后端；None=不可用）
     experience: Any = None      # ExperienceStore（全局经验库，跨会话持久）
+    pause_gate: Any = None      # PauseGate 暂停门（Web 层注入；None=无暂停能力）
 
     async def close(self) -> None:
         await self.bus.stop()
@@ -181,6 +183,7 @@ async def _build_infra(
     approval_gate: Callable[[str, str], Awaitable[bool]] | None = None,
     ring: Any = None,
     question_broker: Any = None,
+    pause_gate: Any = None,
 ) -> _Infra:
     # G1：授权未经人工确认/范围为空/时间窗过期 → 拒绝启动（异常中断，非静默）
     if not authorization.human_confirmed:
@@ -252,6 +255,16 @@ async def _build_infra(
     registry = ToolRegistry(executor, policy=policy, audit=audit)
     workspace = Path(cfg.workspace.root)
     workspace.mkdir(parents=True, exist_ok=True)
+    # 用量实时落盘：每笔模型调用后刷新 usage.json，控制台/状态页随读随新
+    # （原子替换避免读到半截；文件极小，写频以模型调用为界）
+    usage_path = workspace / "usage.json"
+
+    def _usage_sink(snap: dict) -> None:
+        tmp = usage_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(usage_path)
+
+    gateway.budget.on_record = _usage_sink
     experience = ExperienceStore(workspace / "experience.db", audit=audit)
     attachments = workspace / "attachments"
     attachments.mkdir(exist_ok=True)
@@ -375,6 +388,7 @@ async def _build_infra(
         mcp_clients=mcp_clients, mcp_tools=mcp_tools,
         questions=question_broker,
         experience=experience,
+        pause_gate=pause_gate,
     )
 
 
@@ -390,6 +404,7 @@ def _sub_ctx(infra: _Infra) -> SubAgentContext:
         shared_cache=infra.shared_cache,   # 环形共享缓存共持（同题现场/笔记/Flag）
         mcp_tools=infra.mcp_tools,   # 外部 MCP 工具（mcp__<server>__<tool>）
         questions=infra.questions,   # 模型发起用户询问的通道（ask_user）
+        pause_gate=infra.pause_gate,  # 暂停门共持（步骤边界挂起）
     )
 
 
@@ -411,6 +426,7 @@ async def _run_master(
     mission: str = "",
     user_inbox: list[dict[str, Any]] | None = None,
     standing_rules: str = "",
+    dialogue_history: list[dict[str, str]] | None = None,
     experience: Any = None,
 ) -> dict[str, Any]:
     """装配主 Agent 并运行多轮闭环，返回 run_summary。"""
@@ -427,9 +443,11 @@ async def _run_master(
                "recent_experience": [
                    e["insight"] for e in (experience.recent(limit=5) if experience else [])],
                "flag_manager": getattr(assembly, "flag_manager", None),
-               "user_inbox": user_inbox if user_inbox is not None else []},
+               "user_inbox": user_inbox if user_inbox is not None else [],
+               "dialogue_history": dialogue_history},
         knowledge=infra.knowledge,   # 主 Agent 攻击路径模板接线（3.3.6）
         ring=infra.ring,             # 灵枢督导通道（与子 Agent 共持同一台账）
+        pause_gate=infra.pause_gate,  # 暂停门共持（图节点边界挂起）
     ))
     run_summary = await master.run(authorization=infra.authorization, target=target)
     run_summary["model_usage"] = infra.gateway.usage_report()
@@ -438,7 +456,9 @@ async def _run_master(
     if enable_llm_planning and experience:
         try:
             await _extract_experience(
-                infra.gateway, experience, run_summary, infra.audit)
+                AgentBoundGateway(
+                    infra.gateway, infra.agent_models.get("master", "")),
+                experience, run_summary, infra.audit)
         except (SpiritScoutError, OSError, ValueError, TypeError):
             pass
 
@@ -539,24 +559,29 @@ async def run_engagement(
     user_inbox: list[dict[str, Any]] | None = None,
     question_broker: Any = None,
     standing_rules: str = "",
+    pause_gate: Any = None,
+    dialogue_history: list[dict[str, str]] | None = None,
 ) -> EngagementResult:
     """SRC 模式任务入口：侦察 → 探测 → 全链路核验 → 报告。
 
     mission：用户自然语言任务意图，原样注入主 Agent 规划提示词，
     由主 Agent 自行决策下发子任务；授权边界仍在装配层确定性提取执行。
+    dialogue_history：会话对话史（续传接着聊的上文），直达灵枢对话通道。
     """
     if authorization.mode != RunMode.SRC:
         raise SpiritScoutError("run_engagement 仅用于 SRC 模式（CTF/渗透赛请用专用入口）")
     infra = await _build_infra(cfg, models, authorization,
                                agent_models=agent_models,
                                approval_gate=approval_gate, ring=ring,
-                               question_broker=question_broker)
+                               question_broker=question_broker,
+                               pause_gate=pause_gate)
     try:
         assembly = _make_assembler(infra, enable_llm_planning).assemble(RunMode.SRC)
         run_summary = await _run_master(
             infra, assembly, target, enable_llm_planning=enable_llm_planning,
             mission=mission, user_inbox=user_inbox,
             standing_rules=standing_rules,
+            dialogue_history=dialogue_history,
             experience=infra.experience)
 
         # ---- 全链路核验（4.3）：仅 ACCEPTED 漏洞入报告收录池
@@ -602,7 +627,9 @@ async def run_ctf_engagement(
     user_inbox: list[dict[str, Any]] | None = None,
     question_broker: Any = None,
     standing_rules: str = "",
+    pause_gate: Any = None,
     resume: bool = False,
+    dialogue_history: list[dict[str, str]] | None = None,
 ) -> EngagementResult:
     """CTF 专项任务入口（4.4/5.2）：五方向专项 Agent + Flag 统一管理。
 
@@ -617,7 +644,8 @@ async def run_ctf_engagement(
     infra = await _build_infra(cfg, models, authorization,
                                agent_models=agent_models,
                                approval_gate=approval_gate, ring=ring,
-                               question_broker=question_broker)
+                               question_broker=question_broker,
+                               pause_gate=pause_gate)
     try:
         flag_manager = FlagManager(
             flag_patterns=flag_patterns, submit_fn=flag_submit_fn,
@@ -635,6 +663,7 @@ async def run_ctf_engagement(
             infra, assembly, target, enable_llm_planning=enable_llm_planning,
             user_inbox=user_inbox,
             standing_rules=standing_rules,
+            dialogue_history=dialogue_history,
             experience=infra.experience)
 
         # ---- Flag 统一提交（4.4.6：格式校验/去重/频率控制/退避重试）
@@ -681,6 +710,8 @@ async def run_competition_engagement(
     user_inbox: list[dict[str, Any]] | None = None,
     question_broker: Any = None,
     standing_rules: str = "",
+    pause_gate: Any = None,
+    dialogue_history: list[dict[str, str]] | None = None,
 ) -> EngagementResult:
     """智能渗透赛任务入口（4.5/5.3）：赛制自适应调度。
 
@@ -702,7 +733,8 @@ async def run_competition_engagement(
     infra = await _build_infra(cfg, models, authorization,
                                agent_models=agent_models,
                                approval_gate=approval_gate, ring=ring,
-                               question_broker=question_broker)
+                               question_broker=question_broker,
+                               pause_gate=pause_gate)
     try:
         # 赛方禁止行为按工具名登记为动态禁用（4.5.1 规则冲突之外的运行时边界）
         for behavior in rules.forbidden_behaviors:
@@ -746,6 +778,7 @@ async def run_competition_engagement(
             infra, assembly, target, enable_llm_planning=enable_llm_planning,
             user_inbox=user_inbox,
             standing_rules=standing_rules,
+            dialogue_history=dialogue_history,
             experience=infra.experience)
 
         # 靶场/AWD 攻击线产出漏洞 → 全链路核验（4.3， 接入知识库）

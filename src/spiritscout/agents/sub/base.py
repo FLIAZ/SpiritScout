@@ -98,6 +98,9 @@ class SubAgentContext:
     # 模型发起的用户询问通道（ask_user 工具的后端：挂起-作答-回传；
     # for_agent 的 replace 共享同一引用）
     questions: Any = None
+    # 暂停门：用户暂停时步骤边界挂起（for_agent 的 replace 共享同一引用；
+    # None = 无暂停能力，如测试/离线装配）
+    pause_gate: Any = None
 
     def __post_init__(self) -> None:
         if self.audit is None:
@@ -174,6 +177,13 @@ class SubAgent(abc.ABC):
         task.status = TaskStatus.RUNNING
         self.ctx.audit.log("task.start", self.agent_id,
                            {"task_id": task.task_id, "type": task.task_type, "target": task.target})
+        # 开工即开回合：时间线以回合块聚合本 Agent 的步骤动作与结论
+        # （SRC 侧此前只记 task.start/done，执行过程在会话页是黑盒）
+        self.ctx.audit.log("agent.turn", self.agent_id, {
+            "turn": 1,
+            "angle": str(task.payload.get("node_title")
+                         or task.payload.get("tactic") or "")[:200],
+        })
         plans = await self.plan_routes(task)
         routes = [RouteState(route_id=new_id("route"), task_id=task.task_id, name=p.name)
                   for p in plans]
@@ -185,6 +195,13 @@ class SubAgent(abc.ABC):
         summary = self._summarize(task, routes)
         task.status = TaskStatus.DONE
         task.result_summary = summary
+        # 任务收尾：各路线最后一条现场笔记拼成可读结论，随事件流上时间线
+        conclude = "；".join(
+            f"{r.name}：{r.notes[-1] if r.notes else r.status.value}"
+            for r in routes)[:2000]
+        if conclude:
+            self.ctx.audit.log("agent.conclude", self.agent_id,
+                               {"summary": conclude})
         await self._report(task, routes, summary)
         return summary
 
@@ -349,13 +366,23 @@ class SubAgent(abc.ABC):
         routes: list[RouteState] | None = None,
     ) -> None:
         total_steps = max(len(plan.steps), 1)
-        for step in plan.steps:
+        for step_index, step in enumerate(plan.steps):
+            # 暂停门：用户暂停时路线在步骤边界挂起（在途步骤跑完才停，
+            # 不中断半截工具态）；灵枢对话与审批通道不经此门，照常可用
+            if self.ctx.pause_gate is not None:
+                await self.ctx.pause_gate.wait()
             # 健康度剪枝门（每步评估；宽限期内不剪，见 BranchHealthManager）
             if self.health_prune_enabled and self.health_mgr.should_prune(route):
                 self.health_mgr.prune(route, f"健康度 {route.health:.2f} 低于阈值")
                 self.ctx.audit.log("route.pruned", self.agent_id,
                                    {"route": route.name, "health": round(route.health, 3)})
                 break
+            # 步骤级实况：动作卡片随执行即时上时间线（开始 → 完成/失败），
+            # 让会话页看得见子 Agent 的实时关键产出而非黑盒等待
+            step_id = f"{task.task_id}:{route.name}:{step_index}"
+            self.ctx.audit.log("agent.tool_call", self.agent_id, {"calls": [{
+                "id": step_id, "name": str(step.get("action", "step")),
+                "arguments": {k: v for k, v in step.items() if k != "action"}}]})
             # 环形避让：同伴已在同一入口做过无产出尝试 → 不再深入（互不等候、
             # 互不重复做功）；有自己历史的入口由路线内去重负责，不在此拦截
             akey = self._attempt_key(task, step)
@@ -386,6 +413,9 @@ class SubAgent(abc.ABC):
                         akey, agent_id=self.agent_id,
                         agent_name=self.agent_type.value, action=str(step.get("action", "")),
                         outcome=result.value, note=result.note)
+            self.ctx.audit.log("agent.tool_result", self.agent_id, {
+                "id": step_id, "ok": result.ok,
+                "note": (result.note or "")[:300]})
             self._update_route(route, result, total_steps)
             # 实时进度上报（节流）：拓扑/督导的数据面——路线笔记随步可见
             if routes is not None:
