@@ -21,6 +21,9 @@ venv/
 # 本地生成的按 Agent 模型指派表（Web 编队页写回，属本机状态）
 configs/agent_models.yaml
 
+# 本机配置的供应商与模型清单（含接入地址，属私有部署状态；仓库只留 models.example.yaml 模板）
+configs/models.yaml
+
 # 日志
 *.log
 .idea/
