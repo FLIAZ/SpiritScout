@@ -116,6 +116,11 @@ class ReconAgent(SubAgent):
         res = await self.ctx.tools.call("dns_resolve", {"host": host}, **self.ctx.builtin_ctx)
         if not res.ok:
             return StepResult(ok=False, note=f"DNS 解析失败: {res.error}")
+        # 代理虚拟地址（TUN fake-ip）不是目标资产：标注留痕即可，不入册
+        if res.parsed.get("proxy_virtual"):
+            return StepResult(ok=True, value=0.1, findings=[],
+                              note=f"DNS {host} → {res.parsed.get('ips')}"
+                                   f"（代理虚拟地址，未入册）")
         findings = []
         for ip in res.parsed.get("ips", []):
             self.ctx.convergence.merge_asset(Asset(

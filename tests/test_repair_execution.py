@@ -1,0 +1,280 @@
+"""审批、重放、真实连接与 DAG 依赖的行为回归。"""
+
+from __future__ import annotations
+
+import asyncio
+import socket
+import ssl
+import tempfile
+import unittest
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+import httpx
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
+
+from spiritscout.agents.master.dag import TaskDAG
+from spiritscout.core.exceptions import SpiritScoutError
+from spiritscout.core.models import RunMode, Scope, TaskStatus
+from spiritscout.policy.engine import PolicyEngine
+from spiritscout.policy.scope import ScopeGuard
+from spiritscout.tools.builtin import BUILTIN_SPECS, http_probe
+from spiritscout.tools.executor import LocalExecutor
+from spiritscout.tools.http_transport import ScopedHTTPTransport
+from spiritscout.tools.registry import ToolRegistry
+from spiritscout.tools.spec import ToolKind, ToolResult, ToolSpec
+
+
+class ExecutionRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unknown_or_missing_action_never_reaches_executor(self) -> None:
+        gate = AsyncMock(return_value=True)
+        policy = PolicyEngine(RunMode.CTF, ScopeGuard(Scope(local_analysis=True)),
+                              approval_gate=gate)
+        registry = ToolRegistry(LocalExecutor(), policy=policy)
+        execute = AsyncMock(return_value=ToolResult(tool="sandbox_exec", ok=True))
+        registry.register_builtin("sandbox_exec", execute, BUILTIN_SPECS["sandbox_exec"])
+        for params in [{"code": "test"}, {"code": "test", "action": "unclassified"}]:
+            self.assertFalse((await registry.call("sandbox_exec", params)).ok)
+        execute.assert_not_awaited()
+        gate.assert_not_awaited()
+        self.assertTrue((await registry.call(
+            "sandbox_exec", {"code": "test", "action": "analysis"})).ok)
+        gate.assert_not_awaited()
+
+    async def test_sensitive_action_is_denied_even_with_startup_allow(self) -> None:
+        gate = AsyncMock(return_value=False)
+        policy = PolicyEngine(RunMode.CTF, ScopeGuard(Scope(allow_sensitive_actions=True)),
+                              approval_gate=gate)
+        registry = ToolRegistry(LocalExecutor(), policy=policy)
+        execute = AsyncMock()
+        registry.register_builtin("sandbox_exec", execute, BUILTIN_SPECS["sandbox_exec"])
+        result = await registry.call("sandbox_exec", {"code": "test", "action": "delete_files"})
+        self.assertFalse(result.ok)
+        gate.assert_awaited_once()
+        execute.assert_not_awaited()
+
+    async def test_write_error_is_not_retried_or_fallen_back(self) -> None:
+        gate = AsyncMock(return_value=True)
+        policy = PolicyEngine(RunMode.SRC, ScopeGuard(Scope()), approval_gate=gate)
+        registry = ToolRegistry(LocalExecutor(), policy=policy, max_retries=3)
+        spec = ToolSpec(name="http_probe", kind=ToolKind.BUILTIN, fallback_tool="other")
+        execute = AsyncMock(return_value=ToolResult(tool="http_probe", ok=False, error="lost response"))
+        fallback = AsyncMock(return_value=ToolResult(tool="other", ok=True))
+        registry.register_builtin("http_probe", execute, spec)
+        registry.register_builtin("other", fallback, ToolSpec(name="other", kind=ToolKind.BUILTIN))
+        result = await registry.call("http_probe", {
+            "url": "https://audit.test/", "method": "POST", "action": "intrusive_write",
+        })
+        self.assertFalse(result.ok)
+        execute.assert_awaited_once()
+        fallback.assert_not_awaited()
+
+    async def test_post_analysis_is_still_not_automatically_replayed(self) -> None:
+        registry = ToolRegistry(LocalExecutor())
+        execute = AsyncMock(return_value=ToolResult(tool="http_probe", ok=False))
+        registry.register_builtin("http_probe", execute, BUILTIN_SPECS["http_probe"])
+        await registry.call("http_probe", {"method": "POST", "action": "analysis"})
+        execute.assert_awaited_once()
+        execute.reset_mock()
+        self.assertFalse((await registry.call("http_probe", {"method": "DELETE"})).ok)
+        execute.assert_not_awaited()
+
+    async def test_readonly_probe_can_retry(self) -> None:
+        registry = ToolRegistry(LocalExecutor())
+        execute = AsyncMock(side_effect=[ToolResult(tool="http_probe", ok=False),
+                                         ToolResult(tool="http_probe", ok=True)])
+        registry.register_builtin("http_probe", execute, BUILTIN_SPECS["http_probe"])
+        self.assertTrue((await registry.call("http_probe", {"method": "GET"})).ok)
+        self.assertEqual(execute.await_count, 2)
+
+    async def test_missing_program_returns_structured_result(self) -> None:
+        result = await LocalExecutor().run(ToolSpec(
+            name="missing", kind=ToolKind.CLI,
+            command_template=["/nonexistent/spiritscout-regression"],
+        ), {})
+        self.assertFalse(result.ok)
+        self.assertEqual(result.returncode, 127)
+
+    async def test_mcp_action_argument_is_forwarded_as_remote_data(self) -> None:
+        policy = PolicyEngine(RunMode.SRC, ScopeGuard(Scope()),
+                              approval_gate=AsyncMock(return_value=True))
+        registry = ToolRegistry(LocalExecutor(), policy=policy)
+        execute = AsyncMock(return_value=ToolResult(tool="remote", ok=True))
+        registry.register_builtin("remote", execute, ToolSpec(name="remote", kind=ToolKind.MCP))
+        self.assertTrue((await registry.call("remote", {"action": "inspect_function"})).ok)
+        execute.assert_awaited_once_with(action="inspect_function")
+
+    async def test_known_sensitive_mcp_action_still_requires_approval(self) -> None:
+        gate = AsyncMock(return_value=False)
+        policy = PolicyEngine(RunMode.SRC, ScopeGuard(Scope()), approval_gate=gate)
+        registry = ToolRegistry(LocalExecutor(), policy=policy)
+        execute = AsyncMock()
+        registry.register_builtin("remote", execute, ToolSpec(name="remote", kind=ToolKind.MCP))
+        self.assertFalse((await registry.call("remote", {"action": "reverse_shell"})).ok)
+        gate.assert_awaited_once()
+        execute.assert_not_awaited()
+
+
+class DAGRegressionTests(unittest.TestCase):
+    def test_failed_parent_replacement_rebinds_existing_child(self) -> None:
+        dag = TaskDAG()
+        dag.upsert_from_plan([{"tactic": "CHILD", "depends_on": ["PARENT"]},
+                              {"tactic": "PARENT"}], 0)
+        parent = dag.find_by_tactic("PARENT")[0]
+        child = dag.find_by_tactic("CHILD")[0]
+        dag.mark(parent.node_id, TaskStatus.FAILED)
+        replacement = dag.upsert_from_plan([{"tactic": "PARENT"}], 1)[0]
+        dag.mark(replacement.node_id, TaskStatus.DONE)
+        self.assertEqual(child.depends_on, [replacement.node_id])
+        self.assertEqual(dag.ready_nodes(), [child])
+        self.assertEqual(dag.upsert_from_plan([{"tactic": "PARENT"}], 2), [])
+
+    def test_invalid_replacement_rolls_back_rebindings(self) -> None:
+        dag = TaskDAG()
+        dag.upsert_from_plan([{"tactic": "PARENT"},
+                              {"tactic": "CHILD", "depends_on": ["PARENT"]}], 0)
+        dag.mark(dag.find_by_tactic("PARENT")[0].node_id, TaskStatus.FAILED)
+        before = dag.to_dict()
+        with self.assertRaises(SpiritScoutError):
+            dag.upsert_from_plan([{"tactic": "PARENT", "depends_on": ["CHILD"]}], 1)
+        self.assertEqual(dag.to_dict(), before)
+
+
+class ConnectionRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_https_certificate_is_verified_against_original_hostname(self) -> None:
+        # 证书只含域名、不含回环 IP；只有正确保留 SNI/验证名才能握手成功。
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            key = ec.generate_private_key(ec.SECP256R1())
+            name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "audit.test")])
+            now = datetime.now(UTC)
+            cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+                    .public_key(key.public_key()).serial_number(x509.random_serial_number())
+                    .not_valid_before(now - timedelta(minutes=1))
+                    .not_valid_after(now + timedelta(days=1))
+                    .add_extension(x509.SubjectAlternativeName([x509.DNSName("audit.test")]), False)
+                    .add_extension(x509.BasicConstraints(ca=True, path_length=None), True)
+                    .sign(key, hashes.SHA256()))
+            cert_path, key_path = root / "cert.pem", root / "key.pem"
+            cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+            key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM,
+                                                  serialization.PrivateFormat.PKCS8,
+                                                  serialization.NoEncryption()))
+            server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server_ctx.load_cert_chain(cert_path, key_path)
+            sni = []
+            server_ctx.set_servername_callback(lambda _sock, host, _ctx: sni.append(host))
+
+            async def handler(reader, writer):
+                await reader.readuntil(b"\r\n\r\n")
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+
+            server = await asyncio.start_server(handler, "127.0.0.1", 0, ssl=server_ctx)
+            port = server.sockets[0].getsockname()[1]
+            client_ctx = ssl.create_default_context(cafile=str(cert_path))
+            resolver = AsyncMock(return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                                               ("127.0.0.1", port))])
+            try:
+                transport = ScopedHTTPTransport(ScopeGuard(Scope()), lambda: httpx.AsyncHTTPTransport(
+                    verify=client_ctx, trust_env=False))
+                with patch.object(asyncio.get_running_loop(), "getaddrinfo", resolver):
+                    async with httpx.AsyncClient(transport=transport) as client:
+                        response = await client.get(f"https://audit.test:{port}/")
+                self.assertEqual(response.text, "ok")
+                self.assertEqual(sni, ["audit.test"])
+            finally:
+                server.close()
+                await server.wait_closed()
+
+    async def test_actual_connection_uses_checked_ip_and_original_host(self) -> None:
+        hits: list[bytes] = []
+        denied_hits: list[bool] = []
+
+        async def allowed(reader, writer):
+            hits.append(await reader.readuntil(b"\r\n\r\n"))
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        async def denied(reader, writer):
+            denied_hits.append(True)
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_server(allowed, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        blocked = await asyncio.start_server(denied, "127.0.0.2", port)
+        resolve = socket.getaddrinfo
+        lookups = []
+
+        def rebinding(host, service, *args, **kwargs):
+            name = host.decode() if isinstance(host, bytes) else host
+            if name == "audit.test":
+                lookups.append(name)
+                return resolve("127.0.0.1" if len(lookups) == 1 else "127.0.0.2",
+                               service, *args, **kwargs)
+            return resolve(host, service, *args, **kwargs)
+
+        try:
+            with patch("socket.getaddrinfo", side_effect=rebinding), patch.dict(
+                "os.environ", {"HTTP_PROXY": "http://127.0.0.2:1", "NO_PROXY": ""},
+            ):
+                result = await http_probe(f"http://audit.test:{port}/", guard=ScopeGuard(
+                    Scope(allowed_domains=["audit.test"], denied=["127.0.0.2"])))
+            self.assertTrue(result.ok, result.error)
+            self.assertEqual(len(lookups), 1)
+            self.assertEqual(denied_hits, [])
+            self.assertIn(f"Host: audit.test:{port}".encode(), hits[0])
+            self.assertEqual(result.parsed["final_url"], f"http://audit.test:{port}/")
+        finally:
+            server.close()
+            blocked.close()
+            await server.wait_closed()
+            await blocked.wait_closed()
+
+    async def test_sni_and_pools_preserve_logical_origin(self) -> None:
+        seen = []
+        transports = []
+
+        def factory():
+            def record(req):
+                seen.append((req.url.host, req.headers["host"], req.extensions["sni_hostname"]))
+                return httpx.Response(200, content=b"ok")
+            transport = httpx.MockTransport(record)
+            transports.append(transport)
+            return transport
+
+        resolver = AsyncMock(return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                                           ("127.0.0.1", 443))])
+        transport = ScopedHTTPTransport(ScopeGuard(Scope()), factory)
+        with patch.object(asyncio.get_running_loop(), "getaddrinfo", resolver):
+            async with httpx.AsyncClient(transport=transport) as client:
+                await client.get("https://a.test/")
+                await client.get("https://b.test/")
+        self.assertEqual(seen, [("127.0.0.1", "a.test", "a.test"),
+                                ("127.0.0.1", "b.test", "b.test")])
+        self.assertEqual(len(transports), 2)
+
+    async def test_any_denied_dns_address_prevents_request(self) -> None:
+        resolver = AsyncMock(return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                                           ("127.0.0.1", 80)),
+                                          (socket.AF_INET6, socket.SOCK_STREAM, 6, "",
+                                           ("::1", 80, 0, 0))])
+        with patch.object(asyncio.get_running_loop(), "getaddrinfo", resolver):
+            result = await http_probe("http://audit.test/", guard=ScopeGuard(Scope(denied=["::1"])))
+        self.assertFalse(result.ok)
+        self.assertEqual(result.returncode, -3)
+
+    async def test_ipv4_mapped_ipv6_cannot_bypass_ipv4_denial(self) -> None:
+        result = await http_probe("http://[::ffff:127.0.0.1]/", guard=ScopeGuard(
+            Scope(denied=["127.0.0.0/8"])))
+        self.assertFalse(result.ok)
+        self.assertEqual(result.returncode, -3)

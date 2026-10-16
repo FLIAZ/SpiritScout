@@ -92,20 +92,41 @@ def extract_targets(mission: str) -> tuple[list[str], list[str]]:
 
 
 def parse_challenges_yaml(text: str) -> list[dict]:
-    """赛题 YAML 文本 → list[dict]（顶层列表或含 challenges 键的映射）。"""
-    data = yaml.safe_load(text)
+    """赛题 YAML 文本 → list[dict]（顶层列表或含 challenges 键的映射）。
+
+    解析与结构错误包装为可读的域校验错误（422），不落 500。
+    """
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise SpiritScoutError(f"赛题 YAML 解析失败: {exc}") from exc
     if isinstance(data, dict) and "challenges" in data:
         data = data["challenges"]
     if not isinstance(data, list):
         raise SpiritScoutError("赛题格式错误（应为列表或含 challenges 键的 YAML）")
-    return [dict(ch) for ch in data]
+    challenges: list[dict] = []
+    for i, ch in enumerate(data):
+        if not isinstance(ch, dict):
+            raise SpiritScoutError(
+                f"赛题第 {i + 1} 项必须是键值映射，收到 {type(ch).__name__}")
+        challenges.append(dict(ch))
+    return challenges
 
 
 def parse_rules_yaml(text: str):
-    """赛制规则 YAML 文本 → CompetitionRules。"""
+    """赛制规则 YAML 文本 → CompetitionRules（解析/校验错误可读化）。"""
     from spiritscout.competition import CompetitionRules
 
-    return CompetitionRules.from_dict(yaml.safe_load(text) or {})
+    try:
+        data = yaml.safe_load(text) or {}
+    except yaml.YAMLError as exc:
+        raise SpiritScoutError(f"赛制规则 YAML 解析失败: {exc}") from exc
+    try:
+        return CompetitionRules.from_dict(data)
+    except SpiritScoutError:
+        raise
+    except Exception as exc:
+        raise SpiritScoutError(f"赛制规则校验失败: {exc}") from exc
 
 
 def _mission_flag_patterns(mission: str) -> list[str]:
@@ -176,6 +197,10 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
         req = LaunchRequest(**{**req.__dict__, "mode": fallback_mode(req)})
     if mission and not req.target and m_urls:
         req = LaunchRequest(**{**req.__dict__, "target": m_urls[0]})
+    elif mission and not req.target and m_domains:
+        # 纯域名授权（如 SRC「*.bilibili.com」清单）同样要有工作入口，
+        # 否则 plan.target 落到 ctf:// 占位符，侦察/测绘步骤全打在伪协议上
+        req = LaunchRequest(**{**req.__dict__, "target": "https://" + m_domains[0]})
     # 目标硬校验只对用户显式选择的模式生效。智能模式（mode_auto）下
     # 不在创建时拦——「你好」这类普通对话、纯规则说明都不该被目标
     # 校验挡在门外；意图（对话/规则/任务）由运行期 LLM 路由裁决，
@@ -242,6 +267,9 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
         allowed_domains=allowed_domains, allowed_urls=allowed_urls,
         max_requests_per_second=req.rps,
         allow_sensitive_actions=req.allow_sensitive,
+        # 携带附件即已授权分析这些本地文件（离线题常态）——授权数据里
+        # 如实表达本地分析，不伪造域名/URL、不扩大网络范围
+        local_analysis=bool(req.has_uploads),
         notes="启动装配授权声明",
     )
     authorization = Authorization(

@@ -108,18 +108,26 @@ class Scope(BaseModel):
     allowed_domains: list[str] = Field(default_factory=list, description="允许的域名（含子域通配 *.example.com）")
     allowed_cidrs: list[str] = Field(default_factory=list, description="允许的网段（CIDR）")
     allowed_urls: list[str] = Field(default_factory=list, description="允许的 URL 前缀")
-    denied: list[str] = Field(default_factory=list, description="禁打列表（域名/IP/URL 前缀，最高优先）")
+    denied: list[str] = Field(default_factory=list, description="禁打列表（域名/IP/CIDR 网段/URL 前缀，最高优先）")
     time_window_start: datetime | None = None
     time_window_end: datetime | None = None
     max_requests_per_second: float = 10.0
     allow_sensitive_actions: bool = Field(
         default=False,
-        description="敏感操作总开关（反弹shell/上传getshell/容器逃逸/爆破），默认禁用（G5）",
+        description="启动时声明的敏感操作意向（仅作声明留痕——G5 即时审批不可"
+                    "由启动参数免审，动作触发时仍需用户逐类确认）",
+    )
+    local_analysis: bool = Field(
+        default=False,
+        description="已授权分析本地工作区文件/任务附件（离线题常态；"
+                    "不代表任何网络测试授权）",
     )
     notes: str = ""
 
     def is_empty(self) -> bool:
-        return not (self.allowed_domains or self.allowed_cidrs or self.allowed_urls)
+        """网络目标与本地分析授权都未声明才算空（纯附件任务可启动）。"""
+        return not (self.allowed_domains or self.allowed_cidrs
+                    or self.allowed_urls or self.local_analysis)
 
 
 class Authorization(BaseModel):
@@ -244,6 +252,8 @@ class RouteState(BaseModel):
     value_score: float = 0.0           # 发现价值分
     consecutive_failures: int = 0
     steps_executed: int = 0
+    steps_succeeded: int = 0
+    steps_failed: int = 0
     tokens_used: int = 0
     tool_calls: int = 0
     risk_score: float = 0.0            # 暴露风险分（工具/步骤申报的累计值）

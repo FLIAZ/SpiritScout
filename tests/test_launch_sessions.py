@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from spiritscout.blackboard import Blackboard
 from spiritscout.config.settings import SystemConfig, WorkspaceConfig
@@ -47,8 +48,11 @@ class SessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 workspace=workspace, status="running", phase="starting")
             plan = prepare_launch(LaunchRequest(
                 mode=RunMode.SRC, target="https://example.test"))
-
-            await manager._run(session, cfg, plan, True, [])
+            # 故障注入：runtime 入口抛普通异常，验证会话故障隔离落终态
+            # （不依赖真实装配链的失败点——那个会随实现漂移）
+            with patch("spiritscout.runtime.run_engagement",
+                       new=AsyncMock(side_effect=ValueError("注入的启动前故障"))):
+                await manager._run(session, cfg, plan, True, [])
 
             self.assertEqual(session.status, "failed")
             self.assertEqual(session.phase, "failed")

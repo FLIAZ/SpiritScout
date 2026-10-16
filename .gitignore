@@ -17,6 +17,8 @@ venv/
 
 # 运行时数据：会话工作区 / 审计日志 / 报告（本地私有，不入库）
 .spiritscout/
+.playwright-mcp/
+execution.key
 
 # 本地生成的按 Agent 模型指派表（Web 编队页写回，属本机状态）
 configs/agent_models.yaml

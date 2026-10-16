@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import time
 import uuid
 
@@ -16,7 +17,7 @@ from spiritscout.core.models import Event
 
 class InProcessBus(EventBus):
     def __init__(self, queue_maxsize: int = 10000, rate_limit_per_second: float = 1000.0):
-        self._queue: asyncio.PriorityQueue[tuple[int, float, Event]] = asyncio.PriorityQueue(
+        self._queue: asyncio.PriorityQueue[tuple[int, float, int, Event]] = asyncio.PriorityQueue(
             maxsize=queue_maxsize
         )
         self._subs: dict[str, Subscription] = {}
@@ -29,6 +30,7 @@ class InProcessBus(EventBus):
         self._delivered = 0
         self._dropped = 0
         self._handler_errors = 0
+        self._sequence = itertools.count()
 
     # ------------------------------------------------------------ 生命周期
 
@@ -51,17 +53,16 @@ class InProcessBus(EventBus):
     # ------------------------------------------------------------ 发布/订阅
 
     async def publish(self, event: Event) -> None:
+        if not self._running:
+            raise RuntimeError("进程内总线未启动")
         if not event.event_id:
             event.event_id = f"evt-{uuid.uuid4().hex[:12]}"
         await self._throttle()
         # 优先级队列：(priority 小者优先, 时间戳)
-        item = (event.priority, event.ts.timestamp(), event)
-        try:
-            self._queue.put_nowait(item)
-            self._published += 1
-        except asyncio.QueueFull:
-            # 流量控制兜底：队列满丢弃最低优先级的本次事件并计数（9.2 消息风暴防护）
-            self._dropped += 1
+        item = (event.priority, event.ts.timestamp(), next(self._sequence), event)
+        # 满队列施加背压，不能假报成功使 outbox 丢失补送机会。
+        await self._queue.put(item)
+        self._published += 1
 
     def subscribe(self, pattern: str, handler: EventHandler, sub_id: str = "") -> Subscription:
         sub_id = sub_id or f"sub-{uuid.uuid4().hex[:8]}"
@@ -102,7 +103,7 @@ class InProcessBus(EventBus):
     async def _dispatch_loop(self) -> None:
         while self._running:
             try:
-                _, _, event = await asyncio.wait_for(self._queue.get(), timeout=0.2)
+                _, _, _, event = await asyncio.wait_for(self._queue.get(), timeout=0.2)
             except TimeoutError:
                 continue
             except asyncio.CancelledError:

@@ -1,0 +1,44 @@
+{
+  "failed_step_task": {
+    "task_status": "failed",
+    "routes_done": 0,
+    "route_progress": 0.0
+  },
+  "model_stop": {
+    "ready_nodes": 0,
+    "continue_iteration": false,
+    "stop_reason": "主Agent决策收敛: 用户目标已结束"
+  },
+  "background_process": {
+    "tool_ok": true,
+    "marker_when_returned": false,
+    "marker_after_return": false
+  },
+  "flag_concurrent": {
+    "submitted_requests": 1,
+    "accepted": true
+  },
+  "sandbox_control_write": {
+    "tool_ok": true,
+    "returncode": 1,
+    "stored_status": "failed",
+    "error": ""
+  },
+  "shared_database": {
+    "second_owner_blocked": true,
+    "first_lock_still_owned": true,
+    "runs": {
+      "run-one": "running"
+    }
+  },
+  "http_cap": {
+    "tool_ok": true,
+    "configured_byte_window": 4000,
+    "largest_httpx_auto_decoded_chunk": 0,
+    "body_truncated": true,
+    "wire_body_bytes": 8176
+  },
+  "audit_redaction": {
+    "dummy_secret_in_plaintext": false
+  }
+}

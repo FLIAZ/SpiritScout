@@ -7,28 +7,92 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 _SENSITIVE_KEYS = re.compile(
     r"(api_?key|secret|password|passwd|token|authorization|cookie|credential)", re.IGNORECASE
 )
+_RAW_KEYS = {"arguments", "params", "code", "command", "body", "request_body", "headers"}
+_COUNTER_KEYS = {"tokens", "used_tokens", "prompt_tokens", "completion_tokens", "total_tokens",
+                 "input_tokens", "output_tokens", "reasoning_tokens", "budget_tokens"}
+_AUTH_VALUE = re.compile(r"(?i)(\b(?:Bearer|Basic)\s+)[^\s\"'<>]+")
+_NAMED_VALUE = re.compile(
+    r"(?i)((?:api[_-]?key|password|passwd|secret|token|authorization|cookie|credential)"
+    r"[\w-]*[\"']?\s*[:=]\s*[\"']?)[^\s\"'&;,}]+")
+_URL_USERINFO = re.compile(r"(?i)(https?://)[^/\s@]+@")
+
+
+def tool_preview(arguments: Any) -> str:
+    """只提取工具目标和方法；不展示脚本、请求正文、凭据或查询参数值。"""
+    if not isinstance(arguments, dict):
+        return ""
+    raw = arguments.get("url") or arguments.get("target")
+    parts: list[str] = []
+    method = arguments.get("method")
+    if isinstance(method, str) and method.upper() in {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}:
+        parts.append(method.upper())
+    if isinstance(raw, str):
+        try:
+            url = urlsplit(raw)
+            if url.scheme in {"http", "https"} and url.hostname:
+                host = url.hostname
+                host = f"[{host}]" if ":" in host else host
+                if url.port:
+                    host += f":{url.port}"
+                # 路径中的长随机段不进入展示摘要，查询仅保留参数名。
+                path = "/".join("…" if len(segment) > 32 else segment for segment in url.path.split("/"))
+                query = urlencode([(name[:80], "…") for name, _ in parse_qsl(url.query)][:12])
+                parts.append(urlunsplit((url.scheme, host, path, query, "")))
+        except ValueError:
+            pass
+    return " ".join(parts)[:300]
+
+
+def _opaque(value: Any) -> dict[str, Any]:
+    """审计不复制原始脚本/请求；完整工具参数由执行台账加密保管。"""
+    if (isinstance(value, dict) and set(value) == {"_redacted", "digest"}
+            and value["_redacted"] is True and isinstance(value["digest"], str)
+            and re.fullmatch(r"[0-9a-f]{64}", value["digest"])):
+        return value
+    encoded = json.dumps(value, sort_keys=True, ensure_ascii=False, default=str).encode()
+    return {"_redacted": True, "digest": hashlib.sha256(encoded).hexdigest()}
 
 
 def _redact(value: Any) -> Any:
     """递归脱敏：敏感键值替换为 ***REDACTED***。"""
     if isinstance(value, dict):
+        if isinstance(value.get("name"), str) and isinstance(value.get("arguments"), dict):
+            value = {**value, "preview": value.get("preview") or tool_preview(value["arguments"])}
         return {
-            k: ("***REDACTED***" if _SENSITIVE_KEYS.search(str(k)) else _redact(v))
+            k: (v if str(k) in _COUNTER_KEYS and type(v) is int and v >= 0
+                else "***REDACTED***" if _SENSITIVE_KEYS.search(str(k))
+                else _opaque(v) if str(k).lower() in _RAW_KEYS else _redact(v))
             for k, v in value.items()
         }
     if isinstance(value, (list, tuple)):
         return [_redact(v) for v in value]
+    if isinstance(value, str):
+        value = _URL_USERINFO.sub(r"\1***REDACTED***@", value)
+        value = _AUTH_VALUE.sub(r"\1***REDACTED***", value)
+        return _NAMED_VALUE.sub(r"\1***REDACTED***", value)
     return value
+
+
+def sanitize_record(record: dict[str, Any]) -> dict[str, Any]:
+    """读取旧日志也走同一脱敏口，不将历史明文送入 SSE/下载。"""
+    detail = _redact(record.get("detail", {}))
+    if isinstance(detail, dict) and isinstance(detail.get("calls"), list):
+        detail = {**detail, "calls": [
+            {k: v for k, v in call.items() if k != "arguments_cipher"}
+            if isinstance(call, dict) else call for call in detail["calls"]]}
+    return {**record, "detail": detail}
 
 
 class AuditLogger:
@@ -64,6 +128,21 @@ class AuditLogger:
         flag.submit / scope.violation / policy.violation / model.call /
         budget.exceeded / human.approval / system.lifecycle
         """
+        if event_type == "agent.tool_call" and isinstance(detail.get("calls"), list):
+            # 模型入口参数可能与执行器转换后的参数不同，额外保存加密副本供会话查看。
+            # 日志/SSE 仍不暴露正文，展示接口按当前会话密钥解密并脱敏。
+            key = self._path.parent / "execution.key"
+            if key.is_file():
+                from cryptography.fernet import Fernet
+
+                cipher = Fernet(key.read_bytes())
+                calls = []
+                for call in detail["calls"]:
+                    if isinstance(call, dict) and isinstance(call.get("arguments"), dict):
+                        payload = json.dumps(call["arguments"], ensure_ascii=False).encode()
+                        call = {**call, "arguments_cipher": cipher.encrypt(payload).decode()}
+                    calls.append(call)
+                detail = {**detail, "calls": calls}
         with AuditLogger._file_seqs_lock:
             AuditLogger._file_seqs[self._key] += 1
             seq = AuditLogger._file_seqs[self._key]
@@ -83,7 +162,8 @@ class AuditLogger:
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
-            content = self._path.read_text(encoding="utf-8") if self._path.exists() else ""
+            content = "".join(json.dumps(record, ensure_ascii=False) + "\n"
+                              for record in self.read_all())
         dest.write_text(content, encoding="utf-8")
         return dest
 
@@ -91,7 +171,7 @@ class AuditLogger:
         if not self._path.exists():
             return []
         return [
-            json.loads(line)
+            sanitize_record(json.loads(line))
             for line in self._path.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]

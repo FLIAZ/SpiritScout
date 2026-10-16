@@ -19,11 +19,12 @@ from spiritscout.gateway.gateway import (
     AgentBoundGateway,
     ChatResponse,
     ModelGateway,
+    chat_decision,
 )
 from spiritscout.gateway.registry import ModelRegistry
 
 __all__ = [
     "AgentBoundGateway", "CascadeResult", "ChatResponse", "CollabGateway",
     "DebateResult", "JudgeResult", "ModelGateway", "ModelRegistry",
-    "VoteResult", "extract_json", "parse_judgment",
+    "VoteResult", "chat_decision", "extract_json", "parse_judgment",
 ]

@@ -40,9 +40,11 @@ from spiritscout.core.models import (
     Task,
     TaskStatus,
 )
-from spiritscout.gateway import ModelGateway
+from spiritscout.gateway import ModelGateway, chat_decision
 from spiritscout.gateway.backends import extract_json
+from spiritscout.gateway.context import compact_json, shared_context
 from spiritscout.policy.engine import PolicyEngine
+from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
 from spiritscout.tools.registry import AgentToolView, ToolRegistry
 
 
@@ -101,6 +103,7 @@ class SubAgentContext:
     # 暂停门：用户暂停时步骤边界挂起（for_agent 的 replace 共享同一引用；
     # None = 无暂停能力，如测试/离线装配）
     pause_gate: Any = None
+    journal: Any = None
 
     def __post_init__(self) -> None:
         if self.audit is None:
@@ -131,6 +134,18 @@ class SubAgentContext:
                 if profile.allows_tool(name)
             },
         )
+
+
+# 用户询问通道说明（随每次 LLM 决策载荷下发，预算内保底）：模型遇「只有
+# 用户能给的输入」可在返回 JSON 里带 ask_user，管道挂起等用户作答后带着
+# 答复重裁本决策。问句文案由模型撰写、面向普通用户（不行话缩写）。
+_ASK_CHANNEL_NOTE = (
+    "【可询问用户】仅当本决策必须依赖只有用户能提供的输入（测试账号/凭据、"
+    "登录后操作的请求记录、授权范围裁定）时，在返回 JSON 里加 "
+    "\"ask_user\": {\"question\": str, \"options\": [str], \"targets\": [str]}。"
+    "问题面向普通用户，用平实中文，不用 HAR、PoC 这类行话缩写（必要处一句话"
+    "解释）。后端会挂起等用户作答，答复回灌后你重新给出本决策；"
+    "没有这类需求就不要加该字段。")
 
 
 class SubAgent(abc.ABC):
@@ -188,12 +203,19 @@ class SubAgent(abc.ABC):
         routes = [RouteState(route_id=new_id("route"), task_id=task.task_id, name=p.name)
                   for p in plans]
         # 并发执行各路线（对等并行，无阶段瓶颈）
-        await asyncio.gather(
-            *(self._run_route(task, plan, route, routes)
-              for plan, route in zip(plans, routes))
-        )
+        # 单条路线异常时收口其余路线，不能在任务已失败后继续留下执行者。
+        async with asyncio.TaskGroup() as group:
+            for plan, route in zip(plans, routes):
+                group.create_task(self._run_route(task, plan, route, routes))
+        if any(r.status == TaskStatus.DONE for r in routes):
+            task.status = TaskStatus.DONE
+        elif any(r.status == TaskStatus.FAILED for r in routes):
+            task.status = TaskStatus.FAILED
+        elif any(r.status == TaskStatus.PRUNED for r in routes):
+            task.status = TaskStatus.PRUNED
+        else:
+            task.status = TaskStatus.CANCELLED
         summary = self._summarize(task, routes)
-        task.status = TaskStatus.DONE
         task.result_summary = summary
         # 任务收尾：各路线最后一条现场笔记拼成可读结论，随事件流上时间线
         conclude = "；".join(
@@ -365,6 +387,17 @@ class SubAgent(abc.ABC):
         self, task: Task, plan: RoutePlan, route: RouteState,
         routes: list[RouteState] | None = None,
     ) -> None:
+        token = current_execution_scope.set(ExecutionScope(
+            task_id=task.task_id, route_id=route.route_id, agent_id=self.agent_id))
+        try:
+            await self._run_route_inner(task, plan, route, routes)
+        finally:
+            current_execution_scope.reset(token)
+
+    async def _run_route_inner(
+        self, task: Task, plan: RoutePlan, route: RouteState,
+        routes: list[RouteState] | None = None,
+    ) -> None:
         total_steps = max(len(plan.steps), 1)
         for step_index, step in enumerate(plan.steps):
             # 暂停门：用户暂停时路线在步骤边界挂起（在途步骤跑完才停，
@@ -380,6 +413,11 @@ class SubAgent(abc.ABC):
             # 步骤级实况：动作卡片随执行即时上时间线（开始 → 完成/失败），
             # 让会话页看得见子 Agent 的实时关键产出而非黑盒等待
             step_id = f"{task.task_id}:{route.name}:{step_index}"
+            journal = getattr(self.ctx, "journal", None)
+            if journal is not None:
+                journal.checkpoint("route", route.route_id, "before_step", {
+                    "task": task.model_dump(mode="json"), "route": route.model_dump(mode="json"),
+                    "plan": dataclasses.asdict(plan), "step_index": step_index})
             self.ctx.audit.log("agent.tool_call", self.agent_id, {"calls": [{
                 "id": step_id, "name": str(step.get("action", "step")),
                 "arguments": {k: v for k, v in step.items() if k != "action"}}]})
@@ -417,6 +455,11 @@ class SubAgent(abc.ABC):
                 "id": step_id, "ok": result.ok,
                 "note": (result.note or "")[:300]})
             self._update_route(route, result, total_steps)
+            if journal is not None:
+                journal.checkpoint("route", route.route_id, "after_step", {
+                    "task": task.model_dump(mode="json"), "route": route.model_dump(mode="json"),
+                    "plan": dataclasses.asdict(plan), "step_index": step_index,
+                    "result": dataclasses.asdict(result)})
             # 实时进度上报（节流）：拓扑/督导的数据面——路线笔记随步可见
             if routes is not None:
                 await self._live_report(task, routes)
@@ -427,7 +470,9 @@ class SubAgent(abc.ABC):
             if route.steps_executed % 3 == 0:
                 self._reflect(route, plan)
         if route.status == TaskStatus.RUNNING:
-            route.status = TaskStatus.DONE
+            route.status = (TaskStatus.DONE if route.steps_succeeded
+                            else TaskStatus.FAILED if route.steps_failed
+                            else TaskStatus.CANCELLED)
         # 终评（记录最终健康度）
         self.health_mgr.evaluate(route)
 
@@ -477,10 +522,12 @@ class SubAgent(abc.ABC):
         del route.step_times[:-60]
         route.detection_signals += result.detection_signals
         if result.ok:
+            route.steps_succeeded += 1
             route.consecutive_failures = 0
             route.value_score = min(route.value_score + result.value, 1.0)
             route.progress = min(route.progress + (result.progress_delta or 1.0 / total_steps), 1.0)
         else:
+            route.steps_failed += 1
             route.consecutive_failures += 1
         route.risk_score = min(route.risk_score + result.risk_delta, 1.0)
         if result.note:
@@ -514,6 +561,9 @@ class SubAgent(abc.ABC):
             "routes_total": len(routes),
             "routes_done": sum(1 for r in routes if r.status == TaskStatus.DONE),
             "routes_pruned": sum(1 for r in routes if r.status == TaskStatus.PRUNED),
+            "routes_failed": sum(1 for r in routes if r.status == TaskStatus.FAILED),
+            "routes_cancelled": sum(1 for r in routes if r.status == TaskStatus.CANCELLED),
+            "status": task.status.value,
             "cache_stats": self.cache.stats(),
             "route_health": {r.name: round(r.health, 3) for r in routes},
         }
@@ -532,7 +582,7 @@ class SubAgent(abc.ABC):
             updated_by=self.agent_id,
             dedup_key=f"task|{task.task_id}",
         )
-        self.ctx.audit.log("task.done", self.agent_id,
+        self.ctx.audit.log(f"task.{task.status.value}", self.agent_id,
                            {"task_id": task.task_id, "summary": summary})
         await self.ctx.bus.publish(Event(
             topic="task.result", data_id=task.task_id, source=self.agent_id,
@@ -545,7 +595,8 @@ class SubAgent(abc.ABC):
                              *, max_user_chars: int = 6000,
                              timeout_seconds: int | None = None,
                              reasoning_effort: str = "",
-                             task: Task | None = None) -> dict[str, Any] | None:
+                             task: Task | None = None,
+                             _allow_ask: bool = True) -> dict[str, Any] | None:
         """云端 LLM 决策调用（JSON 应答）；不可用/解析失败 → None（调用方回退规则）。
 
         统一的降级语义：LLM 是操作建议的主路径，规则模板是骨架与兜底；
@@ -554,6 +605,8 @@ class SubAgent(abc.ABC):
         task 非空时把灵枢任务包携带的任务意图（mission/node_title）并入
         决策上下文——开局提示词只进灵枢，执行者从任务包知道自己服务于
         什么目标、交付什么。
+        ask 通道：决策可带 ask_user 向用户提问（挂起等答、答复回灌重裁），
+        见 _settle_ask；重裁调用经 _allow_ask=False 关闭再问（至多一问）。
         """
         if not self.enable_llm_planning:
             return None
@@ -576,23 +629,82 @@ class SubAgent(abc.ABC):
         if steering:
             user_obj = {**user_obj, "灵枢督导": {
                 "hint": steering["hint"], "rationale": steering.get("rationale", "")}}
+        # 后续执行读取最新持久化事实；业务建模本身仍以本次直接观测为准。
+        if task is not None and role != "business_analyst" and "business_context" not in user_obj:
+            shared = shared_context(getattr(self.ctx, "blackboard", None))
+            if shared:
+                user_obj = {**user_obj, "shared_context": shared}
+        # 询问通道说明单独保留，观察数据按完整结构缩减，不能截断 JSON。
+        budget = max_user_chars - (len(_ASK_CHANNEL_NOTE) if _allow_ask else 0)
+        content = compact_json(user_obj, max_chars=max(budget, 500))
         try:
-            resp = await self.ctx.gateway.chat(
+            resp = await chat_decision(
+                self.ctx.gateway,
                 [
-                    {"role": "system", "content": self._system_prompt() + f"\nROLE: {role}"},
-                    {"role": "user", "content":
-                        json.dumps(user_obj, ensure_ascii=False)[:max_user_chars]},
+                    {"role": "system", "content": self._system_prompt() + f"\nROLE: {role}"
+                     + ("\n" + _ASK_CHANNEL_NOTE if _allow_ask else "")},
+                    {"role": "user", "content": content},
                 ],
+                audit=self.ctx.audit, actor=self.agent_id,
                 task_type="execution", response_format="json",
                 timeout_seconds=timeout_seconds,
                 reasoning_effort=reasoning_effort,
             )
             data = extract_json(resp.content)
-            return data if isinstance(data, dict) else None
+            if not isinstance(data, dict):
+                return None
+            return await self._settle_ask(
+                data, role=role, user_obj=user_obj,
+                max_user_chars=max_user_chars,
+                timeout_seconds=timeout_seconds,
+                reasoning_effort=reasoning_effort, task=task)
         except Exception as exc:  # noqa: BLE001 —— 降级为规则骨架，不阻断（留痕可见）
             self.ctx.audit.log("llm.step_fallback", self.agent_id,
                                {"role": role, "error": str(exc)[:200]})
             return None
+
+    async def _settle_ask(self, data: dict[str, Any], *, role: str,
+                          user_obj: dict[str, Any], max_user_chars: int,
+                          timeout_seconds: int | None,
+                          reasoning_effort: str,
+                          task: Task | None) -> dict[str, Any] | None:
+        """决策里的 ask_user 落地：向用户发问（挂起等答），答复回灌重裁本决策。
+
+        会话停止/用户未给明确答复 → 按模型原决策继续（与 CTF ask_user 同
+        语义，问题不可代答也不阻塞收尾）；会话未接询问通道时剥除该字段并
+        留痕——提示词承诺过的能力缺通道时至少可见。答复有效则带着答复重新
+        发起同参决策，重裁调用不再开放提问（一轮决策至多一问，防循环）。
+        """
+        ask = data.pop("ask_user", None)
+        if not isinstance(ask, dict) or not str(ask.get("question") or "").strip():
+            return data
+        assert self.ctx.audit is not None
+        question = str(ask["question"]).strip()[:2000]
+        options = [str(o).strip()[:200] for o in (ask.get("options") or [])[:6]
+                   if str(o).strip()]
+        targets = [str(t).strip()[:300] for t in (ask.get("targets") or [])[:6]
+                   if isinstance(t, str) and t.strip()]
+        broker = self.ctx.questions
+        if broker is None:
+            self.ctx.audit.log("agent.ask_user", self.agent_id, {
+                "role": role, "question": question[:300],
+                "note": "会话未接询问通道，按原决策继续"})
+            return data
+        self.ctx.audit.log("agent.ask_user", self.agent_id, {
+            "role": role, "question": question[:500],
+            "options": options, "targets": targets})
+        result = await broker.ask(self.agent_type.value, question, options, targets)
+        answer = str(result.get("answer") or "").strip()
+        added = result.get("scope_added") or []
+        self.ctx.audit.log("agent.ask_answered", self.agent_id, {
+            "role": role, "answer": answer[:300], "scope_added": added})
+        if result.get("cancelled") or not answer:
+            return data
+        return await self._llm_chat_json(
+            role, {**user_obj, "用户答复": {
+                "question": question, "answer": answer, "scope_added": added}},
+            max_user_chars=max_user_chars, timeout_seconds=timeout_seconds,
+            reasoning_effort=reasoning_effort, task=task, _allow_ask=False)
 
     # ------------------------------------------------------------ 提示词
 

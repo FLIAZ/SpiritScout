@@ -25,7 +25,13 @@ from spiritscout.core.ids import new_id
 
 
 class QuestionBroker:
-    """会话内待答问题队列：ask() 挂起等待用户作答，answer() 唤醒。"""
+    """会话内待答问题队列：ask() 挂起等待用户作答，answer() 唤醒。
+
+    并发语义与 ApprovalBroker 一致：同一问题的多个等待者共用一个裁决
+    Future，经 shield 附等——单个分支被取消不影响他人等待；待办生命
+    周期由 Broker 统一管理（作答落地即移除；等待者全部退出按「无答复」
+    回收），创建者退出不再误删仍有人等待的问题。
+    """
 
     def __init__(self, audit: AuditLogger | None = None):
         self._audit = audit or NullAuditLogger()
@@ -33,6 +39,8 @@ class QuestionBroker:
         self._pending: dict[str, dict] = {}           # question_id → 待答记录
         self._waiters: dict[str, asyncio.Future[dict]] = {}
         self._by_question: dict[str, str] = {}        # 问题指纹 → question_id
+        self._fingerprints: dict[str, str] = {}       # question_id → 问题指纹
+        self._consumers: dict[str, int] = {}          # question_id → 等待者引用数
 
     def bind_guard(self, guard: Any) -> None:
         """绑定会话守卫：用户勾选扩围时写入其会话批准集。"""
@@ -47,12 +55,24 @@ class QuestionBroker:
         fingerprint = f"{agent}|{question}"
         existing = self._by_question.get(fingerprint)
         if existing and existing in self._waiters:
-            return await self._waiters[existing]      # 同一问题已在询问：共用裁决
+            qid = existing                            # 同一问题已在询问：共用裁决
+        else:
+            qid = self._create(agent, question, fingerprint, options, targets)
+        fut = self._waiters[qid]
+        self._consumers[qid] = self._consumers.get(qid, 0) + 1
+        try:
+            # shield：单个等待者被取消不连带取消共享的作答
+            return await asyncio.shield(fut)
+        finally:
+            self._detach(qid, fingerprint)
+
+    def _create(self, agent: str, question: str, fingerprint: str,
+                options: list[str], targets: list[str] | None) -> str:
         qid = new_id("ask")
-        loop = asyncio.get_running_loop()
-        fut: asyncio.Future[dict[str, Any]] = loop.create_future()
+        fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._waiters[qid] = fut
         self._by_question[fingerprint] = qid
+        self._fingerprints[qid] = fingerprint
         self._pending[qid] = {
             "question_id": qid, "agent": agent, "question": question,
             "options": [str(o).strip()[:200] for o in (options or [])[:6]
@@ -65,12 +85,36 @@ class QuestionBroker:
             "question_id": qid, "question": question[:500],
             "options": self._pending[qid]["options"],
             "targets": self._pending[qid]["targets"]})
-        try:
-            return await fut
-        finally:
-            self._pending.pop(qid, None)
-            self._waiters.pop(qid, None)
+        return qid
+
+    def _detach(self, qid: str, fingerprint: str) -> None:
+        """等待者退出：引用归零且尚未作答 → 无人等待的问题按「无答复」回收。"""
+        if qid not in self._waiters:
+            return
+        remaining = self._consumers.get(qid, 1) - 1
+        if remaining > 0:
+            self._consumers[qid] = remaining
+            return
+        self._consumers.pop(qid, None)
+        fut = self._waiters.pop(qid, None)
+        self._pending.pop(qid, None)
+        self._fingerprints.pop(qid, None)
+        if self._by_question.get(fingerprint) == qid:
             self._by_question.pop(fingerprint, None)
+        if fut is not None and not fut.done():
+            fut.set_result({"answer": "", "scope_added": [],
+                            "cancelled": "等待者全部退出"})
+
+    def _resolve(self, qid: str, payload: dict[str, Any]) -> None:
+        """作答落地：唤醒全部等待者并移除待办（生命周期收口在 Broker）。"""
+        fut = self._waiters.pop(qid, None)
+        self._pending.pop(qid, None)
+        self._consumers.pop(qid, None)
+        fingerprint = self._fingerprints.pop(qid, None)
+        if fingerprint and self._by_question.get(fingerprint) == qid:
+            self._by_question.pop(fingerprint, None)
+        if fut is not None and not fut.done():
+            fut.set_result(payload)
 
     # ------------------------------------------------------------ 作答侧（Web 端点调用）
 
@@ -83,9 +127,10 @@ class QuestionBroker:
         if rec is None or fut is None or fut.done():
             return False
         answer = str(text or "").strip()[:1000]
-        if not answer and choice is not None \
-                and 0 <= int(choice) < len(rec["options"]):
-            answer = rec["options"][int(choice)]
+        if not answer:
+            if type(choice) is not int or not 0 <= choice < len(rec["options"]):
+                raise ValueError("请选择有效选项或填写答复")
+            answer = rec["options"][choice]
         added: list[str] = []
         if add_targets and self._guard is not None:
             for target in add_targets[:6]:
@@ -98,17 +143,16 @@ class QuestionBroker:
         self._audit.log("user.answered", "web", {
             "question_id": question_id, "answer": answer[:300],
             "scope_added": added})
-        fut.set_result(payload)
+        self._resolve(question_id, payload)
         return True
 
     def cancel_all(self, *, reason: str = "会话停止") -> None:
         """会话停止/关停：全部挂起问题按「无答复」唤醒。"""
-        for qid, fut in list(self._waiters.items()):
-            if not fut.done():
-                self._audit.log("user.answered", "system", {
-                    "question_id": qid, "answer": "", "scope_added": [],
-                    "reason": reason})
-                fut.set_result({"answer": "", "scope_added": [],
+        for qid in list(self._pending):
+            self._audit.log("user.answered", "system", {
+                "question_id": qid, "answer": "", "scope_added": [],
+                "reason": reason})
+            self._resolve(qid, {"answer": "", "scope_added": [],
                                 "cancelled": reason})
 
     # ------------------------------------------------------------ 展示侧

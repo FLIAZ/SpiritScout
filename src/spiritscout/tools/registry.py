@@ -6,6 +6,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import copy
+import hashlib
+import json
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -19,7 +24,19 @@ from spiritscout.core.exceptions import (
 )
 from spiritscout.core.models import AgentType
 from spiritscout.tools.executor import ToolExecutor
-from spiritscout.tools.spec import ToolKind, ToolResult, ToolSpec
+from spiritscout.tools.invocation import (
+    InvocationContext,
+    current_execution_scope,
+    current_invocation,
+)
+from spiritscout.tools.journal import ExecutionJournal
+from spiritscout.tools.spec import (
+    ActionCategory,
+    RiskLevel,
+    ToolKind,
+    ToolResult,
+    ToolSpec,
+)
 
 if False:  # TYPE_CHECKING 等价：避免运行时环（policy.engine 依赖 tools.spec）
     from spiritscout.policy.engine import PolicyEngine
@@ -36,11 +53,13 @@ class ToolRegistry:
         policy: PolicyEngine | None = None,
         audit: AuditLogger | None = None,
         max_retries: int = 1,
+        journal: ExecutionJournal | None = None,
     ):
         self.executor = executor
         self.policy = policy
         self.audit = audit or NullAuditLogger()
         self.max_retries = max_retries
+        self.journal = journal
         self._specs: dict[str, ToolSpec] = {}
         self._builtins: dict[str, BuiltinFn] = {}
 
@@ -66,8 +85,90 @@ class ToolRegistry:
     # ------------------------------------------------------------ 调用
 
     async def call(self, name: str, params: dict[str, Any], **builtin_ctx) -> ToolResult:
+        """每次调用独立编号，参数快照绑定审批；未决动作只留痕、不自动重放。"""
+        spec = self.get(name)
+        params = copy.deepcopy(params)
+        digest = hashlib.sha256(json.dumps(
+            params, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+        invocation_id = f"inv-{uuid.uuid4().hex}"
+        replay_safe = self._replay_safe(spec, params)
+        context = InvocationContext(invocation_id, digest,
+            (lambda action, allow: self.journal.approval(invocation_id, action, allow))
+            if self.journal is not None else None)
+        token = current_invocation.set(context)
+        phase = "not_started"
+        registered = False
+
+        def transition(status: str) -> None:
+            nonlocal phase
+            phase = status
+            if self.journal is not None:
+                self.journal.transition(invocation_id, status,
+                                        effect="unknown" if status == "running"
+                                        and not replay_safe else "none")
+
+        try:
+            if self.journal is not None:
+                self.journal.begin(invocation_id, name, digest,
+                                   "safe" if replay_safe else "never_automatic",
+                                   params=params, scope=current_execution_scope.get())
+                registered = True
+            result = await self._call(name, params, transition=transition, **builtin_ctx)
+            result.invocation_id = invocation_id
+            result.execution_status = ("denied" if phase != "running" else
+                                       "succeeded" if result.ok else "failed")
+            result.effect_status = ("none" if replay_safe or phase != "running" else
+                                    "applied" if result.ok else "unknown")
+            if self.journal is not None:
+                self.journal.transition(invocation_id, result.execution_status,
+                                        effect=result.effect_status, result=result)
+            return result
+        except (Exception, asyncio.CancelledError) as exc:
+            if self.journal is not None and registered:
+                status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "unknown"
+                self.journal.transition(invocation_id, status,
+                                        effect="unknown" if phase == "running" else "none")
+            raise
+        finally:
+            current_invocation.reset(token)
+
+    @staticmethod
+    def _replay_safe(spec: ToolSpec, params: dict[str, Any]) -> bool:
+        return (spec.risk == RiskLevel.READONLY
+                and params.get("action") in (None, ActionCategory.ANALYSIS.value)
+                and spec.name != "sandbox_exec"
+                and (spec.name != "http_probe" or str(params.get("method", "GET")).upper()
+                     in {"GET", "HEAD", "OPTIONS"}))
+
+    async def _call(self, name: str, params: dict[str, Any], *,
+                    transition: Callable[[str], None], **builtin_ctx) -> ToolResult:
         """统一调用入口：策略门 → 授权范围门 → 执行/重试 → 结构化结果。"""
         spec = self.get(name)
+        # 行为声明在统一入口校验，不能依赖某个 Agent 的包装函数。
+        # MCP 的 action 可能是远端业务参数；其风险仍由工具规格门把关。
+        raw_action = params.get("action")
+        if spec.kind == ToolKind.MCP and (
+            not isinstance(raw_action, str) or raw_action not in tuple(a.value for a in ActionCategory)
+        ):
+            raw_action = None
+        action = None
+        required = spec.action_required or (
+            name == "http_probe"
+            and str(params.get("method", "GET")).upper() not in {"GET", "HEAD", "OPTIONS"}
+        )
+        if raw_action is not None:
+            try:
+                action = ActionCategory(raw_action).value
+            except (ValueError, TypeError):
+                return ToolResult(tool=name, ok=False, returncode=-4,
+                                  error="action 类别未知，请如实声明："
+                                  + ", ".join(a.value for a in ActionCategory))
+        if required and action is None:
+            return ToolResult(tool=name, ok=False, returncode=-4,
+                              error="缺少 action 行为声明，请补充后重试")
+        if action not in (None, ActionCategory.ANALYSIS.value) and self.policy is None:
+            return ToolResult(tool=name, ok=False, returncode=-3,
+                              error="敏感动作缺少策略与即时审批通道，未执行")
         if spec.allowed_params:
             unknown = set(params) - spec.allowed_params
             if unknown:
@@ -77,15 +178,20 @@ class ToolRegistry:
         if self.policy is not None:
             try:
                 self._check_scope(spec, params)
+                if spec.risk == RiskLevel.INTRUSIVE or action not in (
+                        None, ActionCategory.ANALYSIS.value):
+                    transition("awaiting_approval")
                 await self.policy.ensure_tool_allowed(
-                    spec, action=str(params.get("action", "")) or None)
+                    spec, action=action)
             except (PolicyViolation, ScopeViolation) as exc:
                 self.audit.log("tool.denied", "registry", {"tool": name, "reason": str(exc)})
                 return ToolResult(tool=name, ok=False, error=str(exc), returncode=-3)
         attempts = 0
         last: ToolResult | None = None
         # 侵入性工具不自动重放，避免网络抖动把一次有副作用的调用变成两次。
-        retry_limit = self.max_retries if spec.risk.value == "readonly" else 0
+        replay_safe = self._replay_safe(spec, params)
+        retry_limit = self.max_retries if replay_safe else 0
+        transition("running")
         while attempts <= retry_limit:
             attempts += 1
             if name in self._builtins:
@@ -97,9 +203,10 @@ class ToolRegistry:
             else:  # pragma: no cover
                 raise SpiritScoutError(f"工具 {name} 类型无法调度: {spec.kind}")
             last.attempts = attempts
-            if last.ok or last.timed_out:
+            if last.ok or last.timed_out or last.parsed.get("retryable") is False:
                 break
-        if last is not None and not last.ok and spec.fallback_tool:
+        if (last is not None and not last.ok and spec.fallback_tool and replay_safe
+                and last.parsed.get("retryable") is not False):
             self.audit.log("tool.fallback", "registry",
                            {"tool": name, "fallback": spec.fallback_tool, "reason": last.error})
             fb = await self.call(spec.fallback_tool, params, **builtin_ctx)

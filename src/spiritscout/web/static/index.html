@@ -4,13 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>灵枢 SpiritScout</title>
-<link rel="stylesheet" href="/static/css/base.css">
-<link rel="stylesheet" href="/static/css/views.css">
+<link rel="stylesheet" href="/static/css/base.css?v=20261016-live">
+<link rel="stylesheet" href="/static/css/views.css?v=20261016-params-fold">
+<link rel="stylesheet" href="/static/css/deliverables.css?v=20261016-archive">
 </head>
 <body>
 <div class="aurora" aria-hidden="true"></div>
 <div id="app">
   <aside class="side">
+    <button id="mobile-sessions-toggle" class="btn sm" type="button" aria-expanded="false" aria-controls="sess-list">会话列表</button>
     <div class="brand">
       <h1>灵枢<em>·</em>SpiritScout</h1>
       <small>渗透测试智能体集群</small>
@@ -82,25 +84,48 @@
       </div>
       <div id="s-err"></div>
       <div class="chips" id="s-chips"></div>
-      <div class="tabs" id="s-tabs">
+      <div class="tabs" id="s-tabs" role="tablist" aria-label="会话页面">
         <button data-tab="chat" class="on">会话</button>
         <button data-tab="topo">拓扑</button>
         <button data-tab="vulns">漏洞</button>
         <button data-tab="flags">Flag</button>
         <button data-tab="events">事件</button>
+        <button data-tab="deliverables">产出与事实</button>
         <button data-tab="report">报告</button>
       </div>
+      <section id="session-actions" class="session-actions" aria-label="待回答的问题与审批" hidden>
+        <div id="topo-ops-apv"></div>
+        <div id="topo-ops-ask"></div>
+      </section>
       <div id="tab-area">
-        <div id="tab-chat"><div class="trace-wrap">
+        <div id="tab-chat"><aside id="session-observer" class="session-observer" aria-label="执行实况与消耗"></aside><div class="trace-wrap">
           <div class="trace" id="trace-box"></div>
           <button id="trace-jump" type="button" hidden aria-label="回到最新轨迹" title="回到最新轨迹">↓ 回到最新</button>
         </div></div>
-        <div id="tab-topo" hidden><div class="card topo" id="topo">
-          <div class="topo-ops" id="topo-ops"><div id="topo-ops-apv"></div><div id="topo-ops-ask"></div></div>
-        </div></div>
+        <div id="tab-topo" hidden><div class="card topo" id="topo"></div></div>
         <div id="tab-vulns" hidden></div>
         <div id="tab-flags" hidden></div>
         <div id="tab-events" hidden><div class="events" id="events"></div></div>
+        <div id="tab-deliverables" hidden>
+          <section class="archive" aria-label="会话产出与事实">
+            <header class="archive-head"><div><span class="archive-eyebrow">会话档案 · 持续沉淀</span>
+              <h3>把发现，留成依据。</h3><p>集中保存产出，沿证据追溯每一条结论。</p></div>
+              <div class="archive-actions"><span id="archive-sync" role="status">等待读取</span>
+                <button class="btn sm" id="archive-export" type="button">导出当前结果</button>
+                <button class="btn sm" id="archive-refresh" type="button">刷新</button></div></header>
+            <div class="archive-layout">
+              <aside class="archive-rail"><label for="archive-search">检索档案</label>
+                <input id="archive-search" type="search" placeholder="内容、来源或目标…" maxlength="200">
+                <nav id="archive-filters" aria-label="档案分类"></nav>
+                <p class="archive-note">事实保留证据引用；推测与待核验发现单独标记。文件来自本会话的产出与报告目录。</p></aside>
+              <div class="archive-main"><div class="archive-list-head"><strong id="archive-count">档案</strong><span>来源可追溯</span></div>
+                <div id="archive-error" role="alert" hidden></div>
+                <div id="archive-list" aria-label="档案条目"></div>
+                <button class="btn archive-more" id="archive-more" type="button" hidden>加载更多</button></div>
+              <aside id="archive-detail" class="archive-detail" aria-label="条目详情与证据来源"><div class="archive-placeholder">选择一条记录<br><small>在这里查看证据与来源</small></div></aside>
+            </div>
+          </section>
+        </div>
         <div id="tab-report" hidden></div>
       </div>
       <div class="composer-dock">
@@ -136,6 +161,10 @@
         <div>
           <h2 style="margin:0 0 4px;font-size:19px">编队</h2>
           <span class="muted" style="font-size:12.5px">查看实际装配角色、工作法与工具边界。只有可运行角色支持模型指派；规划中角色不会参与调度。</span>
+        </div>
+        <div class="bind-save" id="bind-save" hidden>
+          <button class="btn sm" id="bind-revert">还原</button>
+          <button class="btn primary sm" id="bind-save-btn">保存指派</button>
         </div>
       </div>
       <div class="agents-grid" id="agents-grid"></div>
@@ -242,8 +271,11 @@
 
 <div id="toasts"></div>
 
-<script src="/static/js/core.js"></script>
-<script src="/static/js/views.js"></script>
+<script src="/static/js/core.js?v=20261016-archive"></script>
+<script src="/static/js/observer.js?v=20261016-click"></script>
+<script src="/static/js/deliverables.js?v=20261016-archive"></script>
+<script src="/static/js/tool-parameters.js?v=20261016-params-fold"></script>
+<script src="/static/js/views.js?v=20261016-params"></script>
 <script src="/static/js/console.js"></script>
 </body>
 </html>

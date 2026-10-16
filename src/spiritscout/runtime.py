@@ -8,7 +8,10 @@ run_ctf_engagement() / run_competition_engagement() 赛事实例化装配：
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
 import json
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -31,6 +34,7 @@ from spiritscout.core.exceptions import (
     PolicyViolation,
     SpiritScoutError,
 )
+from spiritscout.core.ids import new_id
 from spiritscout.core.models import (
     Authorization,
     BlackboardLayer,
@@ -64,8 +68,9 @@ from spiritscout.tools.executor import (
     docker_available,
 )
 from spiritscout.tools.registry import ToolRegistry
+from spiritscout.tools.run_lock import ExecutionRunLock
 from spiritscout.tools.sandbox import sandbox_exec
-from spiritscout.tools.spec import RiskLevel, ToolKind, ToolResult, ToolSpec
+from spiritscout.tools.spec import ToolKind, ToolResult, ToolSpec
 from spiritscout.verify import VerifyPipeline
 
 if TYPE_CHECKING:
@@ -163,16 +168,45 @@ class _Infra:
     questions: Any = None       # QuestionBroker（ask_user 工具后端；None=不可用）
     experience: Any = None      # ExperienceStore（全局经验库，跨会话持久）
     pause_gate: Any = None      # PauseGate 暂停门（Web 层注入；None=无暂停能力）
+    run_lock: ExecutionRunLock | None = None
+    outcome: str = "failed"
 
     async def close(self) -> None:
-        await self.bus.stop()
-        self.blackboard.close()
-        self.knowledge.close()
-        for client in self.mcp_clients:
+        try:
+            if self.tools.journal is not None:
+                self.tools.journal.finish_run(self.outcome)
+        finally:
             try:
-                await client.close()
-            except Exception:  # noqa: S110, BLE001 —— 关停回收失败不阻断收尾
-                pass
+                await _teardown_infra(
+                    mcp_clients=self.mcp_clients, blackboard=self.blackboard,
+                    experience=self.experience, knowledge=self.knowledge, bus=self.bus)
+            finally:
+                if self.run_lock is not None:
+                    self.run_lock.close()
+
+
+async def _teardown_infra(*, mcp_clients: list[Any], blackboard: Any,
+                          experience: Any, knowledge: Any, bus: Any) -> None:
+    """基建统一收口：逐项容错，单项失败不阻断其余资源回收。
+
+    _Infra.close 与 _build_infra 中断路径共用——初始化失败前已建的资源
+    同样要回收（总线/黑板/知识库/经验库/MCP 子进程，泄漏会拖住进程退出）。
+    """
+    for client in mcp_clients:
+        with contextlib.suppress(Exception):
+            await client.close()
+    if blackboard is not None:
+        with contextlib.suppress(Exception):
+            await blackboard.aclose()
+    if experience is not None:
+        with contextlib.suppress(Exception):
+            experience.close()
+    if knowledge is not None:
+        with contextlib.suppress(Exception):
+            knowledge.close()
+    if bus is not None:
+        with contextlib.suppress(Exception):
+            await bus.stop()
 
 
 async def _build_infra(
@@ -199,197 +233,255 @@ async def _build_infra(
         question_broker.bind_guard(guard)   # 用户勾选扩围 → 写入会话批准集
     # 平台红线由知识库漏洞标准库装载（3.4 全量 7 平台规则，首次启动自动播种）
     knowledge = KnowledgeStore(cfg.knowledge.sqlite_path, auto_seed=True)
-    platform_rule = knowledge.platform_rule_view(authorization.src_platform)
-    policy = PolicyEngine(authorization.mode, guard,
-                          platform_rule=platform_rule, audit=audit,
-                          approval_gate=approval_gate)
-    if authorization.mode == RunMode.SRC:
-        policy.check_automation_allowed()   # 平台禁自动化时启动即阻断
-    limiter = RateLimiter(max(authorization.scope.max_requests_per_second, 0.1))
-
-    bus = create_bus(
-        cfg.bus.backend,
-        queue_maxsize=cfg.bus.queue_maxsize,
-        rate_limit_per_second=cfg.bus.rate_limit_per_second,
-        redis_url=cfg.bus.redis_url,
-        nats_url=cfg.bus.nats_url,
-    )
-    await bus.start()
-    blackboard = Blackboard(cfg.blackboard.sqlite_path, bus=bus)
-    from spiritscout.core.models import AgentType
-
-    blackboard.write(
-        BlackboardLayer.TARGET_AUTH, authorization.auth_id,
-        authorization.model_dump(mode="json"),
-        agent_type=AgentType.MASTER, updated_by="runtime",
-    )
-    convergence = ConvergenceEngine(blackboard)
-    gateway = ModelGateway(ModelRegistry(models), config=cfg.gateway, audit=audit)
-    gateway.set_mode(authorization.mode.value)   # 模式预算计量与熔断（4.9.4）
-    # 执行器三态（4.1）：本地 CLI 默认；docker 后端为子 Agent 沙箱隔离（加固）
-    executor: ToolExecutor
-    if cfg.executor.backend == "docker":
-        if not docker_available():
-            # 不静默降级：显式选择的 docker 后端不可用时拒绝启动并给出出路
-            raise ConfigurationError(
-                "executor.backend=docker 但 Docker 守护进程不可用（docker CLI 缺失"
-                "或 dockerd 未运行）。请启动 Docker 服务，或将 executor.backend "
-                "改回 local 后重试。")
-        executor = DockerExecutor(
-            image=cfg.executor.docker_image,
-            # CTF 模式网络隔离（硬约束 C7）：容器 --network none
-            network_isolation=(authorization.mode == RunMode.CTF
-                               and cfg.executor.ctf_network_isolation),
-            memory_mb=cfg.executor.docker_memory_mb,
-            cpus=cfg.executor.docker_cpus,
-            pids_limit=cfg.executor.docker_pids_limit,
-            read_only=cfg.executor.docker_read_only,
-            tmpfs=cfg.executor.docker_tmpfs,
-            user=cfg.executor.docker_user,
-            max_output_chars=cfg.executor.max_output_chars, audit=audit,
-        )
-    else:
-        executor = LocalExecutor(
-            max_output_chars=cfg.executor.max_output_chars, audit=audit,
-        )
-    registry = ToolRegistry(executor, policy=policy, audit=audit)
-    workspace = Path(cfg.workspace.root)
-    workspace.mkdir(parents=True, exist_ok=True)
-    # 用量实时落盘：每笔模型调用后刷新 usage.json，控制台/状态页随读随新
-    # （原子替换避免读到半截；文件极小，写频以模型调用为界）
-    usage_path = workspace / "usage.json"
-
-    def _usage_sink(snap: dict) -> None:
-        tmp = usage_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(usage_path)
-
-    gateway.budget.on_record = _usage_sink
-    experience = ExperienceStore(workspace / "experience.db", audit=audit)
-    attachments = workspace / "attachments"
-    attachments.mkdir(exist_ok=True)
-    (workspace / "reports").mkdir(exist_ok=True)
-    # 浏览器/代理 HAR 附件 → 真实端点资产。只导入授权范围内的 URL，且不保存
-    # Cookie、Authorization、参数值或响应正文。
-    from spiritscout.traffic import import_har_directory
-
-    import_har_directory(
-        attachments, blackboard=blackboard, guard=guard, audit=audit)
-    sandbox_dir = workspace / "sandbox"
-    sandbox_dir.mkdir(exist_ok=True)
-    builtin_ctx = {
-        "guard": guard,
-        "limiter": limiter,
-        # 附件与沙箱产物目录都在附件分析工具的允许清单内——脚本产物
-        # 可以直接接续 file_analyze/analyze_attachments
-        "allowed_dirs": [str(attachments), str(sandbox_dir)],
-        "workspace_root": str(workspace),
-    }
-    # 外部 MCP 服务器：握手 + 工具清单并入智能体工具目录（失败留痕跳过，
-    # 不阻断开工——MCP 是增益能力而非主链依赖；多台服务器并发握手，
-    # 慢服务器不拖累开工时序）
+    # 以下资源在创建后任何一步失败都要回收：先置空占位，异常路径统一收口
     mcp_clients: list[Any] = []
-    mcp_tools: dict[str, dict[str, Any]] = {}
-    enabled_specs = [s for s in cfg.mcp_servers if s.enabled]
-    if enabled_specs:
-        from spiritscout.tools.mcp_client import build_client
+    experience: Any = None
+    bus: Any = None
+    blackboard: Blackboard | None = None
+    run_lock = ExecutionRunLock(Path(cfg.workspace.root), Path(cfg.blackboard.sqlite_path))
+    journal: Any = None
+    try:
+        run_lock.acquire()
+        platform_rule = knowledge.platform_rule_view(authorization.src_platform)
+        policy = PolicyEngine(authorization.mode, guard,
+                              platform_rule=platform_rule, audit=audit,
+                              approval_gate=approval_gate)
+        if authorization.mode == RunMode.SRC:
+            policy.check_automation_allowed()   # 平台禁自动化时启动即阻断
+        bus = create_bus(
+            cfg.bus.backend,
+            queue_maxsize=cfg.bus.queue_maxsize,
+            rate_limit_per_second=cfg.bus.rate_limit_per_second,
+            redis_url=os.environ.get(cfg.bus.redis_url_env) or cfg.bus.redis_url,
+            channel_prefix=(f"ss:{cfg.bus.namespace}:session:"
+                            + hashlib.sha256(str(Path(cfg.workspace.root).resolve()).encode())
+                            .hexdigest()[:24]),
+            connect_timeout_seconds=cfg.bus.connect_timeout_seconds,
+            nats_url=cfg.bus.nats_url,
+        )
+        await bus.start()
+        limiter = RateLimiter(
+            max(authorization.scope.max_requests_per_second, 0.1),
+            shared_acquire=(lambda: bus.acquire_request_slot(
+                cfg.bus.shared_request_rps, f"ss:{cfg.bus.namespace}:limits:requests"))
+            if cfg.bus.backend == "redis" else None)
+        blackboard = Blackboard(cfg.blackboard.sqlite_path, bus=bus)
+        blackboard.start_notifications()
+        from spiritscout.core.models import AgentType
 
-        async def _start_mcp(spec: Any) -> tuple[Any, Any, list[dict[str, Any]], str]:
+        blackboard.write(
+            BlackboardLayer.TARGET_AUTH, authorization.auth_id,
+            authorization.model_dump(mode="json"),
+            agent_type=AgentType.MASTER, updated_by="runtime",
+        )
+        convergence = ConvergenceEngine(blackboard)
+        gateway = ModelGateway(ModelRegistry(models), config=cfg.gateway, audit=audit)
+        gateway.set_mode(authorization.mode.value)   # 模式预算计量与熔断（4.9.4）
+        # 执行器三态（4.1）：本地 CLI 默认；docker 后端为子 Agent 沙箱隔离（加固）
+        executor: ToolExecutor
+        if cfg.executor.backend == "docker":
+            if not docker_available():
+                # 不静默降级：显式选择的 docker 后端不可用时拒绝启动并给出出路
+                raise ConfigurationError(
+                    "executor.backend=docker 但 Docker 守护进程不可用（docker CLI 缺失"
+                    "或 dockerd 未运行）。请启动 Docker 服务，或将 executor.backend "
+                    "改回 local 后重试。")
+            executor = DockerExecutor(
+                image=cfg.executor.docker_image,
+                # CTF 模式网络隔离（硬约束 C7）：容器 --network none
+                network_isolation=(authorization.mode == RunMode.CTF
+                                   and cfg.executor.ctf_network_isolation),
+                memory_mb=cfg.executor.docker_memory_mb,
+                cpus=cfg.executor.docker_cpus,
+                pids_limit=cfg.executor.docker_pids_limit,
+                read_only=cfg.executor.docker_read_only,
+                tmpfs=cfg.executor.docker_tmpfs,
+                user=cfg.executor.docker_user,
+                max_output_chars=cfg.executor.max_output_chars, audit=audit,
+            )
+        else:
+            executor = LocalExecutor(
+                max_output_chars=cfg.executor.max_output_chars, audit=audit,
+            )
+        workspace = Path(cfg.workspace.root)
+        workspace.mkdir(parents=True, exist_ok=True)
+        from spiritscout.tools.journal import ExecutionJournal
+
+        journal = ExecutionJournal(blackboard, workspace, new_id("run"))
+        journal.activate_run(run_lock)
+        registry = ToolRegistry(executor, policy=policy, audit=audit, journal=journal)
+        # 用量实时落盘：每笔模型调用后刷新 usage.json，控制台/状态页随读随新
+        # （原子替换避免读到半截；文件极小，写频以模型调用为界）
+        usage_path = workspace / "usage.json"
+
+        def _usage_sink(snap: dict) -> None:
+            tmp = usage_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(usage_path)
+
+        # 续传回灌：恢复上一进程的用量累计与逐笔时序（usage.json 若在）——
+        # 进程重启不把总量清零重新计起
+        if usage_path.exists():
             try:
-                client = build_client(spec)
-                return spec, client, await client.start(), ""
-            except Exception as exc:  # noqa: BLE001 —— 不可达：留痕后继续
-                return spec, None, [], str(exc)[:300]
+                prior_usage = json.loads(usage_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                prior_usage = None
+            if isinstance(prior_usage, dict):
+                gateway.budget.restore(prior_usage)
+        gateway.budget.on_record = _usage_sink
+        experience = ExperienceStore(workspace / "experience.db", audit=audit)
+        for name in ("attachments", "sandbox", "artifacts"):
+            if (workspace / name).is_symlink():
+                raise ConfigurationError(f"共享目录不能是符号链接: {name}")
+        attachments = workspace / "attachments"
+        attachments.mkdir(exist_ok=True)
+        (workspace / "reports").mkdir(exist_ok=True)
+        # 浏览器/代理 HAR 附件 → 真实端点资产。只导入授权范围内的 URL，且不保存
+        # Cookie、Authorization、参数值或响应正文。
+        from spiritscout.traffic import import_har_directory
 
-        for spec, client, tools, err in await asyncio.gather(
-                *(_start_mcp(s) for s in enabled_specs)):
-            if client is None:
+        import_har_directory(
+            attachments, blackboard=blackboard, guard=guard, audit=audit)
+        sandbox_dir = workspace / "sandbox"
+        sandbox_dir.mkdir(exist_ok=True)
+        artifacts_dir = workspace / "artifacts"
+        artifacts_dir.mkdir(exist_ok=True)
+        builtin_ctx = {
+            "guard": guard,
+            "limiter": limiter,
+            # 附件与沙箱产物目录都在附件分析工具的允许清单内——脚本产物
+            # 可以直接接续 file_analyze/analyze_attachments
+            "allowed_dirs": [str(attachments), str(sandbox_dir), str(artifacts_dir)],
+            "workspace_root": str(workspace),
+        }
+        # 外部 MCP 服务器：握手 + 工具清单并入智能体工具目录（失败留痕跳过，
+        # 不阻断开工——MCP 是增益能力而非主链依赖；多台服务器并发握手，
+        # 慢服务器不拖累开工时序）
+        mcp_tools: dict[str, dict[str, Any]] = {}
+        enabled_specs = [s for s in cfg.mcp_servers if s.enabled]
+        if enabled_specs:
+            from spiritscout.tools.diagnostics import (
+                browser_failure,
+                browser_tool_guidance,
+                clean_tool_text,
+            )
+            from spiritscout.tools.mcp_client import build_client, resolve_mcp_risk
+
+            async def _start_mcp(spec: Any) -> tuple[Any, Any, list[dict[str, Any]], str]:
+                client = None
+                try:
+                    client = build_client(spec)
+                    # 启动前登记所有权；gather 尚未完成时取消也能完整回收。
+                    mcp_clients.append(client)
+                    return spec, client, await client.start(), ""
+                except Exception as exc:  # noqa: BLE001 —— 不可达：留痕后继续
+                    if client is not None:
+                        with contextlib.suppress(Exception):
+                            await client.close()
+                    return spec, None, [], str(exc)[:300]
+
+            for spec, client, tools, err in await asyncio.gather(
+                    *(_start_mcp(s) for s in enabled_specs)):
+                if client is None:
+                    audit.log("system.lifecycle", "runtime", {
+                        "action": "mcp_server_failed", "server": spec.name,
+                        "error": err})
+                    continue
+                for t in tools:
+                    t = {**t, "description": (t.get("description") or t["name"])
+                         + browser_tool_guidance(t["name"])}
+                    exposed_name = f"mcp__{spec.name}__{t['name']}"
+                    risk = resolve_mcp_risk(spec, t)
+                    properties = (t.get("inputSchema") or {}).get("properties") or {}
+                    target_params = (() if spec.scope_enforcement == "none" else
+                                     tuple(p for p in spec.target_params if p in properties))
+                    embedded_extractor = (
+                        _mcp_embedded_scope_targets
+                        if spec.scope_enforcement != "none"
+                        and {"request", "actualAddr", "batchTarget"} & set(properties)
+                        else None)
+                    tool_spec = ToolSpec(
+                        name=exposed_name, kind=ToolKind.MCP,
+                        description=t.get("description") or t["name"], risk=risk,
+                        timeout_seconds=max(1, int(spec.timeout)),
+                        allowed_params=set(properties), target_params=target_params,
+                        scope_required=spec.scope_enforcement == "required",
+                        scope_target_extractor=embedded_extractor)
+
+                    async def _call_mcp(*, _client=client, _tool=t["name"],
+                                        _timeout=float(spec.timeout),
+                                        _properties=frozenset(properties),
+                                        _name=exposed_name, **kwargs: Any) -> ToolResult:
+                        # ToolRegistry 会追加内置上下文；远端只接收 schema 声明的参数。
+                        arguments = {k: v for k, v in kwargs.items() if k in _properties}
+                        try:
+                            result = await _client.call(_tool, arguments, timeout=_timeout)
+                        except Exception as exc:  # noqa: BLE001 —— 归一为工具失败
+                            return ToolResult(tool=_name, ok=False, returncode=-2,
+                                              error=f"{type(exc).__name__}: {exc!s}"[:1000])
+                        failed = bool(result.get("is_error"))
+                        text = clean_tool_text(str(result.get("text", "")))[:16000]
+                        diagnostic = browser_failure(_tool, text) if failed else {}
+                        reason = text or f"MCP 工具 {_tool} 返回 isError=true，未提供文本诊断"
+                        if diagnostic:
+                            reason = diagnostic["failure_summary"] + "\n" + reason
+                        return ToolResult(
+                            tool=_name, ok=not failed,
+                            returncode=1 if failed else 0, stdout=text,
+                            error=reason if failed else "",
+                            # 服务已给出确定失败结果，交给模型修参；不原样自动重放。
+                            parsed={"retryable": False, **diagnostic} if failed else {})
+
+                    registry.register_builtin(exposed_name, _call_mcp, tool_spec)
+                    mcp_tools[exposed_name] = {
+                        "client": client, "server": spec.name,
+                        "tool": t["name"], "timeout": float(spec.timeout),
+                        "schema": t, "risk": risk.value,
+                        "target_params": list(target_params),
+                        "scope_enforcement": spec.scope_enforcement}
                 audit.log("system.lifecycle", "runtime", {
-                    "action": "mcp_server_failed", "server": spec.name,
-                    "error": err})
-                continue
-            mcp_clients.append(client)
-            for t in tools:
-                exposed_name = f"mcp__{spec.name}__{t['name']}"
-                annotations = t.get("annotations") or {}
-                destructive = annotations.get(
-                    "destructiveHint", annotations.get("destructive_hint"))
-                read_only = annotations.get(
-                    "readOnlyHint", annotations.get("read_only_hint"))
-                if destructive is True:
-                    risk = RiskLevel.DESTRUCTIVE
-                elif read_only is True:
-                    risk = RiskLevel.READONLY
-                else:
-                    risk = RiskLevel(spec.default_risk)
-                properties = (t.get("inputSchema") or {}).get("properties") or {}
-                target_params = (() if spec.scope_enforcement == "none" else
-                                 tuple(p for p in spec.target_params if p in properties))
-                embedded_extractor = (
-                    _mcp_embedded_scope_targets
-                    if spec.scope_enforcement != "none"
-                    and {"request", "actualAddr", "batchTarget"} & set(properties)
-                    else None)
-                tool_spec = ToolSpec(
-                    name=exposed_name, kind=ToolKind.MCP,
-                    description=t.get("description") or t["name"], risk=risk,
-                    timeout_seconds=max(1, int(spec.timeout)),
-                    allowed_params=set(properties), target_params=target_params,
-                    scope_required=spec.scope_enforcement == "required",
-                    scope_target_extractor=embedded_extractor)
-
-                async def _call_mcp(*, _client=client, _tool=t["name"],
-                                    _timeout=float(spec.timeout),
-                                    _properties=frozenset(properties),
-                                    _name=exposed_name, **kwargs: Any) -> ToolResult:
-                    # ToolRegistry 会追加内置上下文；远端只接收 schema 声明的参数。
-                    arguments = {k: v for k, v in kwargs.items() if k in _properties}
-                    try:
-                        result = await _client.call(_tool, arguments, timeout=_timeout)
-                    except Exception as exc:  # noqa: BLE001 —— 归一为工具失败
-                        return ToolResult(tool=_name, ok=False, returncode=-2,
-                                          error=str(exc)[:300])
-                    return ToolResult(
-                        tool=_name, ok=not result.get("is_error"),
-                        returncode=1 if result.get("is_error") else 0,
-                        stdout=str(result.get("text", ""))[:16000])
-
-                registry.register_builtin(exposed_name, _call_mcp, tool_spec)
-                mcp_tools[exposed_name] = {
-                    "client": client, "server": spec.name,
-                    "tool": t["name"], "timeout": float(spec.timeout),
-                    "schema": t, "risk": risk.value,
-                    "target_params": list(target_params),
-                    "scope_enforcement": spec.scope_enforcement}
+                    "action": "mcp_server_ready", "server": spec.name,
+                    "transport": spec.transport, "tools": [t["name"] for t in tools]})
+        for name, fn in (("http_probe", http_probe), ("dns_resolve", dns_resolve),
+                         ("tcp_scan", tcp_scan), ("file_analyze", file_analyze),
+                         ("sandbox_exec", sandbox_exec)):
+            registry.register_builtin(name, fn, BUILTIN_SPECS[name])
+        # 按 Agent 绑定的模型分配——失效模型（注册表已删）剔除并留痕，
+        # 不静默绑定到不存在的模型导致路由期失败
+        bound = dict(agent_models or {})
+        known = {m.model for m in models}
+        stale = {k: v for k, v in bound.items() if v not in known}
+        if stale:
             audit.log("system.lifecycle", "runtime", {
-                "action": "mcp_server_ready", "server": spec.name,
-                "transport": spec.transport, "tools": [t["name"] for t in tools]})
-    for name, fn in (("http_probe", http_probe), ("dns_resolve", dns_resolve),
-                     ("tcp_scan", tcp_scan), ("file_analyze", file_analyze),
-                     ("sandbox_exec", sandbox_exec)):
-        registry.register_builtin(name, fn, BUILTIN_SPECS[name])
-    # 按 Agent 绑定的模型分配——失效模型（注册表已删）剔除并留痕，
-    # 不静默绑定到不存在的模型导致路由期失败
-    bound = dict(agent_models or {})
-    known = {m.model for m in models}
-    stale = {k: v for k, v in bound.items() if v not in known}
-    if stale:
-        audit.log("system.lifecycle", "runtime", {
-            "action": "agent_model_binding_dropped", "stale": stale,
-            "reason": "模型不在注册表，按档位路由"})
-        bound = {k: v for k, v in bound.items() if v in known}
-    return _Infra(
-        cfg=cfg, authorization=authorization, audit=audit, guard=guard,
-        policy=policy, limiter=limiter, bus=bus, blackboard=blackboard,
-        convergence=convergence, gateway=gateway, tools=registry,
-        builtin_ctx=builtin_ctx, workspace=workspace, knowledge=knowledge,
-        agent_models=bound, ring=ring if ring is not None else RingLedger(audit),
-        shared_cache=LocalSharedCache(default_ttl_seconds=3600),
-        mcp_clients=mcp_clients, mcp_tools=mcp_tools,
-        questions=question_broker,
-        experience=experience,
-        pause_gate=pause_gate,
-    )
+                "action": "agent_model_binding_dropped", "stale": stale,
+                "reason": "模型不在注册表，按档位路由"})
+            bound = {k: v for k, v in bound.items() if v in known}
+        return _Infra(
+            cfg=cfg, authorization=authorization, audit=audit, guard=guard,
+            policy=policy, limiter=limiter, bus=bus, blackboard=blackboard,
+            convergence=convergence, gateway=gateway, tools=registry,
+            builtin_ctx=builtin_ctx, workspace=workspace, knowledge=knowledge,
+            agent_models=bound, ring=ring if ring is not None else RingLedger(audit),
+            shared_cache=LocalSharedCache(default_ttl_seconds=3600),
+            mcp_clients=mcp_clients, mcp_tools=mcp_tools,
+            questions=question_broker,
+            experience=experience,
+            pause_gate=pause_gate,
+            run_lock=run_lock,
+        )
+    except BaseException as exc:
+        # 初始化中断不留泄漏：已建资源统一收口（MCP/黑板/经验库/知识库/总线）
+        try:
+            if journal is not None:
+                with contextlib.suppress(Exception):
+                    journal.finish_run("cancelled" if isinstance(exc, asyncio.CancelledError)
+                                       else "failed")
+            await _teardown_infra(
+                mcp_clients=mcp_clients, blackboard=blackboard,
+                experience=experience, knowledge=knowledge, bus=bus)
+        finally:
+            run_lock.close()
+        raise
 
 
 def _sub_ctx(infra: _Infra) -> SubAgentContext:
@@ -405,6 +497,7 @@ def _sub_ctx(infra: _Infra) -> SubAgentContext:
         mcp_tools=infra.mcp_tools,   # 外部 MCP 工具（mcp__<server>__<tool>）
         questions=infra.questions,   # 模型发起用户询问的通道（ask_user）
         pause_gate=infra.pause_gate,  # 暂停门共持（步骤边界挂起）
+        journal=infra.tools.journal,
     )
 
 
@@ -430,15 +523,20 @@ async def _run_master(
     experience: Any = None,
 ) -> dict[str, Any]:
     """装配主 Agent 并运行多轮闭环，返回 run_summary。"""
+    from spiritscout.tools.journal import read_recovery_view
+
+    recovery = read_recovery_view(Path(infra.cfg.blackboard.sqlite_path))
+    recovery_context = (infra.tools.journal.planning_context(recovery)
+                        if infra.tools.journal is not None else {})
     master = MasterAgent(MasterContext(
         bus=infra.bus, blackboard=infra.blackboard, convergence=infra.convergence,
         gateway=AgentBoundGateway(
             infra.gateway, infra.agent_models.get("master", "")),
         policy=infra.policy, agents=assembly.agents,
-        max_rounds=infra.cfg.iteration_max_rounds,
         audit=infra.audit, enable_llm_planning=enable_llm_planning,
         tactic_map=assembly.tactic_map, plan_override=assembly.plan_provider,
         extra={"mode_notes": assembly.notes, "mission": mission,
+               "execution_recovery": recovery_context,
                "standing_rules": standing_rules,
                "recent_experience": [
                    e["insight"] for e in (experience.recent(limit=5) if experience else [])],
@@ -448,8 +546,13 @@ async def _run_master(
         knowledge=infra.knowledge,   # 主 Agent 攻击路径模板接线（3.3.6）
         ring=infra.ring,             # 灵枢督导通道（与子 Agent 共持同一台账）
         pause_gate=infra.pause_gate,  # 暂停门共持（图节点边界挂起）
+        questions=infra.questions,   # 复盘向用户提问通道（ask_user 后端）
+        journal=infra.tools.journal,
     ))
     run_summary = await master.run(authorization=infra.authorization, target=target)
+    run_summary["recovery_mode"] = recovery_context.get("mode", "history_replan")
+    if infra.tools.journal is not None:
+        run_summary["execution_run_id"] = infra.tools.journal.run_id
     run_summary["model_usage"] = infra.gateway.usage_report()
 
     # 灵枢收尾提炼经验：从全场审计与结论中提炼解题思维（非步骤），存入经验库
@@ -605,8 +708,12 @@ async def run_engagement(
             "report": str(out), "verify": verify_stats,
             "rounds": run_summary["rounds_executed"],
         })
+        infra.outcome = "completed"
         return EngagementResult(run_summary=run_summary, verify_stats=verify_stats,
                                 report_path=str(out))
+    except asyncio.CancelledError:
+        infra.outcome = "cancelled"
+        raise
     finally:
         await infra.close()
 
@@ -687,8 +794,12 @@ async def run_ctf_engagement(
             "action": "engagement_complete", "mode": "ctf", "report": str(out),
             "flags": flag_stats, "rounds": run_summary["rounds_executed"],
         })
+        infra.outcome = "completed"
         return EngagementResult(run_summary=run_summary, verify_stats={},
                                 report_path=str(out), flag_stats=flag_stats)
+    except asyncio.CancelledError:
+        infra.outcome = "cancelled"
+        raise
     finally:
         await infra.close()
 
@@ -826,8 +937,12 @@ async def run_competition_engagement(
             "contest_type": rules.contest_type.value, "report": str(out),
             "flags": flag_stats, "verify": verify_stats,
         })
+        infra.outcome = "completed"
         return EngagementResult(run_summary=run_summary, verify_stats=verify_stats,
                                 report_path=str(out), flag_stats=flag_stats)
+    except asyncio.CancelledError:
+        infra.outcome = "cancelled"
+        raise
     finally:
         await infra.close()
 

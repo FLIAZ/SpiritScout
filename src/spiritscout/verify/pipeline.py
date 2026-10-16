@@ -87,9 +87,18 @@ class VerifyPipeline:
                                  "rejected": 0, "by_status": {}}
         for rec in self.bb.query(BlackboardLayer.VULN, limit=10000):
             vuln = Vulnerability.model_validate(rec["data"])
-            if vuln.status != VulnStatus.CANDIDATE:
+            if (vuln.status == VulnStatus.ACCEPTED
+                    or vuln.status.value.startswith("rejected")):
                 continue
-            final = await self.process(rec["record_id"], rec["version"])
+            try:
+                final = await self.process(rec["record_id"], rec["version"])
+            except VersionConflict as exc:
+                # 该记录在核验途中被别处终审（以最新裁决为准）：跳过不覆盖
+                self.audit.log("verify.contention", "verify_pipeline", {
+                    "vuln_id": rec["record_id"], "detail": str(exc)})
+                stats["contention_skipped"] = \
+                    stats.get("contention_skipped", 0) + 1
+                continue
             stats["processed"] += 1
             stats["by_status"][final.status.value] = \
                 stats["by_status"].get(final.status.value, 0) + 1
@@ -106,6 +115,9 @@ class VerifyPipeline:
         assert rec is not None
         vuln = Vulnerability.model_validate(rec[0])
         version = rec[1]
+        # 查询列表与真正处理之间可能已有终审，不能重新降为中间态。
+        if vuln.status == VulnStatus.ACCEPTED or vuln.status.value.startswith("rejected"):
+            return vuln
 
         def save(expected: int) -> int:
             return self._save(record_id, vuln, expected)
@@ -488,20 +500,12 @@ class VerifyPipeline:
         return res if res.ok else None
 
     def _save(self, record_id: str, vuln: Vulnerability, expected_version: int) -> int:
-        """乐观锁写回（冲突重读重试，最多 3 次）。"""
-        for _ in range(3):
-            try:
-                self.bb.write(
-                    BlackboardLayer.VULN, record_id, vuln.model_dump(mode="json"),
-                    agent_type=self.WRITER, updated_by="verify_pipeline",
-                    dedup_key=vuln.dedup_key(), expected_version=expected_version,
-                )
-                return expected_version + 1
-            except VersionConflict:
-                rec = self.bb.read_versioned(BlackboardLayer.VULN, record_id)
-                assert rec is not None
-                expected_version = rec[1]
-        raise VersionConflict(f"漏洞 {record_id} 状态迁移多次冲突")
+        """冲突即放弃旧迁移，下一轮基于最新证据重做核验，不盲改版本号覆盖。"""
+        return self.bb.write(
+            BlackboardLayer.VULN, record_id, vuln.model_dump(mode="json"),
+            agent_type=self.WRITER, updated_by="verify_pipeline",
+            dedup_key=vuln.dedup_key(), expected_version=expected_version,
+        )
 
     def _transition(self, vuln: Vulnerability, stage: str, detail: str) -> None:
         self.audit.log("verify.transition", "verify_pipeline", {

@@ -124,14 +124,19 @@ def drop_key(name: str) -> None:
 
 
 def rename_key(old_name: str, new_name: str) -> None:
-    """供应商改名时密钥跟着走。"""
+    """供应商改名时密钥跟着走。
+
+    先移除同名冲突再改名：``UPDATE OR REPLACE`` 的 REPLACE 语义会先
+    删掉撞名行——那正是调用方刚写入的新密钥，绝不能被旧密钥覆盖。
+    """
     if old_name == new_name:
         return
     with _lock:
         conn = _connect()
         try:
             with conn:
-                conn.execute("UPDATE OR REPLACE secrets SET name=? WHERE name=?",
+                conn.execute("DELETE FROM secrets WHERE name=?", (new_name,))
+                conn.execute("UPDATE secrets SET name=? WHERE name=?",
                              (new_name, old_name))
         finally:
             conn.close()

@@ -61,6 +61,10 @@ class BusConfig(BaseModel):
 
     backend: Literal["inprocess", "redis", "nats"] = "inprocess"
     redis_url: str = "redis://127.0.0.1:6379/0"
+    redis_url_env: str = "SPIRITSCOUT_REDIS_URL"
+    namespace: str = Field(default="spiritscout", pattern=r"^[a-zA-Z0-9_-]{1,64}$")
+    connect_timeout_seconds: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    shared_request_rps: float = Field(default=10.0, gt=0, allow_inf_nan=False)
     nats_url: str = "nats://127.0.0.1:4222"
     queue_maxsize: int = 10000
     rate_limit_per_second: float = 1000.0   # 总线流量控制（4.2.1）
@@ -151,6 +155,9 @@ class McpServerConfig(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     timeout: float = 180.0                # 单次工具调用硬顶（秒）
     default_risk: Literal["readonly", "intrusive", "destructive"] = "intrusive"
+    tool_risk_overrides: dict[str, Literal["readonly", "intrusive", "destructive"]] = Field(
+        default_factory=dict,
+        description="宿主可信配置的单工具风险映射，仅精确匹配远端工具名；不支持通配放行")
     scope_enforcement: Literal["required", "best_effort", "none"] = Field(
         default="required",
         description="required=无法从参数提取目标时拒绝；best_effort=有目标才校验；none=纯本地分析")
@@ -181,7 +188,7 @@ class SystemConfig(BaseModel):
     audit_log_path: str = ".spiritscout/audit.jsonl"
     max_routes_per_agent: int = Field(default=8, description="分支数硬上限（防分支爆炸，9.1）")
     default_routes_per_agent: int = Field(default=3, description="默认 3 条差异化路线（硬约束 C2）")
-    iteration_max_rounds: int = 20
+    # 不设迭代回合顶：继续/收手由主 Agent 按态势判断，用户随时可停
 
     @field_validator("default_routes_per_agent")
     @classmethod
@@ -215,6 +222,8 @@ class ProviderEntry(BaseModel):
     def _name_nonempty(cls, v: str) -> str:
         if not v.strip():
             raise ValueError("供应商名不能为空")
+        if "/" in v:
+            raise ValueError("供应商名不能包含 /（与接口路径标识冲突）")
         return v.strip()
 
 
@@ -233,6 +242,10 @@ class ModelEntry(BaseModel):
     api_format: Literal["auto", "chat_completions", "responses", "anthropic_messages"] = "auto"
     capabilities: list[str] = Field(default_factory=list)  # reasoning/code/chinese/security
     context_window: int = 0               # 上下文窗口（token）；0 = 未声明
+    # 单次输出上限（token）：0 = 请求不带 max_tokens，由端点按模型自身设定——
+    # 上限只在模型想继续说的时候决定掐在哪，设小了思考型模型会把额度耗在
+    # 思考上、正文被截成半截 JSON；声明值仅作模型档案的显式覆盖
+    max_output_tokens: int = 0
     # 思考强度取值：由每个模型自行声明（如 low/medium/high，或某模型特有的
     # ultra）——不设固定枚举，也不假设各模型档位一致；空 = 该模型不吃思考强度。
     reasoning_effort_levels: list[str] = Field(default_factory=list)
@@ -254,6 +267,13 @@ class ModelEntry(BaseModel):
     def _ctx_nonnegative(cls, v: int) -> int:
         if v < 0:
             raise ValueError("context_window 不能为负")
+        return v
+
+    @field_validator("max_output_tokens")
+    @classmethod
+    def _max_out_nonnegative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("max_output_tokens 不能为负")
         return v
 
     @field_validator("reasoning_effort_levels")

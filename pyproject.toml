@@ -51,4 +51,12 @@ spiritscout = "spiritscout.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-spiritscout = ["web/static/*.html"]
+# 运行期按 __file__ 相对路径读取的非代码资产：控制台前端、知识库种子、
+# 报告模板——缺了任何一类，安装产物都是残废（pip 装完打不开页面/起不了知识库/出不了报告）
+spiritscout = [
+    "web/static/*.html",
+    "web/static/js/*.js",
+    "web/static/css/*.css",
+    "knowledge/data/*.json",
+    "agents/report/templates/*.j2",
+]

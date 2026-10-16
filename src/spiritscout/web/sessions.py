@@ -13,12 +13,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import shutil
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from spiritscout.agents.ring import RingLedger
 from spiritscout.config.settings import ModelEntry, SystemConfig
@@ -226,6 +230,85 @@ def _preflight_models(cfg: SystemConfig, models: list[ModelEntry],
             "模型注册表为空，会话未开工。请在「模型」页配置至少一个模型后重试")
 
 
+class _UsageCall(BaseModel):
+    """只读计量视图的单次调用；坏时间戳不能拖垮仪表盘聚合。"""
+
+    ts: float = Field(allow_inf_nan=False)
+    tokens: int = Field(default=0, ge=0)
+    cost_usd: float = Field(default=0, ge=0, allow_inf_nan=False)
+    model: str = ""
+    mode: str = ""
+
+
+class _UsageSnapshot(BaseModel):
+    """磁盘展示快照按结构验证，损坏时回退到终态汇总。"""
+
+    model_config = ConfigDict(allow_inf_nan=False)
+    used_tokens: int = Field(ge=0)
+    used_usd: float = Field(default=0, ge=0)
+    per_model_tokens: dict[str, int] = Field(default_factory=dict)
+    per_mode_tokens: dict[str, int] = Field(default_factory=dict)
+    call_series: list[_UsageCall] = Field(default_factory=list)
+    calls: int = Field(default=0, ge=0)
+    mode: str = ""
+
+
+def _coerce_meta(data: dict[str, Any]) -> dict[str, Any]:
+    """元数据字段类型收敛：旧版本/手改文件里类型漂移的字段拉回正型。"""
+    def _dict(v: Any) -> dict[str, Any]:
+        return v if isinstance(v, dict) else {}
+
+    def _str(v: Any) -> str:
+        return v if isinstance(v, str) else ("" if v is None else str(v))
+
+    def _float(v: Any, default: float = 0.0) -> float:
+        try:
+            result = float(v)
+            return result if math.isfinite(result) else default
+        except (TypeError, ValueError, OverflowError):
+            return default
+
+    def _opt_float(v: Any) -> float | None:
+        try:
+            return None if v is None or not math.isfinite(float(v)) else float(v)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def _list(v: Any) -> list:
+        return v if isinstance(v, list) else []
+
+    status = data.get("status", "interrupted")
+    if not isinstance(status, str) or status not in TERMINAL_STATES | {"created", "running"}:
+        status = "interrupted"
+    summary = dict(_dict(data.get("summary")))
+    if "run" in summary:
+        summary["run"] = _dict(summary["run"])
+    return {
+        **data,
+        "session_id": _str(data.get("session_id")),
+        "mode": _str(data.get("mode")),
+        "target": _str(data.get("target")),
+        "title": _str(data.get("title")),
+        "request": _dict(data.get("request")),
+        "launch_request": _dict(data.get("launch_request")),
+        "standing_rules": _str(data.get("standing_rules")),
+        "opinions": [e for e in _list(data.get("opinions"))
+                     if isinstance(e, dict)],
+        "dialogue_history": [
+            e for e in _list(data.get("dialogue_history"))
+            if isinstance(e, dict) and e.get("role") and e.get("content")],
+        "created_at": _float(data.get("created_at")),
+        "started_at": _opt_float(data.get("started_at")),
+        "finished_at": _opt_float(data.get("finished_at")),
+        "summary": summary,
+        "error": _str(data.get("error")),
+        "status": status,
+        "phase": _str(data.get("phase")) or status,
+        "paused": data.get("paused") is True,
+        "excluded_seconds": max(0.0, _float(data.get("excluded_seconds"))),
+    }
+
+
 @dataclass
 class Session:
     """一次渗透任务会话（会话隔离单元）。"""
@@ -299,6 +382,21 @@ class Session:
     def meta_path(self) -> Path:
         return self.workspace / "meta.json"
 
+    def model_usage(self) -> dict[str, Any]:
+        """列表、状态页与仪表盘共用的用量视图；损坏快照回退到已保存汇总。"""
+        run = self.summary.get("run") if isinstance(self.summary, dict) else None
+        stored = run.get("model_usage") if isinstance(run, dict) else None
+        try:
+            usage = _UsageSnapshot.model_validate(stored).model_dump()
+        except ValidationError:
+            usage = {}
+        try:
+            live = json.loads((self.workspace / "usage.json").read_text(encoding="utf-8"))
+            usage = _UsageSnapshot.model_validate(live).model_dump()
+        except (OSError, ValueError):   # 含 Pydantic ValidationError
+            pass
+        return usage
+
     def report_path(self) -> Path | None:
         """最新报告文件（未生成 → None）。"""
         reports = self.workspace / "reports"
@@ -331,18 +429,10 @@ class Session:
         }
         # 仪表盘总览的轻量指标（从运行摘要提取，不走完整 summary）
         run = (self.summary or {}).get("run", {}) if isinstance(self.summary, dict) else {}
-        usage = run.get("model_usage") or {}
+        usage = self.model_usage()
         out["tokens"] = usage.get("used_tokens", 0)
         out["cost_usd"] = usage.get("used_usd", 0.0)
         # 运行中实时用量优先：网关逐笔落盘的 usage.json（列表/仪表盘随轮询跳动）
-        usage_file = self.workspace / "usage.json"
-        if usage_file.exists():
-            try:
-                live = json.loads(usage_file.read_text(encoding="utf-8"))
-                out["tokens"] = live.get("used_tokens", out["tokens"])
-                out["cost_usd"] = live.get("used_usd", out["cost_usd"])
-            except (OSError, ValueError):
-                pass
         out["rounds"] = run.get("rounds_executed", 0)
         out["flag_stats"] = run.get("flag_stats")
         if include_summary:
@@ -377,34 +467,44 @@ class SessionManager:
     # ------------------------------------------------------------ 注册表
 
     def _scan(self) -> None:
-        """启动重建：加载历史会话；running 残留 → interrupted（进程已死）。"""
+        """启动重建：加载历史会话；running 残留 → interrupted（进程已死）。
+
+        损坏或缺关键元的 meta.json 隔离改名（meta.corrupt-<时刻>.json）并
+        告警——不静默吞掉也不自动删，用户数据误判可人工找回；类型漂移的
+        字段（旧版本/手改文件）按正型收敛，不让一个坏字段炸掉整个注册表。
+        """
         for meta in sorted(self.root.glob("*/meta.json")):
             try:
                 data = json.loads(meta.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+            except (OSError, ValueError) as exc:
+                self._quarantine_meta(meta, f"解析失败: {exc}")
                 continue
-            session = Session(
-                session_id=data["session_id"], mode=data["mode"],
-                target=data["target"], workspace=meta.parent,
-                title=data.get("title", ""),
-                request=data.get("request", {}),
-                launch_request=data.get("launch_request", {}),
-                opinions=data.get("opinions", []),
-                dialogue_history=[
-                    e for e in data.get("dialogue_history", [])
-                    if isinstance(e, dict)
-                    and e.get("role") and e.get("content")],
-                status=data.get("status", "interrupted"),
-                phase=data.get("phase", "interrupted"),
-                created_at=data.get("created_at", 0.0),
-                started_at=data.get("started_at"),
-                finished_at=data.get("finished_at"),
-                summary=data.get("summary", {}), error=data.get("error", ""),
-                standing_rules=data.get("standing_rules", ""),
-            )
+            if not isinstance(data, dict) or not str(data.get("session_id") or ""):
+                self._quarantine_meta(meta, "不是键值映射或缺 session_id")
+                continue
+            try:
+                data = _coerce_meta(data)
+                session = Session(
+                    session_id=data["session_id"], mode=data["mode"],
+                    target=data["target"], workspace=meta.parent,
+                    title=data["title"],
+                    request=data["request"],
+                    launch_request=data["launch_request"],
+                    opinions=data["opinions"],
+                    dialogue_history=data["dialogue_history"],
+                    status=data.get("status", "interrupted"),
+                    phase=data.get("phase", "interrupted"),
+                    created_at=data["created_at"],
+                    started_at=data["started_at"],
+                    finished_at=data["finished_at"],
+                    summary=data["summary"], error=data["error"],
+                    standing_rules=data["standing_rules"],
+                )
+                session.pause_gate.restore(data["paused"], data["excluded_seconds"])
+            except (TypeError, ValueError) as exc:
+                self._quarantine_meta(meta, f"字段类型异常: {exc}")
+                continue
             # 暂停态与扣账跨重启恢复：静默置门（不补记审计）
-            session.pause_gate.restore(bool(data.get("paused")),
-                                       data.get("excluded_seconds", 0.0))
             if session.status not in TERMINAL_STATES:
                 session.status = "interrupted"
                 session.phase = "interrupted"
@@ -412,8 +512,25 @@ class SessionManager:
                 self._persist(session)
             self._sessions[session.session_id] = session
 
+    def _quarantine_meta(self, meta: Path, reason: str) -> None:
+        """损坏元数据隔离：改名留证 + 标准错误告警（不静默、不删除）。"""
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        target = meta.with_name(f"meta.corrupt-{stamp}.json")
+        serial = 0
+        while target.exists():                  # 同秒多份损坏不互相覆盖
+            serial += 1
+            target = meta.with_name(f"meta.corrupt-{stamp}-{serial}.json")
+        try:
+            meta.rename(target)
+        except OSError as exc:
+            print(f"[spiritscout] 会话元数据损坏且无法隔离（{reason}）: {exc}",
+                  file=sys.stderr)
+            return
+        print(f"[spiritscout] 会话元数据损坏已隔离：{meta.parent.name}"
+              f"（{reason}）→ {target.name}", file=sys.stderr)
+
     def _persist(self, session: Session) -> None:
-        session.meta_path.write_text(json.dumps({
+        payload = json.dumps({
             "session_id": session.session_id, "mode": session.mode,
             "target": session.target, "title": session.title,
             "request": session.request,
@@ -427,7 +544,11 @@ class SessionManager:
             "summary": session.summary, "error": session.error,
             "paused": session.pause_gate.paused,
             "excluded_seconds": round(session.pause_gate.excluded_seconds, 1),
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        }, ensure_ascii=False, indent=2)
+        # 原子替换：写半截崩进程不留损坏的 meta.json（损坏文件扫描时会被隔离）
+        tmp = session.meta_path.with_name("meta.json.tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(session.meta_path)
 
     def list(self) -> list[Session]:
         return sorted(self._sessions.values(),

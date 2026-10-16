@@ -68,7 +68,6 @@ audit_log_path: .spiritscout/audit.jsonl
 
 max_routes_per_agent: 8        # 分支数硬上限（防分支爆炸）
 default_routes_per_agent: 3    # 默认 3 条差异化路线（硬约束 C2）
-iteration_max_rounds: 20
 # 外部 MCP 服务器接入：工具以 mcp__<名>__<工具> 并入智能体工具目录，服务器
 # 不可达时留痕跳过、不阻断开工。传输三态：stdio（子进程）/ http（Streamable
 # HTTP 单端点）/ sse（旧版 SSE 长连接）。前两项随项目封装、开箱即用：
@@ -78,7 +77,7 @@ mcp_servers:
     command: .venv/bin/idalib-mcp # 相对路径按项目根解析；绝对路径或 PATH 命令原样使用
     args: ["--stdio"]
     timeout: 600                  # 大型二进制自动分析可跑数分钟
-    default_risk: readonly        # 只读分析；MCP destructiveHint 仍会强制提升为 destructive
+    default_risk: readonly        # 只读分析；可能修改环境的提示会提升为即时审批
     scope_enforcement: none       # 仅分析会话附件，不触网
   - name: yakit                   # Web 渗透：编解码 / HTTP 流量 / 模糊测试 / 指纹 / 端口 / 反序列化
     transport: stdio
@@ -90,9 +89,11 @@ mcp_servers:
   - name: playwright              # 浏览器自动化：JS 渲染页面真实 DOM / 点击 / 表单 / 截图
     transport: stdio
     command: npx
-    args: ["@playwright/mcp@latest"]
+    args: ["@playwright/mcp@latest", "--headless", "--snapshot-boxes"]  # 快照附元素坐标，辅助判断视口外目标
     timeout: 120
-    default_risk: readonly        # 浏览器操作默认只读（导航/截图/DOM 读取）
+    default_risk: intrusive       # 点击、表单及脚本等状态变更默认即时审批
+    tool_risk_overrides:
+      browser_navigate: readonly  # 普通导航不因浏览器页面状态改变被误判成 DoS
     scope_enforcement: required   # 导航目标必须在授权范围内
 
 # —— idalib 装配（一次性，项目根执行；<IDA> 为 IDA Pro 安装目录）：

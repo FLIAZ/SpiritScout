@@ -3,57 +3,33 @@ from __future__ import annotations
 import json
 import unittest
 
-from spiritscout.agents.business.agent import extract_surfaces
+from spiritscout.agents.business.agent import _redacted_url
 from spiritscout.config.settings import ModelEntry
 from spiritscout.gateway.backends import MockBackend
 
 
-class BusinessContextTests(unittest.TestCase):
-    def test_extracts_observed_flow_without_values_or_external_links(self) -> None:
-        html = """
-        <html><head><title>商品中心</title></head><body>
-          <h1>浏览商品</h1>
-          <a href="/catalog">商品列表</a>
-          <a href="https://outside.test/leave">外站</a>
-          <form action="/search" method="get">
-            <label>关键词</label>
-            <input name="q" value="private term">
-            <input name="csrf" value="secret-token" type="hidden">
-          </form>
-        </body></html>
-        """
+class UrlRedactionTests(unittest.TestCase):
+    """入黑板 URL 的脱敏保证：结构保留、参数值与用户信息不落盘。"""
 
-        surface = extract_surfaces(html, "https://shop.test/")
-
-        self.assertEqual(surface["title"], "商品中心")
-        self.assertEqual(surface["links"], [
-            {"url": "https://shop.test/catalog", "text": "商品列表"},
-        ])
-        self.assertEqual(surface["forms"][0]["action"], "https://shop.test/search")
+    def test_strips_query_values_but_keeps_structure(self) -> None:
         self.assertEqual(
-            [field["name"] for field in surface["forms"][0]["fields"]],
-            ["q", "csrf"],
+            _redacted_url("https://shop.test/reset?token=secret-token&user=alice"),
+            "https://shop.test/reset?token=&user=",
         )
-        serialized = repr(surface)
-        self.assertNotIn("private term", serialized)
-        self.assertNotIn("secret-token", serialized)
 
-    def test_redacts_query_values_and_url_userinfo(self) -> None:
-        html = """
-        <html><body>
-          <a href="/reset?token=secret-token&amp;user=alice">Reset</a>
-        </body></html>
-        """
+    def test_strips_url_userinfo(self) -> None:
+        self.assertEqual(
+            _redacted_url("https://viewer:password@shop.test/start?session=private"),
+            "https://shop.test/start?session=",
+        )
 
-        surface = extract_surfaces(
-            html, "https://viewer:password@shop.test/start?session=private")
+    def test_non_http_passthrough(self) -> None:
+        self.assertEqual(_redacted_url("javascript:alert(1)"), "javascript:alert(1)")
 
-        self.assertEqual(surface["url"], "https://shop.test/start?session=")
-        self.assertEqual(surface["links"], [{
-            "url": "https://shop.test/reset?token=&user=", "text": "Reset",
-        }])
-        serialized = repr(surface)
-        for secret in ("viewer", "password", "secret-token", "alice", "private"):
+    def test_no_secret_survives(self) -> None:
+        serialized = repr(_redacted_url(
+            "https://alice:hunter2@shop.test/api?session=private-token&q=x"))
+        for secret in ("alice", "hunter2", "private-token"):
             self.assertNotIn(secret, serialized)
 
 

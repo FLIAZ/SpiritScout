@@ -31,9 +31,35 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.types import Implementation
 
+from spiritscout.config.settings import McpServerConfig
+from spiritscout.tools.spec import RiskLevel
+
 _HANDSHAKE_TIMEOUT = 60.0        # 握手：子进程冷启动 + initialize + tools/list
 _SESSION_READ_TIMEOUT = 3600.0   # 会话级默认读超时（单次调用超时另行覆盖）
 _CLIENT_INFO = Implementation(name="spiritscout", version="0.1.0")
+
+
+def resolve_mcp_risk(server: McpServerConfig, tool: dict[str, Any]) -> RiskLevel:
+    """区分 MCP 的环境变更提示与宿主明令禁止的破坏性工具。
+
+    destructiveHint 不等于 DoS。可能修改状态的工具进入即时审批；只有
+    宿主可信配置明确指定 destructive 才硬拒绝，不能由远端提示猜测。
+    普通浏览器导航等特例由精确工具配置声明，不放行整个服务器。
+    """
+    override = server.tool_risk_overrides.get(str(tool.get("name", "")))
+    if override is not None:
+        return RiskLevel(override)
+    if server.default_risk == RiskLevel.DESTRUCTIVE.value:
+        return RiskLevel.DESTRUCTIVE
+    annotations = tool.get("annotations") or {}
+    readonly = annotations.get("readOnlyHint", annotations.get("read_only_hint"))
+    destructive = annotations.get("destructiveHint", annotations.get("destructive_hint"))
+    # MCP 规范中 readOnlyHint=true 时 destructiveHint 没有意义。
+    if readonly is True:
+        return RiskLevel.READONLY
+    if readonly is False or destructive is True:
+        return RiskLevel.INTRUSIVE
+    return RiskLevel(server.default_risk)
 
 
 class McpError(RuntimeError):
@@ -113,6 +139,7 @@ class McpClient:
                 await asyncio.wait_for(asyncio.shield(self._task), 10)
             except TimeoutError:
                 self._task.cancel()
+                await asyncio.gather(self._task, return_exceptions=True)
         self._task = None
 
     # ---- 常驻会话任务

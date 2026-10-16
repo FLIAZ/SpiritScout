@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 from spiritscout.agents.recon.agent import ReconAgent
 from spiritscout.agents.sub.base import RoutePlan
 from spiritscout.core.models import AgentType, Task
+from spiritscout.gateway.backends import extract_json
 
 
 def _task(**payload_extra) -> Task:
@@ -82,8 +83,9 @@ class TaskIntentTests(unittest.IsolatedAsyncioTestCase):
         await agent._llm_chat_json(
             "path_planner", {"action": "suggest_paths"}, task=_task())
 
+        # 载荷 = JSON + 尾部询问通道说明（生产由 extract_json 解析，测试同构）
         messages = agent.ctx.gateway.chat.await_args.args[0]
-        payload = json.loads(messages[-1]["content"])
+        payload = extract_json(messages[-1]["content"])
         self.assertEqual(payload["task_intent"]["mission"], "摸清目标后台的登录入口")
         self.assertEqual(payload["task_intent"]["node"], "侦察与资产测绘")
 
@@ -93,7 +95,7 @@ class TaskIntentTests(unittest.IsolatedAsyncioTestCase):
         await agent._llm_chat_json("path_planner", {"action": "suggest_paths"})
 
         messages = agent.ctx.gateway.chat.await_args.args[0]
-        self.assertNotIn("task_intent", json.loads(messages[-1]["content"]))
+        self.assertNotIn("task_intent", extract_json(messages[-1]["content"]))
 
 
 if __name__ == "__main__":

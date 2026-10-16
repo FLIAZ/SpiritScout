@@ -19,19 +19,29 @@ import secrets
 import shutil
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
+    JSONResponse,
     PlainTextResponse,
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    model_validator,
+)
 
 from spiritscout import __version__
 from spiritscout.blackboard import Blackboard
@@ -56,6 +66,57 @@ from spiritscout.web.sessions import (
 _STATIC = Path(__file__).parent / "static" / "index.html"
 _STATIC_DIR = Path(__file__).parent / "static"
 
+# 读 API 只回规范公开字段（不回吐 YAML 原始键——历史污染字段不再扩散，
+# 密钥字段永不出现）。模型条目的公开字段 = 注册表声明的全部字段去掉 api_key。
+_MODEL_PUBLIC_FIELDS = tuple(
+    k for k in ModelEntry.model_fields if k != "api_key")
+_PROVIDER_PUBLIC_FIELDS = ("name", "provider", "base_url", "api_format")
+
+
+class ApprovalDecision(BaseModel):
+    """审批裁决体：allow 必须是真布尔——字符串 "false"/"0" 等真值文本
+    一律 422（安全布尔不做隐式转换）。"""
+
+    allow: StrictBool
+
+
+class QuestionAnswerPayload(BaseModel):
+    """回答及显式扩围目标；拒绝把空答复或错误类型吞成已作答。"""
+
+    model_config = ConfigDict(extra="forbid")
+    choice: StrictInt | None = None
+    text: str = Field(default="", max_length=1000)
+    add_targets: list[str] = Field(default_factory=list, max_length=6)
+
+    @model_validator(mode="after")
+    def require_answer(self) -> QuestionAnswerPayload:
+        if self.choice is None and not self.text.strip():
+            raise ValueError("请选择选项或填写答复")
+        return self
+
+
+class SessionCreatePayload(BaseModel):
+    """完整校验创建流程消费的字段，拒绝在搬附件或建会话后才发现类型错误。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: str | None = None
+    mission: str | None = None
+    target: str | None = None
+    scope: list[str] = Field(default_factory=list)
+    upload_ids: list[str] = Field(default_factory=list, max_length=20)
+    platform: str | None = None
+    flag_format: str | None = None
+    challenges_yaml: str | None = None
+    rules_yaml: str | None = None
+    title: str = Field(default="", max_length=80)
+    no_llm: StrictBool = False
+    authorized: StrictBool = True
+    budget_tokens: StrictInt | None = None
+    rps: float = Field(default=10.0, gt=0, allow_inf_nan=False)
+    allow_sensitive: StrictBool = False
+    accept_rule_conflicts: StrictBool = False
+
 
 def _read_state(session: Session) -> dict[str, Any]:
     """数据面快照：短连接只读打开会话黑板（WAL 下与写入侧不互堵）。
@@ -63,17 +124,14 @@ def _read_state(session: Session) -> dict[str, Any]:
     查询配方复用 monitor.panel 的只读组合（层计数 / TASK_STATE / VULN /
     flags.json），输出 JSON 而非文本面板。
     """
+    from spiritscout.tools.journal import read_recovery_view
+
     run_summary: dict[str, Any] = session.summary.get("run", {})
     # 实时用量：运行中由网关逐笔落盘（usage.json），终态回退运行汇总
-    live_usage: dict[str, Any] | None = None
-    usage_file = session.workspace / "usage.json"
-    if usage_file.exists():
-        try:
-            live_usage = json.loads(usage_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            live_usage = None
+    live_usage = session.model_usage()
     state: dict[str, Any] = {
         "session": session.brief(include_summary=False),
+        "recovery": read_recovery_view(session.bb_path, include_inflight=session.status != "running"),
         "layers": {}, "tasks": [],
         "vulns": {"by_status": {}, "items": []},
         "flags": None,
@@ -155,7 +213,8 @@ def _read_state(session: Session) -> dict[str, Any]:
         state["vulns"]["by_status"] = by_status
         # 灵枢应答流：拓扑「你 → 灵枢」节点的回执展示
         replies = []
-        for rec in bb.query(BlackboardLayer.TOPOLOGY, limit=400):
+        topology_records = bb.query(BlackboardLayer.TOPOLOGY, limit=400)
+        for rec in topology_records:
             d = rec["data"]
             if isinstance(d, dict) and d.get("kind") == "reply":
                 replies.append(d)
@@ -163,7 +222,7 @@ def _read_state(session: Session) -> dict[str, Any]:
         state["master_replies"] = replies[-8:]
         # 发现台账：拓扑「发现」组数据源（共享笔记/入口/Flag 落黑板，跨轮持久）
         findings: list[dict[str, Any]] = []
-        for rec in bb.query(BlackboardLayer.TOPOLOGY, limit=400):
+        for rec in topology_records:
             d = rec["data"]
             if isinstance(d, dict) and d.get("kind") == "finding":
                 findings.append(d)
@@ -273,10 +332,11 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     # ------------------------------------------------------------ 会话 CRUD
 
     @app.post("/api/sessions", status_code=201)
-    async def create_session(payload: dict[str, Any]) -> dict[str, Any]:
+    async def create_session(payload: SessionCreatePayload) -> dict[str, Any]:
+        # 安全相关布尔/数值在请求模型处强类型校验；其余字段透传。
         # 授权模型：Web 在场即声明（G1 语义不变、勾选摩擦去除）——
         # 创建行为本身即授权确认，human_confirmed 照旧落审计
-        payload = {**payload, "authorized": True}
+        payload = {**payload.model_dump(), "authorized": True}
         # 智能模式：不传 mode / 传 auto → None，由 LLM 路由按任务描述裁决
         raw_mode = str(payload.get("mode") or "").strip().lower()
         if raw_mode in ("", "auto"):
@@ -388,6 +448,70 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     async def session_state(session_id: str) -> dict[str, Any]:
         return _read_state(_require(session_id))
 
+    @app.get("/api/sessions/{session_id}/deliverables")
+    def session_deliverables(session_id: str, kind: str = "all",
+                             q: str = Query("", max_length=200),
+                             offset: int = Query(0, ge=0),
+                             limit: int = Query(60, ge=1, le=200)) -> dict[str, Any]:
+        from spiritscout.web.deliverables import read_deliverables
+
+        try:
+            return read_deliverables(_require(session_id).workspace, kind=kind,
+                                     query=q, offset=offset, limit=limit)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/sessions/{session_id}/artifacts/download")
+    def session_artifact(session_id: str, path: str = Query(..., max_length=1000)) -> StreamingResponse:
+        from spiritscout.web.deliverables import open_artifact
+
+        try:
+            file = open_artifact(_require(session_id).workspace, path)
+        except OSError as exc:
+            raise HTTPException(404, "产出文件不存在或不在本会话产出目录中") from exc
+
+        def chunks() -> Iterator[bytes]:
+            with file:
+                while chunk := file.read(65536):
+                    yield chunk
+
+        return StreamingResponse(chunks(), media_type="application/octet-stream", headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(Path(path).name)}"})
+
+    @app.get("/api/sessions/{session_id}/executions")
+    async def session_executions(session_id: str, after: int = Query(0, ge=0),
+                                  limit: int = Query(100, ge=1, le=500)) -> dict[str, Any]:
+        """执行元数据分页；不返回参数、凭据或原始工具输出。"""
+        from spiritscout.tools.journal import read_execution_page
+
+        return read_execution_page(_require(session_id).bb_path, after=after, limit=limit)
+
+    @app.get("/api/sessions/{session_id}/tool-parameters")
+    def session_tool_parameters(session_id: str, tool: str = Query(..., max_length=300),
+                               digest: str = Query(..., pattern=r"^[0-9a-f]{64}$")) -> JSONResponse:
+        from spiritscout.web.tool_parameters import read_tool_parameters
+
+        result = read_tool_parameters(_require(session_id).workspace, tool, digest)
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/sessions/{session_id}/recovery")
+    async def session_recovery(session_id: str) -> dict[str, Any]:
+        from spiritscout.tools.journal import read_recovery_view
+
+        session = _require(session_id)
+        return read_recovery_view(session.bb_path, include_inflight=session.status != "running")
+
+    @app.get("/api/sessions/{session_id}/execution-events")
+    async def session_execution_events(session_id: str, after: int = Query(0, ge=0),
+                                        limit: int = Query(100, ge=1, le=500)) -> dict[str, Any]:
+        """数据库事件游标独立于原 JSONL SSE 的行号，断线后可补读。"""
+        from spiritscout.tools.journal import read_execution_page
+
+        page = read_execution_page(_require(session_id).bb_path, events=True,
+                                   after=after, limit=limit)
+        return {"cursor_version": "execution-v1", **page}
+
     @app.get("/api/sessions/{session_id}/events")
     async def session_events(session_id: str, request: Request) -> StreamingResponse:
         session = _require(session_id)
@@ -429,8 +553,8 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
 
     @app.post("/api/sessions/{session_id}/approvals/{approval_id}")
     async def decide_approval(session_id: str, approval_id: str,
-                              payload: dict[str, Any]) -> dict[str, Any]:
-        """高风险动作即时确认裁决：{"allow": true|false}。
+                              payload: ApprovalDecision) -> dict[str, Any]:
+        """高风险动作即时确认裁决：{"allow": true|false}（严格布尔）。
 
         允许 = 本次会话内该动作放行（后续同动作不再询问）；
         拒绝 = 本次调用按策略违规拒绝（分支留痕后继续）。
@@ -438,7 +562,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         session = manager.get(session_id)
         if session is None:
             raise HTTPException(404, f"会话不存在: {session_id}")
-        allow = bool(payload.get("allow", False))
+        allow = payload.allow
         if not session.approvals.decide(approval_id, allow):
             raise HTTPException(409, f"待确认项不存在或已裁决: {approval_id}")
         return {"approval_id": approval_id, "allow": allow}
@@ -453,8 +577,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         per_model = {}
         daily = {}
         for sess in sessions:
-            run = (sess.summary or {}).get("run", {}) if isinstance(sess.summary, dict) else {}
-            mu = run.get("model_usage", {})
+            mu = sess.model_usage()
             t = mu.get("used_tokens", 0)
             c = mu.get("used_usd", 0.0)
             total_tokens += t
@@ -477,19 +600,18 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
 
     @app.post("/api/sessions/{session_id}/questions/{question_id}")
     async def answer_question(session_id: str, question_id: str,
-                              payload: dict[str, Any]) -> dict[str, Any]:
+                              payload: QuestionAnswerPayload) -> dict[str, Any]:
         """回答模型发起的提问：{"choice": 选项下标} 或 {"text": 自由输入}，
         {"add_targets": [...]} 为用户勾选的扩围目标（写入会话批准集）。"""
         session = manager.get(session_id)
         if session is None:
             raise HTTPException(404, f"会话不存在: {session_id}")
-        choice = payload.get("choice")
-        if choice is not None and not isinstance(choice, int):
-            raise HTTPException(422, "choice 必须是选项下标整数")
-        ok = session.questions.answer(
-            question_id, choice=choice,
-            text=str(payload.get("text", "") or ""),
-            add_targets=payload.get("add_targets") or [])
+        try:
+            ok = session.questions.answer(
+                question_id, choice=payload.choice, text=payload.text,
+                add_targets=payload.add_targets)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
         if not ok:
             raise HTTPException(409, f"待答问题不存在或已作答: {question_id}")
         return {"question_id": question_id, "answered": True}
@@ -665,24 +787,42 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                             filename=report.name)
 
     @app.get("/api/sessions/{session_id}/audit/download")
-    async def session_audit_download(session_id: str) -> FileResponse:
+    async def session_audit_download(session_id: str) -> StreamingResponse:
         """审计日志 JSONL 导出（Web 功能补全）。"""
         audit = _require(session_id).audit_path
         if not audit.exists():
             raise HTTPException(404, "审计日志不存在（会话未产生事件）")
-        return FileResponse(audit, media_type="application/x-ndjson",
-                            filename=f"{session_id}-audit.jsonl")
+        from spiritscout.core.audit import sanitize_record
+
+        def records() -> Iterator[str]:
+            # 同步生成器由响应在线程池消费，不一次性物化整个历史文件。
+            with audit.open(encoding="utf-8") as source:
+                for line in source:
+                    try:
+                        record = sanitize_record(json.loads(line))
+                    except (ValueError, TypeError, AttributeError):
+                        record = {"type": "audit.invalid", "detail": {"error": "日志行无效"}}
+                    yield json.dumps(record, ensure_ascii=False) + "\n"
+
+        return StreamingResponse(records(), media_type="application/x-ndjson",
+                                 headers={"Content-Disposition":
+                                          f'attachment; filename="{session_id}-audit.jsonl"'})
 
     # ------------------------------------------------------------ 模型管理
 
     def _providers_view() -> dict[str, Any]:
         providers = modelcfg.read_providers(cfg.models_config_path)
+        # 读 API 只回规范公开字段（+密钥状态）：不回吐 YAML 原始键
         return {"path": cfg.models_config_path,
-                "providers": [{**p, **vault.key_status(p, str(p.get("name") or ""))}
+                "providers": [{**{k: p.get(k) for k in _PROVIDER_PUBLIC_FIELDS},
+                               **vault.key_status(p, str(p.get("name") or ""))}
                               for p in providers]}
 
     def _models_view(entries: list[dict[str, Any]]) -> dict[str, Any]:
-        return {"path": cfg.models_config_path, "models": entries}
+        # 读 API 只回规范公开字段：密钥字段与历史污染字段不再扩散
+        return {"path": cfg.models_config_path,
+                "models": [{k: e.get(k) for k in _MODEL_PUBLIC_FIELDS}
+                           for e in entries]}
 
     @app.get("/api/providers")
     async def list_providers() -> dict[str, Any]:
@@ -699,43 +839,54 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         status = 409 if "已存在" in msg else 404 if "不存在" in msg else 422
         return HTTPException(status, msg)
 
-    def _stash_key(name: str, payload: dict[str, Any]) -> None:
-        """摘出 api_key_value 加密存入密钥库（G8：绝不进 YAML、不回传、留痕不含值）。
+    def _pop_key_value(payload: dict[str, Any]) -> str | None:
+        """摘出 api_key_value（G8：绝不进 YAML、不回传、留痕不含值）。
 
+        返回 None=请求未提供密钥字段（保持既有密钥不动）；空串=清除语义。
         密钥属于供应商：同一端点下的模型共用一条记录。
-        调用方必须先经本函数处理再把 payload 交给写盘函数——
-        否则直填密钥会被当作普通字段写盘。
         """
         if "api_key_value" not in payload:
-            return
-        value = str(payload.pop("api_key_value") or "").strip()
-        vault.set_key(name, value)                 # 空串 = 清除
+            return None
+        return str(payload.pop("api_key_value") or "").strip()
+
+    def _store_key(provider: str, value: str) -> None:
+        vault.set_key(provider, value)             # 空串 = 清除
         AuditLogger(cfg.audit_log_path).log(
             "system.lifecycle", "modelcfg",
             {"action": "model_key_set" if value else "model_key_cleared",
-             "provider": name, "source": "vault"})
+             "provider": provider, "source": "vault"})
 
     @app.post("/api/providers", status_code=201)
     async def add_provider(payload: dict[str, Any]) -> dict[str, Any]:
         payload = dict(payload)
-        _stash_key(str(payload.get("name") or ""), payload)
+        key_value = _pop_key_value(payload)
         try:
+            payload = modelcfg.canonical_provider(payload)
             modelcfg.upsert_provider(cfg.models_config_path, payload)
         except SpiritScoutError as exc:
             raise _model_error(exc) from exc
+        if key_value is not None:                  # 校验通过才动密钥库
+            _store_key(str(payload.get("name") or ""), key_value)
         return _providers_view()
 
     @app.put("/api/providers/{name}")
     async def update_provider(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """供应商更新：先完整校验落盘（失败不动密钥库——已有可用密钥不因
+        失败请求改变），再做密钥操作。语义：仅改名=密钥随名迁移；
+        改名+新密钥=迁移后按显式输入覆写；api_key_value 空串=清除。"""
         payload = dict(payload)
-        new_name = str(payload.get("name") or name)
-        _stash_key(new_name, payload)
+        key_value = _pop_key_value(payload)
         try:
+            payload = modelcfg.canonical_provider({**payload, "name": payload.get("name", name)})
+            new_name = payload["name"]
             modelcfg.upsert_provider(cfg.models_config_path, payload,
                                      original_name=name)
         except SpiritScoutError as exc:
             raise _model_error(exc) from exc
-        vault.rename_key(name, new_name)
+        if new_name != name:
+            vault.rename_key(name, new_name)       # 先迁移
+        if key_value is not None:
+            _store_key(new_name, key_value)        # 再按显式输入覆写/清除
         return _providers_view()
 
     @app.delete("/api/providers/{name}")
@@ -802,8 +953,10 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             raise _model_error(exc) from exc
         return _models_view(entries)
 
-    @app.put("/api/models/{model}")
+    @app.put("/api/models/{model:path}")
     async def update_model(model: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """更新模型画像。模型 ID 含 /（org/model）——path 转换器整体捕获，
+        %2F 与裸 / 同样命中；/api/models/test 等静态路由不受影响。"""
         payload = dict(payload)
         try:
             entries = modelcfg.upsert_entry(
@@ -812,7 +965,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             raise _model_error(exc) from exc
         return _models_view(entries)
 
-    @app.delete("/api/models/{model}")
+    @app.delete("/api/models/{model:path}")
     async def delete_model(model: str) -> dict[str, Any]:
         try:
             entries = modelcfg.delete_entry(cfg.models_config_path, model)

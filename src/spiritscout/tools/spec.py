@@ -25,6 +25,18 @@ class RiskLevel(str, enum.Enum):
     DESTRUCTIVE = "destructive"  # 破坏性（系统默认拒绝封装，合规 G3）
 
 
+class ActionCategory(str, enum.Enum):
+    """模型声明的行为类别；未知值必须补充说明，不能隐式降为只读。"""
+
+    ANALYSIS = "analysis"
+    REVERSE_SHELL = "reverse_shell"
+    WEBSHELL_UPLOAD = "webshell_upload"
+    CONTAINER_ESCAPE = "container_escape"
+    BRUTE_FORCE = "brute_force"
+    DELETE_FILES = "delete_files"
+    INTRUSIVE_WRITE = "intrusive_write"
+
+
 @dataclass
 class ToolSpec:
     name: str
@@ -49,6 +61,8 @@ class ToolSpec:
     parser: Callable[[str, str, int], dict[str, Any]] | None = None
     # 降级替代工具名（失败时自动切换，4.3.1）
     fallback_tool: str | None = None
+    # 放在末尾保留既有位置参数兼容性；所有调用方共用 Registry 校验。
+    action_required: bool = False
 
 
 @dataclass
@@ -64,7 +78,19 @@ class ToolResult:
     error: str = ""
     attempts: int = 1
     rolled_back: bool = False  # 回滚保护触发标记
+    invocation_id: str = ""
+    execution_status: str = ""
+    effect_status: str = "none"
 
     def summary(self, max_chars: int = 500) -> str:
         text = self.stdout or self.error or self.stderr
         return text[:max_chars] + ("..." if len(text) > max_chars else "")
+
+    def failure_reason(self, max_chars: int = 6000) -> str:
+        """错误可能由外部协议放在正文或 stderr，不能把已有诊断变成未知错误。"""
+        text = self.error or self.stderr or self.stdout
+        if text.strip():
+            return text.strip()[:max_chars]
+        if self.timed_out:
+            return f"工具 {self.tool} 执行超时（退出码 {self.returncode}）"
+        return f"工具 {self.tool} 执行未成功（退出码 {self.returncode}，服务未返回诊断正文）"

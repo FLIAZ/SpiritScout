@@ -1,128 +1,262 @@
 /* ================= 视图：会话详情/拓扑/报告 ================= */
 /* ================= 会话详情 ================= */
-const TABS = ["chat", "topo", "vulns", "flags", "events", "report"];
+const TABS = ["chat", "topo", "vulns", "flags", "events", "deliverables", "report"];
+$("#mobile-sessions-toggle").onclick = () => {
+  const open = document.querySelector(".side").classList.toggle("mobile-sessions-open");
+  $("#mobile-sessions-toggle").setAttribute("aria-expanded", String(open));
+};
 function openSession(id) {
+  if (S.cur !== id) {
+    S.state = null;
+    $("#topo-ops-apv").replaceChildren();
+    delete $("#topo-ops-apv").dataset.signature;
+    $("#topo-ops-ask").replaceChildren();
+    updateSessionActions();
+  }
   S.cur = id; S.tab = "chat"; S.evSeen = 0; S.topoView = null;
+  SessionArchive.reset(id);
+  ToolParameters.reset(id);
+  if (window.innerWidth <= 860) {
+    document.querySelector(".side").classList.remove("mobile-sessions-open");
+    $("#mobile-sessions-toggle").setAttribute("aria-expanded", "false");
+  }
   show("session");
   renderSessions();
-  document.querySelectorAll("#s-tabs button").forEach(b =>
-    b.classList.toggle("on", b.dataset.tab === "chat"));
+  document.querySelectorAll("#s-tabs button").forEach(b => {
+    b.classList.toggle("on", b.dataset.tab === "chat");
+    b.setAttribute("aria-selected", String(b.dataset.tab === "chat"));
+    b.tabIndex = b.dataset.tab === "chat" ? 0 : -1;
+  });
   for (const t of TABS) $("#tab-" + t).hidden = t !== "chat";
   refreshState();
   startStreams();
 }
-document.querySelectorAll("#s-tabs button").forEach(b => b.onclick = () => {
-  S.tab = b.dataset.tab;
-  document.querySelectorAll("#s-tabs button").forEach(x => x.classList.toggle("on", x === b));
-  for (const t of TABS) $("#tab-" + t).hidden = t !== S.tab;
-  if (S.tab === "topo") drawTopo();
-  if (S.tab === "report") loadReport();
+document.querySelectorAll("#s-tabs button").forEach(b => {
+  b.id = "session-tab-" + b.dataset.tab;
+  b.setAttribute("role", "tab");
+  b.setAttribute("aria-controls", "tab-" + b.dataset.tab);
+  b.setAttribute("aria-selected", String(b.classList.contains("on")));
+  b.tabIndex = b.classList.contains("on") ? 0 : -1;
+  const panel = $("#tab-" + b.dataset.tab);
+  panel.setAttribute("role", "tabpanel");
+  panel.setAttribute("aria-labelledby", b.id);
+  b.onclick = () => {
+    S.tab = b.dataset.tab;
+    document.querySelectorAll("#s-tabs button").forEach(x => {
+      x.classList.toggle("on", x === b);
+      x.setAttribute("aria-selected", String(x === b));
+      x.tabIndex = x === b ? 0 : -1;
+    });
+    for (const t of TABS) $("#tab-" + t).hidden = t !== S.tab;
+    b.scrollIntoView({block:"nearest", inline:"nearest"});
+    if (S.tab === "topo") drawTopo();
+    if (S.tab === "report") loadReport();
+    if (S.tab === "deliverables") SessionArchive.load();
+  };
+});
+$("#s-tabs").addEventListener("keydown", event => {
+  const buttons = [...document.querySelectorAll("#s-tabs button")];
+  const index = buttons.indexOf(document.activeElement);
+  if (index < 0) return;
+  let next;
+  if (event.key === "ArrowRight") next = (index + 1) % buttons.length;
+  else if (event.key === "ArrowLeft") next = (index - 1 + buttons.length) % buttons.length;
+  else if (event.key === "Home") next = 0;
+  else if (event.key === "End") next = buttons.length - 1;
+  else return;
+  event.preventDefault(); buttons[next].focus(); buttons[next].click();
 });
 
+let stateRequestVersion = 0;
+let stateLoadingSession = null, stateQueued = false, stateRefreshTimer = null;
+function scheduleStateRefresh() {
+  if (stateRefreshTimer) return;
+  stateRefreshTimer = setTimeout(() => { stateRefreshTimer = null; refreshState(); }, 120);
+}
 async function refreshState() {
   if (!S.cur) return;
+  if (stateLoadingSession === S.cur) { stateQueued = true; return; }
+  const sessionId = S.cur, version = ++stateRequestVersion;
+  stateLoadingSession = sessionId;
   try {
-    S.state = await api(`/api/sessions/${S.cur}/state`);
+    const state = await api(`/api/sessions/${sessionId}/state`);
+    if (S.cur !== sessionId || version !== stateRequestVersion) return;
+    S.state = state;
     renderSessionHead(); renderChips(); renderApprovals(); renderQuestions();
     renderDash();
     if (S.tab === "topo") drawTopo();
     renderVulns(); renderFlags();
-  } catch (e) { toast(e.message, true); }
+    SessionObserver.render();
+    ToolParameters.refresh();
+    if (S.tab === "deliverables") SessionArchive.refreshIfStale();
+  } catch (e) { if (S.cur === sessionId) toast(e.message, true); }
+  finally {
+    if (version === stateRequestVersion) {
+      stateLoadingSession = null;
+      if (stateQueued) { stateQueued = false; scheduleStateRefresh(); }
+    }
+  }
 }
 
 /* 高风险动作即时确认：撞见高风险入口的分支挂起待裁决（G5 交互形态） */
 const APV_CN = { reverse_shell: "反弹连接", webshell_upload: "上传 WebShell",
-                 container_escape: "容器逃逸", brute_force: "口令爆破" };
+                 container_escape: "容器逃逸", brute_force: "口令爆破",
+                 delete_files: "删除文件", intrusive_write: "写入操作" };
 function renderApprovals() {
   const list = (S.state && S.state.pending_approvals) || [];
-  $("#topo-ops-apv").innerHTML = list.map(a => `
+  const box = $("#topo-ops-apv"), sessionId = S.cur;
+  const signature = JSON.stringify([sessionId, list]);
+  if (box.dataset.signature === signature) { updateSessionActions(); return; }
+  box.dataset.signature = signature;
+  box.innerHTML = list.map(a => `
     <div class="apv">
       <div class="apv-title">⚠ 高风险动作待确认：${esc(APV_CN[a.action] || a.action)}</div>
-      <div class="apv-detail">${esc(a.detail || "")}<br>允许后本次会话内该动作不再询问；拒绝只拦截本次调用，其余分支照常推进。</div>
+      <div class="apv-detail">${esc(a.detail || "")}<br>仅允许本次调用；其他调用仍需分别确认。拒绝只拦截本次调用，其余分支照常推进。</div>
       <div class="apv-ops">
-        <button class="btn primary sm" data-apv="${esc(a.approval_id)}" data-allow="1">允许（本次会话）</button>
+        <button class="btn primary sm" data-apv="${esc(a.approval_id)}" data-allow="1">允许本次调用</button>
         <button class="btn sm" data-apv="${esc(a.approval_id)}" data-allow="0">拒绝</button>
       </div>
     </div>`).join("");
   $("#topo-ops-apv").querySelectorAll("[data-apv]").forEach(b => b.onclick = async () => {
     try {
-      await api(`/api/sessions/${S.cur}/approvals/${b.dataset.apv}`,
+      await api(`/api/sessions/${sessionId}/approvals/${b.dataset.apv}`,
         { method: "POST", body: JSON.stringify({ allow: b.dataset.allow === "1" }) });
-      toast(b.dataset.allow === "1" ? "已放行，本次会话内该动作不再询问" : "已拒绝，该分支将绕过此动作");
+      toast(b.dataset.allow === "1" ? "已允许本次调用" : "已拒绝本次调用");
       refreshState();
     } catch (e) { toast(e.message, true); refreshState(); }
   });
+  updateSessionActions();
 }
 
-/* 模型发起的提问：问题与选项由模型撰写；勾选目标 = 用户授权扩围 */
+function updateSessionActions() {
+  const panel = $("#session-actions");
+  if (panel) panel.hidden = !$("#topo-ops-apv").children.length
+    && !$("#topo-ops-ask").children.length;
+}
+
+/* 卡片按问题 ID 复用：状态轮询/拓扑重绘不重建输入框、焦点或勾选。 */
+const answeringQuestions = new Set();
 function renderQuestions() {
   const box = $("#topo-ops-ask");
   if (!box) return;
+  const sessionId = S.cur;
+  if (box.dataset.sessionId !== sessionId) {
+    box.replaceChildren();
+    box.dataset.sessionId = sessionId;
+  }
   const list = (S.state && S.state.pending_questions) || [];
-  box.innerHTML = list.map(q => `
-    <div class="apv ask">
-      <div class="apv-title">${esc(agentName(q.agent) || q.agent || "智能体")} 向你提问</div>
-      <div class="apv-detail">${esc(q.question || "")}</div>
-      ${q.targets && q.targets.length ? `<div class="ask-targets">${q.targets.map(t =>
-        `<label class="ask-target"><input type="checkbox" data-qtarget="${esc(q.question_id)}" value="${esc(t)}">将 ${esc(t)} 加入本会话范围</label>`).join("")}</div>` : ""}
-      <div class="ask-ops">
-        ${(q.options || []).map((o, i) =>
-          `<button class="btn primary sm" data-qask="${esc(q.question_id)}" data-qchoice="${i}">${esc(o)}</button>`).join("")}
-      </div>
-      <div class="ask-free"><input placeholder="或者直接输入你的意见…" data-qfree="${esc(q.question_id)}">
-        <button class="btn sm" data-qsend="${esc(q.question_id)}">答复</button></div>
-    </div>`).join("");
-  box.querySelectorAll("[data-qask]").forEach(b => b.onclick = () =>
-    answerQuestion(b.dataset.qask, { choice: Number(b.dataset.qchoice),
-                                     addTargets: collectTargets(b.dataset.qask) }));
-  box.querySelectorAll("[data-qsend]").forEach(b => b.onclick = () => {
-    const input = box.querySelector(`[data-qfree="${b.dataset.qsend}"]`);
-    const text = (input.value || "").trim();
-    if (!text) { toast("先填写答复内容", true); return; }
-    answerQuestion(b.dataset.qsend, { text, addTargets: collectTargets(b.dataset.qsend) });
+  const keep = new Set(list.map(q => q.question_id));
+  for (const card of [...box.children]) {
+    if (!keep.has(card.dataset.questionId)) card.remove();
+  }
+  list.forEach((q, index) => {
+    let card = [...box.children].find(c => c.dataset.questionId === q.question_id);
+    if (!card) {
+      card = document.createElement("div");
+      card.className = "apv ask";
+      card.dataset.questionId = q.question_id;
+    }
+    const signature = JSON.stringify([q.agent, q.question, q.options, q.targets]);
+    if (card.dataset.signature !== signature) {
+      card.dataset.signature = signature;
+      card.innerHTML = `
+        <div class="apv-title">${esc(agentName(q.agent) || q.agent || "智能体")} 向你提问</div>
+        <div class="apv-detail">${esc(q.question || "")}</div>
+        ${q.targets && q.targets.length ? `<div class="ask-targets">${q.targets.map(t =>
+          `<label class="ask-target"><input type="checkbox" data-qtarget value="${esc(t)}">将 ${esc(t)} 加入本会话范围</label>`).join("")}</div>` : ""}
+        <div class="ask-ops">${(q.options || []).map((option, i) =>
+          `<button type="button" class="btn primary sm" data-qchoice="${i}">${esc(option)}</button>`).join("")}</div>
+        <div class="ask-free">
+          <textarea rows="2" maxlength="1000" aria-label="你的答复" placeholder="输入你的答复…（Enter 发送，Shift+Enter 换行）" data-qfree></textarea>
+          <button type="button" class="btn sm" data-qsend>答复</button>
+        </div>
+        <div class="ask-status" role="status" aria-live="polite"></div>`;
+      const input = card.querySelector("[data-qfree]");
+      const sendText = () => {
+        const text = input.value.trim();
+        if (!text) { input.focus(); toast("先填写答复内容", true); return; }
+        answerQuestion(q.question_id, { text, add_targets: collectTargets(card) }, card, sessionId);
+      };
+      card.querySelectorAll("[data-qchoice]").forEach(button => button.onclick = () =>
+        answerQuestion(q.question_id, { choice: Number(button.dataset.qchoice),
+          add_targets: collectTargets(card) }, card, sessionId));
+      card.querySelector("[data-qsend]").onclick = sendText;
+      input.onkeydown = event => {
+        if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
+          event.preventDefault();
+          event.stopPropagation();
+          sendText();
+        }
+      };
+    }
+    if (box.children[index] !== card) box.insertBefore(card, box.children[index] || null);
   });
+  updateSessionActions();
 }
-function collectTargets(qid) {
-  return [...document.querySelectorAll(`[data-qtarget="${qid}"]:checked`)].map(c => c.value);
+function collectTargets(card) {
+  return [...card.querySelectorAll("[data-qtarget]:checked")].map(c => c.value);
 }
-async function answerQuestion(qid, body) {
+async function answerQuestion(qid, body, card, sessionId) {
+  const key = `${sessionId}:${qid}`;
+  if (answeringQuestions.has(key)) return;
+  answeringQuestions.add(key);
+  const status = card.querySelector(".ask-status");
+  const controls = [...card.querySelectorAll("button, input, textarea")];
+  controls.forEach(control => { control.disabled = true; });
+  status.classList.remove("error");
+  status.textContent = "正在提交答复…";
+  card.setAttribute("aria-busy", "true");
   try {
-    await api(`/api/sessions/${S.cur}/questions/${qid}`,
+    await api(`/api/sessions/${sessionId}/questions/${qid}`,
       { method: "POST", body: JSON.stringify(body) });
-    toast("已答复，智能体将继续");
-    refreshState();
-  } catch (e) { toast(e.message, true); refreshState(); }
+    if (S.cur === sessionId) {
+      ++stateRequestVersion;  // 丢弃提交前的旧快照，防止已答问题重新出现。
+      S.state.pending_questions = (S.state.pending_questions || []).filter(q => q.question_id !== qid);
+      renderQuestions();
+      toast("已答复，智能体将继续");
+      refreshState();
+    }
+  } catch (e) {
+    status.classList.add("error");
+    status.textContent = `提交失败：${e.message}。答复已保留，可重试。`;
+    if (S.cur === sessionId) { toast(e.message, true); refreshState(); }
+  } finally {
+    answeringQuestions.delete(key);
+    controls.forEach(control => { control.disabled = false; });
+    card.removeAttribute("aria-busy");
+  }
 }
 
 /* 仪表盘：实时 token 消耗与会话态势（数据面 = /state） */
 const fmtK = n => n >= 1e6 ? (n / 1e6).toFixed(2) + "M"
   : n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n ?? 0);
-function renderDash() {
+let dashRenderVersion = 0;
+async function renderDash() {
   const box = $("#dash-body");
   if (!box) return;
+  const version = ++dashRenderVersion;
+  let metrics;
+  try {
+    metrics = await api("/api/dashboard");
+  } catch (e) {
+    if (S.view === "dash" && version === dashRenderVersion) toast(e.message, true);
+    return;
+  }
+  if (S.view !== "dash" || version !== dashRenderVersion) return;
   const list = S.sessions || [];
-  const running = list.filter(x => !TERMINAL.has(x.status)).length;
-  const tokens = list.reduce((a, x) => a + (x.tokens || 0), 0);
-  const cost = list.reduce((a, x) => a + (x.cost_usd || 0), 0);
+  const running = metrics.running || 0;
+  const tokens = metrics.total_tokens || 0;
+  const cost = metrics.total_cost || 0;
   const flagCell = f => !f || !f.total ? "—"
     : (f.submitted ? `${f.accepted}/${f.submitted}` : `${f.total}`);
 
-  // 按天聚合 token（从 call_series 取，或从 session 汇总）
-  const daily = {};
-  for (const x of list) {
-    const day = x.started_at ? new Date(x.started_at * 1000).toISOString().slice(0, 10) : "未知";
-    daily[day] = (daily[day] || 0) + (x.tokens || 0);
-  }
+  // 与列表、状态页共用后端用量来源；不把整场用量记在会话开始那一天。
+  const daily = metrics.daily || {};
   const dailyArr = Object.entries(daily).sort((a, b) => a[0].localeCompare(b[0]));
   const maxDaily = Math.max(...dailyArr.map(([, v]) => v), 1);
 
   // 按模型聚合
-  const modelAgg = {};
-  for (const x of list) {
-    const mu = x.summary?.run?.model_usage?.per_model_tokens || {};
-    for (const [m, t] of Object.entries(mu))
-      modelAgg[m] = (modelAgg[m] || 0) + t;
-  }
+  const modelAgg = metrics.per_model || {};
   const modelArr = Object.entries(modelAgg).sort((a, b) => b[1] - a[1]);
   const maxModel = Math.max(...modelArr.map(([, v]) => v), 1);
 
@@ -187,6 +321,8 @@ function renderSessionHead() {
     `<span class="tag mono">${esc(s.session_id)}</span>`,
   ].join("");
   $("#s-err").innerHTML = [
+    S.state?.recovery?.unresolved_count > 0
+      ? `<div class="pause-banner">有 ${Number(S.state.recovery.unresolved_count)} 次操作的结果尚待核对。继续任务时，灵枢会收到这些记录；请先核实效果，避免重复操作。</div>` : "",
     running && s.paused
       ? `<div class="pause-banner">⏸ 已暂停——智能体将在当前步骤完成后停下；你仍可与灵枢对话，审批照常</div>` : "",
     s.error ? `<div class="err-banner">${esc(s.error)}</div>` : "",
@@ -448,7 +584,7 @@ function drawTopo() {
   }
   const ids = [...depthIndex.keys()];
   if (!ids.length) {
-    box.innerHTML = `<div class="empty-note">等待灵枢规划——任务拓扑将在此实时展开</div>${OPS}`;
+    box.innerHTML = `<div class="empty-note">等待灵枢规划——任务拓扑将在此实时展开</div>`;
     renderApprovals();
     renderQuestions();
     return;
@@ -532,7 +668,6 @@ function drawTopo() {
       ${ids.filter(id => id !== ORPHAN).map(id => cardHtml(nodeOf.get(id))).join("")}
       ${orphans.length ? orphanCard : ""}
     </div>
-    <div class="topo-ops" id="topo-ops"><div id="topo-ops-apv"></div><div id="topo-ops-ask"></div></div>
     <div class="topo-tools">
       <button id="topo-zin" title="放大">＋</button>
       <button id="topo-zout" title="缩小">－</button>
@@ -669,8 +804,8 @@ function drawTopo() {
   let downPos = null;
   let downTarget = null;
   box.addEventListener("pointerdown", (ev) => {
+    if (ev.button !== 0 || !S.topoView || ev.target.closest("button, input, textarea, select, a")) return;
     ev.preventDefault();
-    if (ev.button !== 0 || !S.topoView || ev.target.closest(".topo-tools")) return;
     downPos = { x: ev.clientX, y: ev.clientY };
     downTarget = ev.target.closest("[data-node]");
     drag = { x: ev.clientX, y: ev.clientY, tx: S.topoView.tx, ty: S.topoView.ty };
@@ -805,6 +940,7 @@ function renderFlags() {
 let traceStick = true;
 const TRACE_AGENT_SLOTS = new Map();
 function traceReset() {
+  SessionObserver.reset();
   $("#trace-box").innerHTML = '<div class="empty-note">等待灵枢开工——过程将按真实时间顺序在此展开</div>';
   TRACE_AGENT_SLOTS.clear();
   S.think.clear();
@@ -834,7 +970,9 @@ function traceAppend(e, body, cls = "") {
   box.querySelector(".empty-note")?.remove();
   box.insertAdjacentHTML("beforeend", traceRow(e, body, cls));
   traceScroll();
-  return box.lastElementChild;
+  const row = box.lastElementChild;
+  row.dataset.eventTs = e.ts || "";
+  return row;
 }
 function traceScroll(force = false) {
   const box = $("#trace-box");
@@ -869,6 +1007,7 @@ function traceFinishThinking(turn) {
 }
 function argBrief(name, args) {
   args = args && typeof args === "object" ? args : {};
+  if (args._redacted) return "正在读取参数";
   const one = v => String(v ?? "").replace(/\s+/g, " ").trim();
   if (name === "http_request") {
     let target = one(args.path || args.url || "/");
@@ -896,6 +1035,7 @@ function argBrief(name, args) {
 const TOOLS_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>';
 function toolFootprint(name, args) {
   args = args && typeof args === "object" ? args : {};
+  if (args._redacted) return "参数见调用卡片";
   const cut = s => { s = String(s ?? "").trim(); return s.length > 400 ? s.slice(0, 400) + " …" : s; };
   if (name === "shell") return cut(args.command);
   if (name === "python") return cut(String(args.code ?? "").split("\n")[0]);
@@ -923,6 +1063,7 @@ function tracePush(e) {
   if (!box) return;
   const d = (typeof e.detail === "object" && e.detail) || {};
   const actor = String(e.actor || "");
+  SessionObserver.push(e);
   switch (e.type) {
     case "task.start":
       traceAppend(e, `<div class="m">开始执行 · ${esc(actorName(actor))}</div>`, "tl-sys");
@@ -979,21 +1120,22 @@ function tracePush(e) {
       break;
     }
     case "agent.tool_call": {
-      const turn = traceTurn(actor);
-      if (!turn) break;
+      const turn = traceTurn(actor) || traceAppend(e,
+        `<div class="hd"><span class="who">${esc(actorName(actor))}</span><span class="k">工具执行</span></div><div class="flow"></div>`, "tl-turn");
       traceFinishThinking(turn);
       const flow = turn.querySelector(".flow");
       for (const c of (d.calls || [])) {
         flow.insertAdjacentHTML("beforeend", `<div class="tl-act" data-id="${esc(c.id || "")}">
-          <button class="hd" type="button" aria-expanded="false"><span class="nm">${esc(c.name || "?")}</span>
-            <span class="ar">${esc(argBrief(c.name, c.arguments))}</span><span class="st">进行中</span>
-            <span class="cv" aria-hidden="true">⌄</span></button><div class="nt"></div><pre></pre></div>`);
+          <button class="hd" type="button" aria-expanded="false"><span class="nm" title="${esc(c.name || "?")}">${esc(SessionObserver.toolName(c.name))}</span>
+            <span class="ar">${esc(c.preview || argBrief(c.name, c.arguments))}</span><span class="st">进行中</span>
+            <span class="cv" aria-hidden="true">⌄</span></button><div class="nt"></div><pre class="tl-output"></pre></div>`);
         const act = flow.lastElementChild;
         const btn = act.querySelector("button.hd");
         btn.onclick = () => {
           act.classList.toggle("open");
           btn.setAttribute("aria-expanded", String(act.classList.contains("open")));
         };
+        ToolParameters.attach(act, c);
       }
       // 工具足迹：计数逐次累加，命令逐行追加（回放时按事件序重建）
       const strip = traceToolsStrip(turn);
@@ -1003,7 +1145,7 @@ function tracePush(e) {
         for (const c of (d.calls || [])) {
           n.textContent = String(Number(n.textContent || "0") + 1);
           lines.insertAdjacentHTML("beforeend",
-            `<div class="ln"><span class="tn">${esc(c.name || "?")}</span><code>${esc(toolFootprint(c.name, c.arguments))}</code></div>`);
+            `<div class="ln"><span class="tn">${esc(c.name || "?")}</span><code>${esc(c.preview || toolFootprint(c.name, c.arguments))}</code></div>`);
         }
       }
       traceScroll();
@@ -1019,10 +1161,10 @@ function tracePush(e) {
       }
       if (!el) break;
       const st = el.querySelector(".st");
-      st.textContent = d.ok ? "完成" : "失败";
+      st.textContent = d.ok ? "已返回" : "失败";
       st.className = "st " + (d.ok ? "y" : "n");
-      el.querySelector(".nt").textContent = String(d.note || "");
-      el.querySelector("pre").textContent = String(d.result ?? "");
+      el.querySelector(".nt").textContent = SessionObserver.resultSummary(d);
+      el.querySelector(".tl-output").textContent = SessionObserver.cleanText(d.result || d.note || "未记录原始响应");
       if (!d.ok) {
         el.classList.add("open");
         el.querySelector("button.hd").setAttribute("aria-expanded", "true");
@@ -1061,6 +1203,27 @@ function tracePush(e) {
     }
     case "flag.extracted":
       traceAppend(e, `<div class="m">捕获 Flag · ${esc(d.value_preview || "")}</div>`, "tl-flag");
+      break;
+    case "model.started":
+      traceAppend(e, `<div class="m">${esc(actorName(actor))} · 正在调用 ${esc(d.model || "模型")} · ${esc(SessionObserver.toolName(d.task_type || "任务决策"))}</div>`, "tl-sys");
+      break;
+    case "model.call": {
+      const n = SessionObserver.usageFor(e, S.state);
+      const row = traceAppend(e, `<div class="m"><strong>${esc(d.model || "模型")} 已返回</strong> · <span class="model-tokens">${n == null ? "单次用量未记录" : `${Number(n).toLocaleString("zh-CN")} token`}</span> · ${(Number(d.latency_ms || 0) / 1000).toFixed(1)} 秒${d.task_type ? ` · ${esc(d.task_type)}` : ""}</div>`, "tl-sys tl-model");
+      row.dataset.callTs = e.ts || "";
+      break;
+    }
+    case "model.failed":
+    case "task.failed":
+    case "llm.step_fallback":
+      traceAppend(e, `<div class="tl-err">${esc(actorName(actor))} · ${esc(d.error || "执行未成功，等待重新决策")}</div>`, "tl-sys");
+      break;
+    case "model.cancelled":
+      traceAppend(e, `<div class="m">${esc(actorName(actor))} · 模型调用已取消，本次用量未返回</div>`, "tl-sys");
+      break;
+    case "task.cancelled":
+    case "task.pruned":
+      traceAppend(e, `<div class="m">${esc(actorName(actor))} · ${e.type === "task.cancelled" ? "任务已撤销" : "路线已剪枝"}</div>`, "tl-sys");
       break;
     case "task.done":
       traceFinishThinking(traceTurn(actor));
@@ -1156,11 +1319,13 @@ function startStreams(rebuild = true) {
   if (rebuild) { S.evSeen = 0; traceReset(); }
   S.esTick = Date.now();
   // 断点续传：看门狗重连带 ?last=已收行号，只补缺口不做全量回放
-  const es = new EventSource(`/api/sessions/${S.cur}/events`
+  const sessionId = S.cur;
+  const es = new EventSource(`/api/sessions/${sessionId}/events`
     + (S.evSeen ? `?last=${S.evSeen}` : ""));
   S.es = es;
   // 审计帧是具名事件（event: audit），onmessage 收不到——必须按事件名监听
   es.addEventListener("audit", m => {
+    if (S.cur !== sessionId || S.es !== es) return;
     S.esTick = Date.now();
     try {
       const e = JSON.parse(m.data);
@@ -1177,10 +1342,10 @@ function startStreams(rebuild = true) {
         box.insertAdjacentHTML("afterbegin", evLine(e));
         while (box.children.length > 250) box.lastChild.remove();
       }
-      if (/task\.|decision\.|vuln\.|flag\.|system\.|model\.call/.test(e.type || "")) refreshState();
+      if (/task\.|decision\.|vuln\.|flag\.|system\.|model\.call/.test(e.type || "")) scheduleStateRefresh();
     } catch {}
   });
-  es.addEventListener("done", () => { refreshState(); });
+  es.addEventListener("done", () => { if (S.cur === sessionId && S.es === es) refreshState(); });
   es.onerror = () => {};
   S.poll = setInterval(() => { refreshState(); refreshSessions(); }, 3000);
   // 断流看门狗：合盖休眠/网络切换后 EventSource 会静默僵死（readyState 不可信），

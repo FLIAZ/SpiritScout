@@ -49,6 +49,8 @@ from spiritscout.agents.sub.base import RoutePlan, StepResult, SubAgent
 from spiritscout.core.ids import new_id
 from spiritscout.core.models import AgentType, BlackboardLayer, Task
 from spiritscout.ctf.flags import FlagManager
+from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
+from spiritscout.tools.spec import ActionCategory
 
 # 题面中疑似编码串的最小长度（降噪）
 _MIN_BLOB_LEN = 12
@@ -84,6 +86,8 @@ _SOLVER_MAX_TOKENS = 4096
 _TURN_PROGRESS = 0.04
 # HTTP 动作参数上限（上下文保护，非行为限制；目标范围由 ScopeGuard 把关）
 _HTTP_METHODS = ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS")
+# 语义上无副作用的读取方法（其余方法须模型自报 action 行为类别才执行）
+_HTTP_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # HTML 结构探测：响应首段命中常见标签即按 HTML 摘要处理
 _HTML_HINT = re.compile(
     r"<\s*(?:!doctype|html|head|body|div|span|a|p|form|table|script|style|title)\b",
@@ -414,6 +418,10 @@ class _ToolOutcome:
 def _fn(name: str, description: str, properties: dict[str, Any],
         required: list[str] | None = None) -> dict[str, Any]:
     """OpenAI 形态的函数工具 schema（网关统一转译到各协议）。"""
+    if "action" in properties:
+        properties = {**properties, "action": {
+            **properties["action"], "enum": [a.value for a in ActionCategory],
+        }}
     return {"type": "function", "function": {
         "name": name, "description": description,
         "parameters": {"type": "object", "properties": properties,
@@ -516,28 +524,54 @@ class CTFBaseAgent(SubAgent):
                             "description": "true=对该地址重新发起真实请求（页面"
                             "状态可能已变化时用）；缺省 false——已读取过的地址"
                             "直接回放当时的记录"},
+                "action": {"type": "string",
+                           "description": "本次请求的行为类别（如实自报）。"
+                           "GET/HEAD/OPTIONS 纯读取可不填；POST/PUT/PATCH/"
+                           "DELETE 这类有副作用的请求必填：analysis=只是"
+                           "查询/读取；intrusive_write=写入/上传/增删改数据；"
+                           "brute_force=爆破；webshell_upload=上传 WebShell。"
+                           "敏感类别会即时请示用户，每次调用单独批准。"
+                           "缺声明的副作用请求会被退回。"},
             }),
         _fn("shell",
             "在隔离沙箱里执行一条 shell 命令（bash -c），拿到输出与退出码。"
             "适合 curl/nc/jq/grep/文件操作等一切命令行动作；工作目录在会话内"
             "持久（脚本与产物落那里，跨回合直接可用；/tmp 每次运行即焚），"
-            "系统文件只读，联网仅限授权目标。命令全文留痕于审计。",
+            "系统文件只读，联网仅限授权目标。命令全文留痕于审计。每次调用"
+            "必须用 action 如实声明这条命令要做什么——审计与审批以它为准。",
             {
                 "command": {"type": "string", "description": "要执行的命令"},
+                "action": {"type": "string",
+                           "description": "本次执行的行为类别（如实自报，缺了"
+                           "不执行）：analysis=只读分析/读取/计算/解码；"
+                           "delete_files=删除文件；reverse_shell=反弹 shell；"
+                           "webshell_upload=上传 WebShell；container_escape="
+                           "容器/沙箱逃逸尝试；brute_force=爆破；"
+                           "intrusive_write=其他有副作用的写入/上传。敏感类别"
+                           "会即时请示用户，批准后同类动作本会话不再重复询问。"},
                 "timeout": {"type": "number",
                             "description": "超时秒数（缺省 60，上限 300）"},
-            }, required=["command"]),
+            }, required=["command", "action"]),
         _fn("python",
             "在隔离沙箱里执行一段 Python 代码（python3），拿到输出与退出码。"
             "已装 requests/httpx/websockets/pwntools 等常用库；适合 "
             "WebSocket/socket 协议交互、数据计算与解码、脚本化构造请求。"
             "工作目录会话内持久，产物跨回合直接可用（/tmp 每次运行即焚）；"
-            "产物也可用附件分析工具继续研究。",
+            "产物也可用附件分析工具继续研究。每次调用必须用 action 如实"
+            "声明这段代码要做什么——审计与审批以它为准。",
             {
                 "code": {"type": "string", "description": "完整 Python 代码"},
+                "action": {"type": "string",
+                           "description": "本次执行的行为类别（如实自报，缺了"
+                           "不执行）：analysis=只读分析/读取/计算/解码；"
+                           "delete_files=删除文件；reverse_shell=反弹 shell；"
+                           "webshell_upload=上传 WebShell；container_escape="
+                           "容器/沙箱逃逸尝试；brute_force=爆破；"
+                           "intrusive_write=其他有副作用的写入/上传。敏感类别"
+                           "会即时请示用户，批准后同类动作本会话不再重复询问。"},
                 "timeout": {"type": "number",
                             "description": "超时秒数（缺省 60，上限 300）"},
-            }, required=["code"]),
+            }, required=["code", "action"]),
         _fn("analyze_text",
             "对题面文本做编码链解码（Base64/Hex/URL/Rot13 递归）与 Flag 提取。"
             "怀疑线索藏在题面或编码串里时用它；已经分析过就不必再来。",
@@ -751,6 +785,10 @@ class CTFBaseAgent(SubAgent):
         self.cache.put(self.route_namespace,
                        f"inv|{self.challenge_id(task)}|{route.name}|{task.task_id}",
                        state)
+        journal = getattr(self.ctx, "journal", None)
+        if journal is not None:
+            journal.checkpoint("ctf_conversation", f"{task.task_id}:{route.route_id}",
+                               "turn_saved", state)
 
     def _shared_conclusions(self, task: Task) -> list[str]:
         """题级共享结论：各路线收尾结论（同伴路线与复盘都能读到）。"""
@@ -823,31 +861,56 @@ class CTFBaseAgent(SubAgent):
                              f"flags|{self.challenge_id(task)}")
         return [f for f in got if isinstance(f, dict)] if isinstance(got, list) else []
 
-    def _record_flag(self, task: Task, value: str) -> None:
+    @staticmethod
+    def _flag_verdict(f: dict) -> str:
+        """共享 Flag 记录的裁决态：accepted / rejected / manual / pending。"""
+        return str(f.get("verdict") or "pending")
+
+    @classmethod
+    def _flag_line(cls, f: dict) -> str:
+        """Flag 共享记录 → 带裁决态的一行展示（同伴可见、裁决变化再可见）。"""
+        tag = {"accepted": "平台判定正确",
+               "rejected": "平台判定错误（勿重复提交）",
+               "manual": "无自动判定通道，待人工确认"}.get(
+            cls._flag_verdict(f), "候选（未判定）")
+        return f"{f.get('value', '')}（{tag}）"
+
+    def _record_flag(self, task: Task, value: str, verdict: str = "pending") -> None:
+        """登记 Flag 候选并维护裁决态：首次登记 pending，平台应答回填。
+
+        同值重复登记只推进裁决态（触发者/轮次不变）——提交结果要传给
+        并行同伴：accepted 才是收敛信号，rejected 防止重复试错。
+        """
         key = f"flags|{self.challenge_id(task)}"
         flags = self._shared_flags(task)
-        if value not in [f.get("value") for f in flags]:
-            flags.append({"value": value, "by": self.direction,
-                          "round": int(getattr(task, "round_no", 0) or 0)})
-            self.cache.put(self.shared_namespace, key, flags)
+        for f in flags:
+            if f.get("value") == value:
+                if self._flag_verdict(f) != verdict:
+                    f["verdict"] = verdict
+                    self.cache.put(self.shared_namespace, key, flags)
+                return
+        flags.append({"value": value, "by": self.direction,
+                      "round": int(getattr(task, "round_no", 0) or 0),
+                      "verdict": verdict})
+        self.cache.put(self.shared_namespace, key, flags)
         self._record_finding(task, "flag", value)
 
     def _peer_flags(self, task: Task, state: dict[str, Any], *,
-                    same_round: bool = False) -> list[str]:
-        """同伴（其他方向）已捕获、且本路线尚未持有的 Flag。
+                    same_round: bool = False) -> list[dict]:
+        """同伴（其他方向）已捕获、且本路线尚未持有的 Flag 记录（带裁决态）。
 
         same_round=True 只认本轮并行的同伴——上一轮的候选可能未经判定，
         不足以让新方向直接收工（信息照常可见，只是不当作终止信号）。
         """
         mine = set(state.get("flags") or [])
         rnd = int(getattr(task, "round_no", 0) or 0)
-        out: list[str] = []
+        out: list[dict] = []
         for f in self._shared_flags(task):
             if f.get("by") == self.direction or f.get("value") in mine:
                 continue
             if same_round and int(f.get("round", 0) or 0) != rnd:
                 continue
-            out.append(str(f["value"]))
+            out.append(f)
         return out
 
     def _peer_updates(self, task: Task, state: dict[str, Any]) -> str:
@@ -871,10 +934,13 @@ class CTFBaseAgent(SubAgent):
             if not c.startswith(f"[{self.direction}/"):
                 lines.append(f"· 同伴结论 {c}")
         seen["concl"] = len(concl)
-        fresh = [v for v in self._peer_flags(task, state) if v not in seen["flags"]]
+        fresh = [f for f in self._peer_flags(task, state)
+                 if self._flag_line(f) not in seen["flags"]]
         if fresh:
-            lines.append("· 同伴已捕获 Flag：" + ", ".join(fresh))
-            seen["flags"].extend(fresh)
+            # 按裁决态展示：候选只是线索，判对是捷报，判错是禁提交清单
+            lines.append("· 同伴 Flag 动态：" + ", ".join(
+                self._flag_line(f) for f in fresh))
+            seen["flags"].extend(self._flag_line(f) for f in fresh)
         if not lines:
             return ""
         return ("## 同伴动态（并行工作的其他方向 Agent 刚做了什么，"
@@ -888,23 +954,33 @@ class CTFBaseAgent(SubAgent):
         return f"{self.agent_type.value}/{route.name}"
 
     async def _solve_turn(self, task: Task, route, plan: RoutePlan) -> StepResult:
+        token = current_execution_scope.set(ExecutionScope(
+            task_id=task.task_id, route_id=route.route_id, agent_id=self.agent_id))
+        try:
+            return await self._solve_turn_inner(task, route, plan)
+        finally:
+            current_execution_scope.reset(token)
+
+    async def _solve_turn_inner(self, task: Task, route, plan: RoutePlan) -> StepResult:
         """解题环单回合：一次原生工具调用回合（可并发多个工具）。
 
         边界（与全系统同一原则）：LLM 只决定「试什么」，执行走同一
         http_probe 通道（ScopeGuard/RPS/审计/审批不变）；Flag 只由
-        FlagManager 正则提取；LLM 不可用 → 本路线诚实停摆（无模板兜底）。
+        模型判定后经 FlagManager 提交；LLM 不可用 → 本路线诚实停摆（无模板兜底）。
         """
         state = self._inv_state(task, route)
         if state["concluded"] or state["stall"]:
             return StepResult(ok=True, value=0.0,
                               final_note=True,
                               note=state["stall"] or "本路线已收尾")
-        # 并行收敛阀：本轮并行工作的同伴（其他方向或其他分支路线）已夺旗
-        # → 本路线立即收尾——并行铺开的分支在结果处汇合，不做重复功
+        # 并行收敛阀：本轮并行同伴的 Flag 获平台判定正确 → 本路线立即收尾
+        # ——并行铺开的分支在结果处汇合，不做重复功。候选/未判定不是战果
+        # （可能被判错，收早了谎报成功）；判错的进提示词当禁提交清单。
         rnd = int(getattr(task, "round_no", 0) or 0)
         mine = set(state.get("flags") or [])
         fresh = [f["value"] for f in self._shared_flags(task)
-                 if int(f.get("round", 0) or 0) == rnd and f["value"] not in mine]
+                 if int(f.get("round", 0) or 0) == rnd and f["value"] not in mine
+                 and self._flag_verdict(f) == "accepted"]
         if fresh:
             state["concluded"] = True
             state["conclusion_text"] = f"同伴路线已夺旗（{', '.join(fresh[:2])}），交叉验证收尾"
@@ -1191,10 +1267,15 @@ class CTFBaseAgent(SubAgent):
         if cand is None:
             return _ToolOutcome(ok=True, value=0.0, note=f"Flag 重复: {value[:40]}",
                                 text="该 Flag 值此前已登记过，无需重复提交。")
-        self._record_flag(task, cand.value)   # 共享缓存：并行分支即刻收敛
+        self._record_flag(task, cand.value)   # 先登记候选（并行方向即刻可见）
         result = await self.flag_manager.submit(cand)
         verdict = {True: "判定正确", False: "判定错误", None: "未获平台判定"}[
             result.accepted]
+        # 裁决态回填共享记录：accepted 才是同伴的收敛信号；rejected 让同伴
+        # 不再重复提交同一个错值；无判定通道（manual）留给人工确认
+        self._record_flag(task, cand.value,
+                          {True: "accepted", False: "rejected"}.get(
+                              result.accepted, "manual"))
         self.ctx.audit.log("agent.flag_submit", self.agent_id, {
             "route": route.name, "challenge": self.challenge_id(task),
             "flag_id": cand.flag_id, "verdict": str(result.accepted),
@@ -1202,7 +1283,9 @@ class CTFBaseAgent(SubAgent):
         text = (f"已登记并提交：{cand.value}\n平台应答：{verdict}"
                 + (f"（{result.submit_response[:200]}）" if result.submit_response else ""))
         return _ToolOutcome(
-            ok=True, value=0.9 if result.accepted is not False else 0.2,
+            ok=True,
+            value=0.9 if result.accepted is True else (
+                0.2 if result.accepted is False else 0.6),
             findings=[{"type": "flag", "value": cand.value}],
             note=f"Flag 提交 {cand.value} → {verdict}", text=text)
 
@@ -1437,6 +1520,14 @@ class CTFBaseAgent(SubAgent):
         if method not in _HTTP_METHODS:
             return _ToolOutcome(
                 ok=False, text=f"方法 {method} 不支持，可用：{', '.join(_HTTP_METHODS)}")
+        # 有副作用的请求须模型自报行为类别（审批与审计的依据），缺声明不执行；
+        # 纯读取方法（GET/HEAD/OPTIONS）不需要——是否敏感由策略门按类别判断
+        action = str(args.get("action", "") or "").strip()
+        if method not in _HTTP_SAFE_METHODS and not action:
+            return _ToolOutcome(ok=False, text=(
+                f"{method} 是有副作用的请求，需要 action 参数如实声明行为类别"
+                "（analysis / intrusive_write / brute_force / webshell_upload 等）；"
+                "缺声明不执行。纯读取请用 GET/HEAD。"))
         base = str(self.challenge_of(task).get("url") or task.target or "").rstrip("/")
         shown = url[len(base):] if base and url.startswith(base) else url
         desc = f"{method} {shown[:100] or '/'}"
@@ -1495,6 +1586,8 @@ class CTFBaseAgent(SubAgent):
                     "本次未重复请求。换一个入口或思路。"))
 
         request: dict[str, Any] = {"url": url, "method": method}
+        if action:
+            request["action"] = action
         if params:
             request["params"] = params
         if headers:
@@ -1548,6 +1641,15 @@ class CTFBaseAgent(SubAgent):
         code = str(args.get(param, "") or "").strip()
         if not code:
             return _ToolOutcome(ok=False, text=f"{name} 工具需要 {param} 参数。")
+        # 行为类别须模型如实自报（通用执行入口无法确认性质就不执行——
+        # 不以 readonly 自动放行）；敏感类别由策略门即时请示用户
+        action = str(args.get("action", "") or "").strip()
+        if not action:
+            return _ToolOutcome(ok=False, text=(
+                f"{name} 工具需要 action 参数：如实声明本次执行的行为类别"
+                "（analysis / delete_files / reverse_shell / webshell_upload / "
+                "container_escape / brute_force / intrusive_write）。"
+                "这是审批与审计的依据，缺声明不执行。"))
         try:
             timeout = float(args.get("timeout") or 60)
         except (TypeError, ValueError):
@@ -1557,7 +1659,8 @@ class CTFBaseAgent(SubAgent):
         res = await self.ctx.tools.call(
             "sandbox_exec",
             {"code": code, "language": "python" if name == "python" else "shell",
-             "timeout": timeout, "log_name": f"output_{route.name}"},
+             "timeout": timeout, "log_name": f"output_{route.name}",
+             "action": action},
             **self.ctx.builtin_ctx)
         if not res.ok and not (res.stdout or res.stderr):
             state["observations"].append(
@@ -1580,8 +1683,11 @@ class CTFBaseAgent(SubAgent):
         if res.stderr:
             lines.append("stderr:\n" + _head_tail(res.stderr, 1200))
         if out_file:
-            lines.append(f"完整输出已存盘（不占上下文）: {out_file}"
+            label = "输出已轮转，仅保留最近两代" if res.parsed.get("output_rotated") else "输出已存盘"
+            lines.append(f"{label}（不占上下文）: {out_file}"
                          "——需要细节时在沙箱里按需读取")
+            if res.parsed.get("previous_output_file"):
+                lines.append(f"上一代输出: {res.parsed['previous_output_file']}")
         if res.timed_out:
             lines.append("提示：超时通常意味着脚本在等待输入或死循环——"
                          "交互式脚本请改为非交互（预置输入/设置超时）。")
@@ -1736,10 +1842,13 @@ class CTFBaseAgent(SubAgent):
             "事实用 kb_search 检索——它们是参考资料，采纳与否由你基于现场"
             "证据判断。\n"
             "动手能力：要跑命令用 shell，要写代码用 python——它们在隔离沙箱里"
-            "执行（系统文件只读、联网仅限授权目标）。工作目录在会话内持久："
+            "执行（系统文件只读，网络操作须遵守用户授权与禁打边界）。工作目录在会话内持久："
             "脚本与产物放在那里，后续回合直接可用；/tmp 每次运行即焚，需要"
             "留存的文件不要写进 /tmp。WebSocket/socket 等协议交互、数据计算、"
             "脚本化构造请求，凡是 http_request 够不着的，一律用它们去完成。\n"
+            "交付文件：需要给用户留存的分析产物写到工作目录的 ../artifacts/，"
+            "会话的产出与事实页会列出这些文件；结论注明文件名、来源与证据，"
+            "临时计算文件继续放在工作目录。\n"
             "协同：同一道题可能有其他方向的 Agent 在并行工作，你们共享现场——"
             "别人探过的入口、写下的笔记、拿到的 Flag 会以「同伴动态」出现在对话里；"
             "有值得同伴立刻知道的发现（接口/参数/口令线索）就用 note 工具写一条，"
@@ -1767,6 +1876,9 @@ class CTFBaseAgent(SubAgent):
         """首条用户消息：题面 + 入口预感知 + 同伴/前轮结论 + 目标。"""
         ch = self.challenge_of(task)
         parts: list[str] = []
+        recovery = task.payload.get("execution_recovery")
+        if recovery:
+            parts.append("## 历史执行核对\n" + json.dumps(recovery, ensure_ascii=False))
         target = str(ch.get("url") or task.target or "")
         if target:
             parts.append(f"## 目标入口\n{target}")
@@ -1793,12 +1905,13 @@ class CTFBaseAgent(SubAgent):
                          + "\n".join(f"· {u} → {v}" for u, v in shown_site))
         peer_flags = self._peer_flags(task, state)
         if peer_flags:
-            parts.append("## 同伴已捕获 Flag\n" + ", ".join(peer_flags))
+            parts.append("## 同伴 Flag 动态（候选仅参考；判对即战果，判错勿重复提交）\n"
+                         + "\n".join(self._flag_line(f) for f in peer_flags))
         state.setdefault("peer_seen", {
             "site": [u for u, _ in shown_site],
             "notes": len(self._shared_notes(task)),
             "concl": len(self._shared_conclusions(task)),
-            "flags": peer_flags})
+            "flags": [self._flag_line(f) for f in peer_flags]})
         rules = str((task.payload or {}).get("rules") or "")
         if rules:
             parts.append("## 用户既定规则（全程遵守，含终止条件）\n"

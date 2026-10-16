@@ -9,6 +9,10 @@ workspace:
 bus:                           # 环形数据总线（适配器决策 A1）
   backend: inprocess           # inprocess（默认）/ redis / nats
   redis_url: redis://127.0.0.1:6379/0
+  redis_url_env: SPIRITSCOUT_REDIS_URL # 优先读环境变量，密码不要写入配置
+  namespace: spiritscout          # 不同部署须配置不同命名空间；会话自动隔离
+  connect_timeout_seconds: 5
+  shared_request_rps: 10           # Redis 模式同一部署所有内置探测请求的合计速率
   nats_url: nats://127.0.0.1:4222
   queue_maxsize: 10000
   rate_limit_per_second: 1000  # 总线流量控制
@@ -55,6 +59,16 @@ web:
 models_config_path: configs/models.yaml
 audit_log_path: .spiritscout/audit.jsonl
 
+# 可选浏览器 MCP：显式启用后，导航只读；其他状态变更仍需即时审批。
+mcp_servers:
+  - name: playwright
+    enabled: false
+    command: npx
+    args: ["@playwright/mcp@latest", "--headless", "--snapshot-boxes"]
+    default_risk: intrusive
+    tool_risk_overrides:
+      browser_navigate: readonly
+    scope_enforcement: required
+
 max_routes_per_agent: 8        # 分支数硬上限（防分支爆炸）
 default_routes_per_agent: 3    # 默认 3 条差异化路线（硬约束 C2）
-iteration_max_rounds: 20

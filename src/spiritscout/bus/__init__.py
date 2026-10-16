@@ -18,7 +18,9 @@ def create_bus(backend: str = "inprocess", **kwargs) -> EventBus:
     if backend == "redis":
         from spiritscout.bus.redis_bus import RedisBus
 
-        return RedisBus(url=kwargs.get("redis_url", "redis://127.0.0.1:6379/0"))
+        return RedisBus(url=kwargs.get("redis_url", "redis://127.0.0.1:6379/0"),
+                        channel_prefix=kwargs.get("channel_prefix", "spiritscout"),
+                        connect_timeout_seconds=kwargs.get("connect_timeout_seconds", 5.0))
     if backend == "nats":
         from spiritscout.bus.nats_bus import NatsBus
 

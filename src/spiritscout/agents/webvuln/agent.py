@@ -25,6 +25,7 @@ URL 载荷（G4 边界）。
 from __future__ import annotations
 
 import re
+from contextvars import ContextVar
 from typing import Any
 from urllib.parse import urlparse
 
@@ -38,6 +39,10 @@ from spiritscout.core.models import (
     Vulnerability,
     VulnStatus,
 )
+from spiritscout.gateway.context import shared_context
+
+# 当前步的防护拦截信号（按步清零；ContextVar 保证并发路线互不污染）
+_STEP_SIGNALS: ContextVar[int] = ContextVar("webvuln_step_signals", default=0)
 
 # SQL 报错特征（初筛信号，覆盖主流 DB 指纹）
 SQL_ERROR_PATTERNS = [
@@ -147,10 +152,12 @@ class WebVulnAgent(SubAgent):
         }.get(action)
         if handler is None:
             return StepResult(ok=False, note=f"未知步骤动作: {action}")
-        self._step_signals = 0
+        # 拦截信号按步累计（ContextVar：gather 并发路线各持上下文副本，
+        # 实例级属性会被并行路线互相清零/污染，风险分随之失真）
+        _STEP_SIGNALS.set(0)
         result = await handler(task, step)
         # 防护拦截信号喂 6.5 风险分（被 WAF/限流拦截＝暴露风险上升，9.2）
-        result.detection_signals += self._step_signals
+        result.detection_signals += _STEP_SIGNALS.get()
         return result
 
     # ------------------------------------------------------------ LLM 决策环
@@ -469,12 +476,7 @@ class WebVulnAgent(SubAgent):
             BlackboardLayer.TOPOLOGY, "business-context") or {})
 
     def _compact_business_context(self) -> dict[str, Any]:
-        context = self._business_context()
-        return {
-            key: context.get(key)
-            for key in ("coverage", "roles", "objects", "workflows", "facts", "gaps")
-            if context.get(key)
-        }
+        return shared_context(self.ctx.blackboard)
 
     @staticmethod
     def _evidence_snippet(body: str, marker: str, radius: int = 100) -> str:
@@ -490,7 +492,7 @@ class WebVulnAgent(SubAgent):
         res = await self.ctx.tools.call(
             "http_probe", {"url": url, "params": params}, **self.ctx.builtin_ctx)
         if res.ok and self._looks_blocked(res):
-            self._step_signals = getattr(self, "_step_signals", 0) + 1
+            _STEP_SIGNALS.set(_STEP_SIGNALS.get() + 1)
         return res if res.ok else None
 
     @staticmethod

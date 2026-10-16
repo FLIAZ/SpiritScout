@@ -9,28 +9,105 @@ file_analyze 仅访问本地文件（CTF 附件分析），不触网，路径需
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import re
 import socket
 import time
+import zlib
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from spiritscout.core.exceptions import ScopeViolation
 from spiritscout.policy.scope import ScopeGuard
+from spiritscout.tools.http_transport import ScopedHTTPTransport
 from spiritscout.tools.spec import RiskLevel, ToolKind, ToolResult, ToolSpec
 
 _UA = "Mozilla/5.0 (X11; Linux x86_64) SpiritScout/0.1 (authorized-security-test)"
+
+# TUN 代理 fake-ip 保留段（RFC 2544 基准测试网段，Clash/mihomo 等借用）：
+# 该段地址是代理虚拟栈的应答器——TCP 全端口可达、无服务横幅，测绘结果
+# 指向代理而非目标。DNS 解析与端口扫描必须识别并标注，不能把虚拟地址
+# 当成真实资产入册。
+_FAKEIP_NETS = [ipaddress.ip_network("198.18.0.0/15")]
+
+_FAKEIP_NOTE = ("解析落在 TUN 代理 fake-ip 保留段（198.18.0.0/15）：这是代理"
+                "虚拟地址而非目标服务器，IP 级测绘与端口扫描结果不可信；"
+                "请按域名（Host/SNI）维度记录身份，不要基于这些地址入册资产。")
+
+
+def _is_proxy_virtual_ip(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(str(ip).strip())
+    except ValueError:
+        return False
+    return any(addr in net for net in _FAKEIP_NETS)
+
+
+def _all_proxy_virtual(ips) -> bool:
+    cleaned = [str(i).strip() for i in ips if str(i).strip()]
+    return bool(cleaned) and all(_is_proxy_virtual_ip(i) for i in cleaned)
+
+
+async def _response_window(response: httpx.Response, limit: int) -> tuple[bytes, bool]:
+    """读取有界响应窗：在解压器内限制输出，不能先自动解压再截断。"""
+    if response.is_stream_consumed:
+        # 兼容已经物化的小响应（如内存适配器）；网络调用始终 stream=True。
+        return response.content[:limit], len(response.content) > limit
+    encoding = response.headers.get("content-encoding", "identity").strip().lower()
+    if encoding not in {"", "identity", "gzip", "x-gzip", "deflate"}:
+        raise httpx.DecodingError(f"未支持的响应压缩编码: {encoding}")
+    decoder = (zlib.decompressobj(16 + zlib.MAX_WBITS)
+               if encoding in {"gzip", "x-gzip"} else None)
+    window = bytearray()
+    first = True
+    async for raw in response.aiter_raw(chunk_size=16384):
+        if encoding == "deflate" and first:
+            # RFC 格式带 zlib 头，兼容常见的 raw-deflate 服务；仅保留
+            # 第一个头字节以决定模式，不为回退积攒整个压缩体。
+            if len(raw) < 2:
+                # aiter_raw 已分块；极短完整响应仍由解压器检查完整性。
+                wrapped = False
+            else:
+                wrapped = (raw[0] & 15 == 8 and (raw[0] << 8 | raw[1]) % 31 == 0)
+            decoder = zlib.decompressobj(zlib.MAX_WBITS if wrapped else -zlib.MAX_WBITS)
+        first = False
+        while raw:
+            remaining = limit - len(window)
+            try:
+                chunk = decoder.decompress(raw, remaining + 1) if decoder else raw
+            except zlib.error as exc:
+                raise httpx.DecodingError("响应压缩数据无效") from exc
+            window.extend(chunk[:remaining])
+            if len(chunk) > remaining:
+                return bytes(window), True
+            if decoder is None:
+                break
+            if decoder.eof and decoder.unused_data:
+                if encoding not in {"gzip", "x-gzip"}:
+                    raise httpx.DecodingError("压缩响应包含多余数据")
+                # gzip 允许拼接多个成员，每个成员仍共用一个总输出窗口。
+                raw = decoder.unused_data
+                decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            else:
+                raw = decoder.unconsumed_tail
+    if decoder is not None and not decoder.eof:
+        raise httpx.DecodingError("响应压缩数据不完整")
+    return bytes(window), False
 
 
 class RateLimiter:
     """全局请求速率限制（9.2：统一管控探测频率与流量特征）。"""
 
-    def __init__(self, rps: float = 10.0):
+    def __init__(self, rps: float = 10.0, *,
+                 shared_acquire: Callable[[], Awaitable[None]] | None = None):
         self._interval = 1.0 / max(rps, 0.1)
         self._last = 0.0
         self._lock = asyncio.Lock()
+        self._shared_acquire = shared_acquire
 
     async def acquire(self) -> None:
         async with self._lock:
@@ -39,6 +116,8 @@ class RateLimiter:
             if wait > 0:
                 await asyncio.sleep(wait)
             self._last = time.monotonic()
+        if self._shared_acquire is not None:
+            await self._shared_acquire()
 
 
 async def http_probe(
@@ -62,23 +141,34 @@ async def http_probe(
     """
     started = time.perf_counter()
 
-    req_headers = {"User-Agent": _UA, **(headers or {})}
+    req_headers = {"User-Agent": _UA, "Accept-Encoding": "gzip, deflate, identity",
+                   **(headers or {})}
     try:
         current_url = url
         current_method = method.upper()
         current_data = data
         current_params = params
         redirect_chain: list[str] = []
-        async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
+        async with httpx.AsyncClient(
+            follow_redirects=False, timeout=timeout, trust_env=False,
+            transport=ScopedHTTPTransport(guard),
+        ) as client:
             for hop in range(max(0, max_redirects) + 1):
+                # 每一跳请求前过禁打硬边界（含解析地址）：重定向链不得
+                # 把请求带进禁打目标
+                guard.ensure_not_denied(current_url)
                 if limiter:
                     await limiter.acquire()
-                resp = await client.request(
+                # 流式发送：响应体不全额进内存——中转跳不读体（省带宽），
+                # 最终响应只取展示窗口需要的字节，超出部分早断不下载
+                req = client.build_request(
                     current_method, current_url, params=current_params,
                     content=current_data, headers=req_headers)
+                resp = await client.send(req, stream=True)
                 location = resp.headers.get("location")
                 if resp.status_code not in {301, 302, 303, 307, 308} or not location:
                     break
+                await resp.aclose()              # 中转体不读：跳转链不占内存
                 if hop >= max_redirects:
                     return ToolResult(
                         tool="http_probe", ok=False, returncode=-2,
@@ -99,11 +189,27 @@ async def http_probe(
                 current_url = next_url
             else:  # pragma: no cover - 循环由 break/上限分支结束
                 raise RuntimeError("redirect loop")
+            # 仍在连接池内读取最终响应体（流式响应随连接关闭失效）：
+            # 只取展示窗口需要的字节（字符窗口 ×4 给多字节编码留余量），
+            # 超大响应下载到窗口容量即断，不全额进内存
+            cap_bytes = max(1000, max_output_chars) * 4
+            content, body_truncated = await _response_window(resp, cap_bytes)
+            got = len(content)
+            await resp.aclose()
+            final_status = resp.status_code
+            final_headers = dict(resp.headers)
+            final_url = str(resp.url)
+            cl = final_headers.get("content-length", "")
+            content_length = int(cl) if cl.isdigit() else got
+            body = content.decode(resp.encoding or "utf-8", errors="replace")
     except httpx.HTTPError as exc:
         return ToolResult(tool="http_probe", ok=False, error=f"HTTP 错误: {exc}",
                           returncode=-2, duration_ms=(time.perf_counter() - started) * 1000)
+    except ScopeViolation as exc:
+        # 禁打边界（含跳转落点/解析地址）在请求前拦截，执行器未发出请求
+        return ToolResult(tool="http_probe", ok=False, error=str(exc),
+                          returncode=-3, duration_ms=(time.perf_counter() - started) * 1000)
 
-    body = resp.text
     if len(body) > max_output_chars:
         body = body[: max_output_chars * 3 // 4] + "\n...[截断]...\n" + body[-max_output_chars // 4 :]
 
@@ -113,25 +219,26 @@ async def http_probe(
         title = re.sub(r"\s+", " ", m.group(1)).strip()[:200]
 
     fingerprint: dict[str, Any] = {}
-    server = resp.headers.get("server")
+    server = final_headers.get("server")
     if server:
         fingerprint["server"] = server
-    powered = resp.headers.get("x-powered-by")
+    powered = final_headers.get("x-powered-by")
     if powered:
         fingerprint["x_powered_by"] = powered
 
     parsed = {
-        "status_code": resp.status_code,
+        "status_code": final_status,
         "title": title,
-        "content_length": len(resp.content),
-        "headers": dict(resp.headers),
+        "content_length": content_length,
+        "body_truncated": body_truncated,
+        "headers": final_headers,
         "fingerprint": fingerprint,
-        "final_url": str(resp.url),
+        "final_url": final_url,
         "redirect_chain": redirect_chain,
     }
     # 范围标注（不拦截）：最终落点在授权白名单之外时告知模型——是否继续
     # 测试该目标由它向用户提问确认（ask_user），用户放行后标注消失
-    if not guard.is_allowed(str(resp.url)):
+    if not guard.is_allowed(final_url):
         parsed["scope_note"] = (
             "最终响应来自当前授权范围之外（未拦截）。继续测试该目标前先用 "
             "ask_user 向用户确认，用户同意后系统会将其加入本会话范围。")
@@ -160,9 +267,14 @@ async def dns_resolve(
     except (TimeoutError, socket.gaierror) as exc:
         return ToolResult(tool="dns_resolve", ok=False, error=f"解析失败: {exc}",
                           returncode=-2, duration_ms=(time.perf_counter() - started) * 1000)
+    # fake-ip 识别：解析全部落在代理虚拟段时如实标注，上层据此不入册 IP 资产
+    proxy_virtual = _all_proxy_virtual(ips)
     return ToolResult(
         tool="dns_resolve", ok=True, stdout="\n".join(ips),
-        parsed={"host": host, "ips": ips},
+        parsed={
+            "host": host, "ips": ips, "proxy_virtual": proxy_virtual,
+            **({"scope_note": _FAKEIP_NOTE} if proxy_virtual else {}),
+        },
         duration_ms=(time.perf_counter() - started) * 1000,
     )
 
@@ -199,11 +311,29 @@ async def tcp_scan(
     try:
         infos = await asyncio.wait_for(
             loop.getaddrinfo(host, None, family=socket.AF_INET), timeout=5.0)
-        ip = min({info[4][0] for info in infos})
+        addrs = {info[4][0] for info in infos}
     except (TimeoutError, socket.gaierror, OSError) as exc:
         return ToolResult(tool="tcp_scan", ok=False, returncode=-2,
                           error=f"主机解析失败: {exc}",
                           duration_ms=(time.perf_counter() - started) * 1000)
+    try:
+        # 解析出的连接地址逐个过禁打门：以域名访问禁打 IP 不绕过
+        guard.ensure_addrs_not_denied(addrs)
+    except ScopeViolation as exc:
+        return ToolResult(tool="tcp_scan", ok=False, returncode=-3,
+                          error=str(exc),
+                          duration_ms=(time.perf_counter() - started) * 1000)
+    ip = min(addrs)
+    # fake-ip 前置门：解析落在代理虚拟段时端口扫描只会探测到代理栈（全端口
+    # 可达、零横幅），扫了也是误导——如实标注并跳过，不入任何「开放服务」
+    if _all_proxy_virtual(addrs):
+        return ToolResult(
+            tool="tcp_scan", ok=True, returncode=0,
+            stdout=f"跳过端口扫描：{host} 解析到代理虚拟地址（{ip}）",
+            parsed={"host": host, "ip": ip, "scanned": 0, "open": [],
+                    "proxy_virtual": True, "scope_note": _FAKEIP_NOTE},
+            duration_ms=(time.perf_counter() - started) * 1000,
+        )
     raw = list(ports) if ports else list(COMMON_TCP_PORTS)
     port_list: list[int] = []
     for p in raw[:max_ports]:
@@ -239,16 +369,28 @@ async def tcp_scan(
 
     results = await asyncio.gather(*(probe(p) for p in port_list))
     open_ports = [{"port": p, "banner": b} for r in results if r for (p, b) in [r]]
+    # 伪开口启发：扫多少开多少且横幅全零是透明代理全连接栈的特征（真实
+    # 主机不会每个端口都应答且说不出一句话）——结果不作为开放服务证据
+    all_open_zero_banner = (len(port_list) >= 10
+                            and len(open_ports) == len(port_list)
+                            and not any(p["banner"] for p in open_ports))
+    if all_open_zero_banner:
+        open_ports = []
+    note = _FAKEIP_NOTE if all_open_zero_banner else ""
+    if not note and not guard.is_allowed(host):
+        note = ("主机在当前授权白名单之外（未拦截）。继续测试前先用 "
+                "ask_user 向用户确认，用户同意后系统会将其加入本会话范围。")
     parsed = {
         "host": host, "ip": ip, "scanned": len(port_list),
         "open": open_ports,
-        "scope_note": ("" if guard.is_allowed(host) else
-                       "主机在当前授权白名单之外（未拦截）。继续测试前先用 "
-                       "ask_user 向用户确认，用户同意后系统会将其加入本会话范围。"),
+        **({"proxy_virtual": True} if all_open_zero_banner else {}),
+        "scope_note": note,
     }
     return ToolResult(
         tool="tcp_scan", ok=True, returncode=0,
-        stdout=f"开放 {len(open_ports)}/{len(port_list)} 端口",
+        stdout=(f"疑似代理伪开口（{len(port_list)}/{len(port_list)} 端口全通且无横幅），结果不采信"
+                if all_open_zero_banner
+                else f"开放 {len(open_ports)}/{len(port_list)} 端口"),
         parsed=parsed,
         duration_ms=(time.perf_counter() - started) * 1000,
     )
@@ -292,7 +434,8 @@ async def file_analyze(
     if not p.is_file():
         return ToolResult(tool="file_analyze", ok=False, returncode=-2,
                           error=f"文件不存在: {p}")
-    data = p.read_bytes()[:max_read_bytes]
+    with p.open("rb") as fh:                # 只读前段：不给超大文件全额内存
+        data = fh.read(max_read_bytes)
     magic = next((name for sig, name in _MAGIC_SIGNATURES
                   if data.startswith(sig)), "unknown")
     strings = [m.group(0).decode("ascii", errors="replace")
@@ -336,6 +479,7 @@ BUILTIN_SPECS: dict[str, ToolSpec] = {
     # 工具只暴露给 CTF 方向 Agent 的目录，常规渗透模式不下发。
     "sandbox_exec": ToolSpec(
         name="sandbox_exec", kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY,
+        action_required=True,
         description="沙箱执行（bwrap：整机只读 + 主目录遮蔽 + 工作区可写）",
         target_params=()),
 }

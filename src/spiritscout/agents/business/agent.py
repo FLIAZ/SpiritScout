@@ -1,26 +1,27 @@
-"""业务体验 Agent：先走真实流程，再把有来源的业务上下文交给安全测试。"""
+"""业务体验 Agent：真实浏览器走访业务流程，观测接口交易，产出带证据的业务上下文。
+
+模型持有工具（playwright 浏览器 / http_probe / record_endpoint）自主走访——
+渲染后的页面、网络面板里的 XHR/fetch 交易都算证据；后端只做证据记账
+（导航页与登记的接口入黑板）与终局建模（business_analyst 归纳角色/对象/
+流程），不写死走访步骤。静态 HTML 解析管线已拆除：对 JS 渲染站点它天然
+失明（主页 0 导航 0 表单的教训），真实浏览器是唯一对得起「体验」二字的手。
+"""
 
 from __future__ import annotations
 
+import json
 import re
-from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from spiritscout.agents.sub.base import RoutePlan, StepResult, SubAgent
+from spiritscout.core.audit import tool_preview
 from spiritscout.core.ids import new_id
 from spiritscout.core.models import AgentType, Asset, BlackboardLayer, Task
 
-_SKIP_LINK_WORDS = (
-    "logout", "log-out", "signout", "delete", "remove", "destroy",
-    "checkout", "purchase", "pay", "submit", "confirm", "注销", "退出",
-    "删除", "支付", "下单", "提交",
-)
-_SAFE_HEADERS = ("content-type", "server", "x-powered-by", "location", "allow")
-
 
 def _redacted_url(raw: str) -> str:
-    """保留 URL 结构和查询参数名，移除用户信息与参数值。"""
+    """保留 URL 结构和查询参数名，移除用户信息与参数值（入黑板不带敏感值）。"""
     parsed = urlsplit(raw)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         return raw
@@ -38,243 +39,252 @@ def _redacted_url(raw: str) -> str:
                        urlencode(names), ""))
 
 
-class _SurfaceParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.title = ""
-        self.headings: list[str] = []
-        self.labels: list[str] = []
-        self.links: list[dict[str, str]] = []
-        self.forms: list[dict[str, Any]] = []
-        self._text_target = ""
-        self._text: list[str] = []
-        self._link_href = ""
-        self._link_text: list[str] = []
-        self._form: dict[str, Any] | None = None
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        values = {k.lower(): (v or "") for k, v in attrs}
-        if tag in {"title", "h1", "h2", "h3", "label", "button"}:
-            self._text_target = tag
-            self._text = []
-        elif tag == "a":
-            self._link_href = values.get("href", "")
-            self._link_text = []
-        elif tag == "form":
-            self._form = {
-                "method": values.get("method", "GET").upper(),
-                "action": values.get("action", ""),
-                "fields": [],
-            }
-        elif tag in {"input", "select", "textarea"} and self._form is not None:
-            name = values.get("name", "").strip()
-            if name:
-                self._form["fields"].append({
-                    "name": name[:128],
-                    "type": values.get("type", tag).lower()[:32],
-                })
-
-    def handle_data(self, data: str) -> None:
-        text = " ".join(data.split())
-        if not text:
-            return
-        if self._text_target:
-            self._text.append(text)
-        if self._link_href:
-            self._link_text.append(text)
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag == self._text_target:
-            text = " ".join(self._text)[:160]
-            if tag == "title":
-                self.title = text
-            elif tag in {"h1", "h2", "h3"} and text:
-                self.headings.append(text)
-            elif text:
-                self.labels.append(text)
-            self._text_target = ""
-            self._text = []
-        if tag == "a" and self._link_href:
-            self.links.append({
-                "href": self._link_href[:500],
-                "text": " ".join(self._link_text)[:160],
-            })
-            self._link_href = ""
-            self._link_text = []
-        if tag == "form" and self._form is not None:
-            self.forms.append(self._form)
-            self._form = None
-
-
-def extract_surfaces(html: str, page_url: str) -> dict[str, Any]:
-    """提取页面公开语义与表单结构，不保留字段值、正文或凭据。"""
-    parser = _SurfaceParser()
-    parser.feed(html[:2_000_000])
-    origin = urlsplit(page_url)
-    links: list[dict[str, str]] = []
-    for item in parser.links:
-        absolute = urljoin(page_url, item["href"])
-        parsed = urlsplit(absolute)
-        if parsed.scheme not in {"http", "https"} or parsed.netloc != origin.netloc:
-            continue
-        clean = _redacted_url(absolute)
-        if not any(existing["url"] == clean for existing in links):
-            links.append({"url": clean, "text": item["text"]})
-    forms: list[dict[str, Any]] = []
-    for form in parser.forms:
-        absolute = urljoin(page_url, str(form["action"]) or page_url)
-        parsed = urlsplit(absolute)
-        if parsed.scheme not in {"http", "https"} or parsed.netloc != origin.netloc:
-            continue
-        forms.append({
-            "action": urlunsplit((parsed.scheme, parsed.netloc, parsed.path or "/", "", "")),
-            "method": form["method"] if form["method"] in {
-                "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"
-            } else "GET",
-            "fields": form["fields"][:32],
-        })
-    return {
-        "url": _redacted_url(page_url),
-        "title": parser.title,
-        "headings": parser.headings[:20],
-        "labels": parser.labels[:30],
-        "links": links[:50],
-        "forms": forms[:20],
-    }
-
-
 class BusinessContextAgent(SubAgent):
     agent_type = AgentType.BUSINESS_CONTEXT
     route_namespace = "business_context"
     health_prune_enabled = False
-    _MAX_PUBLIC_PAGES = 8
+    _TOOL_RESULT_CAP = 6000
+    _TOOL_TIMEOUT = 180
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._observations: dict[str, list[dict[str, Any]]] = {}
+        # 每个任务的走访状态：消息历史 / 是否收尾 / 后端记账的导航页
+        self._explore: dict[str, dict[str, Any]] = {}
+
+    # ------------------------------------------------------------ 路由
 
     def route_templates(self, task: Task) -> list[RoutePlan]:
         return [RoutePlan(
             name="experience_normal_flow",
-            strategy="交付可核验结果：以普通用户视角走访公开流程，产出每条结论都"
-                     "能引用证据的业务上下文（角色/对象/流程/信任边界），证据不足"
-                     "的如实进 unknowns",
-            steps=[
-                {"action": "observe_entry"},
-                {"action": "walk_public_flow"},
-                {"action": "build_context"},
-            ],
+            strategy="以真实用户视角走访业务，产出每条结论都有证据的业务上下文"
+                     "（角色/对象/流程/信任边界）；证据不足的如实进 unknowns",
+            steps=[{"action": "explore"}],
         )]
 
     async def execute_step(self, task, route, plan, step) -> StepResult:
-        handler = {
-            "observe_entry": self._observe_entry,
-            "walk_public_flow": self._walk_public_flow,
-            "build_context": self._build_context,
-        }.get(step["action"])
+        handler = {"explore": self._explore_turn}.get(step["action"])
         if handler is None:
             return StepResult(ok=False, note=f"未知业务体验步骤: {step['action']}")
-        return await handler(task)
+        return await handler(task, route, plan)
 
-    async def _fetch_page(self, task: Task, url: str) -> dict[str, Any] | None:
-        res = await self.ctx.tools.call(
-            "http_probe", {"url": url}, **self.ctx.builtin_ctx)
-        if not res.ok:
-            return None
-        content_type = str((res.parsed.get("headers") or {}).get("content-type", ""))
-        if "html" not in content_type.lower() and "<html" not in res.stdout[:1000].lower():
-            return None
-        surface = extract_surfaces(res.stdout, url)
-        surface["status_code"] = res.parsed.get("status_code")
-        headers = res.parsed.get("headers") or {}
-        surface["headers"] = {
-            key: value for key, value in headers.items()
-            if str(key).lower() in _SAFE_HEADERS
+    # ------------------------------------------------------------ 工具面
+
+    def _tool_schemas(self) -> list[dict[str, Any]]:
+        """模型可用工具清单：record_endpoint + http_probe + 会话装配的浏览器 MCP。"""
+        schemas: list[dict[str, Any]] = [
+            {"type": "function", "function": {
+                "name": "record_endpoint",
+                "description": (
+                    "登记一条实际观测到的接口交易（来自浏览器网络面板/页面行为），"
+                    "作为业务上下文的证据入黑板。只登记真实发生的请求，不要推测。"),
+                "parameters": {"type": "object", "properties": {
+                    "method": {"type": "string", "description": "HTTP 方法，如 GET/POST"},
+                    "url": {"type": "string", "description": "接口地址"},
+                    "params": {"type": "array",
+                               "items": {"type": "string"},
+                               "description": "参数名列表（不要参数值）"},
+                    "status_code": {"type": "integer"},
+                    "note": {"type": "string", "description": "该交易的业务语义，一句话"},
+                }, "required": ["url"]}}},
+            {"type": "function", "function": {
+                "name": "http_probe",
+                "description": "HTTP 只读探测（结构化解析状态码/标题/响应头/指纹；"
+                               "走授权与限速门），适合裸接口与响应头层面的确认",
+                "parameters": {"type": "object", "properties": {
+                    "url": {"type": "string"},
+                    "method": {"type": "string"},
+                    "params": {"type": "object"},
+                    "headers": {"type": "object"},
+                }, "required": ["url"]}}},
+        ]
+        for name, meta in sorted((self.ctx.mcp_tools or {}).items()):
+            schema = meta.get("schema")
+            if not isinstance(schema, dict):
+                continue
+            schemas.append({"type": "function", "function": {
+                "name": name,
+                "description": str(schema.get("description") or meta.get("tool") or name),
+                "parameters": schema.get("inputSchema") or {"type": "object", "properties": {}},
+            }})
+        return schemas
+
+    def _explore_brief(self, task: Task) -> str:
+        """走访任务书：目标、任务意图与交付契约（怎么走由模型决定）。"""
+        payload: dict[str, Any] = {
+            "target": task.target,
+            "交付要求": (
+                "以真实用户视角走访该目标的业务流程。渲染后的页面、网络请求"
+                "（XHR/fetch）都是证据；把实际观测到的接口交易用 record_endpoint "
+                "登记（方法/URL/参数名/业务语义，不要参数值）。结论只写有证据"
+                "支撑的。证据收集完成后直接输出结论文本（不再调用工具），"
+                "系统会据此归纳业务上下文。"),
         }
-        return surface
+        intent = {"mission": str(task.payload.get("mission", ""))[:600],
+                  "node": str(task.payload.get("node_title", ""))[:120]}
+        rules = str(task.payload.get("rules", "")).strip()
+        if rules:
+            intent["rules"] = rules[:600]
+        cleaned = {k: v for k, v in intent.items() if v}
+        if cleaned:
+            payload["task_intent"] = cleaned
+        steering = (self.ctx.ring.steering_for(self.agent_type.value)
+                    if self.ctx.ring is not None else None)
+        if steering:
+            payload["灵枢督导"] = {"hint": steering["hint"],
+                                  "rationale": steering.get("rationale", "")}
+        return json.dumps(payload, ensure_ascii=False)
 
-    async def _observe_entry(self, task: Task) -> StepResult:
-        url = task.target.rstrip("/") or task.target
-        surface = await self._fetch_page(task, url)
-        if surface is None:
-            self._observations[task.task_id] = []
-            return StepResult(ok=False, note="入口页面不可读，业务流程覆盖为空")
-        self._observations[task.task_id] = [surface]
-        self._store_surface(surface)
-        return StepResult(
-            ok=True,
-            value=0.4,
-            findings=[{"type": "business_entry", "value": surface["url"]}],
-            note=(f"已体验入口：{surface['title'] or surface['url']}；"
-                  f"发现 {len(surface['links'])} 个导航、{len(surface['forms'])} 个表单"),
-        )
+    # ------------------------------------------------------------ 走访回合
 
-    async def _walk_public_flow(self, task: Task) -> StepResult:
-        observations = self._observations.setdefault(task.task_id, [])
-        if not observations:
-            return StepResult(ok=True, note="入口无可跟随的公开流程")
-        seen = {item["url"] for item in observations}
-        queue = [link for item in observations for link in item["links"]]
-        while queue and len(observations) < self._MAX_PUBLIC_PAGES:
-            link = queue.pop(0)
-            url = str(link["url"])
-            text = f"{url} {link.get('text', '')}".lower()
-            if url in seen or any(word in text for word in _SKIP_LINK_WORDS):
-                continue
-            seen.add(url)
-            surface = await self._fetch_page(task, url)
-            if surface is None:
-                continue
-            observations.append(surface)
-            self._store_surface(surface)
-            queue.extend(surface["links"])
-        return StepResult(
-            ok=True,
-            value=min(0.2 + len(observations) * 0.08, 0.8),
-            findings=[{"type": "business_page", "value": p["url"]}
-                      for p in observations],
-            note=f"公开流程走访完成：实际访问 {len(observations)} 个页面",
-        )
+    async def _explore_turn(self, task: Task, route, plan) -> StepResult:
+        """一回合模型工具环：模型调工具 → 后端派发回灌；模型不再调工具即收尾建模。
 
-    def _store_surface(self, surface: dict[str, Any]) -> None:
-        page = Asset(
-            asset_id=new_id("asset"),
-            asset_type="app",
-            value=str(surface["url"]),
+        不设固定回合顶：走访何时结束由模型判断（与解题环同语义），
+        终局产出业务上下文。"""
+        st = self._explore.setdefault(task.task_id, {
+            "messages": [], "concluded": False, "pages": [], "turn": 0})
+        if st["concluded"]:
+            return StepResult(ok=True, value=0.9, note="走访已完成并建模")
+        if not st["messages"]:
+            st["messages"] = [
+                {"role": "system",
+                 "content": self._system_prompt() + "\nROLE: business_explorer"},
+                {"role": "user", "content": self._explore_brief(task)},
+            ]
+        else:
+            steering = (self.ctx.ring.steering_for(self.agent_type.value)
+                        if self.ctx.ring is not None else None)
+            if steering:
+                st["messages"].append({"role": "user", "content": json.dumps(
+                    {"灵枢督导": {"hint": steering["hint"],
+                                  "rationale": steering.get("rationale", "")}},
+                    ensure_ascii=False)})
+        st["turn"] += 1
+        if st["turn"] > 1:
+            self.ctx.audit.log("agent.turn", self.agent_id, {"turn": st["turn"], "task_id": task.task_id})
+        try:
+            resp = await self.ctx.gateway.chat(
+                st["messages"], task_type="execution",
+                timeout_seconds=self._TOOL_TIMEOUT,
+                tools=self._tool_schemas(), tool_choice="auto",
+                reasoning_effort=self.task_effort(task))
+        except Exception as exc:  # noqa: BLE001 —— 决策不可用如实报给路线
+            self.ctx.audit.log("llm.step_fallback", self.agent_id, {
+                "role": "business_explorer", "error": str(exc)[:200]})
+            return StepResult(ok=False, note=f"走访决策不可用: {exc}")
+
+        # assistant 消息（含工具调用）回灌，保持多轮协议完整
+        if resp.tool_calls and str(resp.content or "").strip():
+            self.ctx.audit.log("agent.note", self.agent_id, {"text": str(resp.content)[:2000]})
+        st["messages"].append({
+            "role": "assistant",
+            "content": resp.content or "",
+            "tool_calls": [{"id": c.get("id") or "", "type": "function",
+                            "function": {"name": c.get("name") or "",
+                                         "arguments": str(c.get("raw") or "{}")}}
+                           for c in resp.tool_calls],
+        })
+        if not resp.tool_calls:
+            st["concluded"] = True
+            # 终局：带着走访所得归纳业务上下文（证据都在黑板里）
+            ctx_result = await self._build_context(task)
+            conclusion = (resp.content or "").strip()[:1200]
+            if conclusion:
+                ctx_result.note = f"{conclusion}\n{ctx_result.note}"
+            return ctx_result
+
+        # 浏览器是有状态会话，逐个派发避免页面竞态
+        for call in resp.tool_calls:
+            text = await self._run_tool_call(task, call)
+            st["messages"].append({
+                "role": "tool",
+                "tool_call_id": call.get("id") or "call_0",
+                "content": text[: self._TOOL_RESULT_CAP],
+            })
+        plan.steps.append({"action": "explore"})   # 续回合：终局由模型给出
+        return StepResult(ok=True, value=min(0.1 * st["turn"], 0.6),
+                          note=f"走访第 {st['turn']} 回合：{len(resp.tool_calls)} 次工具调用")
+
+    async def _run_tool_call(self, task: Task, call: dict[str, Any]) -> str:
+        """派发一次模型工具调用：record_endpoint 记账，其余一律过工具门。"""
+        name = str(call.get("name") or "")
+        args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
+        self.ctx.audit.log("agent.tool_call", self.agent_id, {
+            "calls": [{"id": call.get("id") or "", "name": name, "arguments": args,
+                       "preview": tool_preview(args)}]})
+        result_meta: dict[str, Any] = {"tool": name}
+        try:
+            if call.get("parse_error"):
+                ok, text = False, f"工具参数解析失败: {call['parse_error']}。请修正 JSON 后重新调用。"
+            elif name == "record_endpoint":
+                ok, text = await self._tool_record_endpoint(task, args)
+            else:
+                res = await self.ctx.tools.call(name, args, **self.ctx.builtin_ctx)
+                ok = res.ok
+                text = (f"工具执行失败: {res.failure_reason()}"
+                        if not res.ok else (res.stdout or "（无输出）"))
+                result_meta.update(invocation_id=res.invocation_id, returncode=res.returncode,
+                                   attempts=res.attempts)
+                result_meta.update({key: res.parsed[key] for key in ("failure_kind", "failure_summary")
+                                    if key in res.parsed and not res.ok})
+                if res.ok and name.endswith("browser_navigate"):
+                    self._track_page(task, str((args or {}).get("url") or ""))
+        except Exception as exc:  # noqa: BLE001 —— 工具异常转结果回灌自纠
+            ok, text = False, f"工具调用异常: {type(exc).__name__}: {exc}"
+        self.ctx.audit.log("agent.tool_result", self.agent_id, {
+            "id": call.get("id") or "", "ok": ok, "note": text[:300], **result_meta})
+        return text
+
+    def _track_page(self, task: Task, url: str) -> None:
+        """导航页记账：URL 脱敏后作为页面证据入黑板（dedup 由黑板处理）。"""
+        url = url.strip()
+        if not url.startswith(("http://", "https://")):
+            return
+        st = self._explore.setdefault(task.task_id, {
+            "messages": [], "concluded": False, "pages": [], "turn": 0})
+        clean = _redacted_url(url)
+        if any(p["url"] == clean for p in st["pages"]):
+            return
+        st["pages"].append({"url": clean})
+        self.ctx.convergence.merge_asset(Asset(
+            asset_id=new_id("asset"), asset_type="app", value=clean,
+            attrs={"kind": "business_page", "source": "model_navigated"},
+            source_agent=self.agent_id), self.agent_type)
+
+    async def _tool_record_endpoint(self, task: Task, args: dict[str, Any]) -> tuple[bool, str]:
+        """模型登记的接口交易：URL 脱敏入黑板，作为端点证据。"""
+        url = str((args or {}).get("url") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            return False, "登记失败：url 必须是 http(s) 地址"
+        status = args.get("status_code")
+        endpoint = Asset(
+            asset_id=new_id("asset"), asset_type="endpoint",
+            value=_redacted_url(url),
             attrs={
-                "kind": "business_page",
-                "title": surface["title"],
-                "headings": surface["headings"],
-                "labels": surface["labels"],
-                "status_code": surface["status_code"],
-                "headers": surface["headers"],
+                "method": str(args.get("method") or "GET").upper()[:10],
+                "params": [str(p)[:128] for p in (args.get("params") or [])][:32],
+                "status_code": int(status) if isinstance(status, (int, float)) else None,
+                "note": str(args.get("note") or "")[:300],
+                "source": "model_observed",
             },
             source_agent=self.agent_id,
         )
-        self.ctx.convergence.merge_asset(page, self.agent_type)
-        for form in surface["forms"]:
-            endpoint = Asset(
-                asset_id=new_id("asset"),
-                asset_type="endpoint",
-                value=str(form["action"]),
-                attrs={
-                    "method": form["method"],
-                    "params": [f["name"] for f in form["fields"]],
-                    "param_locations": {
-                        f["name"]: "query" if form["method"] in {"GET", "HEAD"}
-                        else "body"
-                        for f in form["fields"]
-                    },
-                    "source": "observed_html_form",
-                },
-                source_agent=self.agent_id,
-            )
-            self.ctx.convergence.merge_asset(endpoint, self.agent_type)
+        self.ctx.convergence.merge_asset(endpoint, self.agent_type)
+        return True, "已登记"
+
+    # ------------------------------------------------------------ 上下文建模
 
     async def _build_context(self, task: Task) -> StepResult:
-        observations = self._observations.get(task.task_id, [])
+        # 页面证据从黑板回读：导航记账在走访时已入册，任务续传/重启后
+        # 内存走访态丢失也不丢证据
+        pages: list[dict[str, Any]] = [
+            {"url": rec["data"].get("value", ""), "title": "", "record_id": rec["record_id"]}
+            for rec in self.ctx.blackboard.query(BlackboardLayer.ASSET, limit=500)
+            if rec["data"].get("asset_type") == "app"
+            and (rec["data"].get("attrs") or {}).get("kind") == "business_page"
+        ]
         endpoint_records = [
-            record["data"] for record in self.ctx.blackboard.query(
+            {**record["data"], "_record_id": record["record_id"]} for record in self.ctx.blackboard.query(
                 BlackboardLayer.ASSET, limit=1000)
             if record["data"].get("asset_type") == "endpoint"
         ]
@@ -283,24 +293,32 @@ class BusinessContextAgent(SubAgent):
             str(item.get("value", "")),
         ))
         evidence: list[dict[str, Any]] = []
-        for page in observations:
+        for page in pages:
             evidence.append({
                 "id": f"E{len(evidence) + 1}", "kind": "page",
-                "url": page["url"], "title": page["title"],
-                "headings": page["headings"], "labels": page["labels"],
+                "record_id": page["record_id"],
+                "url": page["url"], "title": page.get("title", ""),
             })
+        recorded = 0
         for endpoint in endpoint_records[:100]:
             attrs = endpoint.get("attrs") or {}
             source_file = attrs.get("source_file", "")
+            source = attrs.get("source") or source_file
+            if source == "model_observed":
+                recorded += 1
             evidence.append({
                 "id": f"E{len(evidence) + 1}",
-                "kind": "har_transaction" if source_file else "observed_form",
+                "record_id": endpoint["_record_id"],
+                "kind": ("har_transaction" if source_file
+                         else "observed_transaction" if source == "model_observed"
+                         else "observed_form"),
                 "method": attrs.get("method", "GET"),
                 "url": endpoint.get("value", ""),
                 "params": attrs.get("params", []),
                 "status_code": attrs.get("status_code"),
+                "note": attrs.get("note", ""),
                 "sequence": (attrs.get("first_seen_index") if source_file else None),
-                "source": attrs.get("source") or source_file,
+                "source": source,
             })
         valid_ids = {item["id"] for item in evidence}
         model_context = await self._llm_chat_json("business_analyst", {
@@ -318,24 +336,24 @@ class BusinessContextAgent(SubAgent):
             1 for endpoint in endpoint_records
             if (endpoint.get("attrs") or {}).get("source_file")
         )
-        form_count = sum(len(page["forms"]) for page in observations)
         coverage = (
-            "observed_transaction_flow" if har_count >= 2
-            else "public_flow" if len(observations) > 1 or form_count
-            else "entry_only" if observations
+            "observed_transaction_flow" if har_count + recorded >= 2
+            else "public_flow" if pages or recorded or har_count
+            else "entry_only" if pages
             else "none"
         )
         gaps: list[str] = list(context.get("unknowns", []))
-        if har_count == 0:
-            gaps.append("未提供脱敏 HAR，登录后或多角色交易流程尚未被观测")
-        if not observations:
-            gaps.append("入口页面不可读")
+        if har_count + recorded == 0:
+            gaps.append("未观测到登录后或多角色交易的接口记录，相关流程尚未被走访")
+        if not pages:
+            gaps.append("入口页面不可达或未走访")
         context.update({
             "kind": "business_context",
             "coverage": coverage,
             "ready_for_testing": bool(endpoint_records),
-            "observed_pages": len(observations),
+            "observed_pages": len(pages),
             "observed_endpoints": len(endpoint_records),
+            "recorded_transactions": recorded,
             "har_transactions": har_count,
             "gaps": list(dict.fromkeys(str(g)[:300] for g in gaps if g)),
             "evidence": evidence,
@@ -353,9 +371,9 @@ class BusinessContextAgent(SubAgent):
             ok=True,
             value=0.9 if context["ready_for_testing"] else 0.3,
             findings=[{"type": "business_context", "coverage": coverage}],
-            note=(f"业务上下文：{coverage}，页面 {len(observations)}，"
-                  f"端点 {len(endpoint_records)}，HAR 交易 {har_count}；"
-                  f"缺口 {len(context['gaps'])} 项"),
+            note=(f"业务上下文：{coverage}，页面 {len(pages)}，"
+                  f"端点 {len(endpoint_records)}（含登记交易 {recorded}、"
+                  f"请求记录 {har_count}）；缺口 {len(context['gaps'])} 项"),
             final_note=True,
         )
 

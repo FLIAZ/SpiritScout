@@ -14,6 +14,7 @@ from __future__ import annotations
 import fnmatch
 import ipaddress
 import posixpath
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from urllib.parse import unquote, urlparse
 
@@ -67,6 +68,18 @@ class ScopeGuard:
         """禁打列表硬校验（用户显式配置的拒绝边界）；白名单不在此拦。"""
         host = self._split(target)[0]
         self._check_denied(target, host)
+
+    def ensure_addrs_not_denied(self, addrs: Iterable[str]) -> None:
+        """DNS 解析出的连接地址同受禁打约束（以域名访问禁打 IP 不绕过）。
+
+        异步工具在自行解析主机后调用（多 A/AAAA 逐个校验）；本方法只做
+        确定性匹配，不发网络请求。调用方必须连接本次已校验的地址，
+        不能在检查后另行解析域名。
+        """
+        for addr in addrs:
+            addr = str(addr).strip()
+            if addr:
+                self._check_denied(addr, addr)
 
     def is_allowed(self, target: str) -> bool:
         """目标是否落在授权白名单/会话批准集内（信息标注用，不做拦截）。"""
@@ -131,10 +144,16 @@ class ScopeGuard:
         raise ScopeViolation(f"IP 超出授权网段: {ip}")
 
     def is_sensitive_allowed(self, action: str) -> bool:
-        """敏感操作门（G5）：反弹shell/上传getshell/容器逃逸/爆破默认禁用；
-        启动授权（scope）或运行期即时确认放行（会话级批准集）其一即可。"""
-        return (self.scope.allow_sensitive_actions
-                or action in self._approved_sensitive)
+        """敏感操作门（G5）：反弹shell/上传getshell/容器逃逸/爆破/删除等
+        默认禁绝；仅运行期即时确认放行过的动作（会话级批准集）免重复
+        询问。启动参数不提供一揽子免审——授权决定权在每次触发时的用户
+        确认，不在启动配置。"""
+        return action in self._approved_sensitive
+
+    @property
+    def approved_sensitive(self) -> frozenset[str]:
+        """会话内已即时批准的敏感动作（审批粒度：同会话同类动作免重复询问）。"""
+        return frozenset(self._approved_sensitive)
 
     def approve_sensitive(self, action: str) -> None:
         """即时确认放行：本次会话内该动作不再询问（授权决策留痕在审批审计）。"""
@@ -143,6 +162,7 @@ class ScopeGuard:
     # ------------------------------------------------------------ 内部
 
     def _check_denied(self, raw: str, host: str | None) -> None:
+        addr = self._as_address(host)
         for pattern in self.scope.denied:
             pattern_host, pattern_url = self._split(pattern)
             url_denied = bool(
@@ -152,8 +172,34 @@ class ScopeGuard:
                 and fnmatch.fnmatchcase(
                     self._normalize_host(host),
                     self._normalize_host(pattern_host)))
-            if url_denied or host_denied:
+            # 禁打条目按网段解释（IPv4/IPv6 CIDR 或裸 IP）：裸 IP 命中 /32、/128
+            cidr_denied = bool(
+                addr is not None and self._addr_in_network(addr, pattern))
+            if url_denied or host_denied or cidr_denied:
                 raise ScopeViolation(f"目标命中禁打列表 {pattern}: {raw}")
+
+    @staticmethod
+    def _addr_in_network(
+        addr: ipaddress.IPv4Address | ipaddress.IPv6Address, pattern: str,
+    ) -> bool:
+        """禁打条目 → 网段（CIDR 或裸 IP）成员判断；非网段写法不参与。"""
+        try:
+            network = ipaddress.ip_network(pattern.strip(), strict=False)
+            # IPv4 映射的 IPv6 仍可能连接 IPv4 服务，不能绕过 IPv4 禁打项。
+            mapped = addr.ipv4_mapped if isinstance(addr, ipaddress.IPv6Address) else None
+            return addr in network or (mapped is not None and mapped in network)
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _as_address(host: str | None) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+        """主机字面量 → IP 地址对象；域名/空值返回 None（不做 DNS 解析）。"""
+        if not host:
+            return None
+        try:
+            return ipaddress.ip_address(str(host).strip().strip("[]"))
+        except ValueError:
+            return None
 
     def _match_host(self, host: str) -> bool:
         host = self._normalize_host(host)

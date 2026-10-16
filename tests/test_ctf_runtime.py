@@ -186,7 +186,8 @@ class RecordReplayTests(unittest.IsolatedAsyncioTestCase):
 
         await agent._tool_http(
             self._task(), SimpleNamespace(name="solve"), state,
-            {"method": "POST", "path": "/api/exec", "data": "cmd=ls"})
+            {"method": "POST", "path": "/api/exec", "data": "cmd=ls",
+             "action": "intrusive_write"})
         await agent._tool_http(
             self._task(), SimpleNamespace(name="solve"), state,
             {"path": "/big.js", "headers": {"Range": "bytes=0-100"}})

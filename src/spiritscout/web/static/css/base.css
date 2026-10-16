@@ -78,6 +78,7 @@ code, .mono { font-family: var(--mono); font-size: .92em; }
 /* ================= 骨架布局 ================= */
 #app { display: grid; grid-template-columns: 236px 1fr; min-height: 100vh; }
 .side {
+  min-width: 0;
   /* 温柔氛围同语系：顶部一缕蜜杏渐入面板，向下归于素面 */
   background: linear-gradient(172deg,
     color-mix(in srgb, var(--glow-1) 20%, var(--surface)) 0%,
@@ -153,7 +154,7 @@ nav button svg { flex: none; }
 #btn-theme:hover { color: var(--ink); border-color: var(--ink-3); }
 main { min-width: 0; padding: 22px 26px 40px; }
 @media (max-width: 860px) {
-  #app { grid-template-columns: 1fr; }
+  #app { grid-template-columns: minmax(0, 1fr); }
   .side { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
   #sess-list { max-height: 180px; }
   main { padding: 16px; }

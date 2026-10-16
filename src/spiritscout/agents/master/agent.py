@@ -37,8 +37,9 @@ from spiritscout.core.models import (
     Task,
     TaskStatus,
 )
-from spiritscout.gateway import ModelGateway
+from spiritscout.gateway import ModelGateway, chat_decision
 from spiritscout.gateway.backends import extract_json
+from spiritscout.gateway.context import compact_json, shared_context
 from spiritscout.policy.engine import PolicyEngine
 
 # 战术 → 子 Agent 映射（3.3.6 子Agent↔战术映射；MVP 装配 recon/web_vuln）
@@ -55,7 +56,6 @@ TACTIC_AGENT_MAP: dict[str, tuple[AgentType, str]] = {
 class MasterState(TypedDict):
     target: str
     round_no: int
-    max_rounds: int
     dag: dict[str, Any]
     tasks_dispatched: Annotated[list[dict], operator.add]
     round_views: Annotated[list[dict], operator.add]
@@ -72,7 +72,6 @@ class MasterContext:
     gateway: ModelGateway
     policy: PolicyEngine
     agents: dict[AgentType, SubAgent]
-    max_rounds: int = 20
     default_routes: int = 3
     audit: AuditLogger | None = None
     enable_llm_planning: bool = True
@@ -83,6 +82,8 @@ class MasterContext:
     knowledge: Any = None       # KnowledgeStore（攻击路径模板接线，None=不接）
     ring: Any = None            # RingLedger 环形台账（与子 Agent 共持；None=不督导）
     pause_gate: Any = None      # 暂停门（与子 Agent 共持；None=无暂停能力）
+    questions: Any = None       # QuestionBroker（复盘向用户提问；None=不可用）
+    journal: Any = None         # 执行台账与加密检查点
 
     def __post_init__(self) -> None:
         if self.audit is None:
@@ -106,23 +107,42 @@ class MasterAgent:
 
     def _build_graph(self):
         graph = StateGraph(MasterState)
-        graph.add_node("meta_plan", self._meta_plan)
-        graph.add_node("dispatch", self._dispatch)
-        graph.add_node("aggregate", self._aggregate)
-        graph.add_node("review", self._review)
+        graph.add_node("meta_plan", self._checkpoint_node("meta_plan", self._meta_plan))
+        graph.add_node("dispatch", self._checkpoint_node("dispatch", self._dispatch))
+        graph.add_node("aggregate", self._checkpoint_node("aggregate", self._aggregate))
+        graph.add_node("review", self._checkpoint_node("review", self._review))
         graph.set_entry_point("meta_plan")
         graph.add_edge("meta_plan", "dispatch")
         graph.add_edge("dispatch", "aggregate")
         graph.add_edge("aggregate", "review")
-        graph.add_conditional_edges(
-            "review",
-            lambda s: "continue" if s["continue_iteration"] else "end",
-            {"continue": "meta_plan", "end": END},
-        )
+        # 单段以 review 收束：继续/收手由外层分段循环携带状态决策——
+        # 框架递归深度只覆盖一段（4 个节点），不构成长期迭代的上限
+        graph.add_edge("review", END)
         return graph.compile()
 
+    def _checkpoint_node(self, name: str, handler: Any) -> Any:
+        async def execute(state: MasterState) -> dict[str, Any]:
+            journal = getattr(self.ctx, "journal", None)
+            if journal is not None:
+                journal.checkpoint("master", "master", f"before_{name}", dict(state))
+            update = await handler(state)
+            if journal is not None:
+                merged = {**state, **update}
+                # 与图中的 operator.add reducer 保持一致，避免遗漏本轮任务/视图。
+                for key in ("tasks_dispatched", "round_views"):
+                    merged[key] = list(state.get(key, [])) + list(update.get(key, []))
+                journal.checkpoint("master", "master", f"after_{name}", merged)
+            return update
+
+        return execute
+
     async def run(self, authorization: Authorization, target: str) -> dict[str, Any]:
-        """启动多轮闭环迭代，直至收敛或轮次耗尽。"""
+        """启动多轮闭环迭代，直至模型复盘判定收敛或用户停止。
+
+        分段执行：每段一轮（规划→派发→汇总→复盘），段间状态由外层循环
+        携带——单段步数固定，框架递归上限不约束业务收敛；是否继续只由
+        复盘决策与用户停止决定，不设固定回合顶。
+        """
         assert self.ctx.audit is not None
         self.ctx.audit.log("decision.change", self.agent_id, {
             "action": "engagement_start", "target": target, "mode": authorization.mode.value})
@@ -133,10 +153,9 @@ class MasterAgent:
             agent_type=AgentType.MASTER, updated_by=self.agent_id,
             dedup_key=f"auth|{authorization.auth_id}",
         )
-        initial: MasterState = {
+        state: MasterState = {
             "target": target,
             "round_no": 0,
-            "max_rounds": self.ctx.max_rounds,
             "dag": TaskDAG().to_dict(),
             "tasks_dispatched": [],
             "round_views": [],
@@ -147,8 +166,15 @@ class MasterAgent:
         # 用户直达通道：与派发/督导隔离，整场运行期间并行消费用户消息
         chat_task = (asyncio.create_task(self._user_chat_watch())
                      if self.ctx.enable_llm_planning else None)
+        total_dispatched = 0
         try:
-            final = await self._graph.ainvoke(initial)
+            while True:
+                final = await self._graph.ainvoke(state)
+                total_dispatched += len(final["tasks_dispatched"])
+                if not final["continue_iteration"]:
+                    break
+                # 下一段携带全部累积态势；本轮派发记录不带入（路由摘要按轮取用）
+                state = {**final, "tasks_dispatched": []}
         finally:
             if chat_task is not None:
                 chat_task.cancel()
@@ -162,7 +188,7 @@ class MasterAgent:
             "dag_stats": final_dag.stats(),
             "dag_nodes": self._dag_snapshot(final_dag),
             "round_views": final["round_views"],
-            "tasks_dispatched": len(final["tasks_dispatched"]),
+            "tasks_dispatched": total_dispatched,
         }
         self.ctx.audit.log("decision.change", self.agent_id,
                            {"action": "engagement_end", **summary})
@@ -194,7 +220,21 @@ class MasterAgent:
                     plan_source = "rule"
             plan["dag_nodes"] = self._ensure_business_gate(
                 plan.get("dag_nodes", []))
-            created = dag.upsert_from_plan(plan.get("dag_nodes", []), round_no)
+            try:
+                created = dag.upsert_from_plan(plan.get("dag_nodes", []), round_no)
+            except SpiritScoutError as exc:
+                # 计划不可落图（未知依赖/成环）：明确落痕后回退规则计划，
+                # 不让一次坏规划卡死整轮
+                ctx.audit.log("decision.change", self.agent_id, {
+                    "action": "plan_rejected", "round": round_no,
+                    "source": plan_source, "reason": str(exc)[:200]})
+                if plan_source != "llm":
+                    raise
+                plan = self._rule_plan(state)
+                plan_source = "rule"
+                plan["dag_nodes"] = self._ensure_business_gate(
+                    plan.get("dag_nodes", []))
+                created = dag.upsert_from_plan(plan.get("dag_nodes", []), round_no)
             ctx.audit.log("decision.change", self.agent_id, {
                 "action": "meta_plan", "round": round_no, "source": plan_source,
                 "new_nodes": [n.node_id for n in created],
@@ -233,6 +273,7 @@ class MasterAgent:
                 payload={"tactic": node.tactic, "technique": node.technique or "",
                          "node_title": node.title,
                          "mission": self._mission(),
+                         "execution_recovery": self.ctx.extra.get("execution_recovery", {}),
                          "rules": self._rules()[:1500],
                          "recent_experience": (self.ctx.extra.get("recent_experience") or [])[-3:],
                          "challenge": challenge or None},
@@ -320,7 +361,8 @@ class MasterAgent:
                                        "description")},
             })
         try:
-            resp = await ctx.gateway.chat(
+            resp = await chat_decision(
+                ctx.gateway,
                 [
                     {"role": "system", "content": self._system_prompt()
                       + "\nROLE: dispatch_plan"},
@@ -341,6 +383,7 @@ class MasterAgent:
                             "\"rationale\": str}]}，每个任务都必须给出。"),
                     }, ensure_ascii=False)},
                 ],
+                audit=ctx.audit, actor=self.agent_id,
                 task_type="meta_planning", response_format="json",
                 reasoning_effort="low",
             )
@@ -427,16 +470,19 @@ class MasterAgent:
                        if Task.model_validate(t["task"]).round_no == state["round_no"]]
         round_tasks = [Task.model_validate(s["task"]) for s in round_specs]
 
-        async def _run_one(spec: dict[str, Any], task: Task) -> tuple[str, bool]:
+        async def _run_one(spec: dict[str, Any], task: Task) -> tuple[str, TaskStatus]:
             agent = ctx.agents[task.agent_type]
             try:
                 await agent.run(task)
-                return spec["node_id"], True
+                status = task.status if task.status in {
+                    TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.PRUNED, TaskStatus.CANCELLED
+                } else TaskStatus.FAILED
+                return spec["node_id"], status
             except Exception as exc:  # noqa: BLE001 —— 单子 Agent 故障不影响全局（2.1-3）
                 assert ctx.audit is not None
                 ctx.audit.log("task.failed", self.agent_id,
                               {"task_id": task.task_id, "error": str(exc)[:300]})
-                return spec["node_id"], False
+                return spec["node_id"], TaskStatus.FAILED
 
         # 下发决策（复杂度/路线预算/思考强度）与子 Agent 执行并行：裁定本身
         # 是一次模型调用（重推理端点上可达十余秒），串行挡在开工路径上纯属
@@ -465,8 +511,8 @@ class MasterAgent:
                 assign_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await assign_task
-        for node_id, ok in results:
-            dag.mark(node_id, TaskStatus.DONE if ok else TaskStatus.FAILED)
+        for node_id, status in results:
+            dag.mark(node_id, status)
         self._write_dag_snapshot(dag)
         return {"dag": dag.to_dict()}
 
@@ -558,9 +604,11 @@ class MasterAgent:
                 "回答用户：确认收到指导意见、回答疑问、简述当前态势与下一步"
                 "打算。需要子 Agent 调整方向或分析新上传的附件时，同时在 "
                 "steering 里给出建议（agent 必须取自 agents 列表，hint 一句话，"
-                "涉及附件写明文件路径，子 Agent 可直接读取）；无需调整则 "
-                "steering 给空列表。返回 JSON：{\"reply\": str, \"steering\": "
-                "[{\"agent\": str, \"hint\": str, \"rationale\": str}]}"),
+                "涉及附件写明文件路径，子 Agent 可直接读取；hint 会随会话页"
+                "展示给用户——用平实中文，不用 HAR、PoC 这类行话缩写）；"
+                "无需调整则 steering 给空列表。返回 JSON：{\"reply\": str, "
+                "\"steering\": [{\"agent\": str, \"hint\": str, "
+                "\"rationale\": str}]}"),
         }
         try:
             resp = await self.ctx.gateway.chat(
@@ -568,7 +616,7 @@ class MasterAgent:
                     {"role": "system", "content": self._system_prompt()
                      + "\nROLE: user_chat"},
                     {"role": "user",
-                     "content": json.dumps(payload, ensure_ascii=False)},
+                     "content": compact_json(payload, max_chars=16000)},
                 ],
                 task_type="meta_planning", response_format="json",
                 reasoning_effort="low",   # 对话应答要快，不与重推理抢档
@@ -690,6 +738,7 @@ class MasterAgent:
             payload: dict[str, Any] = {
                 "action": "steer",
                 "mission": self._mission()[:1000],
+                "business_context": shared_context(self.ctx.blackboard),
                 "progress": digest,
                 "agents": valid_agents,
                 "constraints": (
@@ -701,12 +750,14 @@ class MasterAgent:
                             "{\"steering\": [{\"agent\": 仅 agents 列表之一, "
                             "\"hint\": 一句话方向建议, \"rationale\": 判断依据}]}"),
             }
-            resp = await self.ctx.gateway.chat(
+            resp = await chat_decision(
+                self.ctx.gateway,
                 [
                     {"role": "system", "content": self._system_prompt()
                      + "\nROLE: collab_judge"},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                    {"role": "user", "content": compact_json(payload, max_chars=16000)},
                 ],
+                audit=self.ctx.audit, actor=self.agent_id,
                 task_type="meta_planning", response_format="json",
                 reasoning_effort=self._MASTER_EFFORT,
             )
@@ -751,38 +802,40 @@ class MasterAgent:
         # 漏洞终审（4.1.1 主 Agent 终审权）：合规已通过且 PoC 验证 → 确认收录
         verdicts = self._final_verdicts()
 
-        # 收敛判定（5.1.4 结束条件：时间/轮次耗尽、核心目标完成、无新发现）
+        # 收敛判定交由模型复盘：节点跑完只是态势输入（DAG 状态随视图进入
+        # 复盘上下文），目标是否达成、是否补节点、何时收手由模型判断——
+        # 确定性数据为空不替代目标完成判断，不设固定回合顶。用户随时
+        # 可停；唯一确定性快路是「Flag 已收且全部节点完成」（该收手无需
+        # 再问一次模型）。
         stop_reason = ""
         flags_pending = self._ctf_flags_pending(view)
-        if next_round >= state["max_rounds"]:
-            stop_reason = "轮次上限"
-        elif not dag.has_unfinished() and not view["vuln_in_pipeline"] and not flags_pending:
-            stop_reason = "DAG 全部完成且核验流水线清空"
-
-        # CTF/渗透赛：骨架路线跑完 ≠ 题解尽——Flag 未收时硬收敛门放行，
-        # 交由 LLM 复盘决定换思路再攻还是收手；不设「连续无进展熔断」，
-        # 何时收手由模型复盘判断或用户手动停止（后端规则不做进度的刽子手）
-
-        # LLM 全局复盘（建议者）；规则引擎裁决：DAG 未竟时否决收敛建议。
-        # Flag 已收且 DAG 全 done → 不需要 LLM 复盘来确认"该收手了"
-        flag_done = (not flags_pending
+        flag_done = (bool(view.get("flags"))
+                     and not flags_pending
                      and not dag.has_unfinished()
                      and not view.get("vuln_in_pipeline"))
         if flag_done:
             stop_reason = "核心目标已达成，全部节点完成"
-        elif not stop_reason and not dag.has_unfinished() and not flags_pending:
-            pass   # 还有其他收敛判定逻辑
         llm_decision = (await self._llm_review(state, view)
                         if ctx.enable_llm_planning and not stop_reason else None)
+        if llm_decision is not None and (
+                not isinstance(llm_decision, dict)
+                or type(llm_decision.get("continue_iteration")) is not bool):
+            # 只有明确的布尔决策能收尾；缺字段或字符串 false 不是停止指令。
+            ctx.audit.log("llm.review_failed", self.agent_id, {
+                "round": state["round_no"], "error": "复盘缺少有效的 continue_iteration 布尔值"})
+            llm_decision = None
         deferred_replan = False
         if llm_decision and not stop_reason:
+            if llm_decision.get("continue_iteration", False):
+                await self._ask_user_from_review(llm_decision)
             if not llm_decision.get("continue_iteration", False):
-                if dag.has_unfinished():
-                    ctx.audit.log("decision.change", self.agent_id, {
-                        "action": "llm_stop_vetoed", "round": state["round_no"],
-                        "reason": "DAG 存在未完成任务，规则引擎否决 LLM 收敛建议"})
-                else:
-                    stop_reason = f"主Agent决策收敛: {llm_decision.get('reason', '')[:120]}"
+                stop_reason = f"主Agent决策收敛: {llm_decision.get('reason', '')[:120]}"
+                # 派发阶段已经等待本轮执行者收尾；残留节点不否决模型的
+                # 停止决策，撤销尚未派发的节点并保留明确原因。
+                for node in dag.all_nodes():
+                    if node.status in (TaskStatus.PENDING, TaskStatus.DISPATCHED):
+                        dag.mark(node.node_id, TaskStatus.CANCELLED)
+                        node.meta["cancel_reason"] = stop_reason
             elif llm_decision.get("dag_nodes"):
                 nodes = self._filter_plannable(llm_decision["dag_nodes"])
                 if ctx.plan_override is not None:
@@ -798,11 +851,22 @@ class MasterAgent:
                     # 决策永远到不了下一轮。
                     deferred_replan = bool(nodes)
                 else:
-                    dag.upsert_from_plan(nodes, next_round)
+                    try:
+                        dag.upsert_from_plan(nodes, next_round)
+                    except SpiritScoutError as exc:
+                        # 复盘建议不可落图（未知依赖/成环）：留痕后不入图，
+                        # 本轮收敛判定按「模型继续但无新节点」走下方回元规划
+                        ctx.audit.log("decision.change", self.agent_id, {
+                            "action": "llm_nodes_rejected", "round": state["round_no"],
+                            "reason": str(exc)[:200]})
 
         if (not stop_reason and not deferred_replan
                 and not dag.ready_nodes() and not dag.has_unfinished()):
-            if flags_pending:
+            if llm_decision is not None and llm_decision.get("continue_iteration"):
+                # 模型明确要继续但没给新节点：回元规划重规划（有全量态势
+                # 可补节点）——继续是决策，不因「无就绪任务」拦下
+                deferred_replan = True
+            elif flags_pending:
                 stop_reason = ("Flag 未收且复盘不可用（LLM 未应答/未启用），收敛"
                                if llm_decision is None
                                else "Flag 未收且复盘未给出新方向")
@@ -867,12 +931,14 @@ class MasterAgent:
         try:
             tactic_map = self.ctx.tactic_map or TACTIC_AGENT_MAP
             dag = TaskDAG.from_dict(state["dag"])
-            resp = await self.ctx.gateway.chat(
+            resp = await chat_decision(
+                self.ctx.gateway,
                 [
                     {"role": "system", "content": self._system_prompt() + "\nROLE: meta_planner"},
-                    {"role": "user", "content": json.dumps({
+                    {"role": "user", "content": compact_json({
                         "target": state["target"], "round": state["round_no"],
                         "mission": self._mission()[:2000],
+                        "execution_recovery": self.ctx.extra.get("execution_recovery", {}),
                         "available_tactics": {
                             t: {"agent": a.value, "task_type": tt}
                             for t, (a, tt) in tactic_map.items()},
@@ -891,8 +957,9 @@ class MasterAgent:
                             "目标。按当前态势决定最有价值的交付缺口；不重复已完成"
                             "节点。有 BUSINESS-CONTEXT 时必须先建立业务上下文，其他"
                             "安全测试节点依赖它。"),
-                    }, ensure_ascii=False)[:8000]},
+                    }, max_chars=8000)},
                 ],
+                audit=self.ctx.audit, actor=self.agent_id,
                 task_type="meta_planning", response_format="json",
                 reasoning_effort=self._MASTER_EFFORT,
             )
@@ -904,7 +971,10 @@ class MasterAgent:
                 return None            # 全部不可调度：视为规划失败，回退规则
             data["dag_nodes"] = nodes
             return data
-        except Exception:  # noqa: BLE001 —— 规划失败回退规则规划
+        except Exception as exc:  # noqa: BLE001 —— 规划失败回退规则规划（留痕备查）
+            assert self.ctx.audit is not None
+            self.ctx.audit.log("llm.plan_failed", self.agent_id, {
+                "round": state["round_no"], "error": str(exc)[:300]})
             return None
 
     def _filter_plannable(self, plan_nodes: list[Any]) -> list[dict[str, Any]]:
@@ -940,10 +1010,7 @@ class MasterAgent:
             "clues_total": len(clues),
             "clue_types": sorted({str(c["data"].get("clue_type")) for c in clues}),
             "vulns_by_status": by_status,
-            "business_context": (
-                self.ctx.blackboard.read(BlackboardLayer.TOPOLOGY, "business-context")
-                or {}
-            ),
+            "business_context": shared_context(bb),
         }
 
     async def _llm_review(self, state: MasterState, view: dict) -> dict[str, Any] | None:
@@ -952,6 +1019,7 @@ class MasterAgent:
             payload: dict[str, Any] = {
                 "action": "review", "view": view,
                 "mission": self._mission()[:2000],
+                "execution_recovery": self.ctx.extra.get("execution_recovery", {}),
                 "dag_stats": TaskDAG.from_dict(state["dag"]).stats(),
                 "available_tactics": {
                     t: {"agent": a.value, "task_type": tt}
@@ -973,20 +1041,78 @@ class MasterAgent:
                             "若 Flag/核心目标未收且仍有未试过的思路，"
                             "continue_iteration=true 并给出换思路的新节点"
                             "（dag_nodes 必填，否则等于收手）；"
-                            "确认无解题空间时 continue_iteration=false 并说明理由。"),
+                            "确认无解题空间时 continue_iteration=false 并说明理由。"
+                            "questions 可选（至多 2 条）：仅当继续迭代必须依赖"
+                            "只有用户能提供的输入（测试账号/凭据、登录后操作的"
+                            "请求记录、授权范围裁定）时给出，形如 "
+                            "[{\"question\": str, \"options\": [str], "
+                            "\"targets\": [str]}]；问句面向普通用户、用平实"
+                            "中文，不用 HAR、PoC 这类行话缩写（必要处一句话"
+                            "解释），后端会挂起等用户作答并把答复并入下一轮"
+                            "态势；没有这类需求就不要给。"),
             }
-            resp = await self.ctx.gateway.chat(
+            resp = await chat_decision(
+                self.ctx.gateway,
                 [
                     {"role": "system", "content": self._system_prompt() + "\nROLE: meta_planner"},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                    {"role": "user", "content": compact_json(payload, max_chars=16000)},
                 ],
+                audit=self.ctx.audit, actor=self.agent_id,
                 task_type="meta_planning", response_format="json",
                 reasoning_effort=self._MASTER_EFFORT,
             )
             data = extract_json(resp.content)
             return data
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # 复盘失败必须留痕：静默回退会让「规则收敛」冒充模型决策，
+            # 审计里只剩 llm_reason 为空，无从追查复盘为何未应答
+            assert self.ctx.audit is not None
+            self.ctx.audit.log("llm.review_failed", self.agent_id, {
+                "round": state["round_no"], "error": str(exc)[:300]})
             return None
+
+    async def _ask_user_from_review(self, llm_decision: dict[str, Any]) -> None:
+        """复盘提问：模型给出 questions 时向用户发问，答复落黑板线索层。
+
+        只有用户能给的输入（测试账号/凭据、登录后操作的请求记录、范围
+        裁定）才值得打断用户；问句由模型撰写、面向普通用户。答复写入
+        黑板 RECON_CLUE 层（clue_type=user_reply）——下一轮态势摘要即可
+        见，子 Agent 经线索共享与任务包拿到用户输入。
+        """
+        broker = getattr(self.ctx, "questions", None)
+        items = llm_decision.get("questions")
+        if broker is None or not isinstance(items, list):
+            return
+        assert self.ctx.audit is not None
+        for item in items[:2]:
+            if not isinstance(item, dict):
+                continue
+            question = str(item.get("question") or "").strip()
+            if not question:
+                continue
+            options = [str(o).strip()[:200]
+                       for o in (item.get("options") or [])[:6] if str(o).strip()]
+            targets = [str(t).strip()[:300]
+                       for t in (item.get("targets") or [])[:6]
+                       if isinstance(t, str) and t.strip()]
+            self.ctx.audit.log("master.ask_user", self.agent_id, {
+                "question": question[:500], "options": options,
+                "targets": targets})
+            result = await broker.ask("master", question, options, targets)
+            answer = str(result.get("answer") or "").strip()
+            added = result.get("scope_added") or []
+            self.ctx.audit.log("master.ask_answered", self.agent_id, {
+                "question": question[:200], "answer": answer[:300],
+                "scope_added": added,
+                "cancelled": bool(result.get("cancelled"))})
+            if not answer:
+                continue
+            self.ctx.blackboard.write(
+                BlackboardLayer.RECON_CLUE, new_id("clue"),
+                {"clue_type": "user_reply", "value": answer[:500],
+                 "confidence": 1.0, "detail": question[:200],
+                 "task_id": "", "found_by": self.agent_id},
+                agent_type=AgentType.MASTER, updated_by=self.agent_id)
 
     def _rule_plan(self, state: MasterState) -> dict[str, Any]:
         """规则化初始规划：业务体验 → 侦察 → 端口测绘 → 主机审计 → Web 探测 → 横向。"""

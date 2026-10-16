@@ -29,6 +29,11 @@
 #
 # context_window：模型上下文窗口（token），填 0 或省略表示未声明。
 #
+# max_output_tokens：单次输出上限（token），填 0 或省略表示不向端点发送
+# max_tokens——由端点按模型自身设定决定（推荐默认）。思考型模型会在思考上
+# 消耗输出额度，设小了正文会被截成半截 JSON；确有需要收紧的模型才显式填值。
+# Anthropic Messages 协议必填该项：档案未声明时按 32000 保底下发。
+#
 # reasoning_effort_levels：该模型支持的思考强度取值——**由各模型自己声明，
 # 没有统一枚举**（有的模型是 low/medium/high，有的另有 ultra 之类，有的完全
 # 不吃这一项）。灵枢下发任务时只能从这个列表里挑，列表为空则该模型不发送
@@ -74,6 +79,7 @@ models:
     tier: flagship
     capabilities: [reasoning, code, chinese, security]
     context_window: 0               # 0 = 未声明；按端点文档填实际窗口
+    max_output_tokens: 0            # 0 = 不发送（端点自定）；确要收紧才填值
     reasoning_effort_levels: []     # 端点支持的档位（如 [low, medium, high]）；不确定就留空
     cost_input_per_mtok: 0.8        # 元/百万 token，仅用于预算治理
     cost_output_per_mtok: 2.0

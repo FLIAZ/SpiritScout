@@ -24,6 +24,7 @@ class MasterReviewTests(unittest.IsolatedAsyncioTestCase):
             extra={"user_inbox": []},
             plan_override=lambda state: {"dag_nodes": []},
             tactic_map={"NEXT": (AgentType.RECON, "recon")},
+            pause_gate=None,
         )
         master._final_verdicts = Mock(return_value=[])
         master._llm_review = AsyncMock(return_value={
@@ -39,7 +40,6 @@ class MasterReviewTests(unittest.IsolatedAsyncioTestCase):
         state = {
             "target": "example.test",
             "round_no": 0,
-            "max_rounds": 5,
             "dag": dag.to_dict(),
             "tasks_dispatched": [],
             "round_views": [view],

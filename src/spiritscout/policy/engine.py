@@ -16,7 +16,8 @@ from spiritscout.core.audit import AuditLogger, NullAuditLogger
 from spiritscout.core.exceptions import PolicyViolation
 from spiritscout.core.models import RunMode
 from spiritscout.policy.scope import ScopeGuard
-from spiritscout.tools.spec import RiskLevel, ToolSpec
+from spiritscout.tools.invocation import current_invocation
+from spiritscout.tools.spec import ActionCategory, RiskLevel, ToolSpec
 
 # 各模式禁用的工具类别（G2）
 _MODE_FORBIDDEN_TOOLS: dict[RunMode, set[str]] = {
@@ -25,8 +26,9 @@ _MODE_FORBIDDEN_TOOLS: dict[RunMode, set[str]] = {
     RunMode.COMPETITION: set(),                       # 由赛制规则动态追加
 }
 
-# 敏感操作动作集（G5，与 Scope.allow_sensitive_actions 联动）
-SENSITIVE_ACTIONS = {"reverse_shell", "webshell_upload", "container_escape", "brute_force"}
+# 敏感操作动作集（G5）：类别由模型在工具决策中如实自报（action 参数），
+# 管道只认类别、不扫内容——不写关键词模板，不用内容猜测代替模型判断。
+SENSITIVE_ACTIONS = {a.value for a in ActionCategory if a != ActionCategory.ANALYSIS}
 
 
 @dataclass
@@ -59,35 +61,41 @@ class PolicyEngine:
     # ------------------------------------------------------------ 工具门
 
     async def ensure_tool_allowed(self, spec: ToolSpec, action: str | None = None) -> None:
-        """异步工具门：敏感动作未授权且挂有审批门时，先即时询问操作者
-        （分支挂起等待裁决）；允许 → 写入会话级批准集后放行，拒绝/无门 →
-        落入 check_tool 按违规拒绝。破坏性工具与模式禁用不进入询问——
-        G2/G3 是不可让渡的硬红线。"""
+        """敏感动作逐次审批，只授权当前调用；不向会话级动作集合写入许可。"""
         act = action or spec.name
+        granted = False
         if (
             spec.risk != RiskLevel.DESTRUCTIVE
             and spec.name not in self.forbidden_tools
             and (spec.risk == RiskLevel.INTRUSIVE or act in SENSITIVE_ACTIONS)
-            and not self.guard.is_sensitive_allowed(act)
-            and self.approval_gate is not None
         ):
-            granted = await self.approval_gate(
-                act, f"工具 {spec.name}（风险级 {spec.risk.value}）请求执行动作 {act}")
-            if granted:
-                self.guard.approve_sensitive(act)
-        self.check_tool(spec, action)
+            if self.approval_gate is None:
+                # 无交互面：不能静默放行，留痕后交给 check_tool 拒绝
+                self.audit.log("policy.approval_unavailable", "policy_engine",
+                               {"tool": spec.name, "action": act})
+            else:
+                context = current_invocation.get()
+                detail = f"工具 {spec.name}（风险级 {spec.risk.value}）请求执行动作 {act}"
+                if context is not None:
+                    detail += (f"；调用 {context.invocation_id}"
+                               f"；参数摘要 {context.params_digest}")
+                granted = await self.approval_gate(act, detail)
+                if context is not None and context.record_approval is not None:
+                    context.record_approval(act, granted)
+        self.check_tool(spec, action, invocation_approved=granted)
 
-    def check_tool(self, spec: ToolSpec, action: str | None = None) -> None:
+    def check_tool(self, spec: ToolSpec, action: str | None = None, *,
+                   invocation_approved: bool = False) -> None:
         """工具调用前硬校验。任何违规 → PolicyViolation（拒绝执行）。"""
         if spec.risk == RiskLevel.DESTRUCTIVE:
             self._deny(f"破坏性工具一律禁止: {spec.name}（G3 禁 DoS）")
         if spec.name in self.forbidden_tools:
             self._deny(f"模式 {self.mode.value} 禁用工具: {spec.name}（G2 模式能力边界）")
         if spec.risk == RiskLevel.INTRUSIVE or (action and action in SENSITIVE_ACTIONS):
-            if not self.guard.is_sensitive_allowed(action or spec.name):
+            if not invocation_approved:
                 self._deny(
-                    f"敏感操作未授权: {action or spec.name}（G5：需 scope.allow_sensitive_actions "
-                    f"显式开启并完成人工确认）"
+                    f"敏感操作未授权: {action or spec.name}"
+                    f"（G5：需用户对本次调用即时审批放行）"
                 )
             act = action or spec.name
             if act in self.platform_rule.requires_approval_for:

@@ -40,6 +40,45 @@ def normalize_api_key(raw: str) -> str:
     return ""
 
 
+def canonical_provider(provider: dict[str, Any]) -> dict[str, Any]:
+    """请求体 → 规范供应商条目：只用已声明字段重新序列化（api_key 置空）。
+
+    未知字段不透传——请求体原样写盘会让污染字段进 YAML、读接口回吐；
+    密钥永远不在这里（G8），直填密钥走 api_key_value 由调用方入密钥库。
+    """
+    try:
+        validated = ProviderEntry.model_validate(
+            {k: v for k, v in provider.items() if k in ProviderEntry.model_fields})
+    except Exception as exc:
+        raise SpiritScoutError(f"供应商条目校验失败: {exc}") from exc
+    data = validated.model_dump()
+    data["api_key"] = normalize_api_key(str(data.get("api_key") or ""))
+    return data
+
+
+def canonical_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """请求体 → 规范模型条目：只用已声明字段重新序列化。
+
+    模型接口收到密钥字段直接拒绝（密钥属于供应商，走供应商的
+    api_key_value）；其余未知字段丢弃，不进 YAML、不回传。
+    """
+    if "api_key_value" in entry:
+        raise SpiritScoutError(
+            "密钥属于供应商：请在模型所属供应商里设置密钥"
+            "（api_key_value，加密入密钥库）——模型接口不接受密钥字段")
+    if str(entry.get("api_key") or "").strip():
+        raise SpiritScoutError(
+            "密钥不写进配置文件（G8）——请用供应商的 api_key_value 字段直填")
+    try:
+        validated = ModelEntry.model_validate(
+            {k: v for k, v in entry.items() if k in ModelEntry.model_fields})
+    except Exception as exc:
+        raise SpiritScoutError(f"模型条目校验失败: {exc}") from exc
+    data = validated.model_dump()
+    data.pop("api_key", None)      # 密钥属于供应商，模型条目不落密钥字段
+    return data
+
+
 # ------------------------------------------------------------ 读
 
 
@@ -127,8 +166,7 @@ def write_config(path: str | Path, providers: list[dict[str, Any]],
 def upsert_provider(path: str | Path, provider: dict[str, Any], *,
                     original_name: str | None = None) -> list[dict[str, Any]]:
     """新增（original_name=None）或更新供应商；重名/不存在抛 SpiritScoutError。"""
-    provider = dict(provider,
-                    api_key=normalize_api_key(str(provider.get("api_key") or "")))
+    provider = canonical_provider(provider)
     providers, models = read_config(path)
     if original_name is None:
         if any(p.get("name") == provider.get("name") for p in providers):
@@ -176,8 +214,7 @@ def delete_provider(path: str | Path, name: str) -> list[dict[str, Any]]:
 def upsert_entry(path: str | Path, entry: dict[str, Any], *,
                  original_model: str | None = None) -> list[dict[str, Any]]:
     """新增（original_model=None）或更新模型；ID 冲突/不存在抛 SpiritScoutError。"""
-    entry = dict(entry)
-    entry.pop("api_key", None)      # 密钥属于供应商，模型条目不带密钥字段
+    entry = canonical_entry(entry)   # 密钥字段拒绝、未知字段丢弃、规范化
     providers, entries = read_config(path)
     if original_model is None:
         if any(e.get("model") == entry.get("model") for e in entries):

@@ -132,6 +132,9 @@ class FlagManager:
             cand.submit_response = "本题未配置提交接口，Flag 仅提取待人工判定"
             return cand
         async with self._lock:
+            # 等锁期间其他调用可能已经拿到终判，必须在锁内再次检查。
+            if cand.submitted and cand.accepted is not None:
+                return cand
             for attempt in range(1, self.max_attempts + 1):
                 await self._throttle()
                 try:

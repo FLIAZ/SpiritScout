@@ -82,7 +82,8 @@ class PortScanAgent(SubAgent):
         return StepResult(
             ok=True, value=min(0.15 * len(findings), 0.9),
             findings=findings,
-            note=(f"端口测绘 {step['host']}：开放 {len(findings)}"
+            note=(res.stdout if parsed.get("proxy_virtual") else
+                  f"端口测绘 {step['host']}：开放 {len(findings)}"
                   f"/{parsed.get('scanned', 0)}（{', '.join(f['value'] for f in findings[:6])}"
                   f"{'…' if len(findings) > 6 else ''}）"))
 
@@ -223,7 +224,8 @@ class HostVulnAgent(SubAgent):
                   if hits else f"{base} 无管理面暴露证据"
                   + (f"；可达无证据 {len(clues)} 条留线索" if clues else "")))
 
-    async def _step_gap(self, task: Task) -> StepResult:
+    async def _step_gap(self, task: Task,
+                        step: dict[str, Any] | None = None) -> StepResult:
         return StepResult(ok=True, value=0.1, final_note=True,
                           note="无已观测服务：等待测绘/侦察路线产出后再审计")
 

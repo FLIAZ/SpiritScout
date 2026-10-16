@@ -25,6 +25,10 @@ from spiritscout.config.settings import ModelEntry
 # 流式增量回调：(kind, text) -> None | Awaitable[None]
 DeltaCallback = Callable[[str, str], Any]
 
+# Anthropic Messages 协议必填输出上限；模型/档案都未声明时的保底值
+# （对照同类 Agent 实践：按模型最大输出给足，思考型模型不再被小顶截断）
+_ANTHROPIC_MIN_MAX_TOKENS = 32000
+
 
 async def emit_delta(on_delta: DeltaCallback | None, kind: str, text: str) -> None:
     """投递一个流式增量（回调失败不影响主链——增量只是观感，不是数据）。"""
@@ -91,7 +95,7 @@ class ChatBackend(abc.ABC):
         messages: list[dict[str, Any]],
         *,
         temperature: float = 0.2,
-        max_tokens: int = 4096,
+        max_tokens: int | None = None,
         timeout: int = 120,
         response_format: str | None = None,
         tools: list[dict[str, Any]] | None = None,
@@ -103,7 +107,9 @@ class ChatBackend(abc.ABC):
         "tool_calls": [{"id","name","arguments","raw"}], "finish_reason"}
 
         reasoning_effort：思考强度取值（该模型自己声明的档位，见 ModelEntry）；
-        空 = 不下发，由端点用默认档。"""
+        空 = 不下发，由端点用默认档。
+        max_tokens：输出上限；None = 请求不带该字段（端点按模型自身设定，
+        Anthropic Messages 协议必填、此时给 32000 保底）。"""
 
 
 def extract_json(text: str) -> Any:
@@ -166,7 +172,7 @@ class LiteLLMBackend(ChatBackend):
         messages: list[dict[str, Any]],
         *,
         temperature: float = 0.2,
-        max_tokens: int = 4096,
+        max_tokens: int | None = None,
         timeout: int = 120,
         response_format: str | None = None,
         tools: list[dict[str, Any]] | None = None,
@@ -199,7 +205,7 @@ class LiteLLMBackend(ChatBackend):
         messages: list[dict[str, Any]],
         *,
         temperature: float,
-        max_tokens: int,
+        max_tokens: int | None,
         timeout: int,
         response_format: str | None,
         anthropic: bool,
@@ -214,9 +220,14 @@ class LiteLLMBackend(ChatBackend):
             "model": entry.model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
             "timeout": timeout,
         }
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        elif anthropic:
+            # Anthropic Messages 协议必填输出上限：档案未声明时按模型最大
+            # 输出给足保底，思考预算也从中扣除（_apply_effort）
+            kwargs["max_tokens"] = _ANTHROPIC_MIN_MAX_TOKENS
         if entry.base_url:
             kwargs["api_base"] = entry.base_url
         if entry.api_key:
@@ -353,7 +364,7 @@ class LiteLLMBackend(ChatBackend):
         messages: list[dict[str, Any]],
         *,
         temperature: float,
-        max_tokens: int,
+        max_tokens: int | None,
         timeout: int,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | None = None,
@@ -361,18 +372,55 @@ class LiteLLMBackend(ChatBackend):
     ) -> dict[str, Any]:
         import litellm  # 延迟导入
 
-        # messages 协议 → Responses 协议：system 提升为 instructions，其余入 input
+        # messages 协议 → Responses 协议：system 提升为 instructions，其余入
+        # input。多轮工具对话必须显式转 function_call / function_call_output
+        # 项并回填 call_id——只映射 role/content 会把"谁调了什么、结果对应
+        # 哪次调用"全部抹掉（本地回显端点实测证实），端点侧无法续上工具轮。
         instructions = "\n".join(m.get("content", "") for m in messages
                                  if m.get("role") == "system") or None
-        input_items = [{"role": m["role"], "content": m.get("content", "")}
-                       for m in messages if m.get("role") != "system"]
+        input_items: list[dict[str, Any]] = []
+        for m in messages:
+            role = m.get("role")
+            if role == "system":
+                continue
+            if role == "assistant" and m.get("tool_calls"):
+                text = str(m.get("content", "") or "")
+                if text:
+                    input_items.append({"role": "assistant", "content": text})
+                for tc in m["tool_calls"]:
+                    fn = tc.get("function") or {}
+                    input_items.append({
+                        "type": "function_call",
+                        "call_id": str(tc.get("id") or ""),
+                        "name": str(fn.get("name") or ""),
+                        "arguments": str(fn.get("arguments") or "{}"),
+                    })
+            elif role == "tool":
+                input_items.append({
+                    "type": "function_call_output",
+                    "call_id": str(m.get("tool_call_id") or ""),
+                    "output": str(m.get("content", "") or ""),
+                })
+            else:
+                input_items.append({"role": role, "content": m.get("content", "")})
+        # 工具清单同步转 Responses 形状：扁平 {name,description,parameters}，
+        # 不带 Chat Completions 的 function 包装层
+        responses_tools = [
+            {"type": "function",
+             "name": str(t["function"].get("name") or ""),
+             "description": str(t["function"].get("description") or ""),
+             "parameters": t["function"].get("parameters") or {"type": "object"}}
+            for t in (tools or [])
+            if isinstance(t, dict) and isinstance(t.get("function"), dict)
+        ]
         kwargs: dict[str, Any] = {
             "model": entry.model if entry.model.startswith("openai/") else f"openai/{entry.model}",
             "input": input_items,
             "temperature": temperature,
-            "max_output_tokens": max_tokens,
             "timeout": timeout,
         }
+        if max_tokens is not None:
+            kwargs["max_output_tokens"] = max_tokens
         if instructions:
             kwargs["instructions"] = instructions
         if entry.base_url:
@@ -381,6 +429,10 @@ class LiteLLMBackend(ChatBackend):
             kwargs["api_key"] = entry.api_key
         if tools:
             kwargs["tools"] = tools
+            if tool_choice:
+                kwargs["tool_choice"] = tool_choice
+        if responses_tools:
+            kwargs["tools"] = responses_tools
             if tool_choice:
                 kwargs["tool_choice"] = tool_choice
         if reasoning_effort:
@@ -530,7 +582,7 @@ class MockBackend(ChatBackend):
         messages: list[dict[str, Any]],
         *,
         temperature: float = 0.2,
-        max_tokens: int = 4096,
+        max_tokens: int | None = None,
         timeout: int = 120,
         response_format: str | None = None,
         tools: list[dict[str, Any]] | None = None,
@@ -659,8 +711,8 @@ class MockBackend(ChatBackend):
                            "evidence_refs": page_refs[:8]}] if page_refs else [])
             if tx_refs:
                 workflows.append({
-                    "name": "HAR 中已观测的 HTTP 交易顺序",
-                    "steps": ["按 HAR 首次出现顺序访问端点"],
+                    "name": "请求记录中已观测的 HTTP 交易顺序",
+                    "steps": ["按请求记录首次出现顺序访问端点"],
                     "evidence_refs": tx_refs[:8],
                 })
             return json.dumps({

@@ -8,12 +8,11 @@ async function loadAgents() {
       const bound = S.agents.assignments[a.key] || "";
       const available = a.status === "available";
       const bind = a.configurable ? `<div class="bind">
-          <select data-agent="${esc(a.key)}">
+          <select data-agent="${esc(a.key)}" data-orig="${esc(bound)}">
             <option value="">不指派（按模型列表顺序路由）</option>
             ${S.agents.models.map(m => `<option value="${esc(m.model)}" data-prov="${esc(m.provider || "")}" ${m.model === bound ? "selected" : ""}>${esc(m.model)}</option>`).join("")}
             ${S.agents.models.length ? "" : `<option value="" disabled>（「模型」页还没有启用模型）</option>`}
           </select>
-          <button class="btn sm save-agent" data-agent="${esc(a.key)}" disabled>保存</button>
         </div>` : `<div class="bind-note">${available ? "确定性只读角色，不调用模型" : "尚未装配，不参与任务调度"}</div>`;
       return `<div class="card acard ${available ? "" : "planned"}">
         <div class="h"><b>${esc(a.name)}</b><span class="en">${esc(a.key)}</span>
@@ -26,19 +25,46 @@ async function loadAgents() {
         ${bind}
       </div>`;
     }).join("");
-    g.querySelectorAll("select").forEach(sel => sel.onchange = () => {
-      g.querySelector(`.save-agent[data-agent="${sel.dataset.agent}"]`).disabled = false;
+    // 统一保存：改动先在卡片上标脏，页头一键提交/还原——逐卡点保存已废弃
+    const dirtySels = () => [...g.querySelectorAll("select[data-agent]")]
+      .filter(sel => sel.value !== sel.dataset.orig);
+    const refreshBindBar = () => {
+      const n = dirtySels().length;
+      $("#bind-save").hidden = n === 0;
+      // 按钮可用性由这里统一裁决：保存成功/失败后的复位都走这，不再手工翻 disabled
+      $("#bind-save-btn").disabled = n === 0;
+      $("#bind-save-btn").textContent = n ? `保存指派（${n} 处修改）` : "保存指派";
+    };
+    g.querySelectorAll("select[data-agent]").forEach(sel => sel.onchange = () => {
+      sel.closest(".selx")?.classList.toggle("dirty", sel.value !== sel.dataset.orig);
+      refreshBindBar();
     });
-    g.querySelectorAll(".save-agent").forEach(btn => btn.onclick = async () => {
-      const key = btn.dataset.agent;
-      const model = g.querySelector(`select[data-agent="${key}"]`).value;
+    $("#bind-revert").onclick = () => {
+      dirtySels().forEach(sel => {
+        sel.value = sel.dataset.orig;
+        selxSync(sel);
+        sel.closest(".selx")?.classList.remove("dirty");
+      });
+      refreshBindBar();
+    };
+    $("#bind-save-btn").onclick = async () => {
+      const sels = dirtySels();
+      if (!sels.length) return;
+      const btn = $("#bind-save-btn");
+      btn.disabled = true;
       try {
-        S.agents = await api(`/api/agents/${encodeURIComponent(key)}`,
-          { method: "PUT", body: JSON.stringify({ model }) });
-        toast(model ? `已为「${agentName(key)}」指派 ${model}` : `「${agentName(key)}」恢复默认路由`);
+        for (const sel of sels) {
+          S.agents = await api(`/api/agents/${encodeURIComponent(sel.dataset.agent)}`,
+            { method: "PUT", body: JSON.stringify({ model: sel.value }) });
+        }
+        toast(`已保存 ${sels.length} 处模型指派，新任务即刻生效`);
         loadAgents();
-      } catch (e) { toast(e.message, true); }
-    });
+      } catch (e) {
+        toast(e.message, true);
+        btn.disabled = false;
+      }
+    };
+    refreshBindBar();
   } catch (e) { toast(e.message, true); }
 }
 
@@ -47,8 +73,8 @@ async function loadAgents() {
    密钥库加密保管（工作区 vault.db），页面不缓存、不回传。 */
 const PROVIDER_CN = { openai_compatible: "OpenAI 兼容", anthropic_compatible: "Anthropic 兼容", mock: "离线演练" };
 const fmtCtx = n => n > 0 ? (n >= 1000 ? Math.round(n / 1000) + "k" : String(n)) : "—";
-/* 内联 onclick 里的字符串实参：JSON 转义 + 去掉能提前闭合属性的字符 */
-const jsArg = s => JSON.stringify(String(s ?? "")).replace(/'/g, "\\u0027").replace(/</g, "\\u003c");
+/* 模型/供应商的操作按钮统一 data-* 化：动态值只进 HTML 属性（esc 转义），
+   不再拼内联 onclick 字符串——值里的引号、尖括号从此进不了 JS 语境 */
 const M_ICONS = {
   file: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>`,
   sync: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.7-6.4"/><path d="M21 3v6h-6"/></svg>`,
@@ -80,9 +106,9 @@ function modelTile(m) {
       : `<span class="muted" style="font-size:11.5px">默认档</span>`}</div>
     ${(m.is_fallback_for || []).length ? `<div class="mt-fb">备：${esc(m.is_fallback_for.join("、"))}</div>` : ""}
     <div class="mt-ops">
-      <button onclick='modelTest(${jsArg(m.model)})'>测试</button>
-      <button onclick='modelEdit(${jsArg(m.model)})'>编辑</button>
-      <button class="danger" onclick='modelDel(${jsArg(m.model)})'>删除</button>
+      <button data-mact="test" data-model="${esc(m.model)}">测试</button>
+      <button data-mact="edit" data-model="${esc(m.model)}">编辑</button>
+      <button class="danger" data-mact="del" data-model="${esc(m.model)}">删除</button>
     </div>
   </div>`;
 }
@@ -98,7 +124,7 @@ async function loadModels() {
       box.innerHTML = `<div class="mempty">${M_ICONS.hub}
         <div class="t">还没有供应商</div>
         <div class="s">供应商 = 一个 API 地址 + 一把密钥。添加后点「获取模型列表」从云端勾选启用；<br>服务未提供模型列表时，在供应商里手动填模型 ID。</div>
-        <button class="btn primary" onclick="providerAdd()">+ 添加供应商</button></div>`;
+        <button class="btn primary" data-pact="add">+ 添加供应商</button></div>`;
       return;
     }
     box.innerHTML = pv.providers.map(p => {
@@ -112,13 +138,13 @@ async function loadModels() {
             <div class="pb-url" title="${esc(p.base_url || "")}">${esc(p.base_url || "（未填 API 地址）")}</div>
           </div>
           <div class="pb-ops">
-            <button class="btn sm tinted" onclick='providerFetch(${jsArg(p.name)})' style="display:inline-flex;align-items:center;gap:6px">${M_ICONS.sync}获取模型列表</button>
-            <button class="icon-btn" title="编辑供应商" onclick='providerEdit(${jsArg(p.name)})'>${M_ICONS.pencil}</button>
-            <button class="icon-btn danger" title="删除供应商" onclick='providerDel(${jsArg(p.name)})'>${M_ICONS.trash}</button>
+            <button class="btn sm tinted" data-pact="fetch" data-name="${esc(p.name)}" style="display:inline-flex;align-items:center;gap:6px">${M_ICONS.sync}获取模型列表</button>
+            <button class="icon-btn" title="编辑供应商" data-pact="edit" data-name="${esc(p.name)}">${M_ICONS.pencil}</button>
+            <button class="icon-btn danger" title="删除供应商" data-pact="del" data-name="${esc(p.name)}">${M_ICONS.trash}</button>
           </div>
         </div>
         <div class="mgrid">${mine.map(modelTile).join("")}
-          <button class="ghost-tile" onclick='modelAddTo(${jsArg(p.name)})'>${M_ICONS.plus}手动添加模型</button>
+          <button class="ghost-tile" data-pact="addto" data-name="${esc(p.name)}">${M_ICONS.plus}手动添加模型</button>
         </div>
       </div>`;
     }).join("");
@@ -133,6 +159,23 @@ window.modelTest = async model => {
     else toast(d.error || "测试失败", true);
   } catch (e) { toast(e.message, true); }
 };
+
+/* 模型页操作走事件委托（容器级单监听，随 innerHTML 重渲不受影响）：
+   按钮只带 data-*，点击时从 dataset 取回原值再调对应动作 */
+$("#providers-list").addEventListener("click", ev => {
+  const mb = ev.target.closest("[data-mact]");
+  if (mb) {
+    const fn = { test: modelTest, edit: modelEdit, del: modelDel }[mb.dataset.mact];
+    if (fn) fn(mb.dataset.model);
+    return;
+  }
+  const pb = ev.target.closest("[data-pact]");
+  if (pb) {
+    const fn = { add: providerAdd, fetch: providerFetch, edit: providerEdit,
+                 del: providerDel, addto: modelAddTo }[pb.dataset.pact];
+    if (fn) fn(pb.dataset.name);
+  }
+});
 
 function fillPrefs(sel) {
   $("#m-pref").innerHTML = (S.providers || []).map(p =>

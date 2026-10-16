@@ -92,14 +92,14 @@ const VIEWS = { home: "#view-home", session: "#view-session", dash: "#view-dash"
 function show(view) {
   S.view = view;
   for (const [k, sel] of Object.entries(VIEWS)) $(sel).hidden = k !== view;
-  document.querySelectorAll("nav button").forEach(b =>
+  document.querySelectorAll(".side > nav button").forEach(b =>
     b.classList.toggle("on", b.dataset.nav === (view === "session" ? "home" : view)));
   if (view === "agents") loadAgents();
   if (view === "models") loadModels();
   if (view === "dash") renderDash();
   if (view !== "session") stopStreams();
 }
-document.querySelectorAll("nav button").forEach(b =>
+document.querySelectorAll(".side > nav button").forEach(b =>
   b.onclick = () => { S.cur = null; show(b.dataset.nav); renderSessions(); });
 $("#btn-new").onclick = () => { S.cur = null; show("home"); renderSessions(); };
 
