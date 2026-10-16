@@ -885,14 +885,19 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
 #tab-chat > .trace-wrap { display: flex; flex-direction: column; }
 #tab-chat .trace { height: auto; flex: 1; min-height: 0; }
 .agent-workbench { flex: none; min-width: 0; background: var(--surface);
-  border: 1px solid var(--line-strong); border-radius: var(--radius); margin: 3px 0 12px; }
-.agent-workbench[open] { display: flex; flex-direction: column; max-height: min(49vh, 440px); }
-.agent-workbench > summary { flex: none; cursor: pointer; padding: 11px 12px;
-  border-bottom: 1px solid var(--line); color: var(--ink); }
-.agent-workbench > summary > span:first-of-type { display: inline-flex; align-items: baseline; gap: 12px; }
-.agent-workbench summary b { font-size: 13px; letter-spacing: .03em; }
-.agent-workbench summary small, .aw-count { color: var(--ink-2); font-size: 11px; }
-.aw-count { float: right; font-family: var(--mono); }
+  border: 1px solid var(--line-strong); border-radius: var(--radius); margin: 3px 0 12px; display: flex; flex-direction: column;
+  max-height: min(49vh, 440px); overflow: hidden; }
+.aw-content { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; min-width: 0; overflow: hidden; }
+.agent-workbench > .aw-toggle { display: flex; align-items: center; gap: 9px; flex: none;
+  width: 100%; min-width: 0; text-align: left; cursor: pointer; padding: 11px 12px;
+  border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--ink); }
+.aw-toggle::before { content: "▾"; flex: none; }
+.aw-toggle[aria-expanded="false"]::before { content: "▸"; }
+.aw-toggle[aria-expanded="false"] { border-bottom: 0; }
+.agent-workbench > .aw-toggle > span:first-of-type { display: inline-flex; align-items: baseline; gap: 12px; }
+.agent-workbench .aw-toggle b { font-size: 13px; letter-spacing: .03em; }
+.agent-workbench .aw-toggle small, .aw-count { color: var(--ink-2); font-size: 11px; }
+.aw-count { flex: none; margin-left: auto; font-family: var(--mono); }
 .aw-agents { display: flex; flex: none; gap: 8px; overflow-x: auto; padding: 10px 12px; }
 .aw-agents:empty { display: none; }
 .aw-agent { flex: 0 0 172px; min-width: 0; text-align: left; padding: 9px 11px;
@@ -903,7 +908,7 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
 .aw-agent strong { font-size: 13px; }
 .aw-agent small { margin-top: 5px; font-size: 11px; color: var(--accent-ink); }
 .aw-agent > span { font-family: var(--mono); font-size: 9px; color: var(--ink-2); margin-top: 5px; }
-.aw-pane { min-height: 0; overflow-y: auto; padding: 0 12px 12px; overflow-wrap: anywhere; }
+.aw-pane { flex: 1 1 auto; min-height: 0; min-width: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 0 12px 12px; overflow-wrap: anywhere; }
 .aw-columns { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 18px; }
 .aw-columns > section { min-width: 0; }
 .aw-columns h4 { margin: 0; position: sticky; top: 0; padding: 8px 0;
@@ -919,12 +924,12 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
 .aw-entry details { margin-top: 6px; font-size: 11px; }
 .aw-entry summary { cursor: pointer; color: var(--accent-ink); }
 .aw-empty { color: var(--ink-2); font-size: 12px; line-height: 1.7; padding: 10px 0; }
-.agent-workbench button:focus-visible, .agent-workbench summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.agent-workbench button:focus-visible, .agent-workbench summary:focus-visible, .agent-workbench .aw-pane:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (max-width: 1150px) { .aw-columns { grid-template-columns: minmax(0,1fr); gap: 8px; } }
 @media (max-width: 600px) {
-  .agent-workbench[open] { max-height: 38vh; }
-  .agent-workbench > summary > span:first-of-type { display: inline-block; }
-  .agent-workbench summary small { display: block; margin-top: 3px; }
+  .agent-workbench { max-height: 38vh; }
+  .agent-workbench > .aw-toggle > span:first-of-type { display: inline-block; }
+  .agent-workbench .aw-toggle small { display: block; margin-top: 3px; }
   .aw-agent { flex-basis: 150px; }
 }
 
@@ -943,3 +948,9 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
 
 .tnode .tact > b { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .tnode .tact .tac, .tcard .what { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* 文本与元数据都服从面板宽度；正文只在工作台内部滚动。 */
+.aw-columns, .aw-entry, .aw-entry header, .aw-entry details { min-width: 0; max-width: 100%; }
+.aw-entry pre { min-width: 0; max-width: 100%; tab-size: 2; }
+.aw-entry header > *, .aw-entry > small, .aw-entry summary { min-width: 0; overflow-wrap: anywhere; }
+.agent-workbench > .aw-toggle > span:first-of-type { min-width: 0; flex-wrap: wrap; overflow-wrap: anywhere; }

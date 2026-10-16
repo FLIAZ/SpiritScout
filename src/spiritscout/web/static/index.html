@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>灵枢 SpiritScout</title>
 <link rel="stylesheet" href="/static/css/base.css?v=20261016-live">
-<link rel="stylesheet" href="/static/css/views.css?v=20261017-workers">
+<link rel="stylesheet" href="/static/css/views.css?v=20261017-workers2">
 <link rel="stylesheet" href="/static/css/deliverables.css?v=20261016-review2">
 <link rel="stylesheet" href="/static/css/resources.css?v=20261016-resources">
 </head>
@@ -108,11 +108,13 @@
       </section>
       <div id="tab-area">
         <div id="tab-chat"><aside id="session-observer" class="session-observer" aria-label="执行实况与消耗"></aside><div class="trace-wrap">
-          <details id="agent-workbench" class="agent-workbench" open>
-            <summary><span><b>子 Agent 工作台</b><small>实时分析 · 执行反馈 · 产出</small></span><span class="aw-count">0 个实例</span></summary>
+          <section id="agent-workbench" class="agent-workbench" aria-label="子 Agent 工作台">
+            <button class="aw-toggle" type="button" aria-expanded="true" aria-controls="aw-content"><span><b>子 Agent 工作台</b><small>实时分析 · 执行反馈 · 产出</small></span><span class="aw-count">0 个实例</span></button>
+            <div id="aw-content" class="aw-content">
             <div class="aw-agents" role="group" aria-label="选择子 Agent 实例"></div>
-            <div class="aw-pane" role="region" aria-label="子 Agent 分析与反馈"></div>
-          </details>
+            <div class="aw-pane" role="region" aria-label="子 Agent 分析与反馈" tabindex="0"></div>
+            </div>
+          </section>
           <div class="trace" id="trace-box"></div>
           <button id="trace-jump" type="button" hidden aria-label="回到最新轨迹" title="回到最新轨迹">↓ 回到最新</button>
         </div></div>
@@ -295,7 +297,7 @@
 <script src="/static/js/deliverables.js?v=20261016-review2"></script>
 <script src="/static/js/tool-parameters.js?v=20261016-review2"></script>
 <script src="/static/js/markdown.js?v=20261017-perf"></script>
-<script src="/static/js/agent-workbench.js?v=20261017-workers"></script>
+<script src="/static/js/agent-workbench.js?v=20261017-workers2"></script>
 <script src="/static/js/views.js?v=20261017-workers"></script>
 <script src="/static/js/console.js?v=20261017-workers"></script>
 <dialog id="resource-editor"><form method="dialog"><div class="resource-editor-head"><h3 id="resource-editor-title">资源配置</h3><button class="btn sm" aria-label="关闭" value="cancel">关闭</button></div></form>

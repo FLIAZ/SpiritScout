@@ -94,6 +94,11 @@ const AgentWorkbench = (() => {
   function reset() { if(timer!==null) clearTimeout(timer); timer=null;store=create();const root=$("#agent-workbench");if(root){for(const el of root.querySelectorAll("[data-signature]"))delete el.dataset.signature;}render(); }
   function init() {
     const root=$("#agent-workbench"); if(!root)return;
+    const toggle=root.querySelector(".aw-toggle"), content=root.querySelector(".aw-content");
+    toggle.onclick=()=>{
+      content.hidden=!content.hidden;
+      toggle.setAttribute("aria-expanded",String(!content.hidden));
+    };
     root.addEventListener("click",event=>{const b=event.target.closest("[data-aw-actor]");if(!b)return;store.selected=b.dataset.awActor;render();});
     render();
   }
