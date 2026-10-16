@@ -42,7 +42,7 @@ from spiritscout.core.models import (
 )
 from spiritscout.gateway import ModelGateway, chat_decision
 from spiritscout.gateway.backends import extract_json
-from spiritscout.gateway.context import compact_json, shared_context
+from spiritscout.gateway.context import decision_messages, shared_context
 from spiritscout.policy.engine import PolicyEngine
 from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
 from spiritscout.tools.registry import AgentToolView, ToolRegistry
@@ -124,14 +124,13 @@ class SubAgentContext:
         tool_root = (self.tools._registry
                      if isinstance(self.tools, AgentToolView) else self.tools)
         tool_view = AgentToolView(tool_root, agent_key, audit=self.audit)
-        profile = tool_view.profile
         return dataclasses.replace(
             self,
             gateway=gateway,
             tools=tool_view,
             mcp_tools={
                 name: entry for name, entry in self.mcp_tools.items()
-                if profile.allows_tool(name)
+                if tool_view.allows(name)
             },
         )
 
@@ -634,18 +633,31 @@ class SubAgent(abc.ABC):
             shared = shared_context(getattr(self.ctx, "blackboard", None))
             if shared:
                 user_obj = {**user_obj, "shared_context": shared}
+        if task is not None:
+            from spiritscout.resources.store import ResourceStore
+
+            resources = getattr(getattr(self.ctx, "knowledge", None), "resources", None)
+            if isinstance(resources, ResourceStore):
+                query = str(task.payload.get("node_title", "")) + " " + role.replace("_", " ")
+                user_obj = {**user_obj, "reference_skills": [
+                    {"id":item["skill_id"],"version":item.get("version",0),"description":item.get("description",""),
+                     "reference":item.get("body","")[:1000]} for item in resources.skills(query,include_body=True)
+                    if item.get("enabled",True)][:3]}
         # 询问通道说明单独保留，观察数据按完整结构缩减，不能截断 JSON。
         budget = max_user_chars - (len(_ASK_CHANNEL_NOTE) if _allow_ask else 0)
-        content = compact_json(user_obj, max_chars=max(budget, 500))
+
+        from spiritscout.gateway.context import decision_memory
+
+        execution = current_execution_scope.get() or ExecutionScope()
+        memory_key = f"{task.task_id if task else 'local'}:{execution.route_id}:{role}"
         try:
             resp = await chat_decision(
                 self.ctx.gateway,
-                [
-                    {"role": "system", "content": self._system_prompt() + f"\nROLE: {role}"
-                     + ("\n" + _ASK_CHANNEL_NOTE if _allow_ask else "")},
-                    {"role": "user", "content": content},
-                ],
+                decision_messages(self._system_prompt() + f"\nROLE: {role}"
+                                  + ("\n" + _ASK_CHANNEL_NOTE if _allow_ask else ""),
+                                  user_obj, max(budget, 500)),
                 audit=self.ctx.audit, actor=self.agent_id,
+                memory=decision_memory(self, memory_key),
                 task_type="execution", response_format="json",
                 timeout_seconds=timeout_seconds,
                 reasoning_effort=reasoning_effort,

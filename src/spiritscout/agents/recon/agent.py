@@ -143,11 +143,14 @@ class ReconAgent(SubAgent):
         powered = fp.get("fingerprint", {}).get("x_powered_by")
         if powered:
             techs.append(powered)
+        evidence = fp.get("fingerprint", {}).get("technologies", [])
+        techs.extend(item["name"] for item in evidence if isinstance(item, dict) and item.get("name"))
+        techs = list(dict.fromkeys(techs))
         if techs:
             self._write_clue(task, clue_type="tech_stack", value=", ".join(techs),
-                             confidence=0.8, detail={"source": "http_headers"})
-        return StepResult(ok=bool(techs), value=0.2 if techs else 0.0,
-                          note=f"技术栈: {techs or '未识别'}")
+                             confidence=0.8, detail={"source": "response_observations", "evidence": evidence})
+        return StepResult(ok=True, value=0.2 if techs else 0.0,
+                          note=f"技术栈: {', '.join(techs)}" if techs else "技术栈：当前响应未提供可确认指纹")
 
     async def _step_path_probe(self, task: Task, step: dict) -> StepResult:
         base = task.target.rstrip("/")

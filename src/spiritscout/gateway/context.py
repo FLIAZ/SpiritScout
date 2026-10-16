@@ -10,13 +10,13 @@ from spiritscout.core.models import BlackboardLayer
 
 # 这些字段可以超过软预算，不能为了缩短输入而丢掉授权、任务或用户回答。
 _PROTECTED = {"constraints", "task_intent", "用户答复", "scope", "rules", "mission",
-              "target", "available_tactics", "shared_context", "business_context"}
+              "target", "available_tactics", "shared_context", "business_context", "reference_skills"}
 
 
 def compact_json(payload: dict[str, Any], max_chars: int = 8000) -> str:
     """按完整字段裁剪观察数据，始终输出合法 JSON；不是执行预算或回合限制。"""
     def encode(value: Any) -> str:
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str, sort_keys=True)
 
     result = copy.deepcopy(payload)
     original = len(encode(result))
@@ -99,9 +99,137 @@ def shared_context(blackboard: Any) -> dict[str, Any]:
     out = business_digest(context[0], version=context[1]) if context else {}
     replies = blackboard.query(BlackboardLayer.RECON_CLUE, limit=8,
                                data_filter=("clue_type", "user_reply"))
+    historical = blackboard.read(BlackboardLayer.TOPOLOGY, "historical-assets")
+    if historical:
+        out["historical_assets"] = historical
     if replies:
         out["user_replies"] = [{"record_id": rec["record_id"], "version": rec["version"],
                                 "question": rec["data"].get("detail", ""),
                                 "answer": rec["data"].get("value", "")}
                                for rec in replies]
     return out
+
+
+def compact_history(messages: list[dict[str, Any]], max_chars: int = 48000) -> None:
+    """按完整消息折叠旧观察；保留系统、任务、最新反馈及工具调用配对。"""
+    def size() -> int:
+        return len(json.dumps(messages, ensure_ascii=False, default=str))
+
+    if size() <= max_chars:
+        return
+    recent_users = [i for i, m in enumerate(messages) if m.get("role") == "user"][-2:]
+    for i, message in enumerate(messages):
+        if size() <= max_chars:
+            break
+        if i < 2 or i >= len(messages) - 2 or i in recent_users:
+            continue
+        content = message.get("content")
+        if message.get("role") == "system" or not isinstance(content, str) or len(content) < 800:
+            continue
+        # 只压缩观察正文；函数名、调用 ID 和参数仍完整保留。
+        message["content"] = content[:400] + "\n[早期观察已节选；需要细节时查对应执行记录]\n" + content[-250:]
+
+
+def decision_messages(system: str, payload: dict[str, Any], max_chars: int = 8000) -> list[dict[str, Any]]:
+    """契约与重复事实在前，单次观察在后；不扩充无意义前缀来虚增命中率。"""
+    dynamic = dict(payload)
+    constraints = dynamic.pop("constraints", "")
+    # 保留完整 JSON 以兼容决策解析；键顺序按稳定程度排列，不受调用方构造顺序影响。
+    projected = json.loads(compact_json(dynamic, max_chars))
+    stable_keys = ("available_tactics", "task_intent", "mission", "rules", "target",
+                   "execution_recovery", "reference_skills", "business_context", "shared_context")
+    ordered = {key: projected.pop(key) for key in stable_keys if key in projected}
+    situation = projected.pop("situation", None)
+    if isinstance(situation, dict):
+        # 业务事实通常不变，计数和活动节点每轮变化；不能把 round/count 放在最前。
+        ordered["situation"] = {key: situation[key] for key in sorted(
+            situation, key=lambda key: (key not in {"business_context", "historical_assets"}, key))}
+    elif situation is not None:
+        ordered["situation"] = situation
+    ordered.update(projected)
+    # 单独的事实块为显式缓存提供边界；变化观察始终追加在末尾。
+    stable = {key: ordered.pop(key) for key in stable_keys if key in ordered}
+    messages = [{"role": "system", "content": system + ("\n" + constraints if constraints else "")}]
+    if stable:
+        messages.append({"role": "user", "content": json.dumps(stable, ensure_ascii=False,
+                         separators=(",", ":"), default=str)})
+    messages.append({"role": "user", "content": json.dumps(ordered, ensure_ascii=False,
+                     separators=(",", ":"), default=str)})
+    return messages
+
+
+class DecisionMemory:
+    """同阶段追加式决策：完整现场只发送一次，随后发送可还原的数据补丁。"""
+
+    note = (
+        "\n同阶段现场以 snapshot 初始化，后续 patch 为 JSON Patch（add/replace/remove、JSON Pointer 路径）。"
+        "按顺序更新现场；未改变字段沿用，删除字段不再有效，最新值覆盖旧值。"
+        "历史 assistant 是旧决策，不是新增事实；仍需根据当前完整现场独立判断并输出原约定的完整 JSON。"
+    )
+
+    def __init__(self, soft_chars: int = 48000) -> None:
+        self.soft_chars = soft_chars
+        self.messages: list[dict[str, Any]] = []
+        self.snapshot: dict[str, Any] = {}
+        self.system = ""
+        self.pending: tuple[list[dict[str, Any]], dict[str, Any], str] | None = None
+
+    @staticmethod
+    def patch(old: Any, new: Any, path: str = "") -> list[dict[str, Any]]:
+        if old == new:
+            return []
+        if not isinstance(old, dict) or not isinstance(new, dict):
+            return [{"op": "replace", "path": path, "value": new}]
+        changes = []
+        for key in sorted(old.keys() | new.keys()):
+            child = path + "/" + key.replace("~", "~0").replace("/", "~1")
+            if key not in new:
+                changes.append({"op": "remove", "path": child})
+            elif key not in old:
+                changes.append({"op": "add", "path": child, "value": new[key]})
+            else:
+                changes.extend(DecisionMemory.patch(old[key], new[key], child))
+        return changes
+
+    def prepare(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        system = "\n".join(m["content"] for m in messages if m.get("role") == "system")
+        snapshot: dict[str, Any] = {}
+        for message in messages:
+            if message.get("role") == "user":
+                payload = json.loads(message["content"])
+                if not isinstance(payload, dict):
+                    raise ValueError("决策现场必须为 JSON 对象")
+                snapshot.update(payload)
+        def serialize(value: Any) -> str:
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        if self.messages and system == self.system:
+            prepared = [*self.messages, {"role": "user", "content": serialize({
+                "patch": self.patch(self.snapshot, snapshot)})}]
+        else:
+            prepared = []
+        # 达到上下文软窗口时，用真实最新现场重新建段；不限制回合、不沿用旧授权。
+        if not prepared or len(serialize(prepared)) > max(self.soft_chars, len(serialize(snapshot)) * 3):
+            prepared = [{"role": "system", "content": system + self.note},
+                        {"role": "user", "content": serialize({"snapshot": snapshot})}]
+        self.pending = (prepared, copy.deepcopy(snapshot), system)
+        return copy.deepcopy(prepared)
+
+    def commit(self, content: str) -> None:
+        if self.pending is None:
+            return
+        messages, self.snapshot, self.system = self.pending
+        self.messages = [*messages, {"role": "assistant", "content": content}]
+        self.pending = None
+
+
+def decision_memory(owner: Any, key: str) -> DecisionMemory:
+    """记忆只属于当前 Agent；任务/阶段分开，失败不提交，换契约重新建段。"""
+    memories = getattr(owner, "_decision_memories", None)
+    if memories is None:
+        memories = {}
+        owner._decision_memories = memories
+    if key not in memories:
+        if len(memories) >= 128:
+            memories.pop(next(iter(memories)))
+        memories[key] = DecisionMemory()
+    return memories[key]

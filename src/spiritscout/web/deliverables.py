@@ -133,6 +133,14 @@ def read_deliverables(workspace: Path, *, kind: str = "all", query: str = "",
                         refs=[value], target=tool_preview({"url": value.get("url")}))
                 for index, gap in enumerate(data.get("gaps", [])):
                     add("hypothesis", f"gap:{index}", gap, gap, status="信息缺口")
+            elif data.get("kind") == "secretary":
+                decisions = {item["id"]: item for item in data.get("decisions", []) if isinstance(item, dict) and "id" in item}
+                for item in data.get("suggestions", []):
+                    decision = decisions.get(item["id"], {})
+                    add("outcome", item["id"], "参谋建议：" + item.get("summary", ""),
+                        decision.get("reason") or item.get("benefit"),
+                        status={"accepted": "已采纳", "partial": "部分采纳", "rejected": "未采纳", "needs_evidence": "待补证"}.get(decision.get("verdict"), "待评估"),
+                        refs=[{"id": ref, "kind": "版本化记录"} for ref in item.get("evidence_refs", [])])
             elif data.get("kind") == "finding":
                 text = data.get("text") or data.get("note") or data.get("value") or data.get("summary")
                 add("finding", "finding", data.get("title") or text, text,
@@ -164,3 +172,39 @@ def read_deliverables(workspace: Path, *, kind: str = "all", query: str = "",
                 and (not needle or needle in json.dumps(item, ensure_ascii=False).casefold())]
     return {"items": filtered[offset:offset + limit], "total": len(filtered), "counts": counts,
             "offset": offset, "limit": limit, "has_more": offset + limit < len(filtered)}
+
+
+def read_record_history(workspace: Path, layer: str, record_id: str,
+                        before: int = 0, limit: int = 20) -> dict[str, Any]:
+    """只读分页历史；升级前未留存的旧版本不伪造，现值不自动作为历史事实。"""
+    db = workspace / "bb.db"
+    if not db.is_file():
+        return {"items": [], "has_more": False}
+    with closing(sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+        conn.row_factory = sqlite3.Row
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='bb_record_history'").fetchone():
+            return {"items": [], "has_more": False}
+        rows = conn.execute(
+            "SELECT version,data,updated_by,updated_at FROM bb_record_history "
+            "WHERE layer=? AND record_id=? AND (?=0 OR version<?) ORDER BY version DESC LIMIT ?",
+            (layer, record_id, before, before, limit + 1)).fetchall()
+    items = [{"version": row["version"], "updated_by": row["updated_by"],
+              "updated_at": row["updated_at"], "data": json.loads(row["data"])} for row in rows[:limit]]
+    return {"items": sanitize_record({"detail": {"items": items}})["detail"]["items"],
+            "has_more": len(rows) > limit}
+
+
+def read_vulnerability_page(workspace: Path, offset: int = 0, limit: int = 50) -> dict[str, Any]:
+    """完整漏洞列表按页只读，与状态卡片的全量统计独立。"""
+    db = workspace / "bb.db"
+    if not db.is_file():
+        return {"items": [], "total": 0}
+    with closing(sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='bb_records'").fetchone():
+            return {"items": [], "total": 0}
+        total = conn.execute("SELECT COUNT(*) FROM bb_records WHERE layer='vuln'").fetchone()[0]
+        rows = conn.execute("SELECT data FROM bb_records WHERE layer='vuln' "
+                            "ORDER BY updated_at DESC,record_id LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+    fields = ("vuln_id", "title", "vuln_type", "severity", "status", "cvss_score", "poc_verified", "endpoint", "verification", "false_positive_reason")
+    items = [{key: data.get(key) for key in fields} for row in rows if isinstance(data := json.loads(row[0]), dict)]
+    return {"items": sanitize_record({"detail": {"items": items}})["detail"]["items"], "total": total}

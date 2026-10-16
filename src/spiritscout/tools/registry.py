@@ -135,7 +135,8 @@ class ToolRegistry:
     @staticmethod
     def _replay_safe(spec: ToolSpec, params: dict[str, Any]) -> bool:
         return (spec.risk == RiskLevel.READONLY
-                and params.get("action") in (None, ActionCategory.ANALYSIS.value)
+                and spec.automatic_replay
+                and params.get(spec.action_param) in (None, ActionCategory.ANALYSIS.value)
                 and spec.name != "sandbox_exec"
                 and (spec.name != "http_probe" or str(params.get("method", "GET")).upper()
                      in {"GET", "HEAD", "OPTIONS"}))
@@ -146,8 +147,8 @@ class ToolRegistry:
         spec = self.get(name)
         # 行为声明在统一入口校验，不能依赖某个 Agent 的包装函数。
         # MCP 的 action 可能是远端业务参数；其风险仍由工具规格门把关。
-        raw_action = params.get("action")
-        if spec.kind == ToolKind.MCP and (
+        raw_action = params.get(spec.action_param)
+        if spec.kind == ToolKind.MCP and spec.action_param == "action" and (
             not isinstance(raw_action, str) or raw_action not in tuple(a.value for a in ActionCategory)
         ):
             raw_action = None
@@ -165,7 +166,7 @@ class ToolRegistry:
                                   + ", ".join(a.value for a in ActionCategory))
         if required and action is None:
             return ToolResult(tool=name, ok=False, returncode=-4,
-                              error="缺少 action 行为声明，请补充后重试")
+                              error=f"缺少 {spec.action_param} 行为声明，请根据本次实际操作补充后重试")
         if action not in (None, ActionCategory.ANALYSIS.value) and self.policy is None:
             return ToolResult(tool=name, ok=False, returncode=-3,
                               error="敏感动作缺少策略与即时审批通道，未执行")
@@ -256,8 +257,19 @@ class AgentToolView:
         self.profile: AgentProfile = get_profile(agent)
         self.audit = audit or registry.audit
 
+    def allows(self, name: str) -> bool:
+        if self.profile.allows_tool(name):
+            return True
+        if self.profile.key in {AgentType.MASTER, AgentType.SECRETARY, AgentType.REPORT}:
+            return False
+        try:
+            spec = self._registry.get(name)
+        except ToolExecutionError:
+            return False
+        return spec.kind == ToolKind.MCP and self.profile.key.value in spec.allowed_agents
+
     def _allowed(self, name: str) -> bool:
-        return self.profile.allows_tool(name)
+        return self.allows(name)
 
     def get(self, name: str) -> ToolSpec:
         if not self._allowed(name):

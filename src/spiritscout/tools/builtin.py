@@ -23,6 +23,7 @@ import httpx
 
 from spiritscout.core.exceptions import ScopeViolation
 from spiritscout.policy.scope import ScopeGuard
+from spiritscout.tools.fingerprint import web_fingerprint
 from spiritscout.tools.http_transport import ScopedHTTPTransport
 from spiritscout.tools.spec import RiskLevel, ToolKind, ToolResult, ToolSpec
 
@@ -218,13 +219,7 @@ async def http_probe(
     if m:
         title = re.sub(r"\s+", " ", m.group(1)).strip()[:200]
 
-    fingerprint: dict[str, Any] = {}
-    server = final_headers.get("server")
-    if server:
-        fingerprint["server"] = server
-    powered = final_headers.get("x-powered-by")
-    if powered:
-        fingerprint["x_powered_by"] = powered
+    fingerprint = web_fingerprint(final_headers, body)
 
     parsed = {
         "status_code": final_status,
@@ -483,3 +478,23 @@ BUILTIN_SPECS: dict[str, ToolSpec] = {
         description="沙箱执行（bwrap：整机只读 + 主目录遮蔽 + 工作区可写）",
         target_params=()),
 }
+
+
+async def asset_memory_lookup(host: str, query: str = "", offset: int = 0, *, guard: ScopeGuard,
+                              resources=None, **kwargs) -> ToolResult:
+    """只读共享观测；禁打边界仍适用，不代表当前目标已复核。"""
+    host = host.strip().lower()
+    if not host or resources is None:
+        return ToolResult(tool="asset_memory_lookup", ok=False, error="需要主机名和已装配的共享资产库")
+    guard.ensure_not_denied(host)
+    import json
+
+    result = resources.assets(query=query, host=host, offset=max(0,int(offset)), limit=20)
+    return ToolResult(tool="asset_memory_lookup", ok=True,
+                      stdout=json.dumps({**result, "notice": "历史参考，不能沿用旧授权或声称本次已验证"}, ensure_ascii=False),
+                      parsed={"count": len(result["items"])})
+
+
+BUILTIN_SPECS["asset_memory_lookup"] = ToolSpec(
+    name="asset_memory_lookup", kind=ToolKind.BUILTIN, description="只读跨会话资产历史，按需复核时效",
+    allowed_params={"host", "query", "offset"}, target_params=("host",), risk=RiskLevel.READONLY)

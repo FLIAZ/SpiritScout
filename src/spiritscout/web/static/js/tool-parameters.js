@@ -1,37 +1,44 @@
-/* 参数按会话读取，原始审计继续封存；DOM 仅接收脱敏 JSON 文本。 */
+/* 参数首次展开时读取；并发合并、会话隔离，关闭的卡片不产生读取请求。 */
 const ToolParameters = (() => {
   let session = null, generation = 0, active = 0;
-  const queue = [], cache = new Map(), waiting = new Set();
-  function reset(id) { session = id; generation++; queue.length = 0; cache.clear(); waiting.clear(); }
+  const queue = [], cache = new Map(), waiting = new Set(), inflight = new Map();
+  function reset(id) { session = id; generation++; queue.length = 0; cache.clear(); waiting.clear(); inflight.clear(); }
   function show(entry, data) {
     if (!entry.element.isConnected || entry.session !== S.cur) return;
     entry.pre.textContent = data.available ? JSON.stringify(data.parameters, null, 2) : data.reason;
     entry.element.querySelector('.ar').textContent = data.available
-      ? argBrief(entry.call.name, data.parameters) : "历史参数副本不可用";
+      ? argBrief(entry.call.name, data.parameters) : '参数副本暂不可用';
   }
-  async function drain() {
+  function enqueue(entry) {
+    if (entry.queued || entry.loaded || !entry.box.open || entry.session !== session) return;
+    entry.queued = true; queue.push(entry); drain();
+  }
+  function drain() {
     while (active < 4 && queue.length) {
       const entry = queue.shift(), version = generation;
+      entry.queued = false;
+      if (!entry.element.isConnected || !entry.box.open || entry.session !== session) continue;
       active++;
       (async () => {
+        const requestKey = `${version}:${entry.key}`;
         try {
-          const data = await api(`/api/sessions/${encodeURIComponent(entry.session)}/tool-parameters?` +
-            new URLSearchParams({tool:entry.call.name,digest:entry.digest}));
+          let request = inflight.get(requestKey);
+          if (!request) {
+            request = api(`/api/sessions/${encodeURIComponent(entry.session)}/tool-parameters?` +
+              new URLSearchParams({tool:entry.call.name,digest:entry.digest}));
+            inflight.set(requestKey, request);
+          }
+          const data = await request;
           if (version !== generation || entry.session !== session) return;
-          if (data.available) { cache.set(entry.key, data); waiting.delete(entry); }
-          else if (!TERMINAL.has(S.state?.session?.status)) waiting.add(entry);
+          entry.attempts++;
+          if (data.available) { cache.set(entry.key, data); entry.loaded = true; waiting.delete(entry); }
+          else if (data.retryable !== false && entry.attempts < 3 && !TERMINAL.has(S.state?.session?.status)) waiting.add(entry);
           show(entry, data);
         } catch (error) {
           if (version === generation && entry.session === session && entry.element.isConnected) {
-            if (error.detail === 'Not Found') {
-              entry.pre.textContent = '参数查看接口尚未加载，需要重载后端后刷新页面。';
-              entry.element.querySelector('.ar').textContent = '等待参数接口加载';
-              return;
-            }
-            entry.pre.textContent = `参数读取失败：${error.message}（点击工具标题重试）`;
-            waiting.add(entry);
+            entry.pre.textContent = `参数读取失败：${error.message}。收起后重新展开可重试。`;
           }
-        } finally { active--; drain(); }
+        } finally { inflight.delete(requestKey); active--; drain(); }
       })();
     }
   }
@@ -44,19 +51,16 @@ const ToolParameters = (() => {
     if (args && !args._redacted) { pre.textContent = JSON.stringify(args,null,2); return; }
     const digest = args?.digest;
     if (!/^[0-9a-f]{64}$/.test(digest || '')) { pre.textContent = '此历史调用未保存可读取的参数副本'; return; }
-    const entry = {element,pre,call,digest,session:S.cur,key:call.name+':'+digest};
-    if (cache.has(entry.key)) { show(entry,cache.get(entry.key)); return; }
-    pre.textContent = '正在读取调用参数…'; queue.push(entry); drain();
-    element.querySelector('button.hd').addEventListener('click', () => {
-      if (waiting.has(entry)) { waiting.delete(entry); queue.push(entry); drain(); }
+    const entry = {element,box,pre,call,digest,session:S.cur,key:call.name+':'+digest,attempts:0};
+    pre.textContent = '展开后读取调用参数';
+    box.addEventListener('toggle', () => {
+      if (!box.open) return;
+      if (cache.has(entry.key)) { entry.loaded = true; show(entry,cache.get(entry.key)); return; }
+      pre.textContent = '正在读取调用参数…'; enqueue(entry);
     });
   }
   function refresh() {
-    for (const entry of waiting) {
-      waiting.delete(entry);
-      if (entry.element.isConnected && entry.session === S.cur) queue.push(entry);
-    }
-    drain();
+    for (const entry of waiting) { waiting.delete(entry); enqueue(entry); }
   }
   return {reset,attach,refresh};
 })();

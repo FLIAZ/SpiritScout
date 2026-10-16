@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import hashlib
 import json
 import os
@@ -32,6 +33,7 @@ from spiritscout.core.audit import AuditLogger
 from spiritscout.core.exceptions import (
     ConfigurationError,
     PolicyViolation,
+    ScopeViolation,
     SpiritScoutError,
 )
 from spiritscout.core.ids import new_id
@@ -45,7 +47,6 @@ from spiritscout.ctf.flags import SubmitFn
 from spiritscout.ctf.writeup import build_digest, writeup_body
 from spiritscout.gateway import (
     AgentBoundGateway,
-    CollabGateway,
     ModelGateway,
     ModelRegistry,
 )
@@ -71,7 +72,6 @@ from spiritscout.tools.registry import ToolRegistry
 from spiritscout.tools.run_lock import ExecutionRunLock
 from spiritscout.tools.sandbox import sandbox_exec
 from spiritscout.tools.spec import ToolKind, ToolResult, ToolSpec
-from spiritscout.verify import VerifyPipeline
 
 if TYPE_CHECKING:
     from spiritscout.competition import CompetitionRules
@@ -233,6 +233,12 @@ async def _build_infra(
         question_broker.bind_guard(guard)   # 用户勾选扩围 → 写入会话批准集
     # 平台红线由知识库漏洞标准库装载（3.4 全量 7 平台规则，首次启动自动播种）
     knowledge = KnowledgeStore(cfg.knowledge.sqlite_path, auto_seed=True)
+    from spiritscout.resources.store import ResourceStore, resource_root
+
+    resources = ResourceStore(resource_root(cfg), cfg.resources.freshness_hours)
+    knowledge.resources = resources
+    cfg = cfg.model_copy(deep=True)
+    cfg.mcp_servers = resources.effective_mcp(cfg.mcp_servers)
     # 以下资源在创建后任何一步失败都要回收：先置空占位，异常路径统一收口
     mcp_clients: list[Any] = []
     experience: Any = None
@@ -274,6 +280,35 @@ async def _build_infra(
             authorization.model_dump(mode="json"),
             agent_type=AgentType.MASTER, updated_by="runtime",
         )
+        def collect_asset(layer: BlackboardLayer, record_id: str, version: int, data: dict[str, Any]) -> None:
+            from spiritscout.resources.store import record_asset
+
+            asset = record_asset(layer.value,data)
+            if asset is None:
+                return
+            try:
+                resources.observe(asset, f"{Path(cfg.workspace.root).name}:{layer.value}:{record_id}@{version}")
+            except Exception:  # noqa: BLE001
+                audit.log("assets.sync_failed", "runtime", {"record_id": record_id,
+                          "reason": "共享库暂时不可写；会话黑板已保留，可从资产页补同步"})
+
+        blackboard.record_observer = collect_asset
+        # 只导入历史参考摘要；不复制凭据、Flag 或此前授权。
+        from urllib.parse import urlsplit
+
+        hosts = {value.lstrip("*.").lower() for value in authorization.scope.allowed_domains}
+        hosts.update(urlsplit(value).hostname for value in authorization.scope.allowed_urls)
+        prior = []
+        for host in sorted(value for value in hosts if value)[:3]:
+            try:
+                guard.ensure_not_denied(host)
+            except ScopeViolation:
+                continue
+            prior.extend(resources.assets(host=host, limit=8)["items"])
+        if prior:
+            blackboard.write(BlackboardLayer.TOPOLOGY, "historical-assets", {
+                "items": prior, "note": "跨会话历史参考，均未在本次会话复核；内容可能变化，不能据此声称漏洞仍存在或沿用授权。"},
+                updated_by="asset-memory")
         convergence = ConvergenceEngine(blackboard)
         gateway = ModelGateway(ModelRegistry(models), config=cfg.gateway, audit=audit)
         gateway.set_mode(authorization.mode.value)   # 模式预算计量与熔断（4.9.4）
@@ -353,6 +388,7 @@ async def _build_infra(
             # 可以直接接续 file_analyze/analyze_attachments
             "allowed_dirs": [str(attachments), str(sandbox_dir), str(artifacts_dir)],
             "workspace_root": str(workspace),
+            "resources": resources,
         }
         # 外部 MCP 服务器：握手 + 工具清单并入智能体工具目录（失败留痕跳过，
         # 不阻断开工——MCP 是增益能力而非主链依赖；多台服务器并发握手，
@@ -400,13 +436,31 @@ async def _build_infra(
                         if spec.scope_enforcement != "none"
                         and {"request", "actualAddr", "batchTarget"} & set(properties)
                         else None)
+                    action_param = "_safety_action" if spec.risk_by_action else "action"
+                    model_tool = copy.deepcopy(t)
+                    if spec.risk_by_action:
+                        from spiritscout.tools.spec import ActionCategory
+
+                        if action_param in properties:
+                            raise ConfigurationError(f"MCP 参数 {action_param} 与宿主行为声明冲突")
+                        schema = model_tool.setdefault("inputSchema", {})
+                        schema.setdefault("type", "object")
+                        schema.setdefault("properties", {})[action_param] = {
+                            "type": "string", "enum": [a.value for a in ActionCategory],
+                            "description": "声明本次实际行为，而非工具能力：普通浏览、点击、授权登录、"
+                            "只读分析选 analysis；改写业务数据选 intrusive_write；删除、爆破、反弹连接、"
+                            "WebShell、逃逸选对应类别，执行前逐次审批。与原生 action 独立。"}
+                        schema["required"] = list(dict.fromkeys([*schema.get("required", []), action_param]))
                     tool_spec = ToolSpec(
                         name=exposed_name, kind=ToolKind.MCP,
                         description=t.get("description") or t["name"], risk=risk,
                         timeout_seconds=max(1, int(spec.timeout)),
-                        allowed_params=set(properties), target_params=target_params,
+                        allowed_params=set(properties) | ({action_param} if spec.risk_by_action else set()),
+                        action_required=spec.risk_by_action, action_param=action_param,
+                        automatic_replay=not spec.risk_by_action, target_params=target_params,
                         scope_required=spec.scope_enforcement == "required",
-                        scope_target_extractor=embedded_extractor)
+                        scope_target_extractor=embedded_extractor,
+                        allowed_agents=tuple(role.value for role in spec.allowed_agents))
 
                     async def _call_mcp(*, _client=client, _tool=t["name"],
                                         _timeout=float(spec.timeout),
@@ -436,13 +490,15 @@ async def _build_infra(
                     mcp_tools[exposed_name] = {
                         "client": client, "server": spec.name,
                         "tool": t["name"], "timeout": float(spec.timeout),
-                        "schema": t, "risk": risk.value,
+                        "schema": model_tool, "risk": risk.value,
                         "target_params": list(target_params),
                         "scope_enforcement": spec.scope_enforcement}
                 audit.log("system.lifecycle", "runtime", {
                     "action": "mcp_server_ready", "server": spec.name,
                     "transport": spec.transport, "tools": [t["name"] for t in tools]})
-        for name, fn in (("http_probe", http_probe), ("dns_resolve", dns_resolve),
+        from spiritscout.tools.builtin import asset_memory_lookup
+
+        for name, fn in (("asset_memory_lookup", asset_memory_lookup), ("http_probe", http_probe), ("dns_resolve", dns_resolve),
                          ("tcp_scan", tcp_scan), ("file_analyze", file_analyze),
                          ("sandbox_exec", sandbox_exec)):
             registry.register_builtin(name, fn, BUILTIN_SPECS[name])
@@ -537,6 +593,8 @@ async def _run_master(
         tactic_map=assembly.tactic_map, plan_override=assembly.plan_provider,
         extra={"mode_notes": assembly.notes, "mission": mission,
                "execution_recovery": recovery_context,
+               "secretary_enabled": infra.cfg.secretary.enabled,
+               "secretary_gateway": AgentBoundGateway(infra.gateway, infra.agent_models.get("secretary", "")),
                "standing_rules": standing_rules,
                "recent_experience": [
                    e["insight"] for e in (experience.recent(limit=5) if experience else [])],
@@ -549,7 +607,25 @@ async def _run_master(
         questions=infra.questions,   # 复盘向用户提问通道（ask_user 后端）
         journal=infra.tools.journal,
     ))
-    run_summary = await master.run(authorization=infra.authorization, target=target)
+    from spiritscout.agents.verifier import VerificationQueue
+
+    def verification_rules() -> dict[str, Any]:
+        history = master.ctx.extra.get("dialogue_history") or []
+        replies = infra.blackboard.query(BlackboardLayer.RECON_CLUE, limit=10000,
+                                         data_filter=("clue_type", "user_reply"))
+        return {"mission": master._mission(), "standing_rules": master._rules(),
+                "user_messages": [str(item.get("content", "")) for item in history if item.get("role") == "user"],
+                "user_replies": [rec["data"].get("value", "") for rec in replies]}
+
+    verifier = VerificationQueue(_sub_ctx(infra), verification_rules, enabled=enable_llm_planning)
+    verifier.start()
+    master.ctx.extra["verification_drain"] = verifier.drain
+    try:
+        run_summary = await master.run(authorization=infra.authorization, target=target)
+        await verifier.drain()
+        run_summary["verification"] = verifier.stats()
+    finally:
+        await verifier.close()
     run_summary["recovery_mode"] = recovery_context.get("mode", "history_replan")
     if infra.tools.journal is not None:
         run_summary["execution_run_id"] = infra.tools.journal.run_id
@@ -687,16 +763,8 @@ async def run_engagement(
             dialogue_history=dialogue_history,
             experience=infra.experience)
 
-        # ---- 全链路核验（4.3）：仅 ACCEPTED 漏洞入报告收录池
-        # 接入知识库（误报特征/P0~P4 分级/PoC 模板/verify_method 联动）
-        # 高危/严重收录走多模型投票复核（4.9.3-2；分歧降级人工复核）
-        pipeline = VerifyPipeline(
-            infra.blackboard, infra.tools, infra.policy,
-            builtin_ctx=infra.builtin_ctx, audit=infra.audit,
-            knowledge=infra.knowledge,
-            collab=CollabGateway(infra.gateway),
-        )
-        verify_stats = await pipeline.run()
+        # 独立复测已在候选提交时运行，不能再用模板成功覆盖用户规则裁决。
+        verify_stats = run_summary.get("verification", {})
 
         # ---- 报告生成（4.6）
         report_path = report_path or _default_report_path(infra.workspace, "src_report")
@@ -892,16 +960,7 @@ async def run_competition_engagement(
             dialogue_history=dialogue_history,
             experience=infra.experience)
 
-        # 靶场/AWD 攻击线产出漏洞 → 全链路核验（4.3， 接入知识库）
-        verify_stats: dict[str, int] = {}
-        if rules.contest_type != ContestType.JEOPARDY:
-            pipeline = VerifyPipeline(
-                infra.blackboard, infra.tools, infra.policy,
-                builtin_ctx=infra.builtin_ctx, audit=infra.audit,
-                knowledge=infra.knowledge,
-                collab=CollabGateway(infra.gateway),
-            )
-            verify_stats = await pipeline.run()
+        verify_stats = run_summary.get("verification", {})
 
         submit_stats = await flag_manager.submit_all()
         run_summary["flag_submit"] = submit_stats

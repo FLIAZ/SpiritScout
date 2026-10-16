@@ -38,6 +38,11 @@ CREATE TABLE IF NOT EXISTS bb_records (
     PRIMARY KEY (layer, record_id)
 );
 CREATE INDEX IF NOT EXISTS idx_bb_dedup ON bb_records(layer, dedup_key);
+CREATE TABLE IF NOT EXISTS bb_record_history (
+    layer TEXT NOT NULL, record_id TEXT NOT NULL, version INTEGER NOT NULL,
+    data TEXT NOT NULL, updated_by TEXT NOT NULL, updated_at TEXT NOT NULL,
+    PRIMARY KEY(layer, record_id, version)
+);
 CREATE TABLE IF NOT EXISTS bb_event_outbox (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     event_json TEXT NOT NULL,
@@ -50,24 +55,33 @@ CREATE INDEX IF NOT EXISTS idx_bb_outbox_pending ON bb_event_outbox(sequence) WH
 class Blackboard:
     """结构化分层黑板（8 层）。线程安全；事件发布走环形总线。"""
 
-    def __init__(self, db_path: str | Path, bus: EventBus | None = None):
+    def __init__(self, db_path: str | Path, bus: EventBus | None = None, *, readonly: bool = False):
         self._path = Path(db_path)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
+        if not readonly:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(
+            self._path.resolve().as_uri() + "?mode=ro" if readonly else str(self._path),
+            uri=readonly, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        #：WAL + busy_timeout——Web 控制台/CLI status 等读进程与
-        # 运行中写提交并发时不再瞬态 database is locked（读写不互堵，写等待 5s）
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
-        if (self._conn.execute("SELECT 1 FROM sqlite_master WHERE name='bb_records'").fetchone()
-                and not self._conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE name='bb_event_outbox'").fetchone()):
-            self._backup_before_upgrade()
-        self._conn.executescript(_SCHEMA)
-        self._conn.commit()
+        if not readonly:
+            #：WAL + busy_timeout——Web 控制台/CLI status 等读进程与
+            # 运行中写提交并发时不再瞬态 database is locked（读写不互堵，写等待 5s）
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA busy_timeout=5000")
+            if (self._conn.execute("SELECT 1 FROM sqlite_master WHERE name='bb_records'").fetchone()
+                    and not self._conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE name='bb_event_outbox'").fetchone()):
+                self._backup_before_upgrade()
+            if (self._conn.execute("SELECT 1 FROM sqlite_master WHERE name='bb_records'").fetchone()
+                    and not self._conn.execute("SELECT 1 FROM sqlite_master WHERE name='bb_record_history'").fetchone()):
+                self._backup_before_upgrade("pre-history-v1")
+            self._conn.executescript(_SCHEMA)
+            self._conn.commit()
         self._lock = threading.Lock()
         self._bus = bus
         self._outbox_task: asyncio.Task | None = None
+        self.asset_observer = None
+        self.record_observer = None
 
     def _backup_before_upgrade(self, suffix: str = "pre-runtime-v1") -> None:
         """旧库首次增表前做 SQLite 在线备份，包含 WAL 中已提交的数据。"""
@@ -136,7 +150,14 @@ class Blackboard:
             current = row["version"] if row else 0
             if expected_version is not None and expected_version != current:
                 raise VersionConflict(layer.value, record_id, expected_version, current)
+            # 首次升级时先保存已有现值，后续在同一事务留存每个版本。
+            self._conn.execute(
+                "INSERT OR IGNORE INTO bb_record_history SELECT layer,record_id,version,data,updated_by,updated_at "
+                "FROM bb_records WHERE layer=? AND record_id=?", (layer.value, record_id))
             new_version = current + 1
+            self._conn.execute(
+                "INSERT INTO bb_record_history VALUES(?,?,?,?,?,?)",
+                (layer.value, record_id, new_version, payload, updated_by, now))
             self._conn.execute(
                 """INSERT INTO bb_records(layer, record_id, version, dedup_key, data, updated_by, updated_at)
                    VALUES(?,?,?,?,?,?,?)
@@ -153,7 +174,19 @@ class Blackboard:
             self._conn.execute("INSERT INTO bb_event_outbox(event_json) VALUES(?)",
                                (event.model_dump_json(),))
         self._wake_outbox()
+        if layer == BlackboardLayer.ASSET and self.asset_observer is not None:
+            self.asset_observer(record_id, new_version, data)
+        if self.record_observer is not None:
+            self.record_observer(layer,record_id,new_version,data)
         return new_version
+
+    def status_counts(self, layer: BlackboardLayer) -> dict[str, int]:
+        """完整状态统计独立于展示页采样。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT COALESCE(json_extract(data, '$.status'),'candidate'),COUNT(*) "
+                "FROM bb_records WHERE layer=? GROUP BY 1", (layer.value,)).fetchall()
+        return {str(row[0]): row[1] for row in rows}
 
     def read(self, layer: BlackboardLayer, record_id: str) -> dict[str, Any] | None:
         with self._lock:

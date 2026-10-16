@@ -19,7 +19,8 @@ async function api(path, opt = {}) {
     err.detail = detail;               // 结构化错误（如规则冲突清单）随异常上抛
     throw err;
   }
-  return r.json();
+  const result = await r.json();
+  return result;
 }
 function toast(msg, err = false) {
   const el = document.createElement("div");
@@ -88,7 +89,7 @@ try { applyTheme(localStorage.getItem("ss-theme") || "system"); } catch {}
 
 /* ================= 视图切换 ================= */
 const VIEWS = { home: "#view-home", session: "#view-session", dash: "#view-dash",
-                agents: "#view-agents", models: "#view-models" };
+                agents: "#view-agents", models: "#view-models", mcp:"#view-mcp", skill:"#view-skill", assets:"#view-assets" };
 function show(view) {
   S.view = view;
   for (const [k, sel] of Object.entries(VIEWS)) $(sel).hidden = k !== view;
@@ -97,6 +98,7 @@ function show(view) {
   if (view === "agents") loadAgents();
   if (view === "models") loadModels();
   if (view === "dash") renderDash();
+  if (["mcp","skill","assets"].includes(view) && typeof ResourceConsole !== "undefined") ResourceConsole.open(view);
   if (view !== "session") stopStreams();
 }
 document.querySelectorAll(".side > nav button").forEach(b =>
@@ -108,6 +110,7 @@ async function refreshSessions() {
   try {
     const d = await api("/api/sessions");
     S.sessions = d.sessions;
+    $("#connection-status")?.remove();
     renderSessions();
     if (S.view === "dash") renderDash();
     if (S.cur) {
@@ -115,11 +118,16 @@ async function refreshSessions() {
       if (cur && TERMINAL.has(cur.status) && S.state &&
           S.state.session.status !== cur.status) await refreshState();
     }
-  } catch (e) { /* 控制台重启中等场景静默重试 */ }
+  } catch (e) {
+    if (!$("#connection-status")) {
+      const notice = document.createElement("div"); notice.id = "connection-status"; notice.setAttribute("role", "status");
+      notice.textContent = "控制台连接中断，正在重试；当前内容可能不是最新。"; document.body.append(notice);
+    }
+  }
 }
 function renderSessions() {
   const box = $("#sess-list");
-  if (box.querySelector("input.rename")) return;   // 正在重命名：不打断输入
+  if (box.querySelector("input.rename, [data-armed]")) return;   // 正在重命名：不打断输入
   if (!S.sessions.length) {
     box.innerHTML = `<div class="empty-note" style="padding:22px 8px">还没有会话</div>`;
     return;

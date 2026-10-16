@@ -57,7 +57,10 @@ class ReportAgent:
         assets = [r["data"] for r in self.bb.query(BlackboardLayer.ASSET, limit=10000)]
         vulns = [Vulnerability.model_validate(r["data"])
                  for r in self.bb.query(BlackboardLayer.VULN, limit=10000)]
-        pool = [v for v in vulns if v.status == VulnStatus.ACCEPTED]
+        policy = self.bb.read(BlackboardLayer.TOPOLOGY, "verification-policy") or {}
+        pool = [v for v in vulns if v.status == VulnStatus.ACCEPTED and (
+            not policy.get("independent_retest_required") or (
+                v.verification.get("verdict") == "confirmed" and v.poc_verified and v.exploitable))]
         pool.sort(key=lambda v: (-v.severity.rank, v.vuln_type))
         rejected_stats: dict[str, int] = {}
         for v in vulns:
@@ -70,6 +73,7 @@ class ReportAgent:
                      in current_task_ids]
         clues = [r["data"] for r in self.bb.query(BlackboardLayer.RECON_CLUE, limit=10000)]
         return {
+            "independent_retest": bool(policy.get("independent_retest_required")),
             "assets": assets,
             "pool": pool,
             "rejected_stats": rejected_stats,

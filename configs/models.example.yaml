@@ -24,7 +24,6 @@
 #                      仅 o 系/gpt-5 等原生 Responses 端点需显式指定）
 #   anthropic_messages Anthropic Messages 协议（Claude 系列，auto 自动选）
 #
-# tier 五档（4.9.1）：flagship 旗舰 / rigorous 严谨 / code 代码 / fast 快模 / light 轻量
 # 差异化分工是六协作模式（4.9.3）与级联升级（6.10）的基础，建议至少配 2 档。
 #
 # context_window：模型上下文窗口（token），填 0 或省略表示未声明。
@@ -76,13 +75,12 @@ models:
   # model 填模型名（如 ark-code-latest）或推理接入点 ID（ep-xxxxxxxx）
   - model: ark-code-latest
     provider_ref: ark
-    tier: flagship
     capabilities: [reasoning, code, chinese, security]
     context_window: 0               # 0 = 未声明；按端点文档填实际窗口
     max_output_tokens: 0            # 0 = 不发送（端点自定）；确要收紧才填值
     reasoning_effort_levels: []     # 端点支持的档位（如 [low, medium, high]）；不确定就留空
-    cost_input_per_mtok: 0.8        # 元/百万 token，仅用于预算治理
-    cost_output_per_mtok: 2.0
+    cost_input_per_mtok: 0.0        # 美元/百万 token，请按实际报价配置；0 表示尚未配置
+    cost_output_per_mtok: 0.0
     rate_limit_rpm: 300
     quality_score: 1.0
 
@@ -90,35 +88,33 @@ models:
   # 连续失败时网关自动切到备机（审计留痕 model.fallback）。
   # - model: ark-code-backup
   #   provider_ref: ark
-  #   tier: fast
   #   capabilities: [chinese]
   #   is_fallback_for: [ark-code-latest]
 
   # 其他模型示例
   # - model: deepseek-chat
   #   provider_ref: deepseek
-  #   tier: flagship
   #   capabilities: [reasoning, code, chinese, security]
   #   context_window: 128000
   #   reasoning_effort_levels: []     # deepseek-reasoner 类由端点自管思考，不必填
   #   quality_score: 1.0
   # - model: qwen-max
   #   provider_ref: qwen
-  #   tier: flagship
   #   capabilities: [reasoning, code, chinese]
   #   context_window: 131072
   #   quality_score: 0.98
   # - model: gpt-4o
   #   provider_ref: openai
-  #   tier: flagship
   #   capabilities: [reasoning, code, security]
   #   context_window: 128000
   #   reasoning_effort_levels: [minimal, low, medium, high]
   #   quality_score: 1.0
   # - model: claude-sonnet-4-5
   #   provider_ref: anthropic
-  #   tier: flagship
   #   capabilities: [reasoning, code, security]
   #   context_window: 200000
   #   reasoning_effort_levels: [1024, 4096, 16384]   # 数字 = 原生思考预算（token）
   #   quality_score: 1.0
+
+# 缓存提示默认沿用端点行为，不附加参数。仅兼容端点可设 anthropic_ephemeral。
+# 模型条目可声明 prompt_caching / cost_cached_input_per_mtok / cost_cache_write_per_mtok。

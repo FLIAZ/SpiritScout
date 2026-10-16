@@ -178,11 +178,12 @@ class WebVulnAgent(SubAgent):
             "candidate_payloads": candidates,
             "business_context": self._compact_business_context(),
             "max_payloads": LLM_PAYLOAD_CAP,
+            "required_probe_token": require_token,
             "constraints": (
                 "目的：为该参数产出可核验的判定结论，payload 是最小对照实验，"
                 f"不是攻击流程。返回 JSON：{{\"payloads\": [{{\"payload\": str, \"purpose\": str}}], "
                 f"\"rationale\": str}}。可在骨架候选上裁剪/修改/新增；每条 ≤{LLM_PAYLOAD_MAXLEN} 字符"
-                + (f"且必须原样包含探测标记 {require_token}" if require_token else "")
+                + "；required_probe_token 非空时，每条必须原样包含该字段的探测标记"
                 + "；不构造取数/拖库/破坏性载荷（G4）。"),
         }, reasoning_effort=self.task_effort(task), task=task)
         if data is None:

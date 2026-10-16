@@ -180,15 +180,8 @@ _EMPTY_ASSISTANT_MARKER = re.compile(
 
 def _model_messages(messages: list[dict[str, Any]], *, initialized: bool) \
         -> list[dict[str, Any]]:
-    """构造本轮实际发送给模型的上下文。
-
-    Chat Completions 一类接口没有服务端会话，历史消息需要由调用方续传；但首轮
-    的长系统提示不应在每一轮重新成为最高优先级指令。初始化成功后只续传题面、
-    助手判断、工具结果和后续用户动态。复制列表容器，避免过滤操作改写持久状态。
-    """
-    selected = messages if not initialized else [
-        message for message in messages if message.get("role") != "system"
-    ]
+    """无状态端点每轮均保留系统约束，稳定前缀可由端点缓存复用。"""
+    selected = messages
     # 发送视图与持久状态使用不同的容器：网关/后端即使对
     # message 字典增补字段，也不会改写缓存中的对话。
     view = [dict(message) for message in selected]
@@ -586,6 +579,8 @@ class CTFBaseAgent(SubAgent):
             "POST /api/exec，命令放 cmd 参数」）。有值得同伴接力的发现时写一条。",
             {"text": {"type": "string", "description": "要共享的发现，一句话"}},
             required=["text"]),
+        _fn("asset_memory_lookup", "读取同一主机的跨会话历史观测；历史不代表当前事实，不含凭据或授权。",
+            {"host": {"type": "string"}, "query": {"type": "string"}, "offset":{"type":"integer","minimum":0}}, required=["host"]),
         _fn("kb_search",
             "检索本地经验知识库：敏感路径/备份文件清单、PHP 弱类型等平台特性"
             "事实、模板注入 canary、隐写与提权检查点、攻击路径模板与核验方法。"
@@ -1176,6 +1171,15 @@ class CTFBaseAgent(SubAgent):
                 out = await self._tool_analyze_text(task)
             elif name == "analyze_attachments":
                 out = await self._tool_analyze_attachments(task)
+            elif name == "asset_memory_lookup":
+                host = str(args.get("host", "")).strip().lower()
+                self.ctx.policy.guard.ensure_not_denied(host)
+                resources = getattr(self.ctx.knowledge, "resources", None)
+                if not host or resources is None:
+                    raise ValueError("需要主机名，且共享资产库必须已装配")
+                page = resources.assets(query=str(args.get("query", "")),host=host,offset=max(0,int(args.get("offset",0))),limit=20)
+                out = _ToolOutcome(ok=True, value=0, note="已读取历史资产，仍需按任务复核",
+                    text=json.dumps({**page,"notice":"历史参考，不代表本次已验证；旧授权和凭据不会复用"},ensure_ascii=False))
             elif name == "kb_search":
                 out = await self._tool_kb_search(args)
             elif name == "ask_user":
@@ -1391,7 +1395,11 @@ class CTFBaseAgent(SubAgent):
         # 安全技能库检索（NoorQureshi/security-skills，MIT）：关键词匹配
         skill_hits = []
         q_lower = query.lower()
-        for sk in _load_sec_skills():
+        resources = getattr(kb, "resources", None)
+        skills = resources.skills(query, include_body=True) if resources else _load_sec_skills()
+        for sk in skills:
+            if not sk.get("enabled", True):
+                continue
             hay = (sk.get("skill_id", "") + " " + sk.get("description", "")).lower()
             if any(w in hay for w in q_lower.split() if len(w) >= 2):
                 skill_hits.append(sk)
@@ -1404,7 +1412,7 @@ class CTFBaseAgent(SubAgent):
             body = "\n".join(body_lines)[:4000]
         else:
             body = None
-        if not hits:
+        if not hits and not skill_hits:
             return _ToolOutcome(ok=False, text=(
                 f"经验库没有命中「{query[:60]}」——按你收集到的信息自行分析。"))
         blocks: list[str] = []
@@ -1927,6 +1935,9 @@ class CTFBaseAgent(SubAgent):
         parts.append("## 任务\n夺取本题 Flag。Flag 常藏在响应正文/注释/编码串/"
                      "响应头或附件里；判定拿到后用 submit_flag 提交，拿到应答"
                      "即收尾。")
+        history = self.ctx.blackboard.read(BlackboardLayer.TOPOLOGY, "historical-assets")
+        if history:
+            parts.append("## 同一资产的历史参考（本次未复核，不能沿用旧授权）\n" + json.dumps(history, ensure_ascii=False)[:8000])
         state["messages"] = [
             {"role": "system", "content": self._solver_system_prompt(task)},
             {"role": "user", "content": "\n\n".join(parts)[:24000]},

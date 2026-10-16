@@ -17,6 +17,7 @@ import json
 import os
 import secrets
 import shutil
+import sqlite3
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -46,7 +47,7 @@ from pydantic import (
 from spiritscout import __version__
 from spiritscout.blackboard import Blackboard
 from spiritscout.config.settings import GatewayConfig, ModelEntry, SystemConfig
-from spiritscout.core.audit import AuditLogger
+from spiritscout.core.audit import AuditLogger, tool_preview
 from spiritscout.core.exceptions import (
     ConfigurationError,
     RuleConflictError,
@@ -149,7 +150,7 @@ def _read_state(session: Session) -> dict[str, Any]:
         # 黑板未建（排队中）：终态摘要兜底（重开历史会话）
         state["topology"]["dag_nodes"] = run_summary.get("dag_nodes", [])
         return state
-    bb = Blackboard(session.bb_path, bus=None)
+    bb = Blackboard(session.bb_path, bus=None, readonly=True)
     try:
         for layer in BlackboardLayer:
             state["layers"][layer.value] = bb.count(layer)
@@ -198,6 +199,14 @@ def _read_state(session: Session) -> dict[str, Any]:
             state["topology"]["dag_nodes"] = run_summary.get("dag_nodes", [])
         state["business_context"] = bb.read(
             BlackboardLayer.TOPOLOGY, "business-context")
+        state["observed_evidence"] = [
+            {"url": tool_preview({"url": rec["data"].get("value", "")}),
+             "record_id": rec["record_id"],
+             "method": (rec["data"].get("attrs") or {}).get("method", "GET"),
+             "status_code": (rec["data"].get("attrs") or {}).get("status_code"),
+             "note": "已观测登记，待业务分析整理"}
+            for rec in bb.query(BlackboardLayer.ASSET, limit=100)
+            if rec["data"].get("asset_type") in {"endpoint", "app"}]
         by_status: dict[str, int] = {}
         for rec in bb.query(BlackboardLayer.VULN, limit=50):
             d = rec["data"]
@@ -208,9 +217,13 @@ def _read_state(session: Session) -> dict[str, Any]:
                 "vuln_type": d.get("vuln_type"), "severity": d.get("severity"),
                 "status": status, "cvss_score": d.get("cvss_score"),
                 "poc_verified": d.get("poc_verified"),
+                "verification": d.get("verification", {}),
+                "false_positive_reason": d.get("false_positive_reason"),
                 "endpoint": d.get("endpoint"),
             })
-        state["vulns"]["by_status"] = by_status
+        state["vulns"]["by_status"] = bb.status_counts(BlackboardLayer.VULN)
+        state["vulns"]["total"] = bb.count(BlackboardLayer.VULN)
+        state["vulns"]["has_more"] = state["vulns"]["total"] > len(state["vulns"]["items"])
         # 灵枢应答流：拓扑「你 → 灵枢」节点的回执展示
         replies = []
         topology_records = bb.query(BlackboardLayer.TOPOLOGY, limit=400)
@@ -274,18 +287,34 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             f"{cfg.web.password_env} 设置管理密码")
     vault.configure(cfg.workspace.root)   # 密钥库落在工作区（vault.db/vault.key）
     manager = SessionManager(cfg, models, max_concurrent=max_concurrent)
+    from spiritscout.resources.assistant import ResourceAssistant
+    from spiritscout.resources.store import ResourceStore, resource_root
+    from spiritscout.web.resources import mount_resources
+
+    resource_store = ResourceStore(resource_root(cfg),cfg.resources.freshness_hours)
+    resource_assistant = ResourceAssistant(cfg,resource_store)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         # 监督协程在 lifespan 内启动（不隶属任何请求任务组），
         # 关停时停掉所有未终态会话，避免孤儿任务
         manager.start()
+        resource_assistant.start()
+        # 读取已存在的资产，不启动旧会话或发起网络探测。
+        for path in (Path(cfg.workspace.root)/"sessions").glob("sess-*"):
+            try:
+                resource_store.import_session(path)
+            except (OSError,ValueError,sqlite3.Error):
+                pass
         yield
+        await resource_assistant.close()
         await manager.aclose()
 
     app = FastAPI(title="灵枢 SpiritScout 控制台", version=__version__,
                   lifespan=lifespan)
     app.state.manager = manager
+    mount_resources(app,cfg,resource_store,resource_assistant)
+    app.state.resources = resource_store
 
     @app.middleware("http")
     async def console_security(request: Request, call_next):
@@ -445,7 +474,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         return session.brief(include_summary=False)
 
     @app.get("/api/sessions/{session_id}/state")
-    async def session_state(session_id: str) -> dict[str, Any]:
+    def session_state(session_id: str) -> dict[str, Any]:
         return _read_state(_require(session_id))
 
     @app.get("/api/sessions/{session_id}/deliverables")
@@ -460,6 +489,23 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                                      query=q, offset=offset, limit=limit)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/sessions/{session_id}/vulnerabilities")
+    def session_vulnerabilities(session_id: str, offset: int = Query(0, ge=0),
+                                limit: int = Query(50, ge=1, le=200)) -> JSONResponse:
+        from spiritscout.web.deliverables import read_vulnerability_page
+
+        return JSONResponse(read_vulnerability_page(_require(session_id).workspace, offset, limit),
+                            headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/sessions/{session_id}/record-history")
+    def session_record_history(session_id: str, layer: str = Query(..., max_length=40),
+                               record_id: str = Query(..., max_length=300),
+                               before: int = Query(0, ge=0), limit: int = Query(20, ge=1, le=50)) -> JSONResponse:
+        from spiritscout.web.deliverables import read_record_history
+
+        page = read_record_history(_require(session_id).workspace, layer, record_id, before, limit)
+        return JSONResponse(page, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/sessions/{session_id}/artifacts/download")
     def session_artifact(session_id: str, path: str = Query(..., max_length=1000)) -> StreamingResponse:
@@ -960,7 +1006,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         payload = dict(payload)
         try:
             entries = modelcfg.upsert_entry(
-                cfg.models_config_path, payload, original_model=model)
+                cfg.models_config_path, payload, original_model=model, assignments_path=cfg.agent_models_path)
         except SpiritScoutError as exc:
             raise _model_error(exc) from exc
         return _models_view(entries)
@@ -968,7 +1014,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     @app.delete("/api/models/{model:path}")
     async def delete_model(model: str) -> dict[str, Any]:
         try:
-            entries = modelcfg.delete_entry(cfg.models_config_path, model)
+            entries = modelcfg.delete_entry(cfg.models_config_path, model, assignments_path=cfg.agent_models_path)
         except SpiritScoutError as exc:
             raise _model_error(exc) from exc
         return _models_view(entries)

@@ -63,6 +63,10 @@ class ToolSpec:
     fallback_tool: str | None = None
     # 放在末尾保留既有位置参数兼容性；所有调用方共用 Registry 校验。
     action_required: bool = False
+    action_param: str = "action"  # MCP 原生 action 与安全行为声明使用独立字段
+    automatic_replay: bool = True
+    # 仅宿主可信配置赋值，远端工具描述不能授予角色权限。
+    allowed_agents: tuple[str, ...] = ()
 
 
 @dataclass

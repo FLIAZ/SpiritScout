@@ -132,6 +132,7 @@ class LiveNavigationTests(unittest.IsolatedAsyncioTestCase):
     async def test_offscreen_carousel_click_reports_cause_then_visible_click_opens_tab(self) -> None:
         requests: list[str] = []
         page = b'''<!doctype html><title>Local carousel</title><link rel="icon" href="data:,">
+        <meta name="generator" content="SpiritScout carousel fixture">
         <div style="position:relative;overflow:hidden;width:240px;height:80px">
           <a id="offscreen" href="/landed" target="_blank"
              style="position:absolute;left:-1500px;top:0;width:120px;height:40px">Carousel target</a>
@@ -158,33 +159,41 @@ class LiveNavigationTests(unittest.IsolatedAsyncioTestCase):
                 spec = McpServerConfig(name="playwright", command=shutil.which("node") or "node",
                     args=[str(_MCP_CLI), "--headless", "--isolated", "--executable-path", str(_BROWSER),
                           "--timeout-action", "500", "--snapshot-boxes", "--output-dir", str(root / "browser-output")],
-                    default_risk="intrusive", tool_risk_overrides={"browser_navigate": "readonly"})
+                    default_risk="readonly", risk_by_action=True)
                 cfg = SystemConfig(workspace=WorkspaceConfig(root=temporary),
                     audit_log_path=str(root / "audit.jsonl"), mcp_servers=[spec])
                 cfg.blackboard.sqlite_path = str(root / "bb.db")
                 cfg.knowledge.sqlite_path = str(root / "kb.db")
-                # 隔离测试审批回调，每次有状态调用各请示一次；不设置自动批准配置。
-                gate = AsyncMock(return_value=True)
+                # 普通点击无需审批；危险行为在执行前单独请示，不自动放行。
+                gate = AsyncMock(return_value=False)
                 auth = Authorization(auth_id="local-carousel", mode=RunMode.SRC, human_confirmed=True,
                                      scope=Scope(allowed_urls=[base]))
                 infra = await _build_infra(cfg, [ModelEntry(model="test", provider="mock")], auth,
                                            approval_gate=gate)
                 try:
-                    nav = await infra.tools.call("mcp__playwright__browser_navigate", {"url": base}, **infra.builtin_ctx)
+                    nav = await infra.tools.call("mcp__playwright__browser_navigate", {"url": base, "_safety_action": "analysis"}, **infra.builtin_ctx)
                     self.assertTrue(nav.ok, nav.error)
-                    failed = await infra.tools.call("mcp__playwright__browser_click", {"target": "#offscreen"}, **infra.builtin_ctx)
+                    probe = await infra.tools.call("http_probe", {"url": base}, **infra.builtin_ctx)
+                    self.assertTrue(probe.ok, probe.error)
+                    self.assertIn("SpiritScout carousel fixture",
+                                  [item["name"] for item in probe.parsed["fingerprint"]["technologies"]])
+                    failed = await infra.tools.call("mcp__playwright__browser_click", {"target": "#offscreen", "_safety_action": "analysis"}, **infra.builtin_ctx)
                     self.assertFalse(failed.ok)
                     self.assertEqual(failed.attempts, 1)
                     self.assertEqual(failed.parsed["failure_kind"], "target_outside_viewport")
                     self.assertIn("可视区域外", failed.error[:100])
                     self.assertNotIn("\x1b", failed.error)
                     self.assertNotIn("/landed", requests)
-                    show = await infra.tools.call("mcp__playwright__browser_click", {"target": "#show"}, **infra.builtin_ctx)
+                    show = await infra.tools.call("mcp__playwright__browser_click", {"target": "#show", "_safety_action": "analysis"}, **infra.builtin_ctx)
                     self.assertTrue(show.ok, show.error)
-                    clicked = await infra.tools.call("mcp__playwright__browser_click", {"target": "#offscreen"}, **infra.builtin_ctx)
+                    clicked = await infra.tools.call("mcp__playwright__browser_click", {"target": "#offscreen", "_safety_action": "analysis"}, **infra.builtin_ctx)
                     self.assertTrue(clicked.ok, clicked.error)
                     self.assertEqual(requests.count("/landed"), 1)
-                    self.assertEqual(gate.await_count, 3)
+                    gate.assert_not_awaited()
+                    dangerous = await infra.tools.call("mcp__playwright__browser_evaluate",
+                        {"function": "() => 7", "_safety_action": "delete_files"}, **infra.builtin_ctx)
+                    self.assertFalse(dangerous.ok)
+                    gate.assert_awaited_once()
                 finally:
                     await infra.close()
         finally:

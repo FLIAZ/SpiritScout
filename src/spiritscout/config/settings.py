@@ -10,22 +10,28 @@ from __future__ import annotations
 
 import os
 import re
+import warnings
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from spiritscout.core.exceptions import ConfigurationError
-from spiritscout.core.models import RunMode
+from spiritscout.core.models import AgentType, RunMode
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 
 
 def _expand_env(obj: Any) -> Any:
-    """递归展开字符串中的 ${ENV_VAR}。未设置的环境变量展开为空串并保留痕迹。"""
+    """递归展开环境变量；缺失时明确报错，不制造空地址或空凭据。"""
     if isinstance(obj, str):
-        return _ENV_PATTERN.sub(lambda m: os.environ.get(m.group(1), ""), obj)
+        def resolve(match: re.Match[str]) -> str:
+            name = match.group(1)
+            if name not in os.environ:
+                raise ConfigurationError(f"配置引用的环境变量未设置: {name}")
+            return os.environ[name]
+        return _ENV_PATTERN.sub(resolve, obj)
     if isinstance(obj, dict):
         return {k: _expand_env(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -38,7 +44,10 @@ def _apply_env_overrides(data: dict[str, Any], prefix: str = "SPIRITSCOUT") -> d
     for key, value in os.environ.items():
         if not key.startswith(prefix + "_"):
             continue
-        path = key[len(prefix) + 1 :].lower().split("__")
+        suffix = key[len(prefix) + 1 :]
+        if "__" not in suffix:
+            continue  # 密码、Redis URL 等专用环境变量不是配置树覆盖
+        path = suffix.lower().split("__")
         node = data
         for part in path[:-1]:
             node = node.setdefault(part, {})
@@ -52,11 +61,17 @@ def _apply_env_overrides(data: dict[str, Any], prefix: str = "SPIRITSCOUT") -> d
 # ---------------------------------------------------------------- 子配置
 
 
-class WorkspaceConfig(BaseModel):
+class ValidatedConfig(BaseModel):
+    """未知字段和非有限数值立即报错，避免拼写错误静默失效。"""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+
+class WorkspaceConfig(ValidatedConfig):
     root: str = Field(default=".spiritscout", description="工作区根目录（SQLite/审计/报告产出）")
 
 
-class BusConfig(BaseModel):
+class BusConfig(ValidatedConfig):
     """环形数据总线后端（适配器决策 A1：inprocess 默认，redis/nats 可切）。"""
 
     backend: Literal["inprocess", "redis", "nats"] = "inprocess"
@@ -66,49 +81,49 @@ class BusConfig(BaseModel):
     connect_timeout_seconds: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     shared_request_rps: float = Field(default=10.0, gt=0, allow_inf_nan=False)
     nats_url: str = "nats://127.0.0.1:4222"
-    queue_maxsize: int = 10000
-    rate_limit_per_second: float = 1000.0   # 总线流量控制（4.2.1）
+    queue_maxsize: int = Field(default=10000, gt=0)
+    rate_limit_per_second: float = Field(default=1000.0, gt=0)   # 总线流量控制（4.2.1）
 
 
-class BlackboardConfig(BaseModel):
+class BlackboardConfig(ValidatedConfig):
     sqlite_path: str = ".spiritscout/blackboard.db"
 
 
-class GatewayConfig(BaseModel):
+class GatewayConfig(ValidatedConfig):
     """多模型网关：预算与协作策略（4.9、6.10）。"""
 
-    budget_tokens: int = Field(default=2_000_000, description="运行预算 token 硬顶（超顶熔断）")
-    budget_usd: float = Field(default=20.0, description="运行预算美元硬顶")
+    budget_tokens: int = Field(default=2_000_000, description="Token 用量参考值，仅计量不熔断")
+    budget_usd: float = Field(default=20.0, description="费用参考值，仅计量不熔断")
     mode_budget_tokens: dict[str, int] = Field(
         default_factory=dict,
-        description="按运行模式（src/ctf/competition）的 token 硬顶（4.9.4）；空 = 仅全局预算")
+        description="按模式记录的 Token 参考值，不作为执行上限")
     degrade_at_ratio: float = Field(
         default=0.8,
-        description="用量达预算该比例即自动降级到低档模型（4.9.4 超预算自动降级）；1.0 = 不降级")
+        description="兼容旧配置；当前不按消耗自动降级模型")
     cascade_confidence_threshold: float = 0.8   # 级联升级阈值（6.10：<0.8 升级旗舰复判）
     vote_min_models: int = 2                    # 投票最少模型数（4.9.3-2：≥2 独立判断）
-    request_timeout_seconds: int = 300  # 重推理模型单次调用可达 3~4 分钟，120s 会中途掐死
+    request_timeout_seconds: int = Field(default=300, gt=0)  # 重推理模型单次调用可达 3~4 分钟，120s 会中途掐死
     max_retries: int = 2
 
 
-class ExecutorConfig(BaseModel):
+class ExecutorConfig(ValidatedConfig):
     """工具执行器（CLI/Docker/MCP 三态）。"""
 
     backend: Literal["local", "docker"] = "local"
     docker_image: str = "kalilinux/kali-rolling:latest"
-    default_timeout_seconds: int = 300
-    max_output_chars: int = 20000         # HackSynth 输出窗口截断（3.2.4-9）
+    default_timeout_seconds: int = Field(default=300, gt=0)
+    max_output_chars: int = Field(default=20000, gt=0)         # HackSynth 输出窗口截断（3.2.4-9）
     ctf_network_isolation: bool = True    # CTF 模式网络隔离（硬约束 C7）
     # ---- Docker 沙箱加固（9.3 EXP 沙箱验证：最小权限 + 资源限额 + 只读根fs）
-    docker_memory_mb: int = 512
-    docker_cpus: float = 1.0
-    docker_pids_limit: int = 256
+    docker_memory_mb: int = Field(default=512, gt=0)
+    docker_cpus: float = Field(default=1.0, gt=0)
+    docker_pids_limit: int = Field(default=256, gt=0)
     docker_read_only: bool = True
     docker_tmpfs: str = "/tmp:rw,noexec,nosuid,size=64m"
     docker_user: str = ""                 # 空 = 镜像默认用户；可配 "65534:65534" 进一步降权
 
 
-class KnowledgeConfig(BaseModel):
+class KnowledgeConfig(ValidatedConfig):
     sqlite_path: str = ".spiritscout/knowledge.db"
     chroma_path: str = ".spiritscout/chroma"
     embedding_provider: Literal["hash", "openai_compatible"] = "hash"
@@ -117,18 +132,18 @@ class KnowledgeConfig(BaseModel):
     embedding_model: str = ""
 
 
-class ReportConfig(BaseModel):
+class ReportConfig(ValidatedConfig):
     template: str = "src_standard"        # 报告模板（4.6.2）
     output_format: Literal["markdown", "html"] = "markdown"
     output_dir: str = ".spiritscout/reports"
 
 
-class WebConfig(BaseModel):
+class WebConfig(ValidatedConfig):
     """Web 控制台。"""
 
     host: str = "127.0.0.1"               # 默认仅回环
-    port: int = 8000
-    max_concurrent_sessions: int = Field(default=4, description="并发会话上限（信号量）")
+    port: int = Field(default=8000, ge=1, le=65535)
+    max_concurrent_sessions: int = Field(default=4, ge=1, description="并发会话上限（信号量）")
     remote_auth_required: bool = Field(
         default=True, description="非回环绑定必须配置管理密码，否则拒绝启动")
     password_env: str = Field(
@@ -136,7 +151,7 @@ class WebConfig(BaseModel):
         description="管理密码所在环境变量；配置后本机访问也要求 Basic Auth")
 
 
-class McpServerConfig(BaseModel):
+class McpServerConfig(ValidatedConfig):
     """外部 MCP 服务器接入（工具以 mcp__<名>__<工具> 并入智能体工具目录）。
 
     transport=stdio：本地子进程（如项目 venv 的 ``idalib-mcp --stdio``、
@@ -153,8 +168,9 @@ class McpServerConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     url: str = ""                         # http：MCP 端点
     headers: dict[str, str] = Field(default_factory=dict)
-    timeout: float = 180.0                # 单次工具调用硬顶（秒）
+    timeout: float = Field(default=180.0, gt=0)                # 单次工具调用硬顶（秒）
     default_risk: Literal["readonly", "intrusive", "destructive"] = "intrusive"
+    risk_by_action: bool = Field(default=False, description="按模型声明的本次行为审批，普通浏览器操作不因工具能力而升级风险")
     tool_risk_overrides: dict[str, Literal["readonly", "intrusive", "destructive"]] = Field(
         default_factory=dict,
         description="宿主可信配置的单工具风险映射，仅精确匹配远端工具名；不支持通配放行")
@@ -165,10 +181,35 @@ class McpServerConfig(BaseModel):
         default_factory=lambda: [
             "url", "urls", "target", "targets", "host", "ip", "domain", "endpoint"],
         description="若 MCP 工具 schema 含这些参数，调用前必须通过 ScopeGuard")
+    allowed_agents: list[AgentType] = Field(
+        default_factory=list, description="额外授权的执行角色；空列表沿用原有角色工具范围")
+    enabled: bool = True
+
+    @field_validator("allowed_agents")
+    @classmethod
+    def validate_allowed_agents(cls, value: list[AgentType]) -> list[AgentType]:
+        supported = {AgentType.VERIFIER, AgentType.BUSINESS_CONTEXT, AgentType.CTF_WEB, AgentType.CTF_PWN,
+                     AgentType.CTF_REVERSE, AgentType.CTF_CRYPTO, AgentType.CTF_MISC}
+        if any(role not in supported for role in value):
+            raise ValueError("自定义 MCP 目前支持 verifier、business_context 和 ctf_* 执行角色；其他角色没有动态工具调用循环")
+        return list(dict.fromkeys(value))
+
+
+class SecretaryConfig(ValidatedConfig):
+    """只读参谋按灵枢请求工作，不默认每回合增加调用。"""
+
     enabled: bool = True
 
 
-class SystemConfig(BaseModel):
+class ResourcesConfig(ValidatedConfig):
+    """共享目录路径在会话隔离前固定；历史观测不携带授权。"""
+
+    root: str = ""
+    freshness_hours: float = Field(default=24, gt=0)
+    npm_registry: str = Field(default="https://registry.npmjs.org", pattern=r"^https?://")
+
+
+class SystemConfig(ValidatedConfig):
     """系统总配置。"""
 
     mode: RunMode = RunMode.SRC
@@ -180,13 +221,15 @@ class SystemConfig(BaseModel):
     knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
     report: ReportConfig = Field(default_factory=ReportConfig)
     web: WebConfig = Field(default_factory=WebConfig)
+    secretary: SecretaryConfig = Field(default_factory=SecretaryConfig)
+    resources: ResourcesConfig = Field(default_factory=ResourcesConfig)
     mcp_servers: list[McpServerConfig] = Field(
         default_factory=list,
         description="外部 MCP 服务器（stdio/http），工具并入智能体工具目录")
     models_config_path: str = "configs/models.yaml"
     agent_models_path: str = "configs/agent_models.yaml"   # 按 Agent 模型分配表
     audit_log_path: str = ".spiritscout/audit.jsonl"
-    max_routes_per_agent: int = Field(default=8, description="分支数硬上限（防分支爆炸，9.1）")
+    max_routes_per_agent: int = Field(default=8, ge=1, le=8, description="分支数硬上限（防分支爆炸，9.1）")
     default_routes_per_agent: int = Field(default=3, description="默认 3 条差异化路线（硬约束 C2）")
     # 不设迭代回合顶：继续/收手由主 Agent 按态势判断，用户随时可停
 
@@ -198,7 +241,7 @@ class SystemConfig(BaseModel):
         return v
 
 
-class ProviderEntry(BaseModel):
+class ProviderEntry(ValidatedConfig):
     """模型供应商（接入端点）：一个 base_url + 一把密钥，下挂若干模型。
 
     密钥属于供应商而非单个模型——同一端点的多个模型共用一条密钥记录；
@@ -227,7 +270,7 @@ class ProviderEntry(BaseModel):
         return v.strip()
 
 
-class ModelEntry(BaseModel):
+class ModelEntry(ValidatedConfig):
     """模型注册表条目（4.9.4：能力画像/成本/速率/质量评分）。
 
     模型 ID 即身份：注册表、编队指派、审计与预算都以它为主键；接入信息
@@ -249,11 +292,21 @@ class ModelEntry(BaseModel):
     # 思考强度取值：由每个模型自行声明（如 low/medium/high，或某模型特有的
     # ultra）——不设固定枚举，也不假设各模型档位一致；空 = 该模型不吃思考强度。
     reasoning_effort_levels: list[str] = Field(default_factory=list)
-    cost_input_per_mtok: float = 0.0
-    cost_output_per_mtok: float = 0.0
-    rate_limit_rpm: int = 60
+    prompt_caching: Literal["provider_default", "anthropic_ephemeral"] = "provider_default"
+    cost_cached_input_per_mtok: float | None = Field(default=None, ge=0)
+    cost_cache_write_per_mtok: float | None = Field(default=None, ge=0)
+    cost_input_per_mtok: float = Field(default=0.0, ge=0)
+    cost_output_per_mtok: float = Field(default=0.0, ge=0)
+    rate_limit_rpm: int = Field(default=60, gt=0)
     quality_score: float = 1.0            # 基准评测动态更新
     is_fallback_for: list[str] = Field(default_factory=list, description="主备关系：作为哪些模型的备（模型 ID）")
+
+    def validate_cache_transport(self) -> None:
+        """显式缓存标记只在已声明的兼容协议上启用。"""
+        anthropic = self.api_format == "anthropic_messages" or (
+            self.api_format == "auto" and self.provider == "anthropic_compatible")
+        if self.prompt_caching == "anthropic_ephemeral" and not anthropic:
+            raise ConfigurationError(f"模型 {self.model}：显式 Anthropic 缓存需要 anthropic_messages 协议")
 
     @field_validator("model")
     @classmethod
@@ -282,7 +335,7 @@ class ModelEntry(BaseModel):
         return [s.strip() for s in v if s.strip()]
 
 
-class ModelConfigFile(BaseModel):
+class ModelConfigFile(ValidatedConfig):
     """模型配置文件：供应商（接入端点）+ 模型（能力画像）两段。"""
 
     providers: list[ProviderEntry] = Field(default_factory=list)
@@ -308,6 +361,9 @@ def _load_yaml(path: str | Path) -> dict[str, Any]:
 def load_system_config(path: str | Path) -> SystemConfig:
     data = _expand_env(_load_yaml(path))
     data = _apply_env_overrides(data)
+    if isinstance(data.get("gateway"), dict) and "default_tier" in data["gateway"]:
+        data["gateway"].pop("default_tier")
+        warnings.warn("gateway.default_tier 已废弃，请在编队页指派模型", UserWarning, stacklevel=2)
     try:
         return SystemConfig.model_validate(data)
     except Exception as exc:
@@ -330,12 +386,18 @@ def _merge_providers(cfg: ModelConfigFile) -> list[ModelEntry]:
             "api_key": p.api_key if p else m.api_key,
             "api_format": (p.api_format if p and p.api_format != "auto" else m.api_format),
         }))
+    for entry in out:
+        entry.validate_cache_transport()
     return out
 
 
 def load_model_config(path: str | Path) -> list[ModelEntry]:
     """装载模型注册表（供应商接入信息已合并进各模型）。"""
     data = _expand_env(_load_yaml(path))
+    for entry in data.get("models", []) if isinstance(data.get("models"), list) else []:
+        if isinstance(entry, dict) and "tier" in entry:
+            entry.pop("tier")
+            warnings.warn("模型 tier 已废弃，请在编队页指派模型", UserWarning, stacklevel=2)
     try:
         cfg = ModelConfigFile.model_validate(data)
     except Exception as exc:

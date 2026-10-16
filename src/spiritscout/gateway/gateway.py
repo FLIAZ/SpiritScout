@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
+import json
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -23,7 +25,10 @@ from spiritscout.gateway.backends import (
     MockBackend,
     backend_for,
     emit_delta,
+    extract_json,
 )
+from spiritscout.gateway.cache import PrefixTracker, cache_summary
+from spiritscout.gateway.context import DecisionMemory
 from spiritscout.gateway.registry import ModelRegistry
 from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
 
@@ -40,6 +45,9 @@ class ChatResponse:
     reasoning: str = ""          # 推理模型思考内容（reasoning_content/thinking）
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     finish_reason: str = ""
+    cached_input_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    first_delta_ms: float | None = None
 
 
 def output_lost(resp: ChatResponse) -> bool:
@@ -55,6 +63,7 @@ async def chat_decision(
     *,
     audit=None,
     actor: str = "",
+    memory: DecisionMemory | None = None,
     **kwargs: Any,
 ) -> ChatResponse:
     """决策 JSON 通道：输出为空或被端点截断时加大输出余量重试一次。
@@ -62,6 +71,8 @@ async def chat_decision(
     思考型模型可能把输出额度耗在思考上，正文为空或只剩半截 JSON——解析
     失败会被上层当成决策缺席走规则回退，一次重试远比误判便宜。重试失败
     沿用原响应交由上层解析兜底，不掩盖原始结果。"""
+    if memory is not None:
+        messages = memory.prepare(messages)
     resp = await gateway.chat(messages, **kwargs)
     if output_lost(resp):
         if audit is not None:
@@ -70,11 +81,14 @@ async def chat_decision(
                 "finish_reason": resp.finish_reason,
                 "content_chars": len(resp.content or "")})
         try:
-            retried = await gateway.chat(messages, max_tokens=32768, **kwargs)
+            retry_kwargs = {**kwargs, "max_tokens": max(32768, (kwargs.get("max_tokens") or 0) * 2)}
+            retried = await gateway.chat(messages, **retry_kwargs)
             if not output_lost(retried):
                 resp = retried
         except Exception:  # noqa: BLE001, S110 —— 重试失败沿用原响应，解析端兜底
             pass
+    if memory is not None and not output_lost(resp) and isinstance(extract_json(resp.content), dict):
+        memory.commit(resp.content or "")
     return resp
 
 
@@ -98,7 +112,7 @@ class BudgetTracker:
     # 记账钩子：每笔调用后把用量快照外发（控制台实时展示，不等终场汇总）
     on_record: Any = None
 
-    def record(self, model: str, tokens: int, usd: float, ts: float = 0) -> None:
+    def record(self, model: str, tokens: int, usd: float, ts: float = 0, **metrics: Any) -> None:
         self.used_tokens += tokens
         self.used_usd += usd
         self.per_model_tokens[model] = self.per_model_tokens.get(model, 0) + tokens
@@ -107,7 +121,7 @@ class BudgetTracker:
         import time as _t
         self.call_log.append({
             "ts": ts or _t.time(), "model": model,
-            "tokens": tokens, "cost_usd": usd, "mode": self.mode})
+            "tokens": tokens, "cost_usd": usd, "mode": self.mode, **metrics})
         if self.on_record is not None:
             # 展示面失败不拖累记账主链（sink 自身须可容错，如落盘瞬时失败）
             with contextlib.suppress(Exception):
@@ -140,8 +154,12 @@ class BudgetTracker:
             "per_mode_tokens": dict(self.per_mode_tokens),
             "mode": self.mode,
             "calls": len(self.call_log),
+            "cache": self.cache_snapshot(),
             "live": True,
         }
+
+    def cache_snapshot(self) -> dict[str, Any]:
+        return cache_summary(self.call_log)
 
     def call_series(self) -> list[dict]:
         """逐笔调用记录（时序图表数据源）。"""
@@ -156,6 +174,7 @@ class ModelGateway:
         audit: AuditLogger | None = None,
         mock_backend: MockBackend | None = None,
     ):
+        self.prefix_tracker = PrefixTracker()
         self.registry = registry
         self.config = config or GatewayConfig()
         self.audit = audit or NullAuditLogger()
@@ -282,6 +301,16 @@ class ModelGateway:
         task_type: str = "execution",
     ) -> ChatResponse:
         backend: ChatBackend = backend_for(entry, self._mock)
+        messages = copy.deepcopy(messages)
+        if entry.context_window:
+            from spiritscout.gateway.context import compact_history
+
+            # 字符阈值是保守的软投影，不是回合数/Token 熔断；约束不被丢弃。
+            reserve = max_tokens or entry.max_output_tokens or 4096
+            compact_history(messages, max(1024, entry.context_window - reserve))
+        if tools:
+            tools = sorted(copy.deepcopy(tools), key=lambda t: str(t.get("function", {}).get("name", t.get("name", ""))))
+            tools = json.loads(json.dumps(tools, ensure_ascii=False, sort_keys=True))
         # 输出上限落点：调用点显式给定值优先（小通道定值）；否则按模型档案
         # 声明下发；档案也没声明就 None（请求不带该字段，端点自定）
         if max_tokens is None and entry.max_output_tokens > 0:
@@ -290,8 +319,11 @@ class ModelGateway:
         wall = time.time()                      # 记账用墙钟（时序图按日聚合）
         scope = current_execution_scope.get() or ExecutionScope()
         actor = scope.agent_id or "gateway"
+        prefix = self.prefix_tracker.observe(
+            (entry.provider, entry.base_url or "", entry.model, actor, scope.task_id or "", task_type),
+            messages, tools)
         call = {"call_id": f"model-{uuid.uuid4().hex}", "model": entry.model,
-                "task_type": task_type, "task_id": scope.task_id, "route_id": scope.route_id}
+                "task_type": task_type, "task_id": scope.task_id, "route_id": scope.route_id, **prefix}
         self.audit.log("model.started", actor, call)
         try:
             raw = await backend.complete(
@@ -309,21 +341,33 @@ class ModelGateway:
                             "latency_ms": round((time.perf_counter() - started) * 1000, 1)})
             raise
         latency = (time.perf_counter() - started) * 1000
+        metrics = {key: raw.get(key) for key in ("cached_input_tokens", "cache_write_tokens", "first_delta_ms")}
+        metrics.update(input_tokens=raw["prompt_tokens"], output_tokens=raw["completion_tokens"],
+                       task_type=task_type, actor=actor, **prefix)
         total_tokens = raw["prompt_tokens"] + raw["completion_tokens"]
         cost = (
             raw["prompt_tokens"] / 1e6 * entry.cost_input_per_mtok
             + raw["completion_tokens"] / 1e6 * entry.cost_output_per_mtok
         )
-        self.budget.record(entry.model, total_tokens, cost, ts=wall)
+        read = raw.get("cached_input_tokens")
+        write = raw.get("cache_write_tokens")
+        if read is not None and entry.cost_cached_input_per_mtok is not None:
+            cost += min(read, raw["prompt_tokens"]) / 1e6 * (entry.cost_cached_input_per_mtok - entry.cost_input_per_mtok)
+        if write is not None and entry.cost_cache_write_per_mtok is not None:
+            cost += min(write, max(0, raw["prompt_tokens"] - (read or 0))) / 1e6 * (entry.cost_cache_write_per_mtok - entry.cost_input_per_mtok)
+        self.budget.record(entry.model, total_tokens, cost, ts=wall, **metrics)
         self.audit.log(
             "model.call", actor,
             {**call, "tokens": total_tokens,
              "input_tokens": raw["prompt_tokens"], "output_tokens": raw["completion_tokens"],
              "cost_usd": round(cost, 6), "latency_ms": round(latency, 1),
-             "effort": reasoning_effort,
+             "effort": reasoning_effort, **metrics,
              "tool_calls": [c.get("name") for c in raw.get("tool_calls", [])]},
         )
         return ChatResponse(
+            cached_input_tokens=raw.get("cached_input_tokens"),
+            cache_write_tokens=raw.get("cache_write_tokens"),
+            first_delta_ms=raw.get("first_delta_ms"),
             content=raw["content"],
             model=entry.model,
             prompt_tokens=raw["prompt_tokens"],
@@ -358,6 +402,7 @@ class ModelGateway:
             "per_mode_tokens": dict(self.budget.per_mode_tokens),
             "mode": self.budget.mode,
             "call_series": self.budget.call_series(),
+            "cache": self.budget.cache_snapshot(),
         }
 
 

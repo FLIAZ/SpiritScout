@@ -51,6 +51,28 @@ def _bound_model(cfg: SystemConfig, models: list[ModelEntry],
     return assigned if any(m.model == assigned for m in models) else ""
 
 
+def _conversation_gateway(cfg: SystemConfig, models: list[ModelEntry], audit: AuditLogger) -> Any:
+    """路由与空闲对话也进入同一会话用量台账，运行期继续回灌该快照。"""
+    from spiritscout.gateway import ModelGateway, ModelRegistry
+
+    gateway = ModelGateway(ModelRegistry(models), config=cfg.gateway, audit=audit)
+    path = Path(cfg.workspace.root) / "usage.json"
+    if path.exists():
+        try:
+            gateway.budget.restore(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            pass
+
+    def persist(snapshot: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(path)
+
+    gateway.budget.on_record = persist
+    return gateway
+
+
 async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
                           mission: str, heuristic: RunMode,
                           audit: AuditLogger,
@@ -71,10 +93,9 @@ async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
     - 应答解析失败 → 返回 (None, "task")：按装配层结构化兜底走。
     低思考档提示：分类是小判断，不值得重推理（模型未声明低档时忽略）。
     """
-    from spiritscout.gateway import ModelGateway, ModelRegistry
     from spiritscout.gateway.backends import extract_json
 
-    gateway = ModelGateway(ModelRegistry(models), config=cfg.gateway, audit=audit)
+    gateway = _conversation_gateway(cfg, models, audit)
     try:
         resp = await gateway.chat(
             [{"role": "system", "content": (
@@ -184,8 +205,6 @@ async def _master_reply(cfg: SystemConfig, models: list[ModelEntry],
     消息时灵枢带着上文接着聊，与运行中直达通道共用同一份对话史。
     LLM 不可用时回退固定话术——用户至少能看到确定的反馈。
     """
-    from spiritscout.gateway import ModelGateway, ModelRegistry
-
     system = ("你是灵枢。用中文写一段简短、自然的回复。\n" + _self_view(cfg)
               if kind == "dialogue" else
               "你是灵枢。用户刚下发了执行规则/流程手册（不是具体题目或目标）。"
@@ -196,7 +215,7 @@ async def _master_reply(cfg: SystemConfig, models: list[ModelEntry],
                   for e in (history or [])[-20:]],
                 {"role": "user", "content": user_text[:4000]}]
     try:
-        gateway = ModelGateway(ModelRegistry(models), config=cfg.gateway, audit=audit)
+        gateway = _conversation_gateway(cfg, models, audit)
         resp = await gateway.chat(
             messages,
             task_type="meta_planning", max_tokens=1024,
@@ -238,6 +257,16 @@ class _UsageCall(BaseModel):
     cost_usd: float = Field(default=0, ge=0, allow_inf_nan=False)
     model: str = ""
     mode: str = ""
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    cached_input_tokens: int | None = Field(default=None, ge=0)
+    cache_write_tokens: int | None = Field(default=None, ge=0)
+    first_delta_ms: float | None = Field(default=None, ge=0)
+    task_type: str = ""
+    actor: str = ""
+    request_bytes: int | None = Field(default=None, ge=0)
+    reused_prefix_bytes: int | None = Field(default=None, ge=0)
+    new_suffix_bytes: int | None = Field(default=None, ge=0)
 
 
 class _UsageSnapshot(BaseModel):
@@ -246,6 +275,7 @@ class _UsageSnapshot(BaseModel):
     model_config = ConfigDict(allow_inf_nan=False)
     used_tokens: int = Field(ge=0)
     used_usd: float = Field(default=0, ge=0)
+    cache: dict[str, Any] = Field(default_factory=dict)
     per_model_tokens: dict[str, int] = Field(default_factory=dict)
     per_mode_tokens: dict[str, int] = Field(default_factory=dict)
     call_series: list[_UsageCall] = Field(default_factory=list)
@@ -395,6 +425,10 @@ class Session:
             usage = _UsageSnapshot.model_validate(live).model_dump()
         except (OSError, ValueError):   # 含 Pydantic ValidationError
             pass
+        if usage.get("call_series"):
+            from spiritscout.gateway.cache import cache_summary
+
+            usage["cache"] = cache_summary(usage["call_series"])
         return usage
 
     def report_path(self) -> Path | None:
@@ -581,6 +615,11 @@ class SessionManager:
             # 只服务回复/审计路径，不派工——借用主配置模式，别让 RunMode
             # 构造崩掉续传（续传是否派工由语义路由重新裁决）
             cfg.mode = self._cfg.mode
+        from spiritscout.resources.store import ResourceStore, resource_root
+
+        cfg.resources.root = str(resource_root(self._cfg))
+        resources = ResourceStore(cfg.resources.root, cfg.resources.freshness_hours)
+        cfg.mcp_servers = resources.effective_mcp(cfg.mcp_servers)
         cfg.workspace.root = str(ws)
         cfg.blackboard.sqlite_path = str(session.bb_path)
         cfg.knowledge.sqlite_path = str(ws / "kb.db")

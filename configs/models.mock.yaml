@@ -10,7 +10,6 @@ providers:
 models:
   - model: mock-flagship
     provider_ref: mock
-    tier: flagship
     capabilities: [reasoning, code, chinese, security]
     context_window: 200000
     reasoning_effort_levels: [low, medium, high]
@@ -21,7 +20,6 @@ models:
 
   - model: mock-fast
     provider_ref: mock
-    tier: fast
     capabilities: [chinese]
     context_window: 128000
     reasoning_effort_levels: [low, high]
@@ -32,7 +30,6 @@ models:
 
   - model: mock-code
     provider_ref: mock
-    tier: code
     capabilities: [code]
     context_window: 128000
     reasoning_effort_levels: []
@@ -43,7 +40,6 @@ models:
 
   - model: mock-rigorous
     provider_ref: mock
-    tier: rigorous
     capabilities: [reasoning, chinese, security]
     context_window: 200000
     reasoning_effort_levels: [low, medium, high, ultra]
@@ -54,7 +50,6 @@ models:
 
   - model: mock-backup
     provider_ref: mock
-    tier: fast
     capabilities: [chinese]
     context_window: 128000
     reasoning_effort_levels: []

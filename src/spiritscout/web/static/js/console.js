@@ -221,6 +221,8 @@ window.modelEdit = model => {
   $("#m-model").value = m.model || "";
   fillPrefs(m.provider_ref || "");
   $("#m-ctx").value = m.context_window || 0;
+  $("#m-cache").value = m.prompt_caching || "provider_default";
+  selxSync($("#m-cache"));
   S.effSel = [...(m.reasoning_effort_levels || [])];
   renderEffChips();
   $("#m-caps-box").querySelectorAll("input").forEach(c =>
@@ -237,6 +239,7 @@ window.modelAddTo = ref => {
   renderEffChips();
   fillPrefs(ref);
   $("#m-ctx").value = 0;
+  $("#m-cache").value = "provider_default"; selxSync($("#m-cache"));
   $("#m-dlg").showModal();
 };
 
@@ -248,14 +251,15 @@ window.modelDel = async model => {
 
 $("#m-cancel").onclick = () => $("#m-dlg").close();
 $("#m-save").onclick = async () => {
+  const existing = (S.models?.models || []).find(x => x.model === S.medit) || {};
   const body = {
+    ...Object.fromEntries(Object.entries(existing).filter(([,value]) => value != null)),
     model: $("#m-model").value.trim(), provider_ref: $("#m-pref").value,
     context_window: +$("#m-ctx").value || 0,
     reasoning_effort_levels: [...S.effSel],
     capabilities: [...$("#m-caps-box").querySelectorAll("input:checked")]
       .map(c => c.value),
-    cost_input_per_mtok: 0, cost_output_per_mtok: 0,
-    rate_limit_rpm: 60, quality_score: 1, is_fallback_for: [],
+    prompt_caching: $("#m-cache").value,
   };
   if (!body.model) { toast("模型 ID 必填", true); return; }
   try {
@@ -373,7 +377,8 @@ $("#p-save").onclick = async () => {
   const name = $("#p-name").value.trim();
   const keyval = $("#p-keyval").value.trim();
   if (!name) { toast("供应商名必填", true); return; }
-  const body = { name, provider: $("#p-type").value, base_url: $("#p-baseurl").value.trim(),
+  const original = (S.providers || []).find(p => p.name === S.pedit) || {};
+  const body = { api_format: original.api_format || "auto", name, provider: $("#p-type").value, base_url: $("#p-baseurl").value.trim(),
                  api_key: "" };
   // 密钥只走直填：服务端加密存入密钥库；编辑时留空 = 库内密钥保持不变
   if (keyval) body.api_key_value = keyval;

@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import copy
 import inspect
 import json
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -28,6 +30,22 @@ DeltaCallback = Callable[[str, str], Any]
 # Anthropic Messages 协议必填输出上限；模型/档案都未声明时的保底值
 # （对照同类 Agent 实践：按模型最大输出给足，思考型模型不再被小顶截断）
 _ANTHROPIC_MIN_MAX_TOKENS = 32000
+
+
+def cache_usage(usage: Any) -> dict[str, int | None]:
+    """兼容 SDK 对象和字典；未提供的指标保留 None，不能伪造零命中。"""
+    def get(obj: Any, key: str) -> Any:
+        return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+
+    details = get(usage, "prompt_tokens_details") or get(usage, "input_tokens_details")
+    read = get(details, "cached_tokens")
+    if read is None:
+        read = get(usage, "cache_read_input_tokens")
+    if read is None:
+        read = get(usage, "prompt_cache_hit_tokens")
+    write = get(usage, "cache_creation_input_tokens")
+    return {"cached_input_tokens": read if type(read) is int and read >= 0 else None,
+            "cache_write_tokens": write if type(write) is int and write >= 0 else None}
 
 
 async def emit_delta(on_delta: DeltaCallback | None, kind: str, text: str) -> None:
@@ -216,6 +234,27 @@ class LiteLLMBackend(ChatBackend):
     ) -> dict[str, Any]:
         import litellm  # 延迟导入
 
+        messages = copy.deepcopy(messages)
+        tools = copy.deepcopy(tools)
+        if entry.prompt_caching == "anthropic_ephemeral":
+            if not anthropic:
+                raise ValueError("显式 Anthropic 缓存需要 anthropic_messages 协议")
+            # tools → system → 共享事实 → 最近消息，最多四个断点；
+            # 不能只缓存短 system 而让整个工具环和大事实块每次重算。
+            if tools:
+                tools[-1]["cache_control"] = {"type": "ephemeral"}
+            system = next((m for m in messages if m.get("role") == "system"), None)
+            if system and isinstance(system.get("content"), str):
+                system["content"] = [{"type": "text", "text": system["content"],
+                                      "cache_control": {"type": "ephemeral"}}]
+            eligible = [m for m in messages if m.get("role") in {"user", "tool"}
+                        and isinstance(m.get("content"), str) and m["content"]]
+            for message in ([eligible[0], eligible[-1]] if len(eligible) > 1 else eligible):
+                if message["role"] == "tool":
+                    message["cache_control"] = {"type": "ephemeral"}
+                else:
+                    message["content"] = [{"type": "text", "text": message["content"],
+                                           "cache_control": {"type": "ephemeral"}}]
         kwargs: dict[str, Any] = {
             "model": entry.model,
             "messages": messages,
@@ -253,6 +292,7 @@ class LiteLLMBackend(ChatBackend):
             # 流式响应可能不含 usage 块，token 计数会归零
             kwargs["stream_options"] = {"include_usage": True}
 
+        requested_at = time.perf_counter()
         try:
             resp = await litellm.acompletion(**kwargs)
         except Exception as exc:
@@ -272,13 +312,14 @@ class LiteLLMBackend(ChatBackend):
             resp = await litellm.acompletion(**kwargs)
 
         if streaming:
-            return await self._consume_stream(resp, on_delta)
+            return await self._consume_stream(resp, on_delta, started=requested_at)
 
         choice = resp.choices[0]
         usage = getattr(resp, "usage", None)
         return {
             "content": choice.message.content or "",
             "reasoning": str(getattr(choice.message, "reasoning_content", "") or ""),
+            **cache_usage(usage),
             "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
             "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
             "tool_calls": normalize_tool_calls(
@@ -289,7 +330,7 @@ class LiteLLMBackend(ChatBackend):
     # ------------------------------------------------------------ 流式累积
 
     async def _consume_stream(
-        self, stream: Any, on_delta: DeltaCallback,
+        self, stream: Any, on_delta: DeltaCallback, *, started: float | None = None,
     ) -> dict[str, Any]:
         """累积流式增量：文本/思考逐块投递回调，工具调用按 index 拼接分片。
 
@@ -301,6 +342,8 @@ class LiteLLMBackend(ChatBackend):
         tool_slots: dict[int, dict[str, Any]] = {}
         usage: Any = None
         finish_reason = ""
+        first_delta_ms = None
+        started = started if started is not None else time.perf_counter()
         async for chunk in stream:
             if getattr(chunk, "usage", None):
                 usage = chunk.usage
@@ -313,6 +356,8 @@ class LiteLLMBackend(ChatBackend):
             delta = getattr(choice, "delta", None)
             if delta is None:
                 continue
+            if first_delta_ms is None and any(getattr(delta, k, None) for k in ("content", "reasoning_content", "reasoning", "tool_calls")):
+                first_delta_ms = round((time.perf_counter() - started) * 1000, 1)
             text = getattr(delta, "content", None)
             if text:
                 content_parts.append(text)
@@ -348,8 +393,10 @@ class LiteLLMBackend(ChatBackend):
             for i in sorted(tool_slots)
         ]
         return {
+            "first_delta_ms": first_delta_ms,
             "content": "".join(content_parts),
             "reasoning": "".join(reasoning_parts),
+            **cache_usage(usage),
             "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
             "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
             "tool_calls": normalize_tool_calls(ordered),
@@ -479,6 +526,7 @@ class LiteLLMBackend(ChatBackend):
             "content": content,
             "reasoning": "".join(reasoning_parts),
             # Responses 协议 usage 字段名是 input_tokens/output_tokens
+            **cache_usage(usage),
             "prompt_tokens": int(getattr(usage, "input_tokens", 0) or 0),
             "completion_tokens": int(getattr(usage, "output_tokens", 0) or 0),
             "tool_calls": normalize_tool_calls(raw_calls),
@@ -633,6 +681,29 @@ class MockBackend(ChatBackend):
     def _rule_based(messages: list[dict[str, Any]]) -> str:
         system = next((m["content"] for m in messages if m.get("role") == "system"), "")
         user = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
+        # 测试后端还原追加式现场，语义与真实模型接收的补丁相同。
+        latest = extract_json(user)
+        if isinstance(latest, dict) and ("snapshot" in latest or "patch" in latest):
+            state: dict[str, Any] = {}
+            for message in messages:
+                if message.get("role") != "user":
+                    continue
+                item = extract_json(message.get("content", ""))
+                if not isinstance(item, dict):
+                    continue
+                if "snapshot" in item:
+                    state = copy.deepcopy(item["snapshot"])
+                for change in item.get("patch", []):
+                    keys = [key.replace("~1", "/").replace("~0", "~")
+                            for key in change["path"].lstrip("/").split("/")]
+                    parent = state
+                    for key in keys[:-1]:
+                        parent = parent[key]
+                    if change["op"] == "remove":
+                        parent.pop(keys[-1], None)
+                    else:
+                        parent[keys[-1]] = copy.deepcopy(change["value"])
+            user = json.dumps(state, ensure_ascii=False)
         role = ""
         for line in system.splitlines():
             if line.startswith("ROLE:"):

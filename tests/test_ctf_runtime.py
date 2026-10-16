@@ -51,11 +51,11 @@ class SolverContextTests(unittest.TestCase):
         self.assertEqual(sent[0]["role"], "system")
         self.assertEqual(len(sent), 4)
 
-    def test_later_model_calls_drop_initial_system_but_keep_evidence(self) -> None:
+    def test_later_calls_keep_constraints_and_evidence(self) -> None:
         sent = _model_messages(self.messages, initialized=True)
 
         self.assertEqual([message["role"] for message in sent],
-                         ["user", "assistant", "tool"])
+                         ["system", "user", "assistant", "tool"])
         self.assertEqual(sent[-1]["content"], "现场证据")
         self.assertEqual(len(self.messages), 4, "过滤不能改写持久会话状态")
 
@@ -66,7 +66,7 @@ class SolverContextTests(unittest.TestCase):
 
         self.assertEqual(self.messages[1]["content"], "题面与入口")
 
-    def test_removed_system_prompt_does_not_consume_later_turn_budget(self) -> None:
+    def test_system_remains_protected_when_history_exceeds_budget(self) -> None:
         messages = [
             {"role": "system", "content": "S" * 100_000},
             {"role": "user", "content": "题面"},
@@ -76,7 +76,8 @@ class SolverContextTests(unittest.TestCase):
 
         CTFBaseAgent._compact_messages(messages, initialized=True)
 
-        self.assertEqual(messages[-1]["content"], "E" * 1_000)
+        self.assertEqual(messages[0]["content"], "S" * 100_000)
+        self.assertIn("已折叠", messages[-1]["content"])
 
     def test_fold_keeps_head_and_tail(self) -> None:
         body = "头" * 150 + "中" * 1_000 + "尾结论" + "！" * 100

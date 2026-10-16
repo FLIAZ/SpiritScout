@@ -21,7 +21,8 @@ _SENSITIVE_KEYS = re.compile(
 )
 _RAW_KEYS = {"arguments", "params", "code", "command", "body", "request_body", "headers"}
 _COUNTER_KEYS = {"tokens", "used_tokens", "prompt_tokens", "completion_tokens", "total_tokens",
-                 "input_tokens", "output_tokens", "reasoning_tokens", "budget_tokens"}
+                 "input_tokens", "output_tokens", "reasoning_tokens", "budget_tokens",
+                 "cached_input_tokens", "cache_write_tokens"}
 _AUTH_VALUE = re.compile(r"(?i)(\b(?:Bearer|Basic)\s+)[^\s\"'<>]+")
 _NAMED_VALUE = re.compile(
     r"(?i)((?:api[_-]?key|password|passwd|secret|token|authorization|cookie|credential)"
@@ -71,7 +72,7 @@ def _redact(value: Any) -> Any:
         if isinstance(value.get("name"), str) and isinstance(value.get("arguments"), dict):
             value = {**value, "preview": value.get("preview") or tool_preview(value["arguments"])}
         return {
-            k: (v if str(k) in _COUNTER_KEYS and type(v) is int and v >= 0
+            k: (v if str(k) in _COUNTER_KEYS and (v is None or type(v) is int and v >= 0)
                 else "***REDACTED***" if _SENSITIVE_KEYS.search(str(k))
                 else _opaque(v) if str(k).lower() in _RAW_KEYS else _redact(v))
             for k, v in value.items()

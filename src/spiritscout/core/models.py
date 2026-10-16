@@ -56,6 +56,8 @@ class VulnStatus(str, enum.Enum):
     """漏洞核验状态机（4.3.2 全链路核验）。"""
 
     CANDIDATE = "candidate"                  # 候选（路线发现的原始线索）
+    VERIFYING = "verifying"                  # 独立角色复测中
+    INCONCLUSIVE = "inconclusive"            # 缺少证据或规则，不进入收录池
     SCREENED = "screened"                    # 初筛通过
     REPRODUCED = "reproduced"                # 独立复现通过（≥2 种方式交叉）
     FP_CHECKED = "fp_checked"                # 误报排查通过
@@ -72,6 +74,8 @@ class AgentType(str, enum.Enum):
     """子 Agent 类型（含三模式全谱系）。"""
 
     MASTER = "master"
+    VERIFIER = "verifier"            # 独立危害复测
+    SECRETARY = "secretary"
     BUSINESS_CONTEXT = "business_context"  # 业务流程理解与上下文建模
     RECON = "recon"                # 侦察
     PORT_SCAN = "port_scan"        # 端口扫描
@@ -182,6 +186,7 @@ class Vulnerability(BaseModel):
     exp_code: str | None = None
     poc_verified: bool = False         # PoC 实际运行通过（AWE/MAPTA 证据门控）
     reproductions: list[dict[str, Any]] = Field(default_factory=list, description="复现记录（≥2 种方式）")
+    verification: dict[str, Any] = Field(default_factory=dict, description="独立复测裁决、规则引用与实际执行证据")
     false_positive_reason: str | None = None
     compliance: dict[str, Any] = Field(default_factory=dict, description="合规判定：platform/decision/reason")
     found_by: str = ""

@@ -51,6 +51,8 @@ def resolve_mcp_risk(server: McpServerConfig, tool: dict[str, Any]) -> RiskLevel
         return RiskLevel(override)
     if server.default_risk == RiskLevel.DESTRUCTIVE.value:
         return RiskLevel.DESTRUCTIVE
+    if server.risk_by_action:
+        return RiskLevel.READONLY
     annotations = tool.get("annotations") or {}
     readonly = annotations.get("readOnlyHint", annotations.get("read_only_hint"))
     destructive = annotations.get("destructiveHint", annotations.get("destructive_hint"))

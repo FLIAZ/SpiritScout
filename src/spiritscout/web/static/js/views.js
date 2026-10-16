@@ -368,7 +368,7 @@ function renderChips() {
   const phase = { queued: "等待调度", starting: "启动任务", mode_routing: "判断任务类型",
     model_preflight: "检查模型", runtime_starting: "初始化工具与智能体",
     executing: "执行中", completed: "已完成", failed: "失败", stopped: "已停止",
-    interrupted: "已中断" }[st.session.phase] || st.session.phase || "等待启动";
+    interrupted: "已中断" }[TERMINAL.has(st.session.status) ? st.session.status : st.session.phase] || st.session.phase || "等待启动";
   const firstChip = st.session.mode === "src" && coverage
     ? ["业务覆盖", coverage] : ["当前阶段", phase];
   $("#s-chips").innerHTML = [
@@ -910,19 +910,40 @@ function showNodeDetail(nodeId) {
   panel.querySelector("#td-close").onclick = () => { panel.hidden = true; };
 }
 
+let vulnPageSession = null, vulnOffset = 0, vulnRows = null, vulnLoading = false, vulnGeneration = 0;
+async function loadVulnPage(offset) {
+  const session = S.cur, version = ++vulnGeneration;
+  vulnLoading = true; renderVulns();
+  try {
+    const page = await api(`/api/sessions/${encodeURIComponent(session)}/vulnerabilities?offset=${offset}&limit=50`);
+    if (S.cur !== session || version !== vulnGeneration) return;
+    vulnOffset = offset; vulnRows = page.items;
+  } catch (error) { if (S.cur === session) toast(`漏洞读取失败：${error.message}`, true); }
+  finally { if (S.cur === session && version === vulnGeneration) {vulnLoading = false;renderVulns();} }
+}
 function renderVulns() {
-  const vs = S.state.vulns.items || [];
+  if (vulnPageSession !== S.cur) {vulnPageSession=S.cur;vulnOffset=0;vulnRows=null;vulnLoading=false;vulnGeneration++;}
+  const vs = vulnOffset ? (vulnRows || []) : (S.state.vulns.items || []);
   $("#tab-vulns").innerHTML = vs.length ? `<div class="grid-cards">${vs.map(v => {
     const [sevCn, sevCls] = SEV_CN[v.severity] || [v.severity || "未定级", "blue"];
     return `<div class="card vcard">
       <div class="h"><b>${esc(v.title || v.vuln_type || "漏洞")}</b>
         <span class="tag ${sevCls}">${sevCn}</span>
-        <span class="tag ${v.status === "accepted" ? "green" : ""}">${esc(v.status || "")}</span>
+        <span class="tag ${v.status === "accepted" ? "green" : ""}">${esc(({candidate:"待独立复测",verifying:"鉴真复测中",inconclusive:"证据不足 · 未收录",accepted:"确认收录",rejected_false_positive:"误报 · 不收录",rejected_compliance:"不符合规则 · 不收录"})[v.status] || v.status || "")}</span>
         ${v.poc_verified ? `<span class="tag gold">PoC 已验证</span>` : ""}</div>
       ${v.endpoint ? `<div class="ep">${esc(v.endpoint)}</div>` : ""}
+      ${v.verification?.reason ? `<p>${esc(v.verification.reason)}</p>` : ""}
+      ${v.verification?.rule_quote ? `<p class="muted">危害规则：${esc(v.verification.rule_quote)}</p>` : ""}
       <div class="muted" style="font-size:11.5px">${esc(v.vuln_type || "")}${v.cvss_score != null ? " · CVSS " + v.cvss_score : ""} · ${esc(v.vuln_id || "")}</div>
     </div>`; }).join("")}</div>`
     : `<div class="empty-note">尚无漏洞记录</div>`;
+  const total = S.state.vulns.total ?? vs.length;
+  if (total > 50 || vulnOffset) {
+    $("#tab-vulns").insertAdjacentHTML("afterbegin", `<div class="vuln-pagination"><span>共 ${total} 条 · 当前 ${vulnOffset+1}–${vulnOffset+vs.length}</span><button class="btn sm" data-vuln-prev ${vulnLoading || !vulnOffset ? "disabled" : ""}>上一页</button><button class="btn sm" data-vuln-next ${vulnLoading || vulnOffset+vs.length>=total ? "disabled" : ""}>下一页</button><button class="btn sm" data-vuln-refresh ${vulnLoading ? "disabled" : ""}>${vulnLoading ? "读取中…" : "刷新当前页"}</button></div>`);
+    $("[data-vuln-prev]").onclick=()=>loadVulnPage(Math.max(0,vulnOffset-50));
+    $("[data-vuln-next]").onclick=()=>loadVulnPage(vulnOffset+50);
+    $("[data-vuln-refresh]").onclick=()=>loadVulnPage(vulnOffset);
+  }
 }
 function renderFlags() {
   const f = S.state.flags;
@@ -1252,6 +1273,27 @@ function tracePush(e) {
         ${d.path ? `<div class="bpath">${esc(d.path)}</div>` : ""}</div>`, "tl-user");
       break;
     }
+    case "verification.queued":
+      traceAppend(e, `<div class="m">候选入口已交给鉴真独立复测 · ${esc(d.vuln_id)}</div>`, "tl-sys");
+      break;
+    case "verification.started":
+      traceAppend(e, `<div class="hd"><span class="who">鉴真</span><span class="k">独立危害复测</span></div><p>${esc(d.title || d.vuln_id)}</p>`, "tl-master");
+      break;
+    case "verification.result":
+      traceAppend(e, `<details class="secretary-card" open><summary>鉴真 · ${esc(({confirmed:"确认危害，收录",false_positive:"误报，不收录",out_of_rules:"不符合规则，不收录",inconclusive:"证据不足，未收录"})[d.verdict] || "复测完成")}</summary><p>${esc(d.title || "")}</p><p>${esc(d.reason || "")}</p>${d.rule_quote ? `<p>用户危害规则：${esc(d.rule_quote)}</p>` : ""}${[...(d.evidence || []),...(d.controls || [])].map(ref=>`<p class="mono">${esc(ref.execution_id)} · ${esc(ref.quote)}</p>`).join("")}</details>`, "tl-master");
+      break;
+    case "verification.error":
+      traceAppend(e, `<div class="m">独立复测未完成，不收录：${esc(d.error || "原因未提供")}</div>`, "tl-sys");
+      break;
+    case "secretary.suggested":
+      traceAppend(e, `<details class="secretary-card"><summary>秘书 · ${(d.suggestions || []).length} 条参谋建议</summary>${(d.suggestions || []).map(item => `<article><strong>${esc(item.summary)}</strong><p>${esc(item.benefit)}</p><small>不确定性：${esc(item.uncertainty || "未说明")}</small><p class="mono">${esc((item.evidence_refs || []).join(" · "))}</p></article>`).join("") || '<p>本次没有需要补充的建议。</p>'}</details>`, "tl-master");
+      break;
+    case "secretary.decided":
+      traceAppend(e, `<details class="secretary-card"><summary>灵枢 · 已评估秘书建议</summary>${(d.decisions || []).map(item => `<article><strong>${esc(({accepted:"采纳",partial:"部分采纳",rejected:"拒绝",needs_evidence:"待补证"})[item.verdict] || "待评估")}</strong><p>${esc((d.suggestions || []).find(x=>x.id===item.id)?.summary || item.id)}</p><p>${esc(item.reason)}</p></article>`).join("")}</details>`, "tl-master");
+      break;
+    case "secretary.failed":
+      traceAppend(e, '<div class="m">秘书咨询未完成，灵枢沿用原决策继续。</div>', "tl-sys");
+      break;
     case "ring.steer":
       traceAppend(e, `<div class="hd"><span class="who">灵枢</span>
         <span class="k">→ ${esc(agentName(d.agent))}</span></div>

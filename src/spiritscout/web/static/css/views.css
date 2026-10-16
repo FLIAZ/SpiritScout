@@ -866,3 +866,17 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
 .tl-parameters > summary:focus-visible {outline:2px solid var(--accent);outline-offset:3px;border-radius:3px;}
 .tl-parameters[open] > summary {margin-bottom:8px;}
 .tl-parameters > pre {margin:0;font:11.5px/1.65 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;}
+
+/* 参谋意见和缓存指标沿用当前表面色，突出依据与决策的层级。 */
+.secretary-card {border:1px solid var(--line);border-left:3px solid var(--violet);border-radius:8px;padding:12px 14px;background:var(--surface);}
+.secretary-card summary {cursor:pointer;color:var(--ink);font-weight:600;min-height:28px;}
+.secretary-card article {border-top:1px solid var(--line);padding:12px 0;overflow-wrap:anywhere;}
+.secretary-card p {margin:6px 0;}.secretary-card small {color:var(--ink-2);}
+.obs-cache {display:grid;grid-template-columns:1fr auto;gap:6px;padding:12px 0;border-bottom:1px solid var(--line);font-size:12px;}
+.obs-cache small {grid-column:1/-1;line-height:1.7;color:var(--ink-2);}
+.archive-history {margin-top:18px;border-top:1px solid var(--line);padding-top:12px;}
+.archive-history summary {cursor:pointer;padding:8px 0;}.archive-history pre {max-height:350px;overflow:auto;font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere;}
+#connection-status {position:fixed;top:8px;left:50%;transform:translateX(-50%);max-width:90vw;z-index:1000;background:var(--surface);color:var(--bad);border:1px solid var(--bad);border-radius:8px;padding:10px 18px;font-size:12px;box-shadow:var(--shadow-raise);}
+@media(max-width:600px) {.sess-head .ops button,.tabs button,.archive-actions button {min-height:40px;}.chips {gap:5px;}.obs-focus {padding-bottom:10px;}}
+
+.vuln-pagination {display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:16px;font-size:12px;color:var(--ink-2);}.vuln-pagination span {margin-right:auto;}

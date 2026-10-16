@@ -27,6 +27,8 @@ class AgentProfile:
     runtime_tools: tuple[str, ...] = ()
 
     def allows_tool(self, name: str) -> bool:
+        if name == "asset_memory_lookup":
+            return self.key not in {AgentType.MASTER, AgentType.SECRETARY, AgentType.REPORT}
         return any(fnmatch.fnmatchcase(name, pattern)
                    for pattern in self.runtime_tools)
 
@@ -45,6 +47,21 @@ class AgentProfile:
 
 
 PROFILES: tuple[AgentProfile, ...] = (
+    AgentProfile(
+        AgentType.VERIFIER, "鉴真", "独立危害复测：依据用户规则排除误报，确认实际影响后收录",
+        ("src", "ctf", "competition"), "available", True,
+        "不沿用发现者的结论。基于用户原文和独立请求区分实际危害、静态回显、权限控制与证据不足。",
+        ("读取候选与用户规则", "独立复测并保留对照", "核对实际危害与规则", "确认、拒收或待补证"),
+        ("HTTP 对照复测", "按需接入的 MCP", "询问用户", "独立证据链"),
+        ("http_probe",),
+    ),
+    AgentProfile(
+        AgentType.SECRETARY, "秘书", "只读参谋：审视证据、提示遗漏与重复工作，由灵枢决定采纳",
+        ("src", "ctf", "competition"), "available", True,
+        "独立审视事实与判断，建议必须引用实际记录和版本；不执行工具、不扩大授权。",
+        ("读取版本化事实", "指出矛盾和遗漏", "提出带依据的建议", "交给灵枢独立决策"),
+        ("只读事实快照", "参谋建议"),
+    ),
     AgentProfile(
         AgentType.MASTER, "灵枢", "安全测试负责人：界定目标、编排证据驱动的任务图并终审结论",
         ("src", "ctf", "competition"), "available", True,
@@ -173,6 +190,9 @@ def agent_system_prompt(agent: AgentType | str, allowed: list[str]) -> str:
         f"标准流程：{workflow}。\n"
         f"可用工具面：{tools}。只使用当前实际提供的工具，不声称已执行"
         f"未调用的工具。\n"
+        "输出只包含当前阶段需要的决策和证据引用；不复述已给出的任务、授权、"
+        "业务背景或整段工具返回。简单参数选择和无异常响应判断简洁完成，"
+        "遇到矛盾或高价值证据再深入推理；无新事实时明确指出缺口，避免重复生成相同计划。"
         "必须把输出分成已观测事实、待验证假设和信息缺口；"
         "没有请求/响应、文件或工具结果支撑的内容不得写成事实。"
         "需要交付给用户的文件保存到沙箱工作目录的 ../artifacts/，"

@@ -21,8 +21,7 @@ blackboard:
   sqlite_path: .spiritscout/blackboard.db
 
 gateway:                       # 多模型网关（模型在 models.yaml 注册）
-  default_tier: fast
-  budget_tokens: 2000000       # token 预算硬顶（超顶熔断）
+  budget_tokens: 2000000       # Token 用量参考值，仅计量不熔断
   budget_usd: 20.0
   cascade_confidence_threshold: 0.8
   vote_min_models: 2
@@ -41,7 +40,7 @@ knowledge:                     # 五库 + 两经验库
   chroma_path: .spiritscout/chroma
   embedding_provider: hash     # hash（零依赖默认）/ openai_compatible
   embedding_base_url: ""
-  embedding_api_key: ${EMBEDDING_API_KEY}
+  embedding_api_key: ""        # 启用远端 embedding 时可设为 ${EMBEDDING_API_KEY}
   embedding_model: ""
 
 report:
@@ -59,16 +58,25 @@ web:
 models_config_path: configs/models.yaml
 audit_log_path: .spiritscout/audit.jsonl
 
-# 可选浏览器 MCP：显式启用后，导航只读；其他状态变更仍需即时审批。
+# 可选浏览器 MCP：显式启用后，普通交互默认可用；实际危险行为仍逐次审批。
 mcp_servers:
   - name: playwright
     enabled: false
     command: npx
     args: ["@playwright/mcp@latest", "--headless", "--snapshot-boxes"]
-    default_risk: intrusive
-    tool_risk_overrides:
-      browser_navigate: readonly
+    default_risk: readonly
+    risk_by_action: true
     scope_enforcement: required
 
 max_routes_per_agent: 8        # 分支数硬上限（防分支爆炸）
 default_routes_per_agent: 3    # 默认 3 条差异化路线（硬约束 C2）
+
+# 秘书由灵枢按需要咨询；模型可在编队页单独指派，无工具权限。
+secretary:
+  enabled: true
+
+# 共享资源目录：留空时使用主工作区 resources/，会话隔离前固定路径。
+resources:
+  root: ""
+  freshness_hours: 24
+  npm_registry: https://registry.npmjs.org

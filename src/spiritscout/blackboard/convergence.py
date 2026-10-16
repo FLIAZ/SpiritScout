@@ -52,11 +52,11 @@ class ConvergenceEngine:
                 dedup_key=key,
             )
             return asset.asset_id, True
-        # 合并：保留更完整字段（fingerprint/attrs 并集，后写不覆盖已有非空值）
+        # 合并：保留更完整字段（fingerprint/attrs 并集，新的实测覆盖同字段旧值，历史由黑板版本与共享观测保留）
         merged = existing["data"]
         changed = False
         for field_name in ("fingerprint", "attrs"):
-            combined = {**asset.model_dump().get(field_name, {}), **merged.get(field_name, {})}
+            combined = {**merged.get(field_name, {}), **asset.model_dump().get(field_name, {})}
             if combined != merged.get(field_name):
                 merged[field_name] = combined
                 changed = True
@@ -112,7 +112,14 @@ class ConvergenceEngine:
             )
         # 冲突解决：以验证更充分、证据更完整者为准（6.1）
         winner = self._pick_better_vuln(prev, vuln)
-        winner.evidence = self._merge_evidence(prev, vuln)
+        merged_evidence = self._merge_evidence(prev, vuln)
+        if prev.verification and len(merged_evidence) > len(prev.evidence):
+            # 新实证交回独立复测，不把“上次误报/上次收录”当成永远有效。
+            winner = winner.model_copy(deep=True)
+            winner.status = VulnStatus.CANDIDATE
+            winner.poc_verified = winner.exploitable = False
+            winner.verification = {"verdict": "pending", "previous_verdict": prev.verification.get("verdict")}
+        winner.evidence = merged_evidence
         self._bb.write(
             BlackboardLayer.VULN,
             existing["record_id"],
@@ -180,6 +187,12 @@ class ConvergenceEngine:
     @staticmethod
     def _pick_better_vuln(a: Vulnerability, b: Vulnerability) -> Vulnerability:
         """以验证更充分（状态机进度、复现数、PoC 验证、置信度）者为准。"""
+        if a.verification or b.verification:
+            # 独立复测的拒收/待补证不能被探测侧候选重新升级为收录。
+            if a.verification and not b.verification:
+                return a
+            if b.verification and not a.verification:
+                return b
         def score(v: Vulnerability) -> tuple:
             return (
                 v.status.value,

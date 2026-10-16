@@ -83,9 +83,13 @@ class TaskIntentTests(unittest.IsolatedAsyncioTestCase):
         await agent._llm_chat_json(
             "path_planner", {"action": "suggest_paths"}, task=_task())
 
-        # 载荷 = JSON + 尾部询问通道说明（生产由 extract_json 解析，测试同构）
+        # 事实块与当前观察分离；合并所有用户块检查任务意图仍完整传递。
         messages = agent.ctx.gateway.chat.await_args.args[0]
-        payload = extract_json(messages[-1]["content"])
+        payload = {}
+        for message in messages:
+            if message.get("role") == "user":
+                payload.update(extract_json(message["content"]) or {})
+        payload = payload.get("snapshot", payload)
         self.assertEqual(payload["task_intent"]["mission"], "摸清目标后台的登录入口")
         self.assertEqual(payload["task_intent"]["node"], "侦察与资产测绘")
 

@@ -33,6 +33,7 @@ const SessionArchive = (() => {
       <dt>更新时间</dt><dd>${esc(formatTime(item.updated_at))}</dd>
       ${item.kind === "file" ? `<dt>文件大小</dt><dd>${esc(fmtSize(item.size) || "0 B")}</dd>` : ""}</dl>
       ${refs.length ? `<section class="archive-sources"><h5>证据链 <span>${refs.length}</span></h5>${refs.map(ref => `<div class="archive-source"><code>${esc(ref.id || "证据")}</code><p>${esc(ref.caption)}</p>${ref.note ? `<small>${esc(ref.note)}</small>` : ""}${ref.record_id ? `<small>黑板记录 ${esc(ref.record_id)}</small>` : ""}</div>`).join("")}</section>` : item.kind !== "file" ? '<p class="archive-note">没有附带证据引用，请结合来源核验。</p>' : ""}
+      ${item.record_id ? `<details class="archive-history" data-layer="${esc(item.layer)}" data-record="${esc(item.record_id)}"><summary>版本历史 · 仅供回溯</summary><p>展开后读取。历史记录不能直接作为当前事实。</p><div class="archive-history-list"></div></details>` : ""}
       ${item.kind === "file" ? `<a class="btn archive-download" download href="/api/sessions/${encodeURIComponent(session)}/artifacts/download?path=${encodeURIComponent(item.path)}">下载文件 ↗</a>` : ""}`;
   }
   function formatTime(value) {
@@ -153,6 +154,32 @@ const SessionArchive = (() => {
       });
       if (window.innerWidth <= 1100) $("#archive-detail").scrollIntoView({block:"nearest"});
     };
+    $("#archive-detail").addEventListener("toggle", async event => {
+      const box = event.target;
+      if (!box.matches?.(".archive-history") || !box.open || box.dataset.loaded) return;
+      box.dataset.loaded = "loading";
+      const id = session;
+      const list = box.querySelector(".archive-history-list");
+      let before = 0;
+      const fetchPage = async () => {
+        try {
+          const page = await api(`/api/sessions/${encodeURIComponent(id)}/record-history?` +
+            new URLSearchParams({layer:box.dataset.layer, record_id:box.dataset.record, before:String(before)}));
+          if (session !== id || !box.isConnected) return;
+          list.querySelector("button")?.remove();
+          for (const item of page.items) {
+            const record = document.createElement("details"), title = document.createElement("summary"), pre = document.createElement("pre");
+            title.textContent = `历史 v${item.version} · ${formatTime(item.updated_at)}`;
+            pre.textContent = JSON.stringify(item.data, null, 2); record.append(title,pre); list.append(record);
+          }
+          before = page.items.at(-1)?.version || before;
+          if (page.has_more) { const more = document.createElement("button"); more.className = "btn sm"; more.textContent = "更早版本"; more.onclick = () => {more.disabled=true;fetchPage();}; list.append(more); }
+          if (!list.children.length) list.textContent = "尚未留存历史版本；升级前被覆盖的数据无法恢复。";
+          box.dataset.loaded = "yes";
+        } catch (error) { box.dataset.loaded = ""; list.textContent = `历史读取失败：${error.message}。重新展开可重试。`; }
+      };
+      fetchPage();
+    }, true);
     $("#archive-detail").onclick = event => {
       if (event.target.closest("[data-archive-back]")) {
         $("#archive-search").scrollIntoView({block:"start"});

@@ -97,6 +97,9 @@ class BusinessContextAgent(SubAgent):
                     "headers": {"type": "object"},
                 }, "required": ["url"]}}},
         ]
+        schemas.append({"type":"function","function":{"name":"asset_memory_lookup",
+            "description":"读取同一主机的历史资产，旧结果须按本次任务复核，不携带授权",
+            "parameters":{"type":"object","properties":{"host":{"type":"string"},"query":{"type":"string"},"offset":{"type":"integer","minimum":0}},"required":["host"]}}})
         for name, meta in sorted((self.ctx.mcp_tools or {}).items()):
             schema = meta.get("schema")
             if not isinstance(schema, dict):
@@ -154,11 +157,15 @@ class BusinessContextAgent(SubAgent):
         else:
             steering = (self.ctx.ring.steering_for(self.agent_type.value)
                         if self.ctx.ring is not None else None)
-            if steering:
+            if steering and steering.get("ts") != st.get("steer_seen"):
+                st["steer_seen"] = steering.get("ts")
                 st["messages"].append({"role": "user", "content": json.dumps(
                     {"灵枢督导": {"hint": steering["hint"],
                                   "rationale": steering.get("rationale", "")}},
                     ensure_ascii=False)})
+        from spiritscout.gateway.context import compact_history
+
+        compact_history(st["messages"])
         st["turn"] += 1
         if st["turn"] > 1:
             self.ctx.audit.log("agent.turn", self.agent_id, {"turn": st["turn"], "task_id": task.task_id})
