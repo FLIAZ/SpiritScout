@@ -911,7 +911,7 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
 .aw-pane { flex: 1 1 auto; min-height: 0; min-width: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 0 12px 12px; overflow-wrap: anywhere; }
 .aw-columns { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 18px; }
 .aw-columns > section { min-width: 0; }
-.aw-columns h4 { margin: 0; position: sticky; top: 0; padding: 8px 0;
+.aw-columns > section > h4 { margin: 0; position: sticky; top: 0; padding: 8px 0;
   background: var(--surface); font-size: 11px; color: var(--ink-2); border-bottom: 1px solid var(--line); }
 .aw-entry { padding: 10px 0; border-bottom: 1px solid var(--line); }
 .aw-entry header { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; font-size: 10px; color: var(--ink-2); }
@@ -954,3 +954,11 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
 .aw-entry pre { min-width: 0; max-width: 100%; tab-size: 2; }
 .aw-entry header > *, .aw-entry > small, .aw-entry summary { min-width: 0; overflow-wrap: anywhere; }
 .agent-workbench > .aw-toggle > span:first-of-type { min-width: 0; flex-wrap: wrap; overflow-wrap: anywhere; }
+
+/* Markdown 正文正常排版，宽表格与代码块只在块内滚动。 */
+.aw-markdown { min-width: 0; max-width: 100%; margin-top: 7px; font-size: 12px; line-height: 1.75; overflow-wrap: anywhere; }
+.aw-entry .aw-markdown pre { font-family: var(--mono); font-size: 11px; line-height: 1.65;
+  white-space: pre; overflow-wrap: normal; word-break: normal; overflow: auto; max-height: 240px; }
+.aw-markdown table { display: block; overflow-x: auto; max-width: 100%; }
+.aw-markdown td, .aw-markdown th { min-width: 80px; overflow-wrap: anywhere; }
+.aw-markdown code { overflow-wrap: anywhere; }

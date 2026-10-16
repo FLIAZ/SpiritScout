@@ -1,5 +1,5 @@
 "use strict";
-/* 每个实例独立聚合，SSE 历史回放与实时增量共用，所有文本均按纯文本展示。 */
+/* 每个实例独立聚合，SSE 历史回放与实时增量共用，模型文本复用安全 Markdown 渲染，工具原始响应保持纯文本。 */
 const AgentWorkbench = (() => {
   const create = () => ({agents: new Map(), selected: ""});
   const worker = actor => !!actor && !/^(master(?:-|$)|gateway$|runtime$|system$|user$)/.test(actor);
@@ -85,8 +85,8 @@ const AgentWorkbench = (() => {
     const oldScroll=pane.scrollTop, stick=pane.scrollHeight-pane.scrollTop-pane.clientHeight<40;
     pane.dataset.signature=bodySignature;pane.dataset.actor=selected.actor;
     const blocks=selected.blocks;
-    const blockHtml=b=>`<article class="aw-entry ${b.kind === "错误" ? "bad" : ""}"><header><b>${esc(b.kind)}</b><time>${esc(evElapsed(b.ts))}</time>${b.route ? `<small>${esc(b.route)}</small>` : ""}</header><pre>${esc(b.text)}</pre>${b.clipped ? '<small>此块仅展示最近 24,000 字，完整记录可通过「导出审计」下载。</small>' : ""}</article>`;
-    pane.innerHTML=`<div class="aw-columns"><section><h4>实时分析与输出</h4>${blocks.filter(b=>["分析","输出"].includes(b.kind)).map(blockHtml).join("") || '<p class="aw-empty">尚未收到模型输出。旧记录或未返回流式文本的端点可能没有分析正文。</p>'}</section><section><h4>执行反馈与产出</h4>${blocks.filter(b=>!["分析","输出"].includes(b.kind)).map(blockHtml).join("")}${[...selected.tools.entries()].map(([id,t])=>`<article class="aw-entry ${t.status === "失败" ? "bad" : ""}"><header><b>${esc(SessionObserver.toolName(t.name))}</b><span>${esc(t.status)}</span></header><pre>${esc(t.text)}</pre>${t.raw && t.raw !== t.text ? `<details data-aw-tool="${esc(String(id))}"><summary>展开工具反馈（最多 24,000 字）</summary><pre>${esc(t.raw)}</pre></details>` : ""}</article>`).join("") || '<p class="aw-empty">等待工具反馈与结论</p>'}</section></div>`;
+    const blockHtml=b=>`<article class="aw-entry ${b.kind === "错误" ? "bad" : ""}"><header><b>${esc(b.kind)}</b><time>${esc(evElapsed(b.ts))}</time>${b.route ? `<small>${esc(b.route)}</small>` : ""}</header><div class="md aw-markdown">${mdRender(b.text)}</div>${b.clipped ? '<small>此块仅展示最近 24,000 字，完整记录可通过「导出审计」下载。</small>' : ""}</article>`;
+    pane.innerHTML=`<div class="aw-columns"><section><h4>实时分析与输出</h4>${blocks.filter(b=>["分析","输出"].includes(b.kind)).map(blockHtml).join("") || '<p class="aw-empty">尚未收到模型输出。旧记录或未返回流式文本的端点可能没有分析正文。</p>'}</section><section><h4>执行反馈与产出</h4>${blocks.filter(b=>!["分析","输出"].includes(b.kind)).map(blockHtml).join("")}${[...selected.tools.entries()].map(([id,t])=>`<article class="aw-entry ${t.status === "失败" ? "bad" : ""}"><header><b>${esc(SessionObserver.toolName(t.name))}</b><span>${esc(t.status)}</span></header><div class="md aw-markdown">${mdRender(t.text)}</div>${t.raw && t.raw !== t.text ? `<details data-aw-tool="${esc(String(id))}"><summary>展开工具反馈（最多 24,000 字）</summary><pre>${esc(t.raw)}</pre></details>` : ""}</article>`).join("") || '<p class="aw-empty">等待工具反馈与结论</p>'}</section></div>`;
     if(same) for(const el of pane.querySelectorAll("details")) if(opened.has(el.dataset.awTool)) el.open=true;
     pane.scrollTop=same && !stick ? oldScroll : pane.scrollHeight;
   }
