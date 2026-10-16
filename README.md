@@ -217,12 +217,22 @@ src/spiritscout/
 ## 开发与验证
 
 ```bash
-.venv/bin/python -m unittest discover tests/   # 单元测试
+.venv/bin/python -m pip install -e '.[dev]'  # 固定版本的开发检查工具
+LITELLM_LOCAL_MODEL_COST_MAP=True .venv/bin/python -m unittest discover tests/
 .venv/bin/python -m ruff check src/ tests/     # 静态检查
 ```
 
 测试遵循「mock 不等于真实体验」原则：单测覆盖确定性机制（权限、边界、
-状态机），行为质量以真实任务在浏览器中实测为准。
+状态机），行为质量以真实任务在浏览器中实测为准。CI 使用轻量 test 依赖，
+覆盖 Python 3.11/3.14 和 Node 22；沙箱中的外部工具仍需按部署环境另行验收。
+前端修改同时执行 `node --check`，并运行 `tests/test_*.js` 回归。
+
+用量逐笔写入会话目录的 `usage.db`（SQLite WAL 事务），首次打开时导入旧
+`usage.json`，保留原文件；备份运行中的数据库请使用 SQLite 备份接口，
+或停服后复制。旧版程序无法读取新增的数据库计量，回退前需另行导出。
+读取结果按数据库/WAL 文件版本缓存，单文件仅保留最新快照。
+资产库启动导入按历史记录游标增量执行；资产页的手动同步保留全量重扫。
+会话列表与状态由单一调度器兜底刷新，隐藏页面降频，SSE 继续提供即时事件。
 
 ## 法律免责声明 & 使用合规须知
 
