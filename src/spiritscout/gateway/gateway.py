@@ -111,6 +111,7 @@ class BudgetTracker:
     call_log: list[dict] = field(default_factory=list)
     # 记账钩子：每笔调用后把用量快照外发（控制台实时展示，不等终场汇总）
     on_record: Any = None
+    on_call: Any = None
 
     def record(self, model: str, tokens: int, usd: float, ts: float = 0, **metrics: Any) -> None:
         self.used_tokens += tokens
@@ -119,9 +120,13 @@ class BudgetTracker:
         if self.mode:
             self.per_mode_tokens[self.mode] = self.per_mode_tokens.get(self.mode, 0) + tokens
         import time as _t
-        self.call_log.append({
+        entry = {
             "ts": ts or _t.time(), "model": model,
-            "tokens": tokens, "cost_usd": usd, "mode": self.mode, **metrics})
+            "tokens": tokens, "cost_usd": usd, "mode": self.mode,
+            "call_id": metrics.pop("call_id", None) or uuid.uuid4().hex, **metrics}
+        self.call_log.append(entry)
+        if self.on_call is not None:
+            self.on_call(entry)
         if self.on_record is not None:
             # 展示面失败不拖累记账主链（sink 自身须可容错，如落盘瞬时失败）
             with contextlib.suppress(Exception):
@@ -343,7 +348,7 @@ class ModelGateway:
         latency = (time.perf_counter() - started) * 1000
         metrics = {key: raw.get(key) for key in ("cached_input_tokens", "cache_write_tokens", "first_delta_ms")}
         metrics.update(input_tokens=raw["prompt_tokens"], output_tokens=raw["completion_tokens"],
-                       task_type=task_type, actor=actor, **prefix)
+                       task_type=task_type, actor=actor, call_id=call["call_id"], **prefix)
         total_tokens = raw["prompt_tokens"] + raw["completion_tokens"]
         cost = (
             raw["prompt_tokens"] / 1e6 * entry.cost_input_per_mtok

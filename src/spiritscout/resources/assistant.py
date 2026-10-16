@@ -20,6 +20,7 @@ from spiritscout.config.settings import load_model_config
 from spiritscout.core.audit import _redact
 from spiritscout.gateway import ModelGateway, ModelRegistry
 from spiritscout.gateway.backends import extract_json
+from spiritscout.gateway.usage import read_usage
 from spiritscout.resources.store import ResourceStore, validate_mcp
 from spiritscout.web import agentcfg, vault
 from spiritscout.web.tool_parameters import display_parameters
@@ -100,7 +101,7 @@ class ResourceAssistant:
             ).fetchall()
         usage_path = self.store.root / f"{thread['id']}-usage.json"
         try:
-            usage = json.loads(usage_path.read_text()) if usage_path.exists() else None
+            usage = read_usage(usage_path)
         except (OSError, ValueError):
             usage = None
         return {
@@ -139,15 +140,9 @@ class ResourceAssistant:
                 model = ""
             gateway = ModelGateway(ModelRegistry(models), config=self.cfg.gateway)
             usage_path = self.store.root / f"{thread['id']}-usage.json"
-            if usage_path.exists():
-                gateway.budget.restore(json.loads(usage_path.read_text()))
+            from spiritscout.gateway.usage import bind_usage
 
-            def record_usage(snapshot: dict[str, Any]) -> None:
-                temporary = usage_path.with_suffix(".tmp")
-                temporary.write_text(json.dumps(snapshot, ensure_ascii=False))
-                temporary.replace(usage_path)
-
-            gateway.budget.on_record = record_usage
+            bind_usage(gateway, usage_path)
             prior = self.view(kind)["messages"][-20:]
             from spiritscout.gateway.context import compact_history
 

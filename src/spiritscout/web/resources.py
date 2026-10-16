@@ -175,7 +175,7 @@ def mount_resources(
         count, errors = 0, 0
         for path in (Path(cfg.workspace.root) / "sessions").glob("sess-*"):
             try:
-                count += store.import_session(path)
+                count += store.import_session(path, full=True)
             except (OSError, ValueError, sqlite3.Error):
                 errors += 1
         return {"scanned_records": count, "failed_sessions": errors}

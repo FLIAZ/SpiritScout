@@ -128,7 +128,7 @@ def _read_state(session: Session) -> dict[str, Any]:
     from spiritscout.tools.journal import read_recovery_view
 
     run_summary: dict[str, Any] = session.summary.get("run", {})
-    # 实时用量：运行中由网关逐笔落盘（usage.json），终态回退运行汇总
+    # 实时用量：运行中由网关逐笔持久化（usage.db，兼容旧 usage.json），终态回退运行汇总
     live_usage = session.model_usage()
     state: dict[str, Any] = {
         "session": session.brief(include_summary=False),
@@ -445,7 +445,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         return _agents_view()
 
     @app.get("/api/sessions")
-    async def list_sessions() -> dict[str, Any]:
+    def list_sessions() -> dict[str, Any]:
         return {"sessions": [s.brief(include_summary=False)
                              for s in manager.list()]}
 
@@ -456,7 +456,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         return session
 
     @app.get("/api/sessions/{session_id}")
-    async def get_session(session_id: str) -> dict[str, Any]:
+    def get_session(session_id: str) -> dict[str, Any]:
         session = _require(session_id)
         detail = session.brief()
         detail["request"] = session.request
@@ -614,7 +614,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         return {"approval_id": approval_id, "allow": allow}
 
     @app.get("/api/dashboard")
-    async def dashboard_data() -> dict[str, Any]:
+    def dashboard_data() -> dict[str, Any]:
         """仪表盘聚合数据：跨会话 token 消耗、资产总览、关键发现。"""
         sessions = manager.list()
         total_tokens = 0

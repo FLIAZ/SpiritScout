@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS threads(id TEXT PRIMARY KEY,kind TEXT,created_at REAL
 CREATE UNIQUE INDEX IF NOT EXISTS one_resource_thread ON threads(kind);
 CREATE TABLE IF NOT EXISTS messages(seq INTEGER PRIMARY KEY,thread_id TEXT,role TEXT,content TEXT,created_at REAL);
 CREATE TABLE IF NOT EXISTS proposals(id TEXT PRIMARY KEY,thread_id TEXT,state TEXT,data BLOB,result TEXT,created_at REAL);
+CREATE TABLE IF NOT EXISTS resource_imports(source TEXT PRIMARY KEY,identity TEXT,high_water INTEGER,legacy_version TEXT);
 """
 
 
@@ -181,12 +182,13 @@ class ResourceStore:
             rows = conn.execute(
                 "SELECT * FROM settings WHERE kind=? ORDER BY id", (kind,)
             ).fetchall()
+        cipher = self.cipher() if rows else None
         return [
             {
                 "id": row["id"],
                 "version": row["version"],
                 "updated_at": row["updated_at"],
-                "data": json.loads(self.cipher().decrypt(row["data"])),
+                "data": json.loads(cipher.decrypt(row["data"])),
             }
             for row in rows
         ]
@@ -335,28 +337,43 @@ class ResourceStore:
             "has_more": len(rows) > limit,
         }
 
-    def import_session(self, workspace: Path) -> int:
+    def import_session(self, workspace: Path, *, full: bool = False) -> int:
+        """用历史表行号增量读取；旧库、数据库替换或游标回退时完整重扫。"""
         db = workspace / "bb.db"
         if not db.is_file():
             return 0
+        source = str(db.resolve())
+        stat = db.stat()
+        identity = f"{stat.st_dev}:{stat.st_ino}"
+        versions = []
+        for path in (db, Path(str(db) + "-wal")):
+            try:
+                entry = path.stat()
+                versions.append((entry.st_ino, entry.st_size, entry.st_mtime_ns, entry.st_ctime_ns))
+            except FileNotFoundError:
+                versions.append(())
+        legacy_version = json.dumps(versions)
+        with self.connection() as catalog:
+            previous = catalog.execute("SELECT * FROM resource_imports WHERE source=?", (source,)).fetchone()
+        cursor = previous["high_water"] if previous and previous["identity"] == identity and not full else -1
         conn = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)
         try:
-            exists = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE name='bb_records'"
-            ).fetchone()
-            rows = (
-                conn.execute(
-                    "SELECT layer,record_id,version,data,updated_at FROM bb_records WHERE layer IN ('asset','vuln')"
-                ).fetchall()
-                if exists
-                else []
-            )
-            if conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE name='bb_record_history'"
-            ).fetchone():
-                rows += conn.execute(
-                    "SELECT layer,record_id,version,data,updated_at FROM bb_record_history WHERE layer IN ('asset','vuln')"
-                ).fetchall()
+            conn.execute("BEGIN")
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            has_history = "bb_record_history" in tables
+            upper = conn.execute("SELECT COALESCE(MAX(rowid),0) FROM bb_record_history").fetchone()[0] if has_history else 0
+            reset_cursor = upper < cursor
+            if reset_cursor:
+                cursor = -1
+            rows = []
+            if not has_history and previous and cursor >= 0 and previous["legacy_version"] == legacy_version:
+                return 0
+            if "bb_records" in tables and (cursor < 0 or not has_history):
+                rows.extend(conn.execute("SELECT layer,record_id,version,data,updated_at FROM bb_records "
+                                         "WHERE layer IN ('asset','vuln')").fetchall())
+            if has_history:
+                rows.extend(conn.execute("SELECT layer,record_id,version,data,updated_at FROM bb_record_history "
+                    "WHERE rowid>? AND rowid<=? AND layer IN ('asset','vuln')", (cursor, upper)).fetchall())
         finally:
             conn.close()
         from datetime import datetime
@@ -364,11 +381,14 @@ class ResourceStore:
         for layer, key, version, data, updated in rows:
             asset = record_asset(layer, json.loads(data))
             if asset:
-                self.observe(
-                    asset,
-                    f"{workspace.name}:{layer}:{key}@{version}",
-                    datetime.fromisoformat(updated).timestamp(),
-                )
+                self.observe(asset, f"{workspace.name}:{layer}:{key}@{version}",
+                             datetime.fromisoformat(updated).timestamp())
+        # 观测全部提交之后才推进；中断重放仍由来源唯一键保持幂等。
+        with self.connection() as catalog:
+            catalog.execute("INSERT INTO resource_imports VALUES(?,?,?,?) ON CONFLICT(source) DO UPDATE SET "
+                "high_water=CASE WHEN ? THEN excluded.high_water WHEN identity=excluded.identity THEN MAX(high_water,excluded.high_water) "
+                "ELSE excluded.high_water END,identity=excluded.identity,legacy_version=excluded.legacy_version",
+                (source, identity, upper, legacy_version, reset_cursor))
         return len(rows)
 
 

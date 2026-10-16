@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import ValidationError
 
 from spiritscout.agents.ring import RingLedger
 from spiritscout.config.settings import ModelEntry, SystemConfig
@@ -30,6 +30,8 @@ from spiritscout.core.audit import AuditLogger
 from spiritscout.core.exceptions import SpiritScoutError
 from spiritscout.core.models import RunMode
 from spiritscout.core.pause import PauseGate
+from spiritscout.gateway.usage import UsageSnapshot as _UsageSnapshot
+from spiritscout.gateway.usage import read_usage
 from spiritscout.launch import LaunchPlan, LaunchRequest, prepare_launch
 from spiritscout.policy.approvals import ApprovalBroker
 from spiritscout.policy.questions import QuestionBroker
@@ -56,20 +58,9 @@ def _conversation_gateway(cfg: SystemConfig, models: list[ModelEntry], audit: Au
     from spiritscout.gateway import ModelGateway, ModelRegistry
 
     gateway = ModelGateway(ModelRegistry(models), config=cfg.gateway, audit=audit)
-    path = Path(cfg.workspace.root) / "usage.json"
-    if path.exists():
-        try:
-            gateway.budget.restore(json.loads(path.read_text(encoding="utf-8")))
-        except (OSError, ValueError, TypeError):
-            pass
+    from spiritscout.gateway.usage import bind_usage
 
-    def persist(snapshot: dict[str, Any]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
-        temporary.replace(path)
-
-    gateway.budget.on_record = persist
+    bind_usage(gateway, Path(cfg.workspace.root) / "usage.json")
     return gateway
 
 
@@ -249,39 +240,6 @@ def _preflight_models(cfg: SystemConfig, models: list[ModelEntry],
             "模型注册表为空，会话未开工。请在「模型」页配置至少一个模型后重试")
 
 
-class _UsageCall(BaseModel):
-    """只读计量视图的单次调用；坏时间戳不能拖垮仪表盘聚合。"""
-
-    ts: float = Field(allow_inf_nan=False)
-    tokens: int = Field(default=0, ge=0)
-    cost_usd: float = Field(default=0, ge=0, allow_inf_nan=False)
-    model: str = ""
-    mode: str = ""
-    input_tokens: int = Field(default=0, ge=0)
-    output_tokens: int = Field(default=0, ge=0)
-    cached_input_tokens: int | None = Field(default=None, ge=0)
-    cache_write_tokens: int | None = Field(default=None, ge=0)
-    first_delta_ms: float | None = Field(default=None, ge=0)
-    task_type: str = ""
-    actor: str = ""
-    request_bytes: int | None = Field(default=None, ge=0)
-    reused_prefix_bytes: int | None = Field(default=None, ge=0)
-    new_suffix_bytes: int | None = Field(default=None, ge=0)
-
-
-class _UsageSnapshot(BaseModel):
-    """磁盘展示快照按结构验证，损坏时回退到终态汇总。"""
-
-    model_config = ConfigDict(allow_inf_nan=False)
-    used_tokens: int = Field(ge=0)
-    used_usd: float = Field(default=0, ge=0)
-    cache: dict[str, Any] = Field(default_factory=dict)
-    per_model_tokens: dict[str, int] = Field(default_factory=dict)
-    per_mode_tokens: dict[str, int] = Field(default_factory=dict)
-    call_series: list[_UsageCall] = Field(default_factory=list)
-    calls: int = Field(default=0, ge=0)
-    mode: str = ""
-
 
 def _coerce_meta(data: dict[str, Any]) -> dict[str, Any]:
     """元数据字段类型收敛：旧版本/手改文件里类型漂移的字段拉回正型。"""
@@ -414,17 +372,15 @@ class Session:
 
     def model_usage(self) -> dict[str, Any]:
         """列表、状态页与仪表盘共用的用量视图；损坏快照回退到已保存汇总。"""
+        live = read_usage(self.workspace / "usage.json")
+        if live is not None:
+            return live
         run = self.summary.get("run") if isinstance(self.summary, dict) else None
         stored = run.get("model_usage") if isinstance(run, dict) else None
         try:
             usage = _UsageSnapshot.model_validate(stored).model_dump()
         except ValidationError:
             usage = {}
-        try:
-            live = json.loads((self.workspace / "usage.json").read_text(encoding="utf-8"))
-            usage = _UsageSnapshot.model_validate(live).model_dump()
-        except (OSError, ValueError):   # 含 Pydantic ValidationError
-            pass
         if usage.get("call_series"):
             from spiritscout.gateway.cache import cache_summary
 
@@ -466,7 +422,7 @@ class Session:
         usage = self.model_usage()
         out["tokens"] = usage.get("used_tokens", 0)
         out["cost_usd"] = usage.get("used_usd", 0.0)
-        # 运行中实时用量优先：网关逐笔落盘的 usage.json（列表/仪表盘随轮询跳动）
+        # 运行中实时用量优先：网关逐笔持久化的 usage.db（兼容旧 usage.json）（列表/仪表盘随轮询跳动）
         out["rounds"] = run.get("rounds_executed", 0)
         out["flag_stats"] = run.get("flag_stats")
         if include_summary:

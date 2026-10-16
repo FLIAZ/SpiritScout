@@ -11,7 +11,6 @@ import asyncio
 import contextlib
 import copy
 import hashlib
-import json
 import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -345,25 +344,9 @@ async def _build_infra(
         journal = ExecutionJournal(blackboard, workspace, new_id("run"))
         journal.activate_run(run_lock)
         registry = ToolRegistry(executor, policy=policy, audit=audit, journal=journal)
-        # 用量实时落盘：每笔模型调用后刷新 usage.json，控制台/状态页随读随新
-        # （原子替换避免读到半截；文件极小，写频以模型调用为界）
-        usage_path = workspace / "usage.json"
+        from spiritscout.gateway.usage import bind_usage
 
-        def _usage_sink(snap: dict) -> None:
-            tmp = usage_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
-            tmp.replace(usage_path)
-
-        # 续传回灌：恢复上一进程的用量累计与逐笔时序（usage.json 若在）——
-        # 进程重启不把总量清零重新计起
-        if usage_path.exists():
-            try:
-                prior_usage = json.loads(usage_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                prior_usage = None
-            if isinstance(prior_usage, dict):
-                gateway.budget.restore(prior_usage)
-        gateway.budget.on_record = _usage_sink
+        bind_usage(gateway, workspace / "usage.json")
         experience = ExperienceStore(workspace / "experience.db", audit=audit)
         for name in ("attachments", "sandbox", "artifacts"):
             if (workspace / name).is_symlink():
