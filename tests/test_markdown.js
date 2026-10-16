@@ -1,0 +1,11 @@
+"use strict";
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
+const context=vm.createContext({esc:value=>String(value??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))});
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../src/spiritscout/web/static/js/markdown.js'),'utf8'),context);
+context.markdown='# 标题\n<script>alert(1)</script>\n[危险](javascript:alert(1))\n[文档](https://example.test)\n```\n<unsafe>\n```\n| A | B\n| -- | -- |\n| C | D |';
+const html=vm.runInContext('mdRender(markdown)',context);
+assert.match(html,/<h1>标题<\/h1>/);assert.equal(html.includes('<script>'),false);
+assert.equal(html.includes('href="javascript:'),false);assert.match(html,/rel="noreferrer"/);
+assert.match(html,/<pre>&lt;unsafe&gt;/);assert.match(html,/<table>/);assert.equal((html.match(/<tr>/g)||[]).length,2);
+assert.equal((html.match(/<table>/g)||[]).length,(html.match(/<\/table>/g)||[]).length);
+console.log('markdown: raw HTML escaped, unsafe links blocked, fences and tables passed');

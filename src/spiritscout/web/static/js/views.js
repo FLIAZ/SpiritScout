@@ -70,6 +70,7 @@ $("#s-tabs").addEventListener("keydown", event => {
 let stateRequestVersion = 0;
 let stateLoadingSession = null, stateQueued = false, stateRefreshTimer = null;
 function scheduleStateRefresh() {
+  if (document.visibilityState === "hidden") return;
   if (stateRefreshTimer) return;
   stateRefreshTimer = setTimeout(() => { stateRefreshTimer = null; refreshState(); }, 120);
 }
@@ -78,6 +79,7 @@ async function refreshState() {
   if (stateLoadingSession === S.cur) { stateQueued = true; return; }
   const sessionId = S.cur, version = ++stateRequestVersion;
   stateLoadingSession = sessionId;
+  S.polling?.stateRequested();
   try {
     const state = await api(`/api/sessions/${sessionId}/state`);
     if (S.cur !== sessionId || version !== stateRequestVersion) return;
@@ -1387,9 +1389,13 @@ function startStreams(rebuild = true) {
       if (/task\.|decision\.|vuln\.|flag\.|system\.|model\.call/.test(e.type || "")) scheduleStateRefresh();
     } catch {}
   });
-  es.addEventListener("done", () => { if (S.cur === sessionId && S.es === es) refreshState(); });
+  es.addEventListener("done", () => {
+    if (S.cur !== sessionId || S.es !== es) return;
+    // 终态排空后主动关闭，防止 EventSource 每隔数秒重连并重复刷新状态。
+    stopStreams();
+    refreshState();
+  });
   es.onerror = () => {};
-  S.poll = setInterval(() => { refreshState(); refreshSessions(); }, 3000);
   // 断流看门狗：合盖休眠/网络切换后 EventSource 会静默僵死（readyState 不可信），
   // 会话仍在运行却长时间无帧即判死，增量重连补齐缺口（已渲染行保留）
   S.esDog = setInterval(() => {
@@ -1404,13 +1410,13 @@ function startStreams(rebuild = true) {
 }
 function stopStreams() {
   if (S.es) { S.es.close(); S.es = null; }
-  if (S.poll) { clearInterval(S.poll); S.poll = null; }
   if (S.esDog) { clearInterval(S.esDog); S.esDog = null; }
 }
 // 唤醒即自救：回到前台立刻刷状态，连接不新鲜就增量重连
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState !== "visible" || S.view !== "session" || !S.cur) return;
-  refreshState(); refreshSessions();
+  if (document.visibilityState !== "visible") return;
+  S.polling?.wake();
+  if (S.view !== "session" || !S.cur) return;
   if (TERMINAL.has(S.state?.session?.status)) return;
   // 暂停态同样豁免：连接不再也要刷新，但不为无帧空转重连
   if (S.state?.session?.paused) return;
@@ -1419,49 +1425,6 @@ document.addEventListener("visibilitychange", () => {
 });
 
 /* ================= 报告 ================= */
-function mdRender(md) {
-  const escT = s => esc(s);
-  const lines = md.split("\n");
-  let html = "", inCode = false, inTable = false, list = 0;
-  const inline = s => escT(s)
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
-    .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
-  const closeList = () => { while (list) { html += "</ul>"; list--; } };
-  for (const ln of lines) {
-    if (/^```/.test(ln)) {
-      if (inCode) html += "</pre>"; else { closeList(); html += "<pre>"; }
-      inCode = !inCode; continue;
-    }
-    if (inCode) { html += escT(ln) + "\n"; continue; }
-    const h = ln.match(/^(#{1,4})\s+(.*)/);
-    if (h) { closeList(); const lv = h[1].length; html += `<h${lv}>${inline(h[2])}</h${lv}>`; continue; }
-    if (/^\s*\|/.test(ln)) {          // 表格行：容忍缺尾 | 的行（模型产出常见）
-      closeList();
-      const cells = ln.trim().replace(/^\|/, "").replace(/\|\s*$/, "")
-        .split("|").map(c => c.trim());
-      if (cells.every(c => /^:?-{2,}:?$/.test(c))) continue;   // 分隔行不渲染
-      if (!inTable) { html += "<table>"; inTable = true; }
-      html += "<tr>" + cells.map(c => `<td>${inline(c)}</td>`).join("") + "</tr>";
-      continue;
-    }
-    if (inTable) { html += "</table>"; inTable = false; }
-    const li = ln.match(/^(\s*)[-*]\s+(.*)/);
-    if (li) {
-      const d = Math.floor(li[1].length / 2);
-      while (list < d + 1) { html += "<ul>"; list++; }
-      while (list > d + 1) { html += "</ul>"; list--; }
-      html += `<li>${inline(li[2])}</li>`; continue;
-    }
-    closeList();
-    if (/^---+\s*$/.test(ln)) { html += "<hr>"; continue; }
-    if (ln.trim()) html += `<p>${inline(ln)}</p>`;
-  }
-  closeList();
-  if (inCode) html += "</pre>";
-  if (inTable) html += "</table>";
-  return html;
-}
 async function loadReport() {
   const box = $("#tab-report");
   box.innerHTML = `<div class="empty-note">加载中…</div>`;

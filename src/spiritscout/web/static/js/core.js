@@ -106,7 +106,14 @@ document.querySelectorAll(".side > nav button").forEach(b =>
 $("#btn-new").onclick = () => { S.cur = null; show("home"); renderSessions(); };
 
 /* ================= 会话列表 ================= */
-async function refreshSessions() {
+let sessionsInFlight = null;
+function refreshSessions() {
+  if (sessionsInFlight) return sessionsInFlight;
+  sessionsInFlight = fetchSessions().finally(() => { sessionsInFlight = null; });
+  return sessionsInFlight;
+}
+async function fetchSessions() {
+  S.polling?.listRequested();
   try {
     const d = await api("/api/sessions");
     S.sessions = d.sessions;
@@ -115,8 +122,8 @@ async function refreshSessions() {
     if (S.view === "dash") renderDash();
     if (S.cur) {
       const cur = S.sessions.find(x => x.session_id === S.cur);
-      if (cur && TERMINAL.has(cur.status) && S.state &&
-          S.state.session.status !== cur.status) await refreshState();
+      if (cur && S.state && S.state.session.status !== cur.status) await refreshState();
+      if (cur && S.view === "session" && !TERMINAL.has(cur.status) && !S.es) startStreams(false);
     }
   } catch (e) {
     if (!$("#connection-status")) {

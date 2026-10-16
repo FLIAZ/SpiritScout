@@ -502,7 +502,11 @@ async function compSend() {
       const resp = await api(`/api/sessions/${S.cur}/messages`,
         { method: "POST", body: JSON.stringify({ content: text }) });
       toast("已送达灵枢");
-      if (resp.resumed) refreshSessions();
+      if (resp.resumed) {
+        startStreams(false);
+        refreshState();
+        refreshSessions();
+      }
     }
     compInput.value = "";
     compGrow();
@@ -594,7 +598,11 @@ $("#rc-confirm").onclick = async () => {
   try { S.agents = await api("/api/agents"); } catch {}
   fetch("/openapi.json").then(r => r.json()).then(j => { $("#ver").textContent = "v" + (j.info?.version || ""); }).catch(() => {});
   await refreshSessions();
-  setInterval(refreshSessions, 5000);
+  S.polling = ConsolePolling.create({refreshList: refreshSessions, refreshState,
+    isSession: () => S.view === "session" && !!S.cur,
+    isRunning: () => !TERMINAL.has(S.state?.session?.status),
+    isVisible: () => document.visibilityState === "visible"});
+  S.polling.start();
   const running = S.sessions.find(x => !TERMINAL.has(x.status));
   if (running) openSession(running.session_id);
 })();
