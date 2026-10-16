@@ -330,6 +330,12 @@ class ModelGateway:
         call = {"call_id": f"model-{uuid.uuid4().hex}", "model": entry.model,
                 "task_type": task_type, "task_id": scope.task_id, "route_id": scope.route_id, **prefix}
         self.audit.log("model.started", actor, call)
+        stream = None
+        if on_delta is None and scope.agent_id:
+            from spiritscout.gateway.streaming import AuditStream
+
+            stream = AuditStream(self.audit, actor, call)
+            on_delta = stream
         try:
             raw = await backend.complete(
                 entry, messages,
@@ -340,11 +346,19 @@ class ModelGateway:
                 reasoning_effort=reasoning_effort,
             )
         except BaseException as exc:
+            if stream is not None:
+                stream.flush()
             self.audit.log("model.cancelled" if isinstance(exc, asyncio.CancelledError)
                            else "model.failed", actor,
                            {**call, "error": str(exc)[:300],
                             "latency_ms": round((time.perf_counter() - started) * 1000, 1)})
             raise
+        if stream is not None:
+            # 不支持流式的端点至少回放实际返回正文，不能伪造生成中的分析。
+            if not stream.emitted and not stream.parts:
+                stream("reasoning", raw.get("reasoning", ""))
+                stream("text", raw.get("content", ""))
+            stream.flush()
         latency = (time.perf_counter() - started) * 1000
         metrics = {key: raw.get(key) for key in ("cached_input_tokens", "cache_write_tokens", "first_delta_ms")}
         metrics.update(input_tokens=raw["prompt_tokens"], output_tokens=raw["completion_tokens"],

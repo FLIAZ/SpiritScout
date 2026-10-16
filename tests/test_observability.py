@@ -58,7 +58,7 @@ class ModelLifecycleTests(unittest.IsolatedAsyncioTestCase):
                                       response_format=None, task_type="execution")
         finally:
             current_execution_scope.reset(token)
-        started, completed = audit.records
+        started, completed = [r for r in audit.records if r["type"] in {"model.started", "model.call"}]
         self.assertEqual(started["type"], "model.started")
         self.assertEqual(completed["type"], "model.call")
         self.assertEqual(started["actor"], "agent-one")

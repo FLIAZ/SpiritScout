@@ -385,7 +385,7 @@ function renderChips() {
 /* ================= 拓扑画布 ================= */
 function topoModel() {
   const tp = (S.state && S.state.topology) || { dag_nodes: [], tasks: [] };
-  const nodes = tp.dag_nodes || [], tasks = tp.tasks || [];
+  const nodes = (tp.dag_nodes || []).map(n => ({...n})), tasks = tp.tasks || [];
   const byId = new Map(nodes.map(n => [n.node_id, n]));
   const depth = new Map();
   const depthOf = (n, seen = new Set()) => {
@@ -484,7 +484,7 @@ function drawTopo() {
     const steer = (ring.steering || {})[t.agent_type];
     return `<div class="tcard" data-agent="${esc(t.agent_type || "")}">
       <div class="row1"><span class="who">${esc(agentName(t.agent_type))}</span>
-        <span class="what">${esc(TASK_CN[t.task_type] || t.task_type || "")}</span>
+        <span class="what" title="${esc(TASK_CN[t.task_type] || t.task_type || "")}">${esc(TASK_CN[t.task_type] || t.task_type || "")}</span>
         <span class="tag ${stCls} st">${esc(t.status || "")}</span></div>
       ${tot ? `<div class="prog ${done === tot ? "done" : ""}"><i style="width:${pct}%"></i></div>` : ""}
       <div class="steps">${tot ? `路线 ${done}/${tot} · ` : ""}步骤 ${t.steps || 0}</div>
@@ -631,7 +631,7 @@ function drawTopo() {
       const digest = digestFor(r.agent);
       const isExp = expanded[n.node_id];
       return `<div class="tnode bnode" data-node="${esc(n.node_id)}" style="visibility:hidden">
-        <div class="tact"><span class="dot ${st}"></span><b>${esc(agentName(r.agent))} · ${esc(r.name || "")}</b>
+        <div class="tact"><span class="dot ${st}"></span><b title="${esc(r.name || "")}">${esc(agentName(r.agent))} · ${esc(r.name || "")}</b>
           <span class="tac">${pct}%</span></div>
         <div class="prog ${pct === 100 ? "done" : ""}"><i style="width:${pct}%"></i></div>
         ${r.note ? `<div class="rt-note">${esc(isExp ? r.note : (r.note || "").slice(0, 120))}</div>` : ""}
@@ -641,8 +641,8 @@ function drawTopo() {
     const st = nodeStatus(n.status);
     return `<div class="tnode ${st === "active" ? "active" : ""}" data-node="${esc(n.node_id)}"
       style="visibility:hidden">
-      <div class="tact"><span class="dot ${st}"></span><b>${esc(n.title || n.tactic)}</b>
-        <span class="tac">${esc(n.tactic || "")}</span></div>
+      <div class="tact"><span class="dot ${st}"></span><b title="${esc(n.title || n.tactic)}">${esc(n.title || n.tactic)}</b>
+        <span class="tac" title="${esc(n.tactic || "")}">${esc(n.tactic || "")}</span></div>
       <div class="tcards">${cardsOf(n).map(taskCard).join("")}</div></div>`;
   };
   const orphanCard = `<div class="tnode" data-node="${ORPHAN}" style="visibility:hidden">
@@ -964,6 +964,7 @@ let traceStick = true;
 const TRACE_AGENT_SLOTS = new Map();
 function traceReset() {
   SessionObserver.reset();
+  AgentWorkbench.reset();
   $("#trace-box").innerHTML = '<div class="empty-note">等待灵枢开工——过程将按真实时间顺序在此展开</div>';
   TRACE_AGENT_SLOTS.clear();
   S.think.clear();
@@ -1087,6 +1088,7 @@ function tracePush(e) {
   const d = (typeof e.detail === "object" && e.detail) || {};
   const actor = String(e.actor || "");
   SessionObserver.push(e);
+  AgentWorkbench.push(e);
   switch (e.type) {
     case "task.start":
       traceAppend(e, `<div class="m">开始执行 · ${esc(actorName(actor))}</div>`, "tl-sys");
@@ -1115,7 +1117,7 @@ function tracePush(e) {
       if (kind === "reasoning") {
         const text = d.text || "";
         if (!text) break;
-        // 推理过程聚合到拓扑页的推理栏（renderMind），会话流只留一枚计数章
+        // 工作台显示流式正文，拓扑保留推理摘要；时间线留计数章避免重复刷屏。
         let rec = S.think.get(actor);
         if (!rec) { rec = { chars: 0, tail: "" }; S.think.set(actor, rec); }
         rec.chars += text.length;
@@ -1123,7 +1125,7 @@ function tracePush(e) {
         let chip = flow.querySelector(".tl-thinkchip");
         if (!chip) {
           flow.insertAdjacentHTML("beforeend",
-            '<div class="tl-thinkchip" title="推理过程在「拓扑」页右侧推理栏查看"></div>');
+            '<div class="tl-thinkchip" title="在上方子 Agent 工作台查看实时分析"></div>');
           chip = flow.lastElementChild;
         }
         chip.textContent = `✦ 推理 ${fmtK(rec.chars)} 字`;

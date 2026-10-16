@@ -187,6 +187,16 @@ class SubAgent(abc.ABC):
     # ------------------------------------------------------------ 主流程
 
     async def run(self, task: Task) -> dict[str, Any]:
+        """任务规划阶段也保留角色归属，路线内部会进一步绑定路线 ID。"""
+        token = current_execution_scope.set(dataclasses.replace(
+            current_execution_scope.get() or ExecutionScope(),
+            task_id=task.task_id, route_id="", agent_id=self.agent_id))
+        try:
+            return await self._run_task(task)
+        finally:
+            current_execution_scope.reset(token)
+
+    async def _run_task(self, task: Task) -> dict[str, Any]:
         """执行一个任务包：路线生成 → 并发执行 → 汇总上报。"""
         task.status = TaskStatus.RUNNING
         self.ctx.audit.log("task.start", self.agent_id,

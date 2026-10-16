@@ -880,3 +880,66 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
 @media(max-width:600px) {.sess-head .ops button,.tabs button,.archive-actions button {min-height:40px;}.chips {gap:5px;}.obs-focus {padding-bottom:10px;}}
 
 .vuln-pagination {display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:16px;font-size:12px;color:var(--ink-2);}.vuln-pagination span {margin-right:auto;}
+
+/* 子 Agent 工作台：角色频道保持位置，输出按真实事件实时汇入。 */
+#tab-chat > .trace-wrap { display: flex; flex-direction: column; }
+#tab-chat .trace { height: auto; flex: 1; min-height: 0; }
+.agent-workbench { flex: none; min-width: 0; background: var(--surface);
+  border: 1px solid var(--line-strong); border-radius: var(--radius); margin: 3px 0 12px; }
+.agent-workbench[open] { display: flex; flex-direction: column; max-height: min(49vh, 440px); }
+.agent-workbench > summary { flex: none; cursor: pointer; padding: 11px 12px;
+  border-bottom: 1px solid var(--line); color: var(--ink); }
+.agent-workbench > summary > span:first-of-type { display: inline-flex; align-items: baseline; gap: 12px; }
+.agent-workbench summary b { font-size: 13px; letter-spacing: .03em; }
+.agent-workbench summary small, .aw-count { color: var(--ink-2); font-size: 11px; }
+.aw-count { float: right; font-family: var(--mono); }
+.aw-agents { display: flex; flex: none; gap: 8px; overflow-x: auto; padding: 10px 12px; }
+.aw-agents:empty { display: none; }
+.aw-agent { flex: 0 0 172px; min-width: 0; text-align: left; padding: 9px 11px;
+  border: 1px solid var(--line); border-left: 3px solid var(--line-strong);
+  border-radius: 4px; background: var(--surface); color: var(--ink); cursor: pointer; }
+.aw-agent.selected { border-color: var(--accent); background: var(--accent-soft); }
+.aw-agent strong, .aw-agent small, .aw-agent > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aw-agent strong { font-size: 13px; }
+.aw-agent small { margin-top: 5px; font-size: 11px; color: var(--accent-ink); }
+.aw-agent > span { font-family: var(--mono); font-size: 9px; color: var(--ink-2); margin-top: 5px; }
+.aw-pane { min-height: 0; overflow-y: auto; padding: 0 12px 12px; overflow-wrap: anywhere; }
+.aw-columns { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 18px; }
+.aw-columns > section { min-width: 0; }
+.aw-columns h4 { margin: 0; position: sticky; top: 0; padding: 8px 0;
+  background: var(--surface); font-size: 11px; color: var(--ink-2); border-bottom: 1px solid var(--line); }
+.aw-entry { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.aw-entry header { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; font-size: 10px; color: var(--ink-2); }
+.aw-entry header b { color: var(--accent-ink); }
+.aw-entry header small { overflow-wrap: anywhere; }
+.aw-entry time { font-family: var(--mono); }
+.aw-entry pre { margin: 7px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+  font-family: inherit; font-size: 12px; line-height: 1.75; }
+.aw-entry.bad header b { color: var(--bad); }
+.aw-entry details { margin-top: 6px; font-size: 11px; }
+.aw-entry summary { cursor: pointer; color: var(--accent-ink); }
+.aw-empty { color: var(--ink-2); font-size: 12px; line-height: 1.7; padding: 10px 0; }
+.agent-workbench button:focus-visible, .agent-workbench summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 1150px) { .aw-columns { grid-template-columns: minmax(0,1fr); gap: 8px; } }
+@media (max-width: 600px) {
+  .agent-workbench[open] { max-height: 38vh; }
+  .agent-workbench > summary > span:first-of-type { display: inline-block; }
+  .agent-workbench summary small { display: block; margin-top: 3px; }
+  .aw-agent { flex-basis: 150px; }
+}
+
+/* 拓扑卡片的 flex 子项默认 min-width:auto 会被长标题和 URL 撑破。 */
+.tnode, .unode { overflow-wrap: anywhere; }
+.tnode .tact { min-width: 0; align-items: flex-start; flex-wrap: wrap; }
+.tnode .tact > b { flex: 1 1 120px; min-width: 0; overflow-wrap: anywhere; }
+.tnode .tact .tac { flex: 0 1 auto; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.tnode .tact .dot { margin-top: 5px; }
+.tcards, .tcard, .tcard .rt, .tcard .rts { min-width: 0; max-width: 100%; }
+.tcard .row1, .tcard .rt-head { min-width: 0; flex-wrap: wrap; }
+.tcard .row1 > *, .tcard .rt-head > * { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.tcard .rt-name { flex: 1 1 90px; }
+.tcard .st { flex-shrink: 0; }
+.bnode .rt-note, .mind-digest, .tcard .rt-note, .tcard .what, .tcard .steps { overflow-wrap: anywhere; word-break: break-word; }
+
+.tnode .tact > b { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.tnode .tact .tac, .tcard .what { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }

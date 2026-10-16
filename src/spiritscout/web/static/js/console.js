@@ -595,6 +595,7 @@ $("#rc-confirm").onclick = async () => {
 
 /* ================= 启动 ================= */
 (async function boot() {
+  AgentWorkbench.init();
   try { S.agents = await api("/api/agents"); } catch {}
   fetch("/openapi.json").then(r => r.json()).then(j => { $("#ver").textContent = "v" + (j.info?.version || ""); }).catch(() => {});
   await refreshSessions();
