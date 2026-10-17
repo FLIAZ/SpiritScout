@@ -24,6 +24,28 @@ from spiritscout.core.exceptions import ScopeViolation
 from spiritscout.core.ids import new_id
 
 
+def normalize_targets(targets: Any) -> list[dict[str, str]]:
+    """扩围目标归一化：接受 "host" 或 {"target": ..., "why": ...}。
+
+    why 是模型写给普通用户的一句话说明（它是什么、为什么需要）——
+    控制台勾选项不再只有裸域名可看；缺说明时降级为纯目标，不拦住询问。
+    """
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in (targets or [])[:6]:
+        if isinstance(item, str):
+            target, why = item.strip()[:300], ""
+        elif isinstance(item, dict):
+            target = str(item.get("target") or "").strip()[:300]
+            why = str(item.get("why") or "").strip()[:200]
+        else:
+            continue
+        if target and target not in seen:
+            seen.add(target)
+            out.append({"target": target, "why": why})
+    return out
+
+
 class QuestionBroker:
     """会话内待答问题队列：ask() 挂起等待用户作答，answer() 唤醒。
 
@@ -49,7 +71,7 @@ class QuestionBroker:
     # ------------------------------------------------------------ 询问侧（agent 调用）
 
     async def ask(self, agent: str, question: str, options: list[str],
-                  targets: list[str] | None = None) -> dict[str, Any]:
+                  targets: list[Any] | None = None) -> dict[str, Any]:
         """提交一个用户问题；挂起直到作答/停止。返回 {"answer", "scope_added"}。"""
         question = str(question or "").strip()[:2000]
         fingerprint = f"{agent}|{question}"
@@ -67,7 +89,7 @@ class QuestionBroker:
             self._detach(qid, fingerprint)
 
     def _create(self, agent: str, question: str, fingerprint: str,
-                options: list[str], targets: list[str] | None) -> str:
+                options: list[str], targets: list[Any] | None) -> str:
         qid = new_id("ask")
         fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._waiters[qid] = fut
@@ -77,8 +99,7 @@ class QuestionBroker:
             "question_id": qid, "agent": agent, "question": question,
             "options": [str(o).strip()[:200] for o in (options or [])[:6]
                         if str(o).strip()],
-            "targets": [str(t).strip()[:300] for t in (targets or [])[:6]
-                        if str(t).strip()],
+            "targets": normalize_targets(targets),
             "requested_at": time.time(),
         }
         self._audit.log("user.question", agent, {
@@ -133,8 +154,9 @@ class QuestionBroker:
             answer = rec["options"][choice]
         added: list[str] = []
         if add_targets and self._guard is not None:
+            valid = {t["target"] for t in rec["targets"] if isinstance(t, dict)}
             for target in add_targets[:6]:
-                if str(target) in rec["targets"]:
+                if str(target) in valid:
                     try:
                         added.append(self._guard.approve_target(str(target)))
                     except (ScopeViolation, ValueError, TypeError):

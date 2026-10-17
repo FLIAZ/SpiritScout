@@ -164,8 +164,12 @@ function renderQuestions() {
       card.innerHTML = `
         <div class="apv-title">${esc(agentName(q.agent) || q.agent || "智能体")} 向你提问</div>
         <div class="apv-detail">${esc(q.question || "")}</div>
-        ${q.targets && q.targets.length ? `<div class="ask-targets">${q.targets.map(t =>
-          `<label class="ask-target"><input type="checkbox" data-qtarget value="${esc(t)}">将 ${esc(t)} 加入本会话范围</label>`).join("")}</div>` : ""}
+        ${q.targets && q.targets.length ? `<div class="ask-targets">
+          <div class="ask-targets-hint">这次测试需要访问以下新目标（目前不在授权范围内）。勾选表示允许本次会话访问它，不勾选也不影响你上面的答复：</div>
+          ${q.targets.map(raw => {
+            const t = typeof raw === "string" ? { target: raw, why: "" } : raw;
+            return `<label class="ask-target"><input type="checkbox" data-qtarget value="${esc(t.target)}">允许访问 ${esc(t.target)}${t.why ? `<span class="ask-target-why">（${esc(t.why)}）</span>` : ""}</label>`;
+          }).join("")}</div>` : ""}
         <div class="ask-ops">${(q.options || []).map((option, i) =>
           `<button type="button" class="btn primary sm" data-qchoice="${i}">${esc(option)}</button>`).join("")}</div>
         <div class="ask-free">

@@ -595,14 +595,23 @@ class CTFBaseAgent(SubAgent):
             "需要用户拍板的取舍时用它：问题用你自己的话写清「看到了什么、"
             "为什么想继续、不同选择意味着什么」；options 给 2~4 个你建议的"
             "选项（用户也可以自由输入其他意见）；targets 填你希望纳入测试"
-            "范围的目标（URL 或主机，用户勾选后系统才真正放行）。一次性把"
+            "范围的目标，形如 [{\"target\": \"主机或 URL\", \"why\": \"一句话"
+            "说明它是什么、为什么需要（面向普通用户）\"}]——用户勾选后系统才"
+            "真正放行；只列授权范围外的新目标，不要罗列已在范围内的。一次性把"
             "问题问清楚，不要反复追问。",
             {"question": {"type": "string",
                           "description": "要问用户的问题（自己组织语言）"},
              "options": {"type": "array", "items": {"type": "string"},
                          "description": "建议选项（2~4 个，用户可自由输入）"},
-             "targets": {"type": "array", "items": {"type": "string"},
-                         "description": "希望纳入本会话范围的目标（URL/主机）"}},
+             "targets": {"type": "array",
+                         "items": {"type": "object",
+                                   "properties": {
+                                       "target": {"type": "string",
+                                                  "description": "主机或 URL"},
+                                       "why": {"type": "string",
+                                               "description": "面向普通用户的一句话说明"}},
+                                   "required": ["target"]},
+                         "description": "希望纳入本会话范围的新目标（含一句话说明）"}},
             required=["question"]),
         _fn("submit_flag",
             "把你判定为本题 Flag 的值提交（判定权在你：依据题面给定的格式与"
@@ -1353,8 +1362,8 @@ class CTFBaseAgent(SubAgent):
             return _ToolOutcome(ok=False, text="ask_user 需要 question 参数。")
         options = [str(o).strip()[:200] for o in (args.get("options") or [])[:6]
                    if isinstance(o, (str, int, float)) and str(o).strip()]
-        targets = [str(t).strip()[:300] for t in (args.get("targets") or [])[:6]
-                   if isinstance(t, str) and t.strip()]
+        from spiritscout.policy.questions import normalize_targets
+        targets = normalize_targets(args.get("targets"))
         broker = getattr(self.ctx, "questions", None)
         if broker is None:
             return _ToolOutcome(ok=False, text=(

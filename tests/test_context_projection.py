@@ -62,3 +62,27 @@ class ContextProjectionTests(unittest.TestCase):
             self.assertEqual(first["user_replies"][0]["answer"], "请使用测试账号")
             bb.write(BlackboardLayer.TOPOLOGY, "business-context", {"coverage": "updated", "evidence": []})
             self.assertEqual(shared_context(bb)["version"], first["version"] + 1)
+
+    def test_session_findings_reach_sub_agents_as_facts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            bb = Blackboard(Path(temp) / "bb.db")
+            self.addCleanup(bb.close)
+            bb.write(BlackboardLayer.ASSET, "a1", {
+                "asset_type": "endpoint", "value": "https://api.test/login", "port": 443})
+            bb.write(BlackboardLayer.RECON_CLUE, "c1", {
+                "clue_type": "login_form", "value": "登录表单在 /login"})
+            bb.write(BlackboardLayer.VULN, "v1", {
+                "title": "反射型 XSS", "status": "candidate", "severity": "medium"})
+            result = shared_context(bb)
+            self.assertEqual(result["findings"]["assets"]["total"], 1)
+            self.assertIn("https://api.test/login",
+                          result["findings"]["assets"]["sample"]["endpoint"])
+            self.assertEqual(result["findings"]["clues"]["by_type"], {"login_form": 1})
+            self.assertEqual(result["findings"]["vulns"]["by_status"], {"candidate": 1})
+            self.assertIn("登录表单在 /login", str(result["findings"]["clues"]["sample"]))
+
+    def test_findings_absent_when_blackboard_has_no_results_yet(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            bb = Blackboard(Path(temp) / "bb.db")
+            self.addCleanup(bb.close)
+            self.assertNotIn("findings", shared_context(bb))

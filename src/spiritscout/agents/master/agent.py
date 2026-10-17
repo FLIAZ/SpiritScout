@@ -169,6 +169,8 @@ class MasterAgent:
             "plan_source": "",
         }
         # 用户直达通道：与派发/督导隔离，整场运行期间并行消费用户消息
+        # （开工时间戳供对话通道回答「跑了多久」类问题，不依赖主循环）
+        self.ctx.extra.setdefault("engagement_started_at", time.time())
         chat_task = (asyncio.create_task(self._user_chat_watch())
                      if self.ctx.enable_llm_planning else None)
         total_dispatched = 0
@@ -226,23 +228,26 @@ class MasterAgent:
             plan["dag_nodes"] = self._ensure_business_gate(
                 plan.get("dag_nodes", []))
             try:
-                created = dag.upsert_from_plan(plan.get("dag_nodes", []), round_no)
+                result = dag.upsert_from_plan(plan.get("dag_nodes", []), round_no)
             except SpiritScoutError as exc:
                 # 计划不可落图（未知依赖/成环）：明确落痕后回退规则计划，
                 # 不让一次坏规划卡死整轮
                 ctx.audit.log("decision.change", self.agent_id, {
                     "action": "plan_rejected", "round": round_no,
                     "source": plan_source, "reason": str(exc)[:200]})
+                self._record_plan_result(round_no, [], [], rejected=str(exc))
                 if plan_source != "llm":
                     raise
                 plan = self._rule_plan(state)
                 plan_source = "rule"
                 plan["dag_nodes"] = self._ensure_business_gate(
                     plan.get("dag_nodes", []))
-                created = dag.upsert_from_plan(plan.get("dag_nodes", []), round_no)
+                result = dag.upsert_from_plan(plan.get("dag_nodes", []), round_no)
+            self._record_plan_result(round_no, result.created, result.skipped)
             ctx.audit.log("decision.change", self.agent_id, {
                 "action": "meta_plan", "round": round_no, "source": plan_source,
-                "new_nodes": [n.node_id for n in created],
+                "new_nodes": [n.node_id for n in result.created],
+                "skipped_nodes": self._skip_digest(result.skipped),
                 "analysis": plan.get("analysis", "")[:500]})
         else:
             ctx.audit.log("decision.change", self.agent_id,
@@ -292,7 +297,7 @@ class MasterAgent:
         tasks = [{"task": t.model_dump(mode="json"), "node_id": nid}
                  for t, nid in task_objs]
 
-        self._write_dag_snapshot(dag)
+        self._write_dag_snapshot(dag, round_no)
         return {"dag": dag.to_dict(), "tasks_dispatched": tasks,
                 "plan_source": plan_source}
 
@@ -448,17 +453,21 @@ class MasterAgent:
             "task_ids": list(n.task_ids), "round_created": n.round_created,
         } for n in dag.all_nodes()]
 
-    def _write_dag_snapshot(self, dag: TaskDAG) -> None:
+    def _write_dag_snapshot(self, dag: TaskDAG, round_no: int | None = None) -> None:
         """DAG 快照写黑板任务状态层：Web 拓扑视图运行中实时数据源。
 
         快照记录以 dag_snapshot 键标记，读侧依此与任务记录区分；
-        黑板文件随会话工作区持久化，终态会话拓扑同源可读。
+        黑板文件随会话工作区持久化，终态会话拓扑同源可读。round 一并
+        落盘，供运行中对话通道等旁路读取「现在进行到哪一轮」。
         """
         if self.ctx.blackboard is None:
             return
+        data: dict[str, Any] = {"dag_snapshot": self._dag_snapshot(dag)}
+        if round_no is not None:
+            data["round"] = round_no
         self.ctx.blackboard.write(
             BlackboardLayer.TASK_STATE, "dag-snapshot",
-            {"dag_snapshot": self._dag_snapshot(dag)},
+            data,
             agent_type=AgentType.MASTER, updated_by=self.agent_id,
             dedup_key="dag|snapshot",
         )
@@ -518,7 +527,7 @@ class MasterAgent:
                     await assign_task
         for node_id, status in results:
             dag.mark(node_id, status)
-        self._write_dag_snapshot(dag)
+        self._write_dag_snapshot(dag, state["round_no"])
         return {"dag": dag.to_dict()}
 
     # ------------------------------------------------------------ 用户直达通道
@@ -598,6 +607,7 @@ class MasterAgent:
             "agents": [a.value for a in self.ctx.agents],
             "roster": roster,
             "engagement_paused": paused,
+            "situation": self._engagement_status(),
             "chat_history": history[-self._CHAT_HISTORY_MAX:],
             "new_messages": messages,
             "attachments": attachments,
@@ -605,7 +615,10 @@ class MasterAgent:
                 "你是灵枢，安全测试负责人。用户在会话进行中直接向你发消息，"
                 "这条对话与子 Agent 的执行互不干扰。engagement_paused 为真表示"
                 "用户手动暂停了任务推进——你照常回答问题、聊方向，但不要在回复里"
-                "承诺立即推进执行（恢复由用户操作）。reply 用简洁的中文直接"
+                "承诺立即推进执行（恢复由用户操作）。situation 是从黑板读到的"
+                "实时态势（进行到第几轮、各节点状态、已有成果计数与在途任务）——"
+                "回答进度类问题以它为准，不要凭任务书或臆测说「刚开始」之类的话。"
+                "reply 用简洁的中文直接"
                 "回答用户：确认收到指导意见、回答疑问、简述当前态势与下一步"
                 "打算。需要子 Agent 调整方向或分析新上传的附件时，同时在 "
                 "steering 里给出建议（agent 必须取自 agents 列表，hint 一句话，"
@@ -859,13 +872,25 @@ class MasterAgent:
                     deferred_replan = bool(nodes)
                 else:
                     try:
-                        dag.upsert_from_plan(nodes, next_round)
+                        result = dag.upsert_from_plan(nodes, next_round)
                     except SpiritScoutError as exc:
                         # 复盘建议不可落图（未知依赖/成环）：留痕后不入图，
                         # 本轮收敛判定按「模型继续但无新节点」走下方回元规划
                         ctx.audit.log("decision.change", self.agent_id, {
                             "action": "llm_nodes_rejected", "round": state["round_no"],
                             "reason": str(exc)[:200]})
+                        self._record_plan_result(
+                            state["round_no"], [], [], rejected=str(exc))
+                    else:
+                        self._record_plan_result(
+                            state["round_no"], result.created, result.skipped)
+                        # 落图回执全量留痕：新建与跳过（含原因）都可追查——
+                        # 静默吞掉会让下一轮复盘误判「在途」而空等
+                        ctx.audit.log("decision.change", self.agent_id, {
+                            "action": "llm_nodes_applied",
+                            "round": state["round_no"],
+                            "created": [n.node_id for n in result.created],
+                            "skipped_nodes": self._skip_digest(result.skipped)})
 
         if (not stop_reason and not deferred_replan
                 and not dag.ready_nodes() and not dag.has_unfinished()):
@@ -955,15 +980,22 @@ class MasterAgent:
                             {"tactic": n.tactic, "title": n.title,
                              "status": n.status.value}
                             for n in dag.all_nodes()][:30],
+                        "last_plan_result": self.ctx.extra.get("last_plan_result") or {},
                         "views": state["round_views"][-3:],
                         "constraints": (
                             "返回 JSON：{\"analysis\": str, \"dag_nodes\": [{\"tactic\": "
                             "仅可用战术之一, \"title\": str, \"technique\": str, "
-                            "\"depends_on\": [战术]}]}。每个节点是一个可核验的交付"
+                            "\"depends_on\": [依赖战术名，可空；填已有或本计划内节点的 "
+                            "tactic，不要填标题]}]}。每个节点是一个可核验的交付"
                             "目标——title 写清要产出什么、完成判据是什么（产经验证的"
                             "结论/证据），不写动作步骤；侦察与扫描是手段，本身不构成"
-                            "目标。按当前态势决定最有价值的交付缺口；不重复已完成"
-                            "节点。有 BUSINESS-CONTEXT 时必须先建立业务上下文，其他"
+                            "目标。按当前态势决定最有价值的交付缺口；已完成节点"
+                            "不复建，同一战术需要续作/补做（如凭据到位后补登录态"
+                            "走访）时用「战术@序号」新建续作节点（序号从 2 起，"
+                            "如 BUSINESS-CONTEXT@2）。last_plan_result 是最近一次"
+                            "规划落图的真实回执：skipped 里的战术已有节点、"
+                            "rejected 非空表示整批被拒——按原因修正，不要原样重发。"
+                            "有 BUSINESS-CONTEXT 时必须先建立业务上下文，其他"
                             "安全测试节点依赖它。"),
                     }, 8000),
                 audit=self.ctx.audit, actor=self.agent_id, memory=decision_memory(self, "plan"),
@@ -988,11 +1020,17 @@ class MasterAgent:
             return None
 
     def _filter_plannable(self, plan_nodes: list[Any]) -> list[dict[str, Any]]:
-        """LLM 产出节点过滤：仅保留可用战术（规则引擎调度裁决，不外包给模型）。"""
+        """LLM 产出节点过滤：仅保留可用战术（规则引擎调度裁决，不外包给模型）。
+
+        续作/补做节点战术名可带「@序号」后缀（如 BUSINESS-CONTEXT@2），
+        按基名裁决是否可用；后缀约定见元规划提示词。
+        """
         tactic_map = self.ctx.tactic_map or TACTIC_AGENT_MAP
         nodes, dropped = [], []
         for n in plan_nodes:
-            if isinstance(n, dict) and n.get("tactic") in tactic_map:
+            base = (str(n.get("tactic", "")).split("@", 1)[0]
+                    if isinstance(n, dict) else "")
+            if isinstance(n, dict) and base in tactic_map:
                 nodes.append(n)
             else:
                 dropped.append(n.get("tactic") if isinstance(n, dict) else n)
@@ -1003,6 +1041,30 @@ class MasterAgent:
                 "dropped": [str(d) for d in dropped],
                 "reason": "战术不在可用映射内（调度裁决不外包）"})
         return nodes
+
+    @staticmethod
+    def _skip_digest(skipped: list[dict[str, str]]) -> list[str]:
+        """落图跳过回执的可读摘要（审计与下一轮规划上下文共用）。"""
+        return [f"{s.get('tactic', '')}：{s.get('reason', '')}"
+                for s in skipped[:10]]
+
+    def _record_plan_result(self, round_no: int, created: list[Any],
+                            skipped: list[dict[str, str]], *,
+                            rejected: str = "") -> None:
+        """把最近一次规划落图回执写进上下文，供下一轮规划/复盘如实回看。
+
+        created/skipped/rejected 全量回传——静默吞节点会让模型误以为
+        节点在途而空等（2026-10-16 会话复盘：40+ 轮调度空转根因之一）。
+        后端只回传事实与约定，不替模型裁决该建什么。
+        """
+        self.ctx.extra["last_plan_result"] = {
+            "round": round_no,
+            "created_count": len(created),
+            "created": [str(getattr(n, "tactic", n))[:60] for n in created][:10],
+            "skipped_count": len(skipped),
+            "skipped": self._skip_digest(skipped),
+            "rejected": rejected[:300],
+        }
 
     def _situation_digest(self) -> dict[str, Any]:
         """黑板态势摘要（喂 LLM 的观察面；截断采样防爆 token）。"""
@@ -1022,6 +1084,46 @@ class MasterAgent:
             "vulns_by_status": by_status,
             "business_context": shared_context(bb),
         }
+
+    def _engagement_status(self) -> dict[str, Any]:
+        """运行中对话通道的实时态势：轮次/节点状态/在途任务/成果计数。
+
+        数据源是黑板投影（DAG 快照 + 成果摘要），不依赖主循环内存——
+        独立对话通道据此回答进度类问题（复盘会话里曾答「刚启动阶段」
+        而实际已跑一小时，根因就是这个通道全无态势可看）。
+        """
+        status: dict[str, Any] = {}
+        bb = self.ctx.blackboard
+        if bb is None:
+            return status
+        started = self.ctx.extra.get("engagement_started_at")
+        if isinstance(started, (int, float)):
+            status["elapsed_minutes"] = max(0, round((time.time() - started) / 60))
+        snapshot = bb.read(BlackboardLayer.TASK_STATE, "dag-snapshot") or {}
+        nodes = snapshot.get("dag_snapshot") if isinstance(snapshot, dict) else None
+        if isinstance(nodes, list) and nodes:
+            status["round"] = snapshot.get("round")
+            status["nodes"] = [
+                {"tactic": n.get("tactic"),
+                 "title": str(n.get("title", ""))[:80],
+                 "status": n.get("status")}
+                for n in nodes if isinstance(n, dict)][:30]
+            status["in_flight"] = [
+                str(n.get("title", ""))[:80] for n in nodes
+                if isinstance(n, dict)
+                and n.get("status") in {"dispatched", "running"}][:6]
+        from spiritscout.gateway.context import blackboard_findings
+        findings = blackboard_findings(bb)
+        if (findings["assets"]["total"] or findings["clues"]["total"]
+                or findings["vulns"]["total"]
+                or findings["credentials"]["total"]):
+            status["findings"] = {
+                "assets": findings["assets"]["total"],
+                "clues": findings["clues"]["total"],
+                "credentials": findings["credentials"]["total"],
+                "vulns_by_status": findings["vulns"]["by_status"],
+            }
+        return status
 
     async def _consult_secretary(self, data: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         """秘书失败不阻断原决策；建议只能经灵枢再次权衡后进入原调度链。"""
@@ -1071,20 +1173,32 @@ class MasterAgent:
     async def _llm_review(self, state: MasterState, view: dict) -> dict[str, Any] | None:
         try:
             tactic_map = self.ctx.tactic_map or TACTIC_AGENT_MAP
+            dag_now = TaskDAG.from_dict(state["dag"])
             payload: dict[str, Any] = {
                 "action": "review", "view": view,
                 "mission": self._mission()[:2000],
                 "execution_recovery": self.ctx.extra.get("execution_recovery", {}),
-                "dag_stats": TaskDAG.from_dict(state["dag"]).stats(),
+                "dag_stats": dag_now.stats(),
                 "available_tactics": {
                     t: {"agent": a.value, "task_type": tt}
                     for t, (a, tt) in tactic_map.items()},
                 "situation": self._situation_digest(),
+                "existing_nodes": [
+                    {"tactic": n.tactic, "title": n.title,
+                     "status": n.status.value}
+                    for n in dag_now.all_nodes()][:30],
+                "last_plan_result": self.ctx.extra.get("last_plan_result") or {},
                 "round_routes": self._route_digest(state),
                 "constraints": (
                             "返回 JSON：{\"continue_iteration\": bool, \"reason\": str, "
                             "\"dag_nodes\": [{\"tactic\": 仅可用战术之一, \"title\": str, "
-                            "\"depends_on\": []}]}。"
+                            "\"depends_on\": [依赖战术名，可空；填 tactic 不要填标题]}]}。"
+                            "existing_nodes 是图中全部节点（含状态）：已完成节点"
+                            "不复建；同一战术需要续作/补做（如凭据到位后补登录态"
+                            "走访）时用「战术@序号」新建（序号从 2 起，如 "
+                            "BUSINESS-CONTEXT@2）。last_plan_result 是最近一次规划"
+                            "落图的真实回执：skipped 里的战术已有节点、rejected 非空"
+                            "表示整批被拒——按原因修正，不要原样重发。"
                             "round_routes 是各子 Agent 路线的执行笔记（观察与结论），"
                             "据此判断还有哪些未试过的方向；笔记含「LLM 不可用/调查"
                             "停摆」属基础设施问题而非无解题空间——应继续迭代重试。"
@@ -1101,8 +1215,11 @@ class MasterAgent:
                             "只有用户能提供的输入（测试账号/凭据、登录后操作的"
                             "请求记录、授权范围裁定）时给出，形如 "
                             "[{\"question\": str, \"options\": [str], "
-                            "\"targets\": [str]}]；问句面向普通用户、用平实"
-                            "中文，不用 HAR、PoC 这类行话缩写（必要处一句话"
+                            "\"targets\": [{\"target\": str, \"why\": 一句话说明"
+                            "它是什么、为什么需要（面向普通用户）}]}]；targets 仅在"
+                            "需要访问授权范围外的新目标时给出，用户勾选后纳入本次"
+                            "会话范围，不要罗列已在范围内的目标；问句面向普通用户、"
+                            "用平实中文，不用 HAR、PoC 这类行话缩写（必要处一句话"
                             "解释），后端会挂起等用户作答并把答复并入下一轮"
                             "态势；没有这类需求就不要给。"),
             }
@@ -1146,9 +1263,8 @@ class MasterAgent:
                 continue
             options = [str(o).strip()[:200]
                        for o in (item.get("options") or [])[:6] if str(o).strip()]
-            targets = [str(t).strip()[:300]
-                       for t in (item.get("targets") or [])[:6]
-                       if isinstance(t, str) and t.strip()]
+            from spiritscout.policy.questions import normalize_targets
+            targets = normalize_targets(item.get("targets"))
             self.ctx.audit.log("master.ask_user", self.agent_id, {
                 "question": question[:500], "options": options,
                 "targets": targets})
@@ -1195,20 +1311,28 @@ class MasterAgent:
                 or "BUSINESS-CONTEXT" not in tactic_map):
             return [node for node in plan_nodes if isinstance(node, dict)]
         clean = [dict(node) for node in plan_nodes if isinstance(node, dict)]
-        business = next(
-            (node for node in clean if node.get("tactic") == "BUSINESS-CONTEXT"),
-            {"tactic": "BUSINESS-CONTEXT", "title": "体验正常业务流程并建立上下文",
-             "depends_on": []},
-        )
-        business["depends_on"] = []
-        ordered = [business]
+
+        def _is_business(node: dict[str, Any]) -> bool:
+            return str(node.get("tactic", "")).split("@", 1)[0] == "BUSINESS-CONTEXT"
+
+        # 计划里已有业务上下文（含 @序号 续作）就不再补建门闸节点——
+        # 补建的那份会被同战术去重跳过，徒增一次静默噪音
+        if not any(_is_business(node) for node in clean):
+            clean = [{"tactic": "BUSINESS-CONTEXT", "title": "体验正常业务流程并建立上下文",
+                      "depends_on": []}] + clean
+        ordered = []
         for node in clean:
-            if node.get("tactic") == "BUSINESS-CONTEXT":
-                continue
-            deps = list(node.get("depends_on") or [])
-            if "BUSINESS-CONTEXT" not in deps:
-                deps.insert(0, "BUSINESS-CONTEXT")
-            node["depends_on"] = deps
+            if str(node.get("tactic", "")) == "BUSINESS-CONTEXT":
+                node["depends_on"] = []
+            elif _is_business(node):
+                # 续作节点依赖由规划自定（如凭据到位后的登录态走访），不强制
+                pass
+            else:
+                deps = list(node.get("depends_on") or [])
+                if not any(str(d).split("@", 1)[0] == "BUSINESS-CONTEXT"
+                           for d in deps):
+                    deps.insert(0, "BUSINESS-CONTEXT")
+                node["depends_on"] = deps
             ordered.append(node)
         return ordered
 

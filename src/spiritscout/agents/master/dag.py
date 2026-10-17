@@ -6,9 +6,22 @@ Incalmo 反面教材（附录A §2.10）：刚性任务图会在早期侦察停�
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 from spiritscout.core.exceptions import SpiritScoutError
 from spiritscout.core.ids import new_id
 from spiritscout.core.models import DAGNode, TaskStatus
+
+
+@dataclass
+class PlanUpsertResult:
+    """落图回执：created=真正新建的节点；skipped=被跳过的规划节点与原因。
+
+    跳过/拒绝必须携带原因回执给规划方——静默吞掉会让模型误以为节点
+    「在途」而空等（2026-10-16 会话复盘：40+ 轮调度空转根因之一）。
+    """
+    created: list[DAGNode] = field(default_factory=list)
+    skipped: list[dict[str, str]] = field(default_factory=list)
 
 
 class TaskDAG:
@@ -34,27 +47,31 @@ class TaskDAG:
         self._nodes[node.node_id] = node
         return node
 
-    def upsert_from_plan(self, plan_nodes: list[dict], round_no: int) -> list[DAGNode]:
+    def upsert_from_plan(self, plan_nodes: list[dict], round_no: int) -> PlanUpsertResult:
         """在副本中校验整批变更，成功后才原子应用节点和重绑定的依赖。"""
         staged = TaskDAG.from_dict(self.to_dict())
-        created = staged._upsert_from_plan(plan_nodes, round_no)
+        created, skipped = staged._upsert_from_plan(plan_nodes, round_no)
         for nid, node in staged._nodes.items():
             if nid in self._nodes:
                 self._nodes[nid].depends_on = list(node.depends_on)
             else:
                 self._nodes[nid] = node
-        return [self._nodes[n.node_id] for n in created]
+        return PlanUpsertResult(
+            created=[self._nodes[n.node_id] for n in created], skipped=skipped)
 
-    def _upsert_from_plan(self, plan_nodes: list[dict], round_no: int) -> list[DAGNode]:
+    def _upsert_from_plan(
+        self, plan_nodes: list[dict], round_no: int,
+    ) -> tuple[list[DAGNode], list[dict[str, str]]]:
         """从元规划输出合并节点（动态重规划：已存在同战术节点不重复建）。
 
         两遍构建：先建全部新节点、后解析依赖——计划内节点可以互相引用，
         节点在计划中的先后顺序不再决定依赖能否解析（子节点先于父节点
         出现也不丢边）。未知依赖抛 SpiritScoutError（规划错误明确返回，
         不静默丢边）；绑定规则见 _pick_dependency；建完校验环/自依赖，
-        校验失败整体回滚本次新建。
+        校验失败整体回滚本次新建。同一战术被跳过的节点带原因进回执。
         """
         created: list[DAGNode] = []
+        skipped: list[dict[str, str]] = []
         pairs: list[tuple[dict, DAGNode]] = []
         # 第一遍：建节点（依赖先置空）
         for spec in plan_nodes:
@@ -66,6 +83,11 @@ class TaskDAG:
             if latest and latest.status not in {
                 TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.PRUNED,
             }:
+                skipped.append({
+                    "tactic": tactic,
+                    "title": str(spec.get("title", tactic))[:120],
+                    "reason": f"同战术节点已存在（{latest.tactic}，状态 {latest.status.value}）",
+                })
                 continue
             node = self.add_node(
                 tactic, str(spec.get("title", tactic)),
@@ -75,7 +97,7 @@ class TaskDAG:
             created.append(node)
             pairs.append((spec, node))
         if not pairs:
-            return created
+            return created, skipped
         try:
             # 第二遍：解析依赖（新建与既有节点都在候选内）
             for spec, node in pairs:
@@ -106,7 +128,7 @@ class TaskDAG:
             for _, node in pairs:                # 整体回滚：坏计划不落半个节点
                 self._nodes.pop(node.node_id, None)
             raise
-        return created
+        return created, skipped
 
     def _pick_dependency(self, tactic: str, exclude: DAGNode) -> DAGNode | None:
         """依赖绑定规则：同战术候选取最新创建且未失败的——失败重建后

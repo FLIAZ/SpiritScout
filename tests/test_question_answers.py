@@ -98,3 +98,22 @@ class QuestionAnswerTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post(f"/api/sessions/other/questions/{qid}", json={"choice": 0})
         self.assertEqual(response.status_code, 409)
         self.assertFalse(waiting.done())
+
+    async def test_targets_carry_plain_language_why_and_answer_matches_by_target(self) -> None:
+        task = asyncio.create_task(self.session.questions.ask(
+            "master", "需要新增测试范围吗？", ["允许", "拒绝"],
+            [{"target": "https://pass.test.invalid", "why": "登录接口域名，登录态走访需要"},
+             "https://legacy.test.invalid"]))
+        self.tasks.append(task)
+        await asyncio.sleep(0)
+        view = self.session.questions.view()[0]
+        # 说明随目标一起进入前端渲染；裸字符串目标降级为空说明
+        self.assertEqual(view["targets"], [
+            {"target": "https://pass.test.invalid", "why": "登录接口域名，登录态走访需要"},
+            {"target": "https://legacy.test.invalid", "why": ""}])
+        response = await self.client.post(self.url(view["question_id"]), json={
+            "text": "允许", "add_targets": ["https://pass.test.invalid"]})
+        self.assertEqual(response.status_code, 200, response.text)
+        answer = await task
+        self.assertEqual(answer["scope_added"], ["https://pass.test.invalid/"])
+        self.assertTrue(self.guard.is_allowed("https://pass.test.invalid"))

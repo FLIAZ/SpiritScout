@@ -127,11 +127,15 @@ class DAGRegressionTests(unittest.TestCase):
         parent = dag.find_by_tactic("PARENT")[0]
         child = dag.find_by_tactic("CHILD")[0]
         dag.mark(parent.node_id, TaskStatus.FAILED)
-        replacement = dag.upsert_from_plan([{"tactic": "PARENT"}], 1)[0]
+        replacement = dag.upsert_from_plan([{"tactic": "PARENT"}], 1).created[0]
         dag.mark(replacement.node_id, TaskStatus.DONE)
         self.assertEqual(child.depends_on, [replacement.node_id])
         self.assertEqual(dag.ready_nodes(), [child])
-        self.assertEqual(dag.upsert_from_plan([{"tactic": "PARENT"}], 2), [])
+        again = dag.upsert_from_plan([{"tactic": "PARENT"}], 2)
+        self.assertEqual(again.created, [])
+        # 跳过必须带回执原因：静默吞节点会让规划方误判「在途」
+        self.assertEqual(len(again.skipped), 1)
+        self.assertIn("已存在", again.skipped[0]["reason"])
 
     def test_invalid_replacement_rolls_back_rebindings(self) -> None:
         dag = TaskDAG()
@@ -142,6 +146,49 @@ class DAGRegressionTests(unittest.TestCase):
         with self.assertRaises(SpiritScoutError):
             dag.upsert_from_plan([{"tactic": "PARENT", "depends_on": ["CHILD"]}], 1)
         self.assertEqual(dag.to_dict(), before)
+
+
+class CredentialLedgerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_chinese_user_reply_credential_is_ledgered_redacted_and_idempotent(self) -> None:
+        from types import SimpleNamespace
+
+        from spiritscout.agents.hostops.agent import PostExploitAgent
+        from spiritscout.blackboard import Blackboard
+        from spiritscout.core.models import AgentType, BlackboardLayer, Task
+
+        with tempfile.TemporaryDirectory() as temp:
+            bb = Blackboard(Path(temp) / "bb.db")
+            self.addCleanup(bb.close)
+            bb.write(BlackboardLayer.RECON_CLUE, "reply-real", {
+                "clue_type": "user_reply",
+                "value": "账号18325032098,密码MQLMQLxxl123**",
+                "detail": "请提供一组测试账号和密码"})
+            # 提问正文含「密码」但答复本身没有：不得误报
+            bb.write(BlackboardLayer.RECON_CLUE, "reply-mention", {
+                "clue_type": "user_reply", "value": "稍后提供",
+                "detail": "需要一次性下发测试账号与密码"})
+            agent = object.__new__(PostExploitAgent)
+            agent.agent_id = "post-test"
+            agent.ctx = SimpleNamespace(blackboard=bb)
+            task = Task(task_id="cred", task_type="post_exploit",
+                        agent_type=AgentType.POST_EXPLOIT, target="https://example.test")
+
+            result = await agent._step_credential(task)
+            self.assertTrue(result.ok)
+            self.assertNotIn("暂无凭据", result.note)
+            self.assertNotIn("MQLMQLxxl123", result.note)
+            self.assertNotIn("MQLMQLxxl123", str(result.findings))
+            # 凭据线索落凭据层（post_exploit 对线索层无写权）
+            leads = bb.query(BlackboardLayer.CREDENTIAL, limit=50)
+            self.assertEqual(len(leads), 1)
+            stored = str(leads[0]["data"])
+            self.assertNotIn("MQLMQLxxl123", stored)
+            self.assertNotIn("18325032098", stored)
+            self.assertTrue(leads[0]["data"]["redacted"])
+
+            # 再次执行：同一证据不重复登记，且不会从线索本身再派生线索
+            await agent._step_credential(task)
+            self.assertEqual(len(bb.query(BlackboardLayer.CREDENTIAL, limit=50)), 1)
 
 
 class ConnectionRegressionTests(unittest.IsolatedAsyncioTestCase):

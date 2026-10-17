@@ -91,6 +91,59 @@ def business_digest(context: dict[str, Any], *, version: int | None = None) -> d
     return out
 
 
+def blackboard_findings(blackboard: Any) -> dict[str, Any]:
+    """本会话实时成果投影：资产/线索/漏洞的计数与抽样（子 Agent 与旁路共用）。
+
+    子 Agent 此前只拿到业务上下文与用户答复，看不到其他分支已探到的资产、
+    线索与漏洞，容易重复劳动或在「黑板里没有可用信息」上误判（2026-10-16
+    复盘：post_exploit 拿着用户给的账号却报「暂无凭据证据」）。这里只回传
+    事实与选样，硬上限防 token；未展示不代表不存在。
+    """
+    assets = blackboard.query(BlackboardLayer.ASSET, limit=500)
+    by_type: dict[str, int] = {}
+    samples: dict[str, list[str]] = {"endpoint": [], "service": [], "url": []}
+    for rec in assets:
+        data = rec["data"]
+        atype = str(data.get("asset_type") or "?")
+        by_type[atype] = by_type.get(atype, 0) + 1
+        value = str(data.get("value") or "")[:160]
+        if atype in samples and value and len(samples[atype]) < 10:
+            samples[atype].append(value)
+    clues = blackboard.query(BlackboardLayer.RECON_CLUE, limit=300)
+    clue_types: dict[str, int] = {}
+    clue_samples: list[dict[str, str]] = []
+    for rec in clues:
+        data = rec["data"]
+        ctype = str(data.get("clue_type") or "?")
+        clue_types[ctype] = clue_types.get(ctype, 0) + 1
+        if ctype != "user_reply" and len(clue_samples) < 8:
+            clue_samples.append({"type": ctype,
+                                 "value": str(data.get("value") or "")[:120]})
+    vulns = blackboard.query(BlackboardLayer.VULN, limit=300)
+    vuln_status: dict[str, int] = {}
+    vuln_samples: list[dict[str, str]] = []
+    for rec in vulns:
+        data = rec["data"]
+        status = str(data.get("status") or "candidate")
+        vuln_status[status] = vuln_status.get(status, 0) + 1
+        if len(vuln_samples) < 6:
+            vuln_samples.append({
+                "title": str(data.get("title") or "")[:100],
+                "status": status,
+                "severity": str(data.get("severity") or "")})
+    creds = blackboard.query(BlackboardLayer.CREDENTIAL, limit=200)
+    return {
+        "assets": {"total": len(assets), "by_type": by_type, "sample": samples},
+        "clues": {"total": len(clues), "by_type": clue_types, "sample": clue_samples},
+        "vulns": {"total": len(vulns), "by_status": vuln_status,
+                  "sample": vuln_samples},
+        "credentials": {
+            "total": len(creds),
+            "sample": [str(r["data"].get("where") or "")[:120] for r in creds[:6]]},
+        "note": "本会话黑板实时成果（节选；凭据值已打码，明文见相应原始线索）。",
+    }
+
+
 def shared_context(blackboard: Any) -> dict[str, Any]:
     """规划、执行与复盘共享同一版本的事实投影，用户回答不再只剩线索类型。"""
     if blackboard is None:
@@ -107,6 +160,10 @@ def shared_context(blackboard: Any) -> dict[str, Any]:
                                 "question": rec["data"].get("detail", ""),
                                 "answer": rec["data"].get("value", "")}
                                for rec in replies]
+    findings = blackboard_findings(blackboard)
+    if (findings["assets"]["total"] or findings["clues"]["total"]
+            or findings["vulns"]["total"] or findings["credentials"]["total"]):
+        out["findings"] = findings
     return out
 
 

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
 from urllib.parse import urlparse
@@ -29,11 +30,16 @@ _ADMIN_PATHS = (
     ("/manager/html", "tomcat-manager"), ("/debug", "debug"),
     ("/.env", "="),
 )
-# 凭据类证据标记（深耕：值打码登记）
+# 凭据类证据标记（中英文；中文会话里「密码/口令」是高频表述，
+# 2026-10-16 复盘：用户答复「账号xxx,密码xxx」因纯英文正则被漏识别）
 _CRED_MARKERS = re.compile(
-    r"(?i)(password|passwd|secret|api[_-]?key|authorization|access[_-]?token)")
+    r"(?i)(password|passwd|secret|api[_-]?key|authorization|access[_-]?token"
+    r"|密码|口令|凭据)")
+# 打码：值紧跟标记（可有 =/:/： 分隔），中英文标签与账号一并覆盖；
+# 值在顿号/逗号/分号/空白处截断，避免把后续内容整段吞掉
 _SECRET_VALUE = re.compile(
-    r"(?i)((?:password|passwd|secret|api[_-]?key|token)\s*[=:]\s*)(\S{4,})")
+    r"(?i)((?:password|passwd|secret|api[_-]?key|token|密码|口令|账号|用户名|登录名)"
+    r"\s*[=:：]?\s*)([^\s,，;；]{2,})")
 
 
 class PortScanAgent(SubAgent):
@@ -286,8 +292,12 @@ class PostExploitAgent(SubAgent):
         found: list[dict[str, str]] = []
         for rec in self.ctx.blackboard.query(BlackboardLayer.RECON_CLUE, limit=200):
             d = rec["data"]
-            blob = f"{d.get('value', '')} {d.get('detail', '')}"
-            if _CRED_MARKERS.search(str(blob)):
+            if d.get("clue_type") == "credential_lead":
+                continue    # 已登记的线索不再二次登记（防止“线索的线索”滚雪球）
+            # user_reply 的 detail 是提问正文（可能含「密码」字样），只扫答复本身
+            blob = (str(d.get("value", "")) if d.get("clue_type") == "user_reply"
+                    else f"{d.get('value', '')} {d.get('detail', '')}")
+            if _CRED_MARKERS.search(blob):
                 found.append({"source": f"clue:{d.get('clue_type', '')}",
                               "where": str(d.get("value", ""))[:160]})
         for rec in self.ctx.blackboard.query(BlackboardLayer.VULN, limit=200):
@@ -297,21 +307,30 @@ class PostExploitAgent(SubAgent):
                 found.append({"source": f"vuln:{d.get('vuln_type', '')}",
                               "where": str(d.get("endpoint", ""))[:160]})
         for item in found:
+            redacted = _SECRET_VALUE.sub(r"\1***", item["where"])
+            # 摘要用哈希：既做幂等去重，又不把明文写进 dedup_key
+            digest = hashlib.sha1(item["where"].encode("utf-8")).hexdigest()[:12]
+            dedup = f"credential_lead|{item['source']}|{digest}"
+            if self.ctx.blackboard.find_by_dedup_key(
+                    BlackboardLayer.CREDENTIAL, dedup):
+                continue    # 同一证据已登记过
+            # 凭据层是本职写权（post_exploit 无 RECON_CLUE 写权限）；
+            # 旧实现写线索层，识别到即 PolicyViolation 崩步——一直没暴露
+            # 只是因为英文标记没命中过
             self.ctx.blackboard.write(
-                BlackboardLayer.RECON_CLUE, new_id("clue"),
-                {"clue_type": "credential_lead",
-                 "value": _SECRET_VALUE.sub(r"\1***", item["where"]),
-                 "confidence": 0.6,
-                 "detail": {"source": item["source"], "redacted": True},
+                BlackboardLayer.CREDENTIAL, new_id("cred"),
+                {"kind": "credential_lead", "source": item["source"],
+                 "where": redacted, "confidence": 0.6, "redacted": True,
                  "task_id": task.task_id, "found_by": self.agent_id},
                 agent_type=self.agent_type, updated_by=self.agent_id,
-                dedup_key=f"clue|credential_lead|{item['source']}|{item['where']}")
+                dedup_key=dedup)
+        redacted_all = [_SECRET_VALUE.sub(r"\1***", f["where"]) for f in found]
         return StepResult(
             ok=True, value=min(0.2 * len(found), 0.8),
-            findings=[{"type": "credential_lead", "value": f["where"]}
-                      for f in found[:10]],
+            findings=[{"type": "credential_lead", "value": r}
+                      for r in redacted_all[:10]],
             note=(f"凭据线索 {len(found)} 条（值打码登记："
-                  f"{'; '.join(f['where'][:40] for f in found[:4])}…）"
+                  f"{'; '.join(r[:40] for r in redacted_all[:4])}…）"
                   if found else "黑板中暂无凭据类证据"))
 
     async def _step_lateral(self, task: Task, step: dict) -> StepResult:

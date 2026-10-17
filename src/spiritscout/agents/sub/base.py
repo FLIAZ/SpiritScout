@@ -141,7 +141,11 @@ class SubAgentContext:
 _ASK_CHANNEL_NOTE = (
     "【可询问用户】仅当本决策必须依赖只有用户能提供的输入（测试账号/凭据、"
     "登录后操作的请求记录、授权范围裁定）时，在返回 JSON 里加 "
-    "\"ask_user\": {\"question\": str, \"options\": [str], \"targets\": [str]}。"
+    "\"ask_user\": {\"question\": str, \"options\": [str], "
+    "\"targets\": [{\"target\": str, \"why\": str}]}。targets 仅在需要访问"
+    "当前授权范围外的新目标时给出；why 用一句话说明它是什么、为什么需要"
+    "（面向普通用户）——控制台会渲染成「允许访问」勾选项，只有用户勾选"
+    "才会纳入本会话范围；不要在 targets 里罗列已在范围内的目标。"
     "问题面向普通用户，用平实中文，不用 HAR、PoC 这类行话缩写（必要处一句话"
     "解释）。后端会挂起等用户作答，答复回灌后你重新给出本决策；"
     "没有这类需求就不要加该字段。")
@@ -704,8 +708,8 @@ class SubAgent(abc.ABC):
         question = str(ask["question"]).strip()[:2000]
         options = [str(o).strip()[:200] for o in (ask.get("options") or [])[:6]
                    if str(o).strip()]
-        targets = [str(t).strip()[:300] for t in (ask.get("targets") or [])[:6]
-                   if isinstance(t, str) and t.strip()]
+        from spiritscout.policy.questions import normalize_targets
+        targets = normalize_targets(ask.get("targets"))
         broker = self.ctx.questions
         if broker is None:
             self.ctx.audit.log("agent.ask_user", self.agent_id, {
