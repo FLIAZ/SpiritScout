@@ -1084,6 +1084,9 @@ class CTFBaseAgent(SubAgent):
             self.ctx.audit.log("agent.conclude", self.agent_id, {
                 "route": route.name, "challenge": self.challenge_id(task),
                 "turn": turn, "summary": summary[:2000]})
+            # 结论已随上面的 agent.conclude 单独上时间线：置位让任务级
+            # 收尾（base._run_task）不再把同一段文本拼进汇总结论重复展示
+            route.conclusion_published = True
             # 结论文本（最终答案与依据，常含 Markdown 表格）走长限额，
             # WriteUp 的「解题依据」段不再半途截断
             note = f"收尾（第 {turn} 回合）：{summary[:1500] or '无结论文本'}"

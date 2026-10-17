@@ -266,6 +266,9 @@ class RouteState(BaseModel):
     step_times: list[float] = Field(default_factory=list)  # 近期步骤时间戳（monotonic，探测频率依据，上限 60 条）
     health: float = 1.0                # 健康度（6.5 公式计算结果）
     notes: list[str] = Field(default_factory=list)
+    # 路线已单独发过 agent.conclude（如 CTF 解题环收尾）——任务级收尾
+    # 拼结论时跳过，否则同一段结论文本上两遍时间线
+    conclusion_published: bool = False
 
 
 class FlagCandidate(BaseModel):

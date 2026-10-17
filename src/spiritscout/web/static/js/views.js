@@ -1244,6 +1244,9 @@ function tracePush(e) {
       traceAppend(e, `<div class="m">${esc(actorName(actor))} · 正在调用 ${esc(d.model || "模型")} · ${esc(SessionObserver.toolName(d.task_type || "任务决策"))}</div>`, "tl-sys");
       break;
     case "model.call": {
+      // 调用收尾即定格 Markdown：文本流已结束，不等下一次回合边界
+      // （否则纯推理续轮/会话收尾前的流式正文会一直保持原文）
+      traceFinishThinking(traceTurn(actor));
       const n = SessionObserver.usageFor(e, S.state);
       const row = traceAppend(e, `<div class="m"><strong>${esc(d.model || "模型")} 已返回</strong> · <span class="model-tokens">${n == null ? "单次用量未记录" : `${Number(n).toLocaleString("zh-CN")} token`}</span> · ${(Number(d.latency_ms || 0) / 1000).toFixed(1)} 秒${d.task_type ? ` · ${esc(d.task_type)}` : ""}</div>`, "tl-sys tl-model");
       row.dataset.callTs = e.ts || "";
@@ -1252,9 +1255,11 @@ function tracePush(e) {
     case "model.failed":
     case "task.failed":
     case "llm.step_fallback":
+      traceFinishThinking(traceTurn(actor));   // 调用异常收尾：已流入的正文同样要定格
       traceAppend(e, `<div class="tl-err">${esc(actorName(actor))} · ${esc(d.error || "执行未成功，等待重新决策")}</div>`, "tl-sys");
       break;
     case "model.cancelled":
+      traceFinishThinking(traceTurn(actor));
       traceAppend(e, `<div class="m">${esc(actorName(actor))} · 模型调用已取消，本次用量未返回</div>`, "tl-sys");
       break;
     case "task.cancelled":

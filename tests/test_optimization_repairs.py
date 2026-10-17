@@ -43,13 +43,47 @@ class ConfigurationRepairTests(unittest.TestCase):
             modelcfg.write_config(model_path, [], [{"model": "old", "provider": "mock"},
                 {"model": "backup", "provider": "mock", "is_fallback_for": ["old"]}])
             agentcfg.set_assignment(agent_path, "master", "old", {"old"})
+            agentcfg.set_naming_chain(agent_path, ["old", "keeper"], {"old", "keeper"})
             modelcfg.upsert_entry(model_path, {"model": "new", "provider": "mock"},
                                   original_model="old", assignments_path=agent_path)
             self.assertEqual(agentcfg.read_assignments(agent_path), {"master": "new"})
+            self.assertEqual(agentcfg.read_naming_chain(agent_path), ["new", "keeper"])
             self.assertEqual(modelcfg.read_entries(model_path)[1]["is_fallback_for"], ["new"])
             with self.assertRaises(SpiritScoutError):
                 modelcfg.delete_entry(model_path, "new", assignments_path=agent_path)
             self.assertIn("secretary", agentcfg._VALID_KEYS)
+
+    def test_delete_rejects_model_in_naming_chain_until_migrated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model_path, agent_path = Path(directory) / "models.yaml", Path(directory) / "agents.yaml"
+            modelcfg.write_config(model_path, [], [{"model": "mini", "provider": "mock"}])
+            agentcfg.set_naming_chain(agent_path, ["mini"], {"mini"})
+            with self.assertRaises(SpiritScoutError) as ctx:
+                modelcfg.delete_entry(model_path, "mini", assignments_path=agent_path)
+            self.assertIn("命名链", str(ctx.exception))
+            # 迁走（清空链）后删除放行
+            agentcfg.set_naming_chain(agent_path, [], {"mini"})
+            self.assertEqual(modelcfg.delete_entry(
+                model_path, "mini", assignments_path=agent_path), [])
+
+    def test_naming_chain_and_assignments_share_one_file_safely(self) -> None:
+        """同一分配表文件的两段（assignments/naming）一起读一起写，互不覆盖。"""
+        with tempfile.TemporaryDirectory() as directory:
+            agent_path = Path(directory) / "agents.yaml"
+            agentcfg.set_assignment(agent_path, "master", "big", {"big"})
+            agentcfg.set_naming_chain(agent_path, ["small", "big"], {"big", "small"})
+            # 写指派保留命名链；写命名链保留指派
+            agentcfg.set_assignment(agent_path, "recon", "small", {"big", "small"})
+            self.assertEqual(agentcfg.read_naming_chain(agent_path), ["small", "big"])
+            agentcfg.set_naming_chain(agent_path, ["small"], {"big", "small"})
+            self.assertEqual(agentcfg.read_assignments(agent_path),
+                             {"master": "big", "recon": "small"})
+            # 清空链不落 naming 键；文件里手工加的非法形状显式报错
+            agentcfg.set_naming_chain(agent_path, [], {"big", "small"})
+            self.assertEqual(agentcfg.read_naming_chain(agent_path), [])
+            agent_path.write_text("naming: 不是数组\n", encoding="utf-8")
+            with self.assertRaises(SpiritScoutError):
+                agentcfg.read_naming_chain(agent_path)
 
     def test_failed_model_write_rolls_back_assignment_migration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

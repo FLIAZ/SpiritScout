@@ -91,6 +91,45 @@ class WebRepairTests(unittest.TestCase):
             self.assertEqual(self.client.get("/api/dashboard").json()["total_tokens"], 10)
 
 
+class NamingChainApiTests(unittest.TestCase):
+    """命名候选链 API：模型页排的降级顺序，落盘热读、越权 ID 拒绝。"""
+
+    def test_chain_roundtrip_validation_and_hot_persistence(self) -> None:
+        from spiritscout.web import agentcfg, modelcfg
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = SystemConfig(
+                workspace=WorkspaceConfig(root=str(root)),
+                models_config_path=str(root / "models.yaml"),
+                agent_models_path=str(root / "agents.yaml"),
+                audit_log_path=str(root / "audit.jsonl"),
+            )
+            modelcfg.write_config(cfg.models_config_path, [],
+                                  [{"model": "mini", "provider": "mock"},
+                                   {"model": "backup", "provider": "mock"}])
+            client = TestClient(create_app(cfg, []))
+            self.assertEqual(client.get("/api/models/naming").json()["chain"], [])
+            # 顺序即用户排的降级顺序；重复项去重保序
+            r = client.put("/api/models/naming",
+                           json={"models": ["mini", "backup", "mini"]})
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.json()["chain"], ["mini", "backup"])
+            # 落进分配表文件，命名调用每次热读（改完即生效）
+            self.assertEqual(agentcfg.read_naming_chain(cfg.agent_models_path),
+                             ["mini", "backup"])
+            # 不在注册表的模型 / 非法形状 → 422，原链保持不变
+            self.assertEqual(client.put("/api/models/naming",
+                                        json={"models": ["ghost"]}).status_code, 422)
+            self.assertEqual(client.put("/api/models/naming",
+                                        json={"models": "mini"}).status_code, 422)
+            self.assertEqual(agentcfg.read_naming_chain(cfg.agent_models_path),
+                             ["mini", "backup"])
+            # 清空链 = 回到默认（跟随编队页灵枢指派）
+            self.assertEqual(client.put("/api/models/naming",
+                                        json={"models": []}).json()["chain"], [])
+
+
 class MetadataRepairTests(unittest.TestCase):
     def test_bad_field_types_do_not_prevent_other_sessions_loading(self) -> None:
         for field, value in [("opinions", 3), ("dialogue_history", 7),

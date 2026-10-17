@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# 灵探 SpiritScout 启动器
-#   ./launch.sh            前台启动（Ctrl+C 停止）；额外参数透传给程序（如 --port 8000）
-#   ./launch.sh stop [端口]  停止控制台（默认端口 8000）
+# 灵枢 SpiritScout 启动器
+#   ./launch.sh                      前台启动（Ctrl+C 停止）；额外参数透传给程序（如 --port 8000）
+#   ./launch.sh stop    [端口] [--force]        停止控制台（默认端口 8000；--force = 放弃运行中会话现场）
+#   ./launch.sh restart [端口] [--force] [参数]  先停再起；显式给了端口会一并转给新进程，其余参数透传
+#   ./launch.sh -h                   启动器用法说明（程序自身参数：./launch.sh start -h）
 set -euo pipefail
 cd "$(dirname "$0")"
+shopt -s nullglob
 
 PORT="${WEBCONSOLE_PORT:-8000}"
 
@@ -12,28 +15,88 @@ if [ ! -x .venv/bin/python ]; then
   exit 1
 fi
 
+# 停止控制台：按端口找 PID，先礼（SIGTERM 等 lifespan 收尾）后兵（超时强杀）
+stop_console() {
+  local cmd="$1" port="$2" force="$3"
+  # 活跃会话保护：有运行中的会话时不掐现场，确认放弃才停
+  local running=0 m
+  for m in .spiritscout/sessions/*/meta.json; do
+    grep -q '"status": *"running"' "$m" 2>/dev/null && running=$((running + 1))
+  done
+  if [ "$running" -gt 0 ] && [ -z "$force" ]; then
+    echo "有 ${running} 个会话正在运行。确认放弃现场请用：./launch.sh ${cmd} --force" >&2
+    return 1
+  fi
+  local pid
+  # || true：端口空闲时 grep 无匹配会以非零收尾，set -e 会静默退出
+  pid=$(ss -tlnp 2>/dev/null | grep -E ":${port}[[:space:]]" \
+        | grep -oP 'pid=\K[0-9]+' | head -1 || true)
+  if [ -z "$pid" ]; then
+    echo "控制台未在运行（端口 ${port}）"
+    return 0
+  fi
+  kill "$pid" 2>/dev/null || true
+  local i
+  for i in $(seq 1 100); do          # 优雅退出最多等 10 秒（关会话/资源助手要时间）
+    kill -0 "$pid" 2>/dev/null || { echo "已停止（PID $pid，端口 ${port}）"; return 0; }
+    sleep 0.1
+  done
+  echo "10 秒未退出，强制结束（PID $pid）" >&2
+  kill -9 "$pid" 2>/dev/null || true
+  sleep 0.3
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "无法结束 PID $pid，请手动处理" >&2
+    return 1
+  fi
+  echo "已强制停止（PID $pid，端口 ${port}）"
+}
+
 case "${1:-start}" in
+  -h|--help|help)
+    cat <<'USAGE'
+灵枢 SpiritScout 启动器
+
+用法：
+  ./launch.sh                        前台启动（Ctrl+C 停止）；额外参数透传给程序（如 --port 8000）
+  ./launch.sh start [参数...]        同上（显式 start）
+  ./launch.sh stop     [端口] [--force]         停止控制台（默认端口 8000，或环境变量 WEBCONSOLE_PORT）
+                                                --force = 有运行中会话时确认放弃现场
+  ./launch.sh restart  [端口] [--force] [参数]  先停再起；显式端口会转成 --port 传给新进程，其余参数透传
+  ./launch.sh -h | --help | help     本说明
+
+示例：
+  ./launch.sh stop                   # 停默认端口 8000
+  ./launch.sh restart 8100 --force   # 放弃会话现场，重启在 8100
+  ./launch.sh --host 0.0.0.0         # 透传给程序前台启动
+
+停止行为：按端口找 PID，SIGTERM 优雅退出（最多等 10 秒），超时 SIGKILL。
+程序自身参数说明：./launch.sh start -h
+USAGE
+    ;;
   stop)
-    force=""
-    port="$PORT"
+    force="" port=""
     for a in "${@:2}"; do
       if [ "$a" = "--force" ]; then force="1"; else port="$a"; fi
     done
-    # 活跃会话保护：有运行中的会话时不掐现场，确认放弃才停
-    running=0
-    for m in .spiritscout/sessions/*/meta.json; do
-      grep -q '"status": *"running"' "$m" 2>/dev/null && running=$((running + 1))
+    stop_console stop "${port:-$PORT}" "$force"
+    ;;
+  restart)
+    force="" port="" extra=()
+    for a in "${@:2}"; do
+      if [ "$a" = "--force" ]; then force="1"
+      elif [ -z "$port" ] && [[ "$a" != -* ]]; then port="$a"
+      else extra+=("$a"); fi
     done
-    if [ "$running" -gt 0 ] && [ -z "$force" ]; then
-      echo "有 ${running} 个会话正在运行。确认放弃现场请用：./launch.sh stop --force" >&2
-      exit 1
-    fi
-    pid=$(ss -tlnp 2>/dev/null | grep ":${port}" | grep -oP 'pid=\K[0-9]+' | head -1)
-    if [ -n "$pid" ]; then
-      kill "$pid" && echo "已停止（PID $pid，端口 ${port}）"
-    else
-      echo "控制台未在运行（端口 ${port}）"
-    fi
+    stop_console restart "${port:-$PORT}" "$force"
+    for i in $(seq 1 50); do          # 端口释放要片刻：确认空闲再起，避免撞地址
+      ss -tln 2>/dev/null | grep -E ":${port:-$PORT}[[:space:]]" >/dev/null || break
+      sleep 0.1
+    done
+    args=()
+    [ -n "$port" ] && args+=(--port "$port")
+    echo "重新启动中（端口 ${port:-默认}）…"
+    exec .venv/bin/python -m spiritscout --config configs/system.yaml \
+      "${args[@]}" "${extra[@]}"
     ;;
   start)
     exec .venv/bin/python -m spiritscout --config configs/system.yaml "${@:2}"

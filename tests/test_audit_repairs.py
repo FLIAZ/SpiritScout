@@ -106,6 +106,44 @@ class AuditTaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task.status, TaskStatus.DONE)
         self.assertEqual(summary["routes_done"], 1)
 
+    async def test_published_route_conclusion_not_repeated_at_task_level(self) -> None:
+        """路线已单独发过 agent.conclude 时，任务级收尾不再重复拼接同一结论。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            audit_path = Path(tmp) / "audit.jsonl"
+            ctx = SubAgentContext(
+                self.bus, self.bb, ConvergenceEngine(self.bb),
+                SimpleNamespace(), ToolRegistry(LocalExecutor()),
+                PolicyEngine(RunMode.CTF, ScopeGuard(Scope(local_analysis=True))),
+                audit=AuditLogger(audit_path))
+
+            class _ConcludingAgent(_ProbeAgent):
+                publish = False
+
+                async def execute_step(self, task, route, plan, step):
+                    if self.publish:
+                        # 模拟 CTF 解题环：结论已随路线级 agent.conclude 上时间线
+                        route.conclusion_published = True
+                    return StepResult(ok=True, note="已拿到 Flag", final_note=True)
+
+            def conclude_events() -> list[dict]:
+                return [json.loads(line) for line in
+                        audit_path.read_text(encoding="utf-8").splitlines()
+                        if line.strip() and json.loads(line)["type"] == "agent.conclude"]
+
+            # 未置位（SRC 侧形态）：任务级收尾照常拼一条汇总结论
+            agent = _ConcludingAgent(ctx, enable_llm_planning=False)
+            agent.publish = False
+            await agent.run(self.task([{"ok": True}]))
+            self.assertEqual(len(conclude_events()), 1)
+            self.assertIn("audit：已拿到 Flag", conclude_events()[0]["detail"]["summary"])
+
+            # 已置位（CTF 解题环形态）：同文本不再上第二遍时间线
+            audit_path.write_text("", encoding="utf-8")
+            agent = _ConcludingAgent(ctx, enable_llm_planning=False)
+            agent.publish = True
+            await agent.run(self.task([{"ok": True}]))
+            self.assertEqual(conclude_events(), [])
+
     async def test_empty_route_is_cancelled_instead_of_success(self) -> None:
         task = self.task([])
         summary = await self.agent.run(task)

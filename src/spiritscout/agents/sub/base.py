@@ -230,10 +230,12 @@ class SubAgent(abc.ABC):
             task.status = TaskStatus.CANCELLED
         summary = self._summarize(task, routes)
         task.result_summary = summary
-        # 任务收尾：各路线最后一条现场笔记拼成可读结论，随事件流上时间线
+        # 任务收尾：各路线最后一条现场笔记拼成可读结论，随事件流上时间线。
+        # 已单独发过 agent.conclude 的路线（conclusion_published，如 CTF
+        # 解题环收尾）跳过——同一段结论文本重复上时间线，用户看到两遍
         conclude = "；".join(
             f"{r.name}：{r.notes[-1] if r.notes else r.status.value}"
-            for r in routes)[:2000]
+            for r in routes if not r.conclusion_published)[:2000]
         if conclude:
             self.ctx.audit.log("agent.conclude", self.agent_id,
                                {"summary": conclude})

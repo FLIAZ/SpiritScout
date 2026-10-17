@@ -141,6 +141,50 @@ class ResourceStoreTests(unittest.TestCase):
             self.assertEqual(row["observations"], 2)
             self.assertEqual(row["data"]["fingerprint"]["server"], "second")
 
+    def test_campaign_inheritance_backfill_filters_and_import(self) -> None:
+        """分类：来源自动继承 + 补名回填 + 聚合/过滤 + 导入携带。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ResourceStore(root / "resources")
+            # 先登记分类再观测：来源前缀自动继承
+            store.set_session_campaign("sess-alpha", "BiliBili SRC")
+            store.observe({"asset_type": "app", "value": "https://a.example.com"},
+                          "sess-alpha:asset:one@1")
+            # 先观测后登记：登记时回填既有观测
+            store.observe({"asset_type": "app", "value": "https://b.example.com"},
+                          "sess-beta:asset:one@1")
+            store.set_session_campaign("sess-beta", "某 CTF")
+            # 空分类 = 已尝试判断不了：不再列入补名候选
+            store.set_session_campaign("sess-gamma", "")
+            store.observe({"asset_type": "app", "value": "https://c.example.com"},
+                          "sess-gamma:asset:one@1")
+            # 无会话前缀的来源不继承（历史 sort 来源、测试夹具）
+            store.observe({"asset_type": "app", "value": "https://d.example.com"},
+                          "post")
+
+            self.assertEqual(store.session_campaign("sess-alpha"), "BiliBili SRC")
+            campaigns = store.campaigns()
+            self.assertEqual([row["name"] for row in campaigns["items"]],
+                             ["BiliBili SRC", "某 CTF"])
+            self.assertEqual(campaigns["unnamed"], 2)
+            self.assertEqual(store.assets(campaign="某 CTF")["total"], 1)
+            self.assertEqual(store.assets(unnamed=True)["total"], 2)
+            self.assertEqual(
+                store.assets(campaign="某 CTF")["items"][0]["campaigns"], ["某 CTF"])
+            self.assertEqual(store.sessions_without_campaign(), [])
+            # 会话导入携带已登记的分类（observe 按来源前缀自动继承）
+            workspace = root / "sess-import"
+            workspace.mkdir()
+            bb = Blackboard(workspace / "bb.db")
+            bb.write(BlackboardLayer.ASSET, "asset",
+                     {"asset_type": "app", "value": "https://example.test"})
+            bb.close()
+            store.set_session_campaign("sess-import", "BiliBili SRC")
+            store.import_session(workspace)
+            imported = next(item for item in store.assets(campaign="BiliBili SRC")["items"]
+                            if item["data"]["value"].startswith("https://example.test"))
+            self.assertEqual(imported["campaigns"], ["BiliBili SRC"])
+
 
 class ResourceApiTests(unittest.TestCase):
     def test_management_pages_secret_fields_and_config_conflict(self) -> None:

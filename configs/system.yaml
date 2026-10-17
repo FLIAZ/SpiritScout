@@ -17,14 +17,13 @@ blackboard:
   sqlite_path: .spiritscout/blackboard.db
 
 gateway:                       # 多模型网关（模型在 models.yaml 注册）
-  default_tier: fast
-  budget_tokens: 2000000       # token 预算硬顶（超顶熔断）
+  budget_tokens: 2000000       # Token 用量参考值，仅计量不熔断
   budget_usd: 20.0
-  mode_budget_tokens:          # 按运行模式的 token 硬顶（4.9.4，可留空仅全局）
+  mode_budget_tokens:          # 按模式记录的 Token 参考值，不作为执行上限
     src: 2000000
     ctf: 1000000
     competition: 1500000
-  degrade_at_ratio: 0.8        # 用量达预算 80% 自动降级低档模型（4.9.4）
+  degrade_at_ratio: 0.8        # 兼容旧配置；当前不按消耗自动降级
   cascade_confidence_threshold: 0.8
   vote_min_models: 2
   request_timeout_seconds: 300  # 重推理模型单次调用可达数分钟，过短会中途掐死解题环
@@ -48,8 +47,13 @@ knowledge:                     # 五库 + 两经验库
   chroma_path: .spiritscout/chroma
   embedding_provider: hash     # hash（零依赖默认）/ openai_compatible
   embedding_base_url: ""
-  embedding_api_key: ${EMBEDDING_API_KEY}
+  embedding_api_key: ""        # 启用远端 embedding 时可设为 ${EMBEDDING_API_KEY}
   embedding_model: ""
+
+experience:                    # 经验库（跨会话自我进化）：收尾提炼 + 开工召回
+  root: ""                     # 空=跟随工作区；Web 控制台自动指向共享目录
+  distill_timeout_seconds: 45  # 收尾提炼单次 LLM 硬顶（秒），仅终态路径使用
+  recall_limit: 6              # 会话开工注入的经验条数上限
 
 report:
   template: src_standard       # 报告模板（4.6.2）
@@ -77,23 +81,22 @@ mcp_servers:
     command: .venv/bin/idalib-mcp # 相对路径按项目根解析；绝对路径或 PATH 命令原样使用
     args: ["--stdio"]
     timeout: 600                  # 大型二进制自动分析可跑数分钟
-    default_risk: readonly        # 只读分析；可能修改环境的提示会提升为即时审批
+    default_risk: readonly        # 只读分析；可能修改环境的提示按侵入性能力处理（调用时声明行为）
     scope_enforcement: none       # 仅分析会话附件，不触网
   - name: yakit                   # Web 渗透：编解码 / HTTP 流量 / 模糊测试 / 指纹 / 端口 / 反序列化
     transport: stdio
     command: .tools/yak/yak       # 项目自带 Yakit 引擎（无头运行，不依赖图形端）
     args: ["mcp"]                 # 需要全部工具集时加 "--enable-all"
     timeout: 300
-    default_risk: intrusive       # 网络探测默认需会话即时批准
+    default_risk: intrusive       # 网络探测类能力：调用时逐次声明本次行为，仅危险语义即时审批
     scope_enforcement: required   # 参数无法给出可校验目标时默认拒绝
   - name: playwright              # 浏览器自动化：JS 渲染页面真实 DOM / 点击 / 表单 / 截图
     transport: stdio
     command: npx
     args: ["@playwright/mcp@latest", "--headless", "--snapshot-boxes"]  # 快照附元素坐标，辅助判断视口外目标
     timeout: 120
-    default_risk: intrusive       # 点击、表单及脚本等状态变更默认即时审批
-    tool_risk_overrides:
-      browser_navigate: readonly  # 普通导航不因浏览器页面状态改变被误判成 DoS
+    default_risk: readonly        # 普通浏览器操作不按工具能力判危险
+    risk_by_action: true          # 模型声明本次实际行为，危险操作执行前逐次审批
     scope_enforcement: required   # 导航目标必须在授权范围内
 
 # —— idalib 装配（一次性，项目根执行；<IDA> 为 IDA Pro 安装目录）：
@@ -128,3 +131,13 @@ mcp_servers:
 #   - name: virustotal          # 文件/域名情报（VirusTotal 官方托管端点，样本细节出网）
 #     transport: http
 #     url: https://ai.virustotal.com/mcp
+
+# 秘书由灵枢按需要咨询；模型可在编队页单独指派，无工具权限。
+secretary:
+  enabled: true
+
+# 共享资源目录：留空时使用主工作区 resources/，会话隔离前固定路径。
+resources:
+  root: ""
+  freshness_hours: 24
+  npm_registry: https://registry.npmjs.org

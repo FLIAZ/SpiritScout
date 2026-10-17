@@ -307,6 +307,15 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                 resource_store.import_session(path)
             except (OSError,ValueError,sqlite3.Error):
                 pass
+        # 历史会话缺项目分类的，后台用轻量模型补名（旁路增强，失败静默；
+        # 密钥从本机密钥库热取，未配置密钥时自动跳过）
+        from spiritscout.config import load_model_config
+        try:
+            naming_models = vault.apply_keys(load_model_config(cfg.models_config_path))
+        except (OSError, ValueError, SpiritScoutError):
+            naming_models = models
+        from spiritscout.web.sessions import schedule_campaign_backfill
+        schedule_campaign_backfill(cfg, naming_models)
         yield
         await resource_assistant.close()
         await manager.aclose()
@@ -314,7 +323,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     app = FastAPI(title="灵枢 SpiritScout 控制台", version=__version__,
                   lifespan=lifespan)
     app.state.manager = manager
-    mount_resources(app,cfg,resource_store,resource_assistant)
+    mount_resources(app,cfg,resource_store,resource_assistant,models=models)
     app.state.resources = resource_store
 
     @app.middleware("http")
@@ -994,6 +1003,32 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     @app.get("/api/models")
     async def list_models() -> dict[str, Any]:
         return _models_view(modelcfg.read_entries(cfg.models_config_path))
+
+    # 命名链路由须先于 /api/models/{model:path} 注册（静态段优先匹配），
+    # 否则 "naming" 会被当作模型 ID 吞进动态路由。
+    @app.get("/api/models/naming")
+    async def naming_chain_view() -> dict[str, Any]:
+        """会话命名候选链（「模型」页维护的降级顺序；空 = 跟随灵枢指派）。"""
+        try:
+            chain = agentcfg.read_naming_chain(cfg.agent_models_path)
+        except (SpiritScoutError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return {"chain": chain, "path": cfg.agent_models_path}
+
+    @app.put("/api/models/naming")
+    async def set_naming_chain(payload: dict[str, Any]) -> dict[str, Any]:
+        """整链写回：顺序即降级顺序，由用户在页面排定，后端只校验存在性。"""
+        from spiritscout.config import load_model_config
+        raw = payload.get("models")
+        if not isinstance(raw, list):
+            raise HTTPException(422, "models 必须是模型 ID 数组")
+        valid = {m.model for m in load_model_config(cfg.models_config_path)}
+        try:
+            chain = agentcfg.set_naming_chain(
+                cfg.agent_models_path, [str(x) for x in raw], valid)
+        except SpiritScoutError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return {"chain": chain, "path": cfg.agent_models_path}
 
     @app.post("/api/models", status_code=201)
     async def add_model(payload: dict[str, Any]) -> dict[str, Any]:

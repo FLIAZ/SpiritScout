@@ -243,16 +243,16 @@ def upsert_entry(path: str | Path, entry: dict[str, Any], *,
         entries = [dict(e, is_fallback_for=[entry["model"] if m == original_model else m
                     for m in e.get("is_fallback_for", [])]) for e in entries]
     if assignments_path and original_model and original_model != entry["model"]:
-        from spiritscout.web.agentcfg import read_assignments, write_assignments
+        from spiritscout.web.agentcfg import migrate_model, read_assignments
 
         table = read_assignments(assignments_path)
-        changed = {key: entry["model"] if value == original_model else value for key, value in table.items()}
         # 配置校验先完成；写盘异常回滚编队，避免静默留悬空引用。
         _validate(providers, entries)
-        write_assignments(assignments_path, changed)
+        migrate_model(assignments_path, original_model, entry["model"])
         try:
             write_config(path, providers, entries)
         except BaseException:
+            from spiritscout.web.agentcfg import write_assignments
             write_assignments(assignments_path, table)
             raise
     else:
@@ -286,12 +286,13 @@ def add_entries(path: str | Path, provider_ref: str,
 
 def delete_entry(path: str | Path, model: str, *, assignments_path: str | Path | None = None) -> list[dict[str, Any]]:
     providers, entries = read_config(path)
-    from spiritscout.web.agentcfg import read_assignments
+    from spiritscout.web.agentcfg import read_assignments, read_naming_chain
 
     users = [k for k, v in read_assignments(assignments_path).items() if v == model] if assignments_path else []
+    chain = [m for m in read_naming_chain(assignments_path) if m == model] if assignments_path else []
     backups = [e["model"] for e in entries if model in e.get("is_fallback_for", [])]
-    if users or backups:
-        raise SpiritScoutError(f"模型仍被引用，请先迁移：编队 {users}，备用关系 {backups}")
+    if users or chain or backups:
+        raise SpiritScoutError(f"模型仍被引用，请先迁移：编队 {users}，命名链 {chain}，备用关系 {backups}")
     remaining = [e for e in entries if e.get("model") != model]
     if len(remaining) == len(entries):
         raise SpiritScoutError(f"模型不存在: {model}")

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
 from spiritscout.core.audit import _redact
@@ -43,7 +44,8 @@ def public_mcp(config: Any, version: int = 0, origin: str = "config") -> dict[st
 
 
 def mount_resources(
-    app: FastAPI, cfg: Any, store: ResourceStore, assistant: ResourceAssistant
+    app: FastAPI, cfg: Any, store: ResourceStore, assistant: ResourceAssistant,
+    *, models: list[Any] | None = None,
 ) -> None:
     def fail(exc: Exception) -> HTTPException:
         if isinstance(exc, ValidationError):
@@ -161,24 +163,40 @@ def mount_resources(
     def assets(
         q: str = Query("", max_length=200),
         host: str = Query("", max_length=300),
+        campaign: str = Query("", max_length=120),
+        unnamed: int = Query(0, ge=0, le=1),
         offset: int = Query(0, ge=0),
         limit: int = Query(40, ge=1, le=100),
     ) -> dict[str, Any]:
-        return store.assets(q, offset, limit, host=host)
+        result = store.assets(q, offset, limit, host=host, campaign=campaign,
+                              unnamed=bool(unnamed))
+        result["campaigns"] = store.campaigns()
+        return result
 
     @app.get("/api/assets/{key}/history")
     def asset_history(key: str, offset: int = Query(0, ge=0)) -> dict[str, Any]:
         return store.history(key, offset)
 
     @app.post("/api/assets/sync")
-    def asset_sync() -> dict[str, Any]:
-        count, errors = 0, 0
-        for path in (Path(cfg.workspace.root) / "sessions").glob("sess-*"):
-            try:
-                count += store.import_session(path, full=True)
-            except (OSError, ValueError, sqlite3.Error):
-                errors += 1
-        return {"scanned_records": count, "failed_sessions": errors}
+    async def asset_sync() -> dict[str, Any]:
+        def scan() -> tuple[int, int]:
+            count, errors = 0, 0
+            for path in (Path(cfg.workspace.root) / "sessions").glob("sess-*"):
+                try:
+                    count += store.import_session(path, full=True)
+                except (OSError, ValueError, sqlite3.Error):
+                    errors += 1
+            return count, errors
+
+        count, errors = await run_in_threadpool(scan)
+        renaming = 0
+        if models:
+            # 历史会话缺项目分类的，后台用轻量模型补名（旁路，不阻塞响应）
+            from spiritscout.web.sessions import schedule_campaign_backfill
+
+            renaming = schedule_campaign_backfill(cfg, models)
+        return {"scanned_records": count, "failed_sessions": errors,
+                "renaming": renaming}
 
     @app.get("/api/resources/{kind}/chat")
     def chat_view(kind: Literal["mcp", "skill"]) -> dict[str, Any]:

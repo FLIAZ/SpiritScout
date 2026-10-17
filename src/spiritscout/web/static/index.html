@@ -7,7 +7,7 @@
 <link rel="stylesheet" href="/static/css/base.css?v=20261016-live">
 <link rel="stylesheet" href="/static/css/views.css?v=20261017-workers3">
 <link rel="stylesheet" href="/static/css/deliverables.css?v=20261016-review2">
-<link rel="stylesheet" href="/static/css/resources.css?v=20261016-resources">
+<link rel="stylesheet" href="/static/css/resources.css?v=20261017-campaigns">
 </head>
 <body>
 <div class="aurora" aria-hidden="true"></div>
@@ -199,6 +199,18 @@
         </div>
         <button class="btn primary" id="p-add">+ 添加供应商</button>
       </div>
+      <section class="naming-box" aria-label="会话自动命名候选链">
+        <div class="nb-text"><b>会话自动命名</b>
+          <span>新会话标题与资产项目分类的候选链：按序尝试，前面的调不动自动换下一个。留空则跟随编队页灵枢指派。</span></div>
+        <ol class="nb-chain" id="naming-chain"></ol>
+        <div class="nb-pool" id="naming-pool"
+             aria-label="候选模型池：按点击先后顺序加入候选链"></div>
+        <div class="nb-ops" id="naming-bar" hidden>
+          <span class="nb-note">改动保存后即刻生效，无需重启。</span>
+          <button class="btn sm tinted" id="naming-revert" type="button">还原</button>
+          <button class="btn sm primary" id="naming-save" type="button">保存顺序</button>
+        </div>
+      </section>
       <div id="providers-list"></div>
     </section>
   </main>
@@ -299,12 +311,12 @@
 <script src="/static/js/markdown.js?v=20261017-perf"></script>
 <script src="/static/js/agent-workbench.js?v=20261017-workers3"></script>
 <script src="/static/js/views.js?v=20261017-workers"></script>
-<script src="/static/js/console.js?v=20261017-workers"></script>
+<script src="/static/js/console.js?v=20261017-naming2"></script>
 <dialog id="resource-editor"><form method="dialog"><div class="resource-editor-head"><h3 id="resource-editor-title">资源配置</h3><button class="btn sm" aria-label="关闭" value="cancel">关闭</button></div></form>
 <label>标识<input id="resource-key" autocomplete="off" placeholder="唯一名称"></label>
 <label>配置内容（JSON）<textarea id="resource-json" rows="15" spellcheck="false"></textarea></label>
 <div id="resource-secrets"><label>环境变量（JSON，可留空保持原值）<input id="resource-env" type="password" autocomplete="new-password" placeholder='{"API_KEY":"…"}'></label><label>请求头（JSON，可留空保持原值）<input id="resource-headers" type="password" autocomplete="new-password" placeholder='{"Authorization":"Bearer …"}'></label></div>
 <p class="muted">密钥只通过专用字段填写。聊天中不要粘贴密钥；保存的 MCP 接入对新会话生效。</p><div id="resource-save-error" role="alert"></div><button type="button" class="btn primary" id="resource-save">保存配置</button></dialog>
-<script src="/static/js/resources.js?v=20261016-resources"></script>
+<script src="/static/js/resources.js?v=20261017-campaigns"></script>
 </body>
 </html>

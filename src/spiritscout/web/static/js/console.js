@@ -115,9 +115,13 @@ function modelTile(m) {
 
 async function loadModels() {
   try {
-    const [pv, md] = await Promise.all([api("/api/providers"), api("/api/models"),
-                                        loadPresets()]);
+    const [pv, md, nm] = await Promise.all([api("/api/providers"), api("/api/models"),
+                                            api("/api/models/naming").catch(() => null),
+                                            loadPresets()]);
     S.providers = pv.providers; S.models = md;
+    namingSaved = (nm && nm.chain) || [];
+    S.namingChain = [...namingSaved];
+    namingRender();
     $("#models-path").innerHTML = `${M_ICONS.file}<span>${esc(md.path)} · 密钥加密保存在本机</span>`;
     const box = $("#providers-list");
     if (!pv.providers.length) {
@@ -150,6 +154,62 @@ async function loadModels() {
     }).join("");
   } catch (e) { toast(e.message, true); }
 }
+
+/* ================= 会话自动命名候选链 =================
+   顺序即降级顺序，完全由用户排定：点击候选池里的模型，按点击先后入链；
+   前面的调不动，命名调用自动换下一个；留空 = 跟随编队页灵枢指派。
+   保存后即刻生效（每次命名调用热读，无需重启）。 */
+let namingSaved = [];
+function namingRender() {
+  const chain = S.namingChain || [];
+  const registry = (S.models && S.models.models) || [];
+  const provOf = id => (registry.find(m => m.model === id) || {}).provider_ref || "未知供应商";
+  $("#naming-chain").innerHTML = chain.map((m, i) => `<li>
+      <span class="nb-idx">${i + 1}</span><span class="nb-prov" title="供应商">${esc(provOf(m))}</span><b>${esc(m)}</b>
+      <span class="nb-ops-row">
+        <button type="button" data-nm="up" data-i="${i}" ${i === 0 ? "disabled" : ""} title="前移">↑</button>
+        <button type="button" data-nm="down" data-i="${i}" ${i === chain.length - 1 ? "disabled" : ""} title="后移">↓</button>
+        <button type="button" class="danger" data-nm="del" data-i="${i}" title="移出候选链">✕</button>
+      </span></li>`).join("")
+    || `<li class="nb-empty">未配置——命名跟随编队页灵枢指派的模型。</li>`;
+  // 候选池：注册表全量模型（带供应商标识），点击即按先后顺序入链
+  $("#naming-pool").innerHTML = registry.map(m => {
+    const on = chain.includes(m.model);
+    return `<button type="button" class="nb-chip${on ? " on" : ""}" data-nm="add"
+              data-model="${esc(m.model)}"${on ? " disabled" : ""}
+              title="${on ? "已在候选链上（可在上方列表移除）" : "点击加入候选链，按点击顺序排列"}">
+              <span class="nb-prov">${esc(m.provider_ref || "未知供应商")}</span><b>${esc(m.model)}</b></button>`;
+  }).join("") || `<span class="nb-pool-empty">注册表中还没有模型——先在下方添加。</span>`;
+  const dirty = JSON.stringify(chain) !== JSON.stringify(namingSaved);
+  $("#naming-bar").hidden = !dirty;
+  $("#naming-save").disabled = !dirty;
+}
+$("#naming-chain").addEventListener("click", ev => {
+  const b = ev.target.closest("[data-nm]"); if (!b) return;
+  const i = +b.dataset.i, chain = S.namingChain, act = b.dataset.nm;
+  if (act === "up" && i > 0) [chain[i - 1], chain[i]] = [chain[i], chain[i - 1]];
+  else if (act === "down" && i < chain.length - 1) [chain[i], chain[i + 1]] = [chain[i + 1], chain[i]];
+  else if (act === "del") chain.splice(i, 1);
+  else return;
+  namingRender();
+});
+$("#naming-pool").addEventListener("click", ev => {
+  const b = ev.target.closest("[data-nm=add]"); if (!b || b.disabled) return;
+  S.namingChain.push(b.dataset.model);
+  namingRender();
+});
+$("#naming-revert").onclick = () => { S.namingChain = [...namingSaved]; namingRender(); };
+$("#naming-save").onclick = async () => {
+  const btn = $("#naming-save");
+  btn.disabled = true;
+  try {
+    const d = await api("/api/models/naming", { method: "PUT", body: JSON.stringify({ models: S.namingChain }) });
+    namingSaved = d.chain || [];
+    S.namingChain = [...namingSaved];
+    namingRender();
+    toast("命名候选链已保存，即刻生效");
+  } catch (e) { toast(e.message, true); btn.disabled = false; }
+};
 
 window.modelTest = async model => {
   toast(`正在测试 ${model} …`);

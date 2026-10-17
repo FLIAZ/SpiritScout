@@ -964,3 +964,28 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
 .aw-markdown table { display: block; overflow-x: auto; max-width: 100%; }
 .aw-markdown td, .aw-markdown th { min-width: 80px; overflow-wrap: anywhere; }
 .aw-markdown code { overflow-wrap: anywhere; }
+
+/* ================= 会话自动命名候选链（模型页） ================= */
+.naming-box {border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:16px 20px;margin:14px 0 18px;display:flex;flex-direction:column;gap:12px;}
+.nb-text {display:flex;flex-direction:column;gap:4px;}
+.nb-text b {font-size:13px;}
+.nb-text span {font-size:11.5px;color:var(--ink-2);line-height:1.7;}
+.nb-chain {list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;}
+.nb-chain li {display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:8px;padding:8px 12px;}
+.nb-chain li.nb-empty {border-style:dashed;color:var(--ink-2);font-size:12px;}
+.nb-idx {font:11px var(--mono);color:var(--ink-2);min-width:14px;text-align:center;}
+.nb-chain b {font:12.5px var(--mono);overflow-wrap:anywhere;}
+.nb-ops-row {margin-left:auto;display:flex;gap:6px;}
+.nb-ops-row button {border:1px solid var(--line);background:transparent;color:var(--ink-2);border-radius:6px;width:26px;height:24px;cursor:pointer;line-height:1;font-size:12px;}
+.nb-ops-row button:hover:not(:disabled) {border-color:var(--accent);color:var(--accent-ink);}
+.nb-ops-row button:disabled {opacity:.35;cursor:default;}
+.nb-ops-row button.danger:hover {border-color:var(--bad);color:var(--bad);}
+.nb-pool {display:flex;flex-wrap:wrap;gap:6px;}
+.nb-pool-empty {font-size:12px;color:var(--ink-2);}
+.nb-chip {display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);border-radius:999px;background:transparent;padding:4px 12px;cursor:pointer;font:12px var(--mono);color:var(--ink);}
+.nb-chip b {font-weight:600;font-size:12.5px;overflow-wrap:anywhere;}
+.nb-chip:hover:not(:disabled) {border-color:var(--accent);color:var(--accent-ink);}
+.nb-chip:disabled {opacity:.4;cursor:default;}
+.nb-prov {font-size:10.5px;color:var(--ink-2);}
+.nb-ops {display:flex;align-items:center;gap:8px;justify-content:flex-end;}
+.nb-note {font-size:11px;color:var(--ink-2);margin-right:auto;}

@@ -15,6 +15,7 @@ import asyncio
 import json
 import math
 import shutil
+import sqlite3
 import sys
 import time
 import uuid
@@ -238,6 +239,206 @@ async def _llm_extract_platform(cfg: SystemConfig, models: list[ModelEntry],
         "action": "platform_profile_extracted", "profile": profile.redacted()})
     return profile.to_dict()
 
+
+# ---------------------------------------------------------------- 会话自动命名
+# 与 ChatGPT 用 mini 级模型给会话起标题同一套路：旁路小调用、低思考档、
+# 短输出短超时、失败静默降级（展示回退 mission 首行）；命名失败绝不影响
+# 会话开工与执行。资产的「来源项目」分类与会话名共用这一次调用产出。
+
+_NAMING_SYSTEM = (
+    "你是安全测试平台的登记员，负责给测试会话归档。只输出 JSON。"
+    "name：会话短名（4~16 个字，中文，概括测试对象与目的，如"
+    "「BiliBili 登录越权测试」「某靶场 SQL 注入」）；"
+    "campaign：本次测试归属的项目名称——厂商 SRC、比赛或漏洞平台"
+    "（如「BiliBili SRC」「2026 某CTF」）——同一次调用顺便确定资产归类。"
+    "existing_campaigns 是平台上已有的项目清单：本次任务若属于其中某个"
+    "项目，campaign 必须原样复用该名称（一字不改）；确实判断不了归属时"
+    "campaign 给空串。answer: {\"name\": \"...\", \"campaign\": \"...\"}。"
+    "ROLE: namer")
+
+_NAMING_MAX_TOKENS = 1024    # 思考型模型的思考额度也从这里扣：给足余量，
+                             # 否则思考耗尽额度正文为空，命名静默失败
+
+
+def _naming_model_candidates(cfg: SystemConfig, models: list[ModelEntry]) -> list[str]:
+    """命名候选链：用户在「模型」页排的降级顺序；空链 = 跟随灵枢指派。
+
+    顺序完全由用户决定，后端不发明兜底规则；链上 ID 已不在注册表
+    （改名/删行）时跳过，整链失效才回到默认（编队页灵枢指派，再退
+    注册表首项——与网关空指派同语义）。
+    """
+    names = {m.model for m in models}
+    try:
+        configured = agentcfg.read_naming_chain(cfg.agent_models_path)
+    except (SpiritScoutError, OSError, ValueError):
+        configured = []
+    chain = [mid for mid in configured if mid in names]
+    if chain:
+        return chain
+    bound = _bound_model(cfg, models, "master")
+    if bound:
+        return [bound]
+    return [models[0].model] if models else []
+
+
+async def _llm_name(cfg: SystemConfig, models: list[ModelEntry], audit: AuditLogger,
+                    *, mission: str, target: str, mode: str,
+                    campaigns: list[str] | None = None) -> dict[str, str] | None:
+    """按用户排的候选链调用：前面的调不动/应答不成 JSON 就换下一个。
+
+    campaign 携带已有项目清单让分类自然收敛：模型能对应上就复用既名
+    （大小写/空格变体归一到既有名称），对应不上才提出新名。
+    """
+    from spiritscout.gateway.backends import extract_json
+    from spiritscout.gateway.gateway import output_lost
+
+    known = [str(name) for name in (campaigns or []) if str(name).strip()][:40]
+    candidates = _naming_model_candidates(cfg, models)
+    if not candidates:
+        return None
+    messages = [
+        {"role": "system", "content": _NAMING_SYSTEM},
+        {"role": "user", "content": json.dumps({
+            "mission": mission[:2000], "target": target, "mode": mode,
+            "existing_campaigns": known,
+        }, ensure_ascii=False)}]
+    try:
+        gateway = _conversation_gateway(cfg, models, audit)
+    except Exception as exc:  # noqa: BLE001 —— 命名是锦上添花，任何失败不阻断主流程
+        audit.log("session.naming", "namer", {
+            "action": "failed", "mode": mode, "error": str(exc)[:300]})
+        return None
+    for candidate in candidates:
+        try:
+            resp = await gateway.chat(
+                messages,
+                task_type="classification", response_format="json",
+                reasoning_effort="low", model=candidate,
+                max_tokens=_NAMING_MAX_TOKENS,
+                timeout_seconds=min(30, cfg.gateway.request_timeout_seconds))
+            if output_lost(resp):
+                # 思考型模型可能把输出额度全耗在思考上、正文为空或被端点
+                # 掐断：加大余量对同一候选原样重试一次（与决策通道
+                # llm.output_retry 同一语义），而不是把「思考吃光额度」
+                # 误判成「应答不成 JSON」换下一个候选
+                audit.log("session.naming", "namer", {
+                    "action": "output_retry", "mode": mode,
+                    "model": candidate,
+                    "finish_reason": resp.finish_reason,
+                    "content_chars": len(resp.content or "")})
+                resp = await gateway.chat(
+                    messages,
+                    task_type="classification", response_format="json",
+                    reasoning_effort="low", model=candidate,
+                    max_tokens=_NAMING_MAX_TOKENS * 4,
+                    timeout_seconds=min(30, cfg.gateway.request_timeout_seconds))
+        except Exception as exc:  # noqa: BLE001 —— 该模型调不动：换链上用户排的下一个
+            audit.log("session.naming", "namer", {
+                "action": "model_unavailable", "mode": mode,
+                "model": candidate, "error": str(exc)[:200]})
+            continue
+        try:
+            data = extract_json(resp.content)
+        except ValueError as exc:
+            audit.log("session.naming", "namer", {
+                "action": "unparsed", "mode": mode,
+                "model": candidate, "error": str(exc)[:200]})
+            continue            # 应答不成 JSON：同样换下一个候选再试
+        if not isinstance(data, dict):
+            data = {}
+        name = str(data.get("name") or "").strip().strip("\"'。").replace("\n", " ")[:40]
+        campaign = str(data.get("campaign") or "").strip().strip("\"'。")[:80]
+        if campaign:
+            folded = campaign.casefold().replace(" ", "")
+            for existing in known:
+                if existing.casefold().replace(" ", "") == folded:
+                    campaign = existing
+                    break
+        audit.log("session.naming", "namer", {
+            "action": "named", "mode": mode, "name": name, "campaign": campaign,
+            "model": candidate})
+        return {"name": name, "campaign": campaign}
+    audit.log("session.naming", "namer", {
+        "action": "failed", "mode": mode, "models": candidates})
+    return None
+
+
+_BACKFILL_TASK: asyncio.Task | None = None
+_BACKFILL_BATCH = 60     # 单次触发处理的会话数上限（按最早观测先来先办）
+
+
+def schedule_campaign_backfill(cfg: SystemConfig, models: list[ModelEntry]) -> int:
+    """为「已产出资产但尚无项目分类」的历史会话后台补名。
+
+    返回本次纳入的会话数（0 = 无需处理/已在运行/不可执行）。补名全程
+    旁路：按任务原文分组去重（同文本只调一次模型），结果复用到组内全部
+    会话；任何失败都不影响响应，判不了归属的会话下次触发再试。
+    """
+    global _BACKFILL_TASK
+    if _BACKFILL_TASK is not None and not _BACKFILL_TASK.done():
+        return 0
+    if not models:
+        return 0
+    from spiritscout.resources.store import ResourceStore, resource_root
+
+    try:
+        store = ResourceStore(resource_root(cfg), cfg.resources.freshness_hours)
+        pending = store.sessions_without_campaign(limit=_BACKFILL_BATCH)
+    except (OSError, sqlite3.Error, SpiritScoutError):
+        return 0
+    if not pending:
+        return 0
+    _BACKFILL_TASK = asyncio.create_task(
+        _campaign_backfill(cfg, models, store, pending),
+        name="spiritscout-campaign-backfill")
+    return len(pending)
+
+
+async def _campaign_backfill(cfg: SystemConfig, models: list[ModelEntry],
+                             store: Any, session_ids: list[str]) -> None:
+    """逐组补名：同任务原文只调一次模型，结果复用到组内全部会话。"""
+    audit = AuditLogger(cfg.audit_log_path)
+    sessions_dir = Path(cfg.workspace.root) / "sessions"
+    groups: dict[str, dict[str, Any]] = {}
+    for sid in session_ids:
+        try:
+            meta = json.loads(
+                (sessions_dir / sid / "meta.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            store.set_session_campaign(sid, "")     # 元数据不可读：不再重复尝试
+            continue
+        launch = meta.get("launch_request") if isinstance(meta.get("launch_request"), dict) else {}
+        request = meta.get("request") if isinstance(meta.get("request"), dict) else {}
+        mission = str(launch.get("mission") or request.get("mission") or "").strip()
+        target = str(meta.get("target") or "")
+        if not mission and not target:
+            store.set_session_campaign(sid, "")     # 无任务信息：没有可命名的内容
+            continue
+        group = groups.setdefault(mission or f"target:{target}", {
+            "mission": mission, "target": target,
+            "mode": str(meta.get("mode") or ""), "ids": []})
+        group["ids"].append(sid)
+    named_sessions = attached = 0
+    try:
+        for group in groups.values():
+            campaigns = [row["name"] for row in store.campaigns()["items"]]
+            result = await _llm_name(
+                cfg, models, audit, mission=group["mission"],
+                target=group["target"], mode=group["mode"], campaigns=campaigns)
+            if not result or not result.get("campaign"):
+                continue        # 调用失败/判不了归属：不落库，下次触发再补
+            for sid in group["ids"]:
+                attached += store.set_session_campaign(sid, result["campaign"])
+            named_sessions += len(group["ids"])
+    except (OSError, sqlite3.Error) as exc:
+        audit.log("session.naming", "namer", {
+            "action": "backfill_failed", "error": str(exc)[:300]})
+    audit.log("session.naming", "namer", {
+        "action": "backfill_done", "scanned": len(session_ids),
+        "groups": len(groups), "named_sessions": named_sessions,
+        "updated_observations": attached})
+
+
 TERMINAL_STATES = frozenset({"completed", "failed", "stopped", "interrupted"})
 
 # 会话对话史封顶（条数）：用户↔灵枢的完整往来，跨续传与重启保留。
@@ -369,6 +570,7 @@ def _coerce_meta(data: dict[str, Any]) -> dict[str, Any]:
         "mode": _str(data.get("mode")),
         "target": _str(data.get("target")),
         "title": _str(data.get("title")),
+        "auto_title": _str(data.get("auto_title")),
         "request": _dict(data.get("request")),
         "launch_request": _dict(data.get("launch_request")),
         "standing_rules": _str(data.get("standing_rules")),
@@ -398,6 +600,8 @@ class Session:
     target: str
     workspace: Path
     title: str = ""                                          # 会话名（可重命名；空 = 自动摘要）
+    # 小模型自动命名（创建后台生成；展示优先级：用户重命名 > auto_title > mission 首行）
+    auto_title: str = ""
     request: dict[str, Any] = field(default_factory=dict)   # 启动参数（展示用）
     status: str = "created"      # created/running/completed/failed/stopped/interrupted
     phase: str = "queued"        # 细粒度启动/执行阶段，避免把启动等待误报成业务覆盖
@@ -489,9 +693,11 @@ class Session:
         return candidates[0] if candidates else None
 
     def display_title(self) -> str:
-        """会话名：用户重命名优先；否则取任务描述首行（无则退回目标）。"""
+        """会话名：用户重命名优先，其次小模型自动命名，最后回到任务首行。"""
         if self.title:
             return self.title
+        if self.auto_title:
+            return self.auto_title
         mission = str(self.request.get("mission") or "").strip()
         if mission:
             first = mission.splitlines()[0].strip()
@@ -548,6 +754,7 @@ class SessionManager:
             tuple[Session, SystemConfig, LaunchPlan, bool, list[ModelEntry], bool]] = \
             asyncio.Queue()
         self._supervisor: asyncio.Task | None = None
+        self._naming_tasks: set[asyncio.Task] = set()   # 会话自动命名（后台旁路）
         self.root = Path(cfg.workspace.root) / "sessions"
         self.root.mkdir(parents=True, exist_ok=True)
         self._scan()
@@ -576,6 +783,7 @@ class SessionManager:
                     session_id=data["session_id"], mode=data["mode"],
                     target=data["target"], workspace=meta.parent,
                     title=data["title"],
+                    auto_title=data["auto_title"],
                     request=data["request"],
                     launch_request=data["launch_request"],
                     opinions=data["opinions"],
@@ -621,6 +829,7 @@ class SessionManager:
         payload = json.dumps({
             "session_id": session.session_id, "mode": session.mode,
             "target": session.target, "title": session.title,
+            "auto_title": session.auto_title,
             "request": session.request,
             "launch_request": session.launch_request,
             "standing_rules": session.standing_rules,
@@ -825,7 +1034,56 @@ class SessionManager:
                 shutil.rmtree(updir, ignore_errors=True)
         self.start()            # 直接使用（非 Web lifespan）时懒启动监督协程
         await self._queue.put((session, cfg, plan, no_llm, models, False))
+        if not no_llm:
+            # 命名是旁路增强：不阻塞入队，失败静默（展示回退 mission 首行）
+            self._schedule_naming(session, cfg, models, plan)
         return session
+
+    def _schedule_naming(self, session: Session, cfg: SystemConfig,
+                         models: list[ModelEntry], plan: LaunchPlan) -> None:
+        """创建后立刻后台命名：小模型给「会话短名 + 归属项目」，不阻塞开工。"""
+        if not (plan.mission or plan.target):
+            return
+        if not models:
+            return              # 没有模型可调（创建链路已保证注册表非空，兜底）
+        task = asyncio.create_task(
+            self._name_session(session, cfg, models, plan),
+            name=f"spiritscout-naming-{session.session_id}")
+        self._naming_tasks.add(task)
+        task.add_done_callback(self._naming_tasks.discard)
+
+    async def _name_session(self, session: Session, cfg: SystemConfig,
+                            models: list[ModelEntry], plan: LaunchPlan) -> None:
+        from spiritscout.resources.store import ResourceStore, resource_root
+
+        audit = AuditLogger(cfg.audit_log_path)
+        try:
+            try:
+                store: ResourceStore | None = ResourceStore(
+                    resource_root(self._cfg), self._cfg.resources.freshness_hours)
+                campaigns = [row["name"] for row in store.campaigns()["items"]]
+            except (OSError, sqlite3.Error):
+                store, campaigns = None, []
+            result = await _llm_name(
+                cfg, models, audit, mission=plan.mission or "", target=plan.target,
+                mode=session.mode, campaigns=campaigns)
+            if not result or self._sessions.get(session.session_id) is not session:
+                return          # 调用失败，或会话已被删除/替换：不落库不回写
+            if result.get("name"):
+                session.auto_title = result["name"]
+                self._persist(session)
+            if result.get("campaign") and store is not None:
+                updated = store.set_session_campaign(
+                    session.session_id, result["campaign"])
+                audit.log("session.naming", "namer", {
+                    "action": "campaign_attached",
+                    "campaign": result["campaign"], "observations": updated})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 —— 命名旁路绝不影响会话主流程
+            audit.log("session.naming", "namer", {
+                "action": "error",
+                "error": f"{type(exc).__name__}: {exc}"[:300]})
 
     def _rebuild_plan(self, session: Session, *, mission: str | None = None,
                       extra_scope: list[str] | None = None) -> LaunchPlan | None:

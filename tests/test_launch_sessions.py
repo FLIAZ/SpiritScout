@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import unittest
@@ -202,7 +203,7 @@ class _FakeChatGateway:
     async def chat(self, messages, **kwargs):
         self.calls.append({"messages": messages, **kwargs})
         content = self._contents.pop(0) if self._contents else "{}"
-        return SimpleNamespace(content=content)
+        return SimpleNamespace(content=content, finish_reason="stop")
 
 
 class PlatformExtractionTests(unittest.IsolatedAsyncioTestCase):
@@ -269,6 +270,326 @@ class PlatformExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("platform_yaml", session.launch_request)
         actions = [line["detail"].get("action") for line in audit_lines]
         self.assertIn("platform_not_found", actions)
+
+
+class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
+    """小模型自动命名与资产分类补名：解析收敛、失败静默、按任务去重。"""
+
+    def _cfg(self, root: Path) -> SystemConfig:
+        # 配置路径显式指向临时目录：模型注册表只能写进 tmp，
+        # 默认值 "configs/models.yaml" 是仓库真实文件（相对 CWD）。
+        cfg = SystemConfig(
+            workspace=WorkspaceConfig(root=str(root)),
+            models_config_path=str(root / "models.yaml"),
+            agent_models_path=str(root / "agents.yaml"),
+            audit_log_path=str(root / "audit.jsonl"),
+        )
+        return cfg
+
+    async def test_llm_name_converges_to_existing_campaign(self) -> None:
+        from spiritscout.core.audit import AuditLogger
+        from spiritscout.web import agentcfg
+        from spiritscout.web import sessions as web_sessions
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(Path(tmp))
+            # 用户在模型页排的候选链：顺序即降级顺序
+            agentcfg.set_naming_chain(cfg.agent_models_path, ["mini"], {"mini"})
+            models = [ModelEntry(model="mini", api_key="k")]
+            gateway = _FakeChatGateway(json.dumps({
+                "name": "BiliBili 越权测试", "campaign": "bilibili src"}))
+            with patch("spiritscout.web.sessions._conversation_gateway",
+                       lambda *args: gateway):
+                result = await web_sessions._llm_name(
+                    cfg, models, AuditLogger(cfg.audit_log_path),
+                    mission="对 bilibili 做登录越权测试",
+                    target="https://bilibili.com", mode="src",
+                    campaigns=["BiliBili SRC"])
+            # 大小写变体收敛到既有分类名（分类不因拼写漂移裂开）
+            self.assertEqual(result, {"name": "BiliBili 越权测试",
+                                      "campaign": "BiliBili SRC"})
+            call = gateway.calls[0]
+            self.assertEqual(call["task_type"], "classification")
+            self.assertEqual(call["reasoning_effort"], "low")
+            self.assertEqual(call["model"], "mini")
+
+    async def test_llm_name_walks_user_chain_on_failure(self) -> None:
+        """链上首选调不动时按用户排的顺序换下一个，不发明额外兜底。"""
+        from spiritscout.core.audit import AuditLogger
+        from spiritscout.web import agentcfg
+        from spiritscout.web import sessions as web_sessions
+
+        class _Picky:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def chat(self, messages, **kwargs):
+                self.calls.append({"messages": messages, **kwargs})
+                if kwargs.get("model") == "mini":
+                    raise TimeoutError("首选模型不可用")
+                return SimpleNamespace(
+                    content=json.dumps(
+                        {"name": "备份命名", "campaign": "BiliBili SRC"}),
+                    finish_reason="stop")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(Path(tmp))
+            agentcfg.set_naming_chain(
+                cfg.agent_models_path, ["mini", "backup"], {"mini", "backup"})
+            gateway = _Picky()
+            with patch("spiritscout.web.sessions._conversation_gateway",
+                       lambda *args: gateway):
+                result = await web_sessions._llm_name(
+                    cfg, [ModelEntry(model="mini", api_key="k"),
+                          ModelEntry(model="backup", api_key="k")],
+                    AuditLogger(cfg.audit_log_path),
+                    mission="对 bilibili 做登录越权测试",
+                    target="https://bilibili.com", mode="src")
+            # 严格按用户排的顺序尝试：mini 失败后是 backup，而不是注册表首项
+            self.assertEqual([c["model"] for c in gateway.calls],
+                             ["mini", "backup"])
+            self.assertEqual(result, {"name": "备份命名",
+                                      "campaign": "BiliBili SRC"})
+
+    async def test_llm_name_retries_when_thinking_eats_output_budget(self) -> None:
+        """思考型模型把小额输出额度耗在思考上：加大余量重试，而非弃案。"""
+        from spiritscout.core.audit import AuditLogger
+        from spiritscout.web import agentcfg
+        from spiritscout.web import sessions as web_sessions
+
+        class _Thinking:
+            """首调思考吃光额度正文为空（sess-2bef27ae 实测故障形态）。"""
+
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def chat(self, messages, **kwargs):
+                self.calls.append({"messages": messages, **kwargs})
+                if len(self.calls) == 1:
+                    return SimpleNamespace(content="", finish_reason="length")
+                return SimpleNamespace(
+                    content=json.dumps({"name": "PKW 学院教务 CTF",
+                                        "campaign": "PKW CTF"}),
+                    finish_reason="stop")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(Path(tmp))
+            agentcfg.set_naming_chain(cfg.agent_models_path, ["mini"], {"mini"})
+            gateway = _Thinking()
+            with patch("spiritscout.web.sessions._conversation_gateway",
+                       lambda *args: gateway):
+                result = await web_sessions._llm_name(
+                    cfg, [ModelEntry(model="mini", api_key="k")],
+                    AuditLogger(cfg.audit_log_path),
+                    mission="ctf题目，http://8080-x.challenge.ctfplus.cn/",
+                    target="http://8080-x.challenge.ctfplus.cn/", mode="ctf")
+            self.assertEqual(result, {"name": "PKW 学院教务 CTF",
+                                      "campaign": "PKW CTF"})
+            # 同一候选加大余量重试，而不是把空正文当成应答失败换链
+            self.assertEqual([c["model"] for c in gateway.calls],
+                             ["mini", "mini"])
+            self.assertGreater(gateway.calls[1]["max_tokens"],
+                               gateway.calls[0]["max_tokens"])
+
+    async def test_empty_chain_follows_master_assignment(self) -> None:
+        """未配置候选链时跟随编队页灵枢指派（用户的另一处选择）。"""
+        from spiritscout.core.audit import AuditLogger
+        from spiritscout.web import agentcfg
+        from spiritscout.web import sessions as web_sessions
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(Path(tmp))
+            agentcfg.set_assignment(cfg.agent_models_path, "master", "big", {"big"})
+            gateway = _FakeChatGateway(json.dumps(
+                {"name": "跟随指派", "campaign": "某 SRC"}))
+            with patch("spiritscout.web.sessions._conversation_gateway",
+                       lambda *args: gateway):
+                await web_sessions._llm_name(
+                    cfg, [ModelEntry(model="big", api_key="k"),
+                          ModelEntry(model="mini", api_key="k")],
+                    AuditLogger(cfg.audit_log_path),
+                    mission="任务", target="t", mode="src")
+            self.assertEqual(gateway.calls[0]["model"], "big")
+
+    async def test_llm_name_failure_is_silent(self) -> None:
+        from spiritscout.core.audit import AuditLogger
+        from spiritscout.web import sessions as web_sessions
+
+        class _Down:
+            async def chat(self, messages, **kwargs):
+                raise TimeoutError("模型不可用")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(Path(tmp))
+            with patch("spiritscout.web.sessions._conversation_gateway",
+                       lambda *args: _Down()):
+                result = await web_sessions._llm_name(
+                    cfg, [ModelEntry(model="mini", api_key="k")],
+                    AuditLogger(cfg.audit_log_path),
+                    mission="任务", target="t", mode="src")
+            self.assertIsNone(result)
+            lines = [json.loads(line) for line in
+                     Path(cfg.audit_log_path).read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(lines[-1]["detail"]["action"], "failed")
+
+    async def test_backfill_groups_identical_missions(self) -> None:
+        from spiritscout.resources.store import ResourceStore
+        from spiritscout.web import sessions as web_sessions
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = self._cfg(root)
+            store = ResourceStore(root / "resources")
+            sessions_dir = root / "sessions"
+            for sid, mission in (("sess-a", "对 bilibili 做越权测试"),
+                                 ("sess-b", "对 bilibili 做越权测试"),
+                                 ("sess-c", "打一道 CTF 反序列化题")):
+                workspace = sessions_dir / sid
+                workspace.mkdir(parents=True)
+                (workspace / "meta.json").write_text(json.dumps({
+                    "session_id": sid, "mode": "src",
+                    "target": "https://bilibili.com",
+                    "request": {"mission": mission},
+                    "launch_request": {"mission": mission}}), encoding="utf-8")
+                store.observe({"asset_type": "app",
+                               "value": f"https://{sid}.example.com"},
+                              f"{sid}:asset:one@1")
+            self.assertEqual(len(store.sessions_without_campaign()), 3)
+            gateway = _FakeChatGateway(
+                json.dumps({"name": "越权测试", "campaign": "BiliBili SRC"}),
+                json.dumps({"name": "反序列化", "campaign": "某 CTF 平台"}))
+            models = [ModelEntry(model="mini", api_key="k")]
+            with patch("spiritscout.web.sessions._conversation_gateway",
+                       lambda *args: gateway):
+                await web_sessions._campaign_backfill(
+                    cfg, models, store, ["sess-a", "sess-b", "sess-c"])
+            self.assertEqual(len(gateway.calls), 2)   # 同任务原文只调一次模型
+            self.assertEqual(store.session_campaign("sess-b"), "BiliBili SRC")
+            self.assertEqual(store.session_campaign("sess-c"), "某 CTF 平台")
+            self.assertEqual(store.assets(campaign="BiliBili SRC")["total"], 2)
+            self.assertEqual(store.sessions_without_campaign(), [])
+
+    async def test_schedule_skips_when_nothing_to_do(self) -> None:
+        from spiritscout.resources.store import ResourceStore
+        from spiritscout.web import sessions as web_sessions
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(Path(tmp))
+            ResourceStore(Path(tmp) / "resources")     # 空目录：无待补名会话
+            self.assertEqual(web_sessions.schedule_campaign_backfill(
+                cfg, [ModelEntry(model="mini", api_key="k")]), 0)
+            self.assertEqual(web_sessions.schedule_campaign_backfill(
+                cfg, []), 0)                            # 无模型：不可执行
+
+    def test_display_title_priority(self) -> None:
+        session = Session(
+            session_id="sess-naming", mode="src", target="https://t.example.com",
+            workspace=Path("/tmp/unused"),
+            request={"mission": "原始任务第一行\n第二行"})
+        self.assertEqual(session.display_title(), "原始任务第一行")
+        session.auto_title = "自动短名"
+        self.assertEqual(session.display_title(), "自动短名")
+        session.title = "用户命名"                 # 用户重命名优先级最高
+        self.assertEqual(session.display_title(), "用户命名")
+
+    async def test_create_schedules_naming_for_new_session(self) -> None:
+        from spiritscout.resources.store import ResourceStore, resource_root
+        from spiritscout.web import modelcfg, vault
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = self._cfg(root)
+            modelcfg.write_config(cfg.models_config_path, [],
+                                  [{"model": "mini", "provider": "mock"}])
+            vault.configure(str(root))
+            manager = SessionManager(cfg, [])
+            manager._run = AsyncMock()   # 只验证创建/命名链路，不跑 engagement
+            plan = prepare_launch(LaunchRequest(
+                mode=RunMode.SRC, mission="对 bilibili 做登录越权测试",
+                target="https://bilibili.com"))
+            gateway = _FakeChatGateway(json.dumps({
+                "name": "BiliBili 越权测试", "campaign": "BiliBili SRC"}))
+            with patch("spiritscout.web.sessions._conversation_gateway",
+                       lambda *args: gateway):
+                session = await manager.create({
+                    "mode": "src", "mission": "对 bilibili 做登录越权测试",
+                    "target": "https://bilibili.com"}, plan)
+                for _ in range(200):
+                    if session.auto_title:
+                        break
+                    await asyncio.sleep(0.01)
+            self.assertEqual(session.auto_title, "BiliBili 越权测试")
+            self.assertEqual(session.display_title(), "BiliBili 越权测试")
+            # 分类随会话落地：同一会话的资产观测将自动继承
+            store = ResourceStore(resource_root(manager._cfg))
+            self.assertEqual(store.session_campaign(session.session_id),
+                             "BiliBili SRC")
+
+    async def test_naming_does_not_gate_execution_start(self) -> None:
+        """命名与执行并行：命名模型悬着不应答，任务照样即刻开工。"""
+        from spiritscout.web import modelcfg, vault
+
+        class _Gated:
+            def __init__(self) -> None:
+                self.gate = asyncio.Event()
+                self.calls: list[dict] = []
+
+            async def chat(self, messages, **kwargs):
+                self.calls.append({"messages": messages, **kwargs})
+                await self.gate.wait()      # 模拟命名模型迟迟不应答
+                return SimpleNamespace(
+                    content=json.dumps(
+                        {"name": "迟到命名", "campaign": "BiliBili SRC"}),
+                    finish_reason="stop")
+
+        run_started = asyncio.Event()
+
+        async def fake_run(session, cfg, plan, no_llm, models, resume=False):
+            run_started.set()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = self._cfg(root)
+            modelcfg.write_config(cfg.models_config_path, [],
+                                  [{"model": "mini", "provider": "mock"}])
+            vault.configure(str(root))
+            manager = SessionManager(cfg, [])
+            manager._run = fake_run
+            plan = prepare_launch(LaunchRequest(
+                mode=RunMode.SRC, mission="对 bilibili 做登录越权测试",
+                target="https://bilibili.com"))
+            gateway = _Gated()
+            with patch("spiritscout.web.sessions._conversation_gateway",
+                       lambda *args: gateway):
+                session = await manager.create({
+                    "mode": "src", "mission": "对 bilibili 做登录越权测试",
+                    "target": "https://bilibili.com"}, plan)
+                # 命名模型不应答期间：执行任务照常开工（若命名阻塞开工，
+                # 这里 wait_for 会超时失败——这正是要守住的不变量）
+                await asyncio.wait_for(run_started.wait(), timeout=2)
+                self.assertFalse(session.auto_title)
+                gateway.gate.set()          # 放行命名应答
+                for _ in range(200):
+                    if session.auto_title:
+                        break
+                    await asyncio.sleep(0.01)
+            self.assertEqual(session.auto_title, "迟到命名")
+
+    async def test_auto_title_persists_across_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = self._cfg(root)
+            manager = SessionManager(cfg, [])
+            workspace = root / "sessions" / "sess-meta"
+            workspace.mkdir(parents=True)
+            session = Session(session_id="sess-meta", mode="src",
+                              target="https://t.example.com", workspace=workspace)
+            manager._sessions["sess-meta"] = session
+            session.auto_title = "自动短名"
+            manager._persist(session)
+            reloaded = SessionManager(cfg, []).get("sess-meta")
+            self.assertEqual(reloaded.auto_title, "自动短名")
+            self.assertEqual(reloaded.display_title(), "自动短名")
 
 
 if __name__ == "__main__":

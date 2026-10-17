@@ -24,8 +24,10 @@ from spiritscout.core.exceptions import SpiritScoutError
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS assets(id TEXT PRIMARY KEY,kind TEXT,identity TEXT,host TEXT,first_seen REAL,last_seen REAL);
-CREATE TABLE IF NOT EXISTS observations(id INTEGER PRIMARY KEY,asset_id TEXT,source TEXT,observed_at REAL,digest TEXT,data TEXT,UNIQUE(asset_id,source));
+CREATE TABLE IF NOT EXISTS observations(id INTEGER PRIMARY KEY,asset_id TEXT,source TEXT,observed_at REAL,digest TEXT,data TEXT,campaign TEXT NOT NULL DEFAULT '',UNIQUE(asset_id,source));
 CREATE INDEX IF NOT EXISTS obs_asset_time ON observations(asset_id,observed_at DESC,id DESC);
+-- 会话 → 项目分类（名称由模型命名，见 web/sessions；观测按来源前缀继承）
+CREATE TABLE IF NOT EXISTS session_campaigns(session_id TEXT PRIMARY KEY,campaign TEXT NOT NULL,created_at REAL);
 CREATE TABLE IF NOT EXISTS settings(kind TEXT,id TEXT,version INTEGER,data BLOB,updated_at REAL,PRIMARY KEY(kind,id));
 CREATE TABLE IF NOT EXISTS threads(id TEXT PRIMARY KEY,kind TEXT,created_at REAL,title TEXT);
 CREATE UNIQUE INDEX IF NOT EXISTS one_resource_thread ON threads(kind);
@@ -142,6 +144,13 @@ class ResourceStore:
         with self.connection() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(_SCHEMA)
+            # 旧库迁移：observations 补 campaign 列（索引必须在列存在后建）
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(observations)")}
+            if "campaign" not in columns:
+                conn.execute(
+                    "ALTER TABLE observations ADD COLUMN campaign TEXT NOT NULL DEFAULT ''")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS obs_campaign ON observations(campaign)")
         os.chmod(self.path, 0o600)
 
     @contextmanager
@@ -253,7 +262,8 @@ class ResourceStore:
         )
 
     def observe(
-        self, data: dict[str, Any], source: str, observed_at: float | None = None
+        self, data: dict[str, Any], source: str, observed_at: float | None = None,
+        *, campaign: str = "",
     ) -> str:
         identity, host, kind, selected = safe_asset(data)
         key = hashlib.sha256(identity.encode()).hexdigest()[:24]
@@ -261,26 +271,44 @@ class ResourceStore:
         digest = hashlib.sha256(text.encode()).hexdigest()
         timestamp = observed_at if observed_at is not None else time.time()
         with self.connection() as conn:
+            effective = campaign.strip()[:80]
+            if not effective and ":" in source:
+                # 来源自带会话前缀（sess-xxx:...）：自动继承该会话的项目分类
+                row = conn.execute(
+                    "SELECT campaign FROM session_campaigns WHERE session_id=?",
+                    (source.split(":", 1)[0],),
+                ).fetchone()
+                effective = str(row["campaign"]) if row else ""
             conn.execute(
                 "INSERT INTO assets VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
                 "first_seen=MIN(first_seen,excluded.first_seen),last_seen=MAX(last_seen,excluded.last_seen)",
                 (key, kind, identity, host, timestamp, timestamp),
             )
+            # 同一（资产,来源）保留最早一条观测的现场；分类字段允许补齐
             conn.execute(
-                "INSERT OR IGNORE INTO observations(asset_id,source,observed_at,digest,data) VALUES(?,?,?,?,?)",
-                (key, source, timestamp, digest, text),
+                "INSERT INTO observations(asset_id,source,observed_at,digest,data,campaign) "
+                "VALUES(?,?,?,?,?,?) ON CONFLICT(asset_id,source) DO UPDATE SET "
+                "campaign=CASE WHEN excluded.campaign!='' THEN excluded.campaign "
+                "ELSE observations.campaign END",
+                (key, source, timestamp, digest, text, effective),
             )
         return key
 
     def assets(
-        self, query: str = "", offset: int = 0, limit: int = 40, *, host: str = ""
+        self, query: str = "", offset: int = 0, limit: int = 40, *, host: str = "",
+        campaign: str = "", unnamed: bool = False,
     ) -> dict[str, Any]:
         with self.connection() as conn:
             where = ("WHERE identity LIKE ?" + (" AND host=?" if host else "") +
+                (" AND EXISTS (SELECT 1 FROM observations oc WHERE oc.asset_id=assets.id"
+                 " AND oc.campaign=?)" if campaign else "") +
+                (" AND NOT EXISTS (SELECT 1 FROM observations oc WHERE oc.asset_id=assets.id"
+                 " AND oc.campaign!='')" if unnamed else "") +
                 " AND (kind!='finding' OR json_extract((SELECT data FROM observations o "
                 "WHERE o.asset_id=assets.id ORDER BY observed_at DESC,id DESC LIMIT 1), "
                 "'$.fingerprint.status')='accepted')")
-            args = ["%" + query + "%", *([host.lower().rstrip(".")] if host else [])]
+            args = ["%" + query + "%", *([host.lower().rstrip(".")] if host else []),
+                    *([campaign] if campaign else [])]
             total = conn.execute(
                 "SELECT COUNT(*) FROM assets " + where, args
             ).fetchone()[0]
@@ -303,12 +331,17 @@ class ResourceStore:
                     "SELECT COUNT(DISTINCT source) FROM observations WHERE asset_id=?",
                     (row["id"],),
                 ).fetchone()[0]
+                campaigns = [entry["campaign"] for entry in conn.execute(
+                    "SELECT DISTINCT campaign FROM observations "
+                    "WHERE asset_id=? AND campaign!=''", (row["id"],),
+                )]
                 items.append(
                     {
                         **dict(row),
                         "data": json.loads(latest["data"]),
                         "source": latest["source"],
                         "observations": count,
+                        "campaigns": campaigns,
                         "changed": len(observations) > 1
                         and latest["digest"] != observations[1]["digest"],
                         "freshness": "recent"
@@ -323,6 +356,66 @@ class ResourceStore:
             "offset": offset,
             "has_more": offset + len(items) < total,
         }
+
+    def campaigns(self) -> dict[str, Any]:
+        """分类聚合视图：各项目覆盖的资产数与最近观测时间；未归类资产单列。"""
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT campaign AS name, COUNT(DISTINCT asset_id) AS count, "
+                "MAX(observed_at) AS last_seen FROM observations "
+                "WHERE campaign!='' GROUP BY campaign "
+                "ORDER BY count DESC, name",
+            ).fetchall()
+            unnamed = conn.execute(
+                "SELECT COUNT(*) FROM assets WHERE id NOT IN "
+                "(SELECT asset_id FROM observations WHERE campaign!='')",
+            ).fetchone()[0]
+        return {"items": [dict(row) for row in rows], "unnamed": unnamed}
+
+    def session_campaign(self, session_id: str) -> str:
+        """会话登记的项目分类（未登记返回空串）。"""
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT campaign FROM session_campaigns WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+        return str(row["campaign"]) if row else ""
+
+    def set_session_campaign(self, session_id: str, campaign: str) -> int:
+        """登记会话的项目分类，并回填该会话已入库观测的 campaign 字段。
+
+        返回被回填的观测行数；空分类 = 标记「已尝试、无可归类」（不再重试）。
+        """
+        campaign = campaign.strip()[:80]
+        with self.connection() as conn:
+            conn.execute(
+                "INSERT INTO session_campaigns(session_id,campaign,created_at) "
+                "VALUES(?,?,?) ON CONFLICT(session_id) DO UPDATE SET "
+                "campaign=excluded.campaign",
+                (session_id, campaign, time.time()),
+            )
+            if not campaign:
+                return 0
+            cursor = conn.execute(
+                "UPDATE observations SET campaign=? WHERE source LIKE ? AND campaign!=?",
+                (campaign, f"{session_id}:%", campaign),
+            )
+        return cursor.rowcount
+
+    def sessions_without_campaign(self, limit: int = 200) -> list[str]:
+        """贡献过观测、但尚未登记分类的会话（按最早观测先来先办）。"""
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT source_sessions.session_id AS sid FROM ("
+                "  SELECT substr(source,1,instr(source,':')-1) AS session_id,"
+                "         MIN(observed_at) AS first_seen FROM observations"
+                "  WHERE source LIKE 'sess-%:%' GROUP BY session_id"
+                ") AS source_sessions WHERE NOT EXISTS ("
+                "  SELECT 1 FROM session_campaigns c"
+                "  WHERE c.session_id=source_sessions.session_id"
+                ") ORDER BY source_sessions.first_seen LIMIT ?", (limit,),
+            ).fetchall()
+        return [str(row["sid"]) for row in rows]
 
     def history(self, key: str, offset: int = 0, limit: int = 30) -> dict[str, Any]:
         with self.connection() as conn:
