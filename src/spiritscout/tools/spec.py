@@ -21,7 +21,9 @@ class ToolKind(str, enum.Enum):
 
 class RiskLevel(str, enum.Enum):
     READONLY = "readonly"      # 只读探测（默认允许）
-    INTRUSIVE = "intrusive"    # 侵入性（写入/利用，需敏感操作开关 + 人工确认 G5）
+    # 侵入性能力（可能改写环境/触碰状态）：调用时按本次行为语义声明，
+    # 仅危险语义（G5）逐次即时请示
+    INTRUSIVE = "intrusive"
     DESTRUCTIVE = "destructive"  # 破坏性（系统默认拒绝封装，合规 G3）
 
 

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from spiritscout.blackboard import Blackboard
-from spiritscout.config.settings import SystemConfig, WorkspaceConfig
+from spiritscout.config.settings import ModelEntry, SystemConfig, WorkspaceConfig
 from spiritscout.core.models import AgentType, BlackboardLayer, RunMode
 from spiritscout.launch import LaunchRequest, prepare_launch
 from spiritscout.web.app import _read_state
@@ -150,6 +152,123 @@ class SessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(
                 [task["task_id"] for task in state["tasks"]], ["task-new"])
+
+
+PLATFORM_DOC_MISSION = """平台托管的 CTF 跑分赛，请尽快拿分。平台 API 根地址：http://10.0.100.58
+接口文档：
+- GET http://10.0.100.58/api/v1/challenges 列出题目；
+  应答 {"data": {"challenges": [{...}]}}，每题字段：
+  unique_code / description / difficulty / container_addr / is_completed。
+- POST /api/v1/challenge/start，body {"unique_code": "<题号>"}，应答含 container_addr。
+- POST /api/v1/challenge/close，body {"unique_code": "<题号>"}。
+- POST /api/v1/challenge/submit，body {"unique_code": "<题号>", "flag": "<flag>"}，
+  应答 {"correct": true|false}；重复提交返回 409 {"code": "duplicate"}。
+固定请求头：X-API-Key: tsec-test-token。同一时间最多开 2 个容器。
+"""
+
+PLAIN_CTF_MISSION = "一道ctf题目，拿flag：http://challenge.example.cn/"
+
+_EXTRACTED_PROFILE = json.dumps({
+    "platform": {
+        "name": "tsecbench", "base_url": "http://10.0.100.58",
+        "headers": {"X-API-Key": "tsec-test-token"},
+        "ops": {
+            "list": {"method": "GET", "path": "/api/v1/challenges",
+                     "items_field": "data.challenges"},
+            "start": {"method": "POST", "path": "/api/v1/challenge/start",
+                      "body": {"unique_code": "{challenge}"},
+                      "addr_field": "container_addr"},
+            "close": {"method": "POST", "path": "/api/v1/challenge/close",
+                      "body": {"unique_code": "{challenge}"}},
+            "submit": {"method": "POST", "path": "/api/v1/challenge/submit",
+                       "body": {"unique_code": "{challenge}", "flag": "{flag}"},
+                       "accepted_field": "correct",
+                       "duplicate_code": "duplicate"},
+        },
+        "limits": {"max_active": 2},
+        "challenge_fields": {
+            "id": "unique_code", "title": "description",
+            "container_addr": "container_addr", "is_completed": "is_completed"},
+    }}, ensure_ascii=False)
+
+
+class _FakeChatGateway:
+    """对话链路替身：按调用顺序吐预设应答，记录调用参数供断言。"""
+
+    def __init__(self, *contents: str) -> None:
+        self._contents = list(contents)
+        self.calls: list[dict] = []
+
+    async def chat(self, messages, **kwargs):
+        self.calls.append({"messages": messages, **kwargs})
+        content = self._contents.pop(0) if self._contents else "{}"
+        return SimpleNamespace(content=content)
+
+
+class PlatformExtractionTests(unittest.IsolatedAsyncioTestCase):
+    async def _run(self, mission: str, reply: str):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = SystemConfig(workspace=WorkspaceConfig(root=str(root)))
+            models = [ModelEntry(model="test-model")]
+            manager = SessionManager(cfg, models)
+            workspace = root / "sessions" / "sess-platform"
+            workspace.mkdir(parents=True)
+            session = Session(session_id="sess-platform", mode="ctf",
+                              target="ctf://challenges", workspace=workspace)
+            session.launch_request = {"mission": mission, "mode": "ctf"}
+            cfg.audit_log_path = str(session.audit_path)
+            plan = prepare_launch(LaunchRequest(
+                mode=RunMode.CTF, mission=mission))
+            gateway = _FakeChatGateway(reply)
+            with patch("spiritscout.web.sessions._conversation_gateway",
+                       return_value=gateway), patch(
+                    "spiritscout.runtime.run_ctf_engagement",
+                    new=AsyncMock(return_value=SimpleNamespace(
+                        run_summary={}, verify_stats={}, flag_stats={},
+                        report_path=str(workspace / "report.md")))) as run_mock:
+                await manager._run(session, cfg, plan, False, models)
+            audit_text = Path(cfg.audit_log_path).read_text(encoding="utf-8")
+            audit_lines = [json.loads(line) for line in audit_text.splitlines()
+                           if line.strip()]
+            self.assertEqual(session.status, "completed")
+            return session, plan, run_mock, gateway, audit_lines, audit_text
+
+    async def test_platform_doc_mission_extracts_profile_for_runtime(self) -> None:
+        session, plan, run_mock, gateway, audit_lines, audit_text = await self._run(
+            PLATFORM_DOC_MISSION, _EXTRACTED_PROFILE)
+
+        profile = run_mock.call_args.kwargs["platform_profile"]
+        self.assertEqual(profile["base_url"], "http://10.0.100.58")
+        self.assertEqual(profile["headers"]["X-API-Key"], "tsec-test-token")
+        self.assertEqual(profile["challenge_fields"]["id"], "unique_code")
+        # 平台宿主并入授权域（纯托管题任务也要通过启动门）
+        self.assertIn("10.0.100.58", plan.authorization.scope.allowed_domains)
+        # 抽取结果回写启动参数：续传/重建计划不再重抽
+        self.assertIn("tsecbench", session.launch_request["platform_yaml"])
+        # 独立抽取调用：任务原文进了提示词（截断后）
+        self.assertEqual(len(gateway.calls), 1)
+        self.assertIn("10.0.100.58",
+                      gateway.calls[0]["messages"][1]["content"])
+        # 审计打码：抽取留痕可见，凭据值不见
+        actions = [line["detail"].get("action") for line in audit_lines]
+        self.assertIn("platform_profile_extracted", actions)
+        self.assertNotIn("tsec-test-token", audit_text)
+        extracted = next(line for line in audit_lines
+                         if line["detail"].get("action") == "platform_profile_extracted")
+        self.assertEqual(extracted["detail"]["profile"]["name"], "tsecbench")
+        # 凭据在审计里被摘要化/打码，任何形态都不得出现原文
+        self.assertNotIn("tsec-test-token",
+                         json.dumps(extracted, ensure_ascii=False))
+
+    async def test_mission_without_platform_description_runs_unchanged(self) -> None:
+        session, _, run_mock, _, audit_lines, _ = await self._run(
+            PLAIN_CTF_MISSION, json.dumps({"platform": None}))
+
+        self.assertIsNone(run_mock.call_args.kwargs["platform_profile"])
+        self.assertNotIn("platform_yaml", session.launch_request)
+        actions = [line["detail"].get("action") for line in audit_lines]
+        self.assertIn("platform_not_found", actions)
 
 
 if __name__ == "__main__":

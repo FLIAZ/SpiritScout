@@ -109,6 +109,7 @@ class SessionCreatePayload(BaseModel):
     platform: str | None = None
     flag_format: str | None = None
     challenges_yaml: str | None = None
+    platform_yaml: str | None = None
     rules_yaml: str | None = None
     title: str = Field(default="", max_length=80)
     no_llm: StrictBool = False
@@ -386,6 +387,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                 rps=float(payload.get("rps", 10.0)),
                 flag_format=payload.get("flag_format") or None,
                 challenges_yaml=payload.get("challenges_yaml") or None,
+                platform_yaml=payload.get("platform_yaml") or None,
                 rules_yaml=payload.get("rules_yaml") or None,
                 accept_rule_conflicts=bool(
                     payload.get("accept_rule_conflicts", False)),

@@ -179,8 +179,7 @@ class ToolRegistry:
         if self.policy is not None:
             try:
                 self._check_scope(spec, params)
-                if spec.risk == RiskLevel.INTRUSIVE or action not in (
-                        None, ActionCategory.ANALYSIS.value):
+                if self.policy.requires_approval(spec, action):
                     transition("awaiting_approval")
                 await self.policy.ensure_tool_allowed(
                     spec, action=action)

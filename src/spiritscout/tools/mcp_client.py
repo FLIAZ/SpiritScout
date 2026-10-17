@@ -42,8 +42,10 @@ _CLIENT_INFO = Implementation(name="spiritscout", version="0.1.0")
 def resolve_mcp_risk(server: McpServerConfig, tool: dict[str, Any]) -> RiskLevel:
     """区分 MCP 的环境变更提示与宿主明令禁止的破坏性工具。
 
-    destructiveHint 不等于 DoS。可能修改状态的工具进入即时审批；只有
-    宿主可信配置明确指定 destructive 才硬拒绝，不能由远端提示猜测。
+    destructiveHint 不等于 DoS。可能修改状态的工具解析为 INTRUSIVE——
+    注册层据此自动配发行为声明字段（调用时声明本次语义，仅危险语义逐次
+    请示），能力级别本身不再整体审批；只有宿主可信配置明确指定
+    destructive 才硬拒绝，不能由远端提示猜测。
     普通浏览器导航等特例由精确工具配置声明，不放行整个服务器。
     """
     override = server.tool_risk_overrides.get(str(tool.get("name", "")))

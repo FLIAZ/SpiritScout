@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 import shutil
 import signal
 import time
@@ -210,6 +211,7 @@ async def sandbox_exec(
     language: str = "shell",
     timeout: float = 60.0,
     workspace_root: str | None = None,
+    workspace_scope: str | None = None,
     log_name: str = "last_output",
     max_output_chars: int = 20000,
     **_: Any,
@@ -218,6 +220,9 @@ async def sandbox_exec(
 
     ok 语义：进程正常结束（任何退出码）即 ok=True——退出码非零是结果不是
     工具故障；只有沙箱不可用 / 启动失败 / 超时被终止才 ok=False。
+    workspace_scope：工作目录作用域（调用方传题级 id 等）。非空时工作目录
+    细分为 ``sandbox/<scope>/``——多题并行时各题产物、脚本与日志互不覆盖；
+    缺省时沿用会话级 ``sandbox/``（SRC 等单目标场景不受影响）。
     """
     started = time.perf_counter()
     code = str(code or "")
@@ -244,8 +249,13 @@ async def sandbox_exec(
             if (workspace / name).is_symlink():
                 raise OSError(f"沙箱共享目录不能是符号链接: {name}")
         # 会话持久工作目录：workspace_root 即会话工作区，跨调用保留产物，
-        # 供后续回合与附件工具继续使用（/tmp 为每运行 tmpfs，不持久）
+        # 供后续回合与附件工具继续使用（/tmp 为每运行 tmpfs，不持久）；
+        # 题级作用域在会话工作区内再细分一层（多题并行互不覆盖）。
         rundir = workspace / "sandbox"
+        if workspace_scope:
+            safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(workspace_scope)).strip("._-")[:80]
+            if safe:
+                rundir = rundir / safe
         rundir.mkdir(parents=True, exist_ok=True)
         (workspace / "artifacts").mkdir(exist_ok=True)
     except OSError as exc:

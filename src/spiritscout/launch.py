@@ -34,6 +34,7 @@ class LaunchRequest:
     rps: float = 10.0
     flag_format: str | None = None
     challenges_yaml: str | None = None      # CTF/渗透赛赛题 YAML 文本
+    platform_yaml: str | None = None        # 平台档案 YAML 文本（托管题/跑分平台）
     rules_yaml: str | None = None           # 渗透赛赛制规则 YAML 文本
     accept_rule_conflicts: bool = False
     mission: str | None = None              # 自然语言任务意图（任务式启动）
@@ -50,6 +51,7 @@ class LaunchPlan:
     rules: object | None                    # CompetitionRules（仅渗透赛）
     flag_patterns: list[str] | None
     mission: str = ""                       # 任务意图原文（喂主 Agent 规划）
+    platform_profile: dict | None = None    # 平台档案（含凭据；对运行时直供）
     mode_auto: bool = False                 # 智能模式：待 LLM 路由复核
     needs_mode_routing: bool = False        # 输入未明确声明模式时才需要 LLM 语义裁决
     source_request: LaunchRequest | None = None  # 重建计划用（LLM 改判时）
@@ -210,9 +212,10 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
                 if mission else "——或在任务描述中写明目标")
         raise SpiritScoutError(f"SRC 模式需要目标 URL{hint}")
     if (req.mode == RunMode.CTF and not req.challenges_yaml and not m_urls
-            and not req.has_uploads and not mode_auto):
+            and not req.has_uploads and not req.platform_yaml and not mode_auto):
         raise SpiritScoutError(
-            "CTF 模式需要赛题清单——粘贴赛题 YAML，写明赛题 URL，或上传题目附件")
+            "CTF 模式需要赛题清单——粘贴赛题 YAML，写明赛题 URL，上传题目附件，"
+            "或提供平台档案（托管题由平台列题）")
     if req.mode == RunMode.COMPETITION and not req.rules_yaml and not mode_auto:
         raise SpiritScoutError(
             "渗透赛模式需要赛制规则 YAML（contest_type/flag_patterns/submit 等"
@@ -244,6 +247,16 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
                 "赛制规则与合规基线冲突，需人工确认风险后才可继续："
                 f"\n{listing}", conflicts)
 
+    # 平台档案（显式提供）：解析校验失败即报错；托管题由平台列题/开容器
+    platform_profile: dict | None = None
+    if req.platform_yaml:
+        from spiritscout.ctf.platform import parse_platform_profile
+
+        try:
+            platform_profile = parse_platform_profile(req.platform_yaml).to_dict()
+        except ValueError as exc:
+            raise SpiritScoutError(f"平台档案校验失败: {exc}") from exc
+
     # 授权范围：默认限定目标 URL 前缀（最小授权原则）；extra_scope 可追加
     allowed_urls = [req.target.rstrip("/")] if req.target else []
     allowed_domains: list[str] = []
@@ -262,6 +275,12 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
         url = str(ch.get("url", ""))
         if url.startswith(("http://", "https://")):
             allowed_urls.append(url.rstrip("/"))
+    # 平台宿主并入授权域：平台 API 只由装配层直连（不是测试目标），并入
+    # 保证纯托管题任务（目标由平台运行期下发）有可校验的范围声明
+    if platform_profile:
+        host = urlparse(str(platform_profile.get("base_url") or "")).hostname or ""
+        if host and host not in allowed_domains:
+            allowed_domains.append(host)
 
     scope = Scope(
         allowed_domains=allowed_domains, allowed_urls=allowed_urls,
@@ -286,6 +305,7 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
         challenges=challenges, rules=rules,
         flag_patterns=flag_patterns,
         mission=mission,
+        platform_profile=platform_profile,
         mode_auto=mode_auto,
         needs_mode_routing=needs_mode_routing,
         source_request=req if mode_auto else None,

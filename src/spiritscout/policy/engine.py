@@ -3,7 +3,8 @@
 合规自查映射：
 - G2 CTF 模式禁端口扫描（硬约束 C7）；
 - G3 禁 DoS（DESTRUCTIVE 级工具不注册/一律拒绝）；
-- G5 敏感操作门（INTRUSIVE 需 scope 显式开启 + 人工确认）；
+- G5 危险语义动作逐次审批（删除文件/反弹 shell/WebShell 上传/容器逃逸/
+  爆破；普通写入类动作如实留痕但不打断）；
 -  平台红线（如 bytesrc auto_test_allowed=false → 阻断自动探测）。
 """
 
@@ -26,9 +27,18 @@ _MODE_FORBIDDEN_TOOLS: dict[RunMode, set[str]] = {
     RunMode.COMPETITION: set(),                       # 由赛制规则动态追加
 }
 
-# 敏感操作动作集（G5）：类别由模型在工具决策中如实自报（action 参数），
+# 危险语义动作集（G5）：类别由模型在工具决策中如实自报（action 参数），
 # 管道只认类别、不扫内容——不写关键词模板，不用内容猜测代替模型判断。
-SENSITIVE_ACTIONS = {a.value for a in ActionCategory if a != ActionCategory.ANALYSIS}
+# 只有调用含义本身危险的动作才即时请示用户；intrusive_write（普通写入/
+# 上传/重启容器等）如实留痕但不打断——审批以「本次调用要干什么」为准，
+# 不再以工具能力级别整体判定。
+DANGEROUS_ACTIONS = {
+    ActionCategory.DELETE_FILES.value,
+    ActionCategory.REVERSE_SHELL.value,
+    ActionCategory.WEBSHELL_UPLOAD.value,
+    ActionCategory.CONTAINER_ESCAPE.value,
+    ActionCategory.BRUTE_FORCE.value,
+}
 
 
 @dataclass
@@ -60,14 +70,29 @@ class PolicyEngine:
 
     # ------------------------------------------------------------ 工具门
 
+    @staticmethod
+    def requires_approval(spec: ToolSpec, action: str | None) -> bool:
+        """本次调用是否需要即时请示用户（G5 收窄后的唯一判据）。
+
+        - 模型已声明行为类别：只看类别是否属危险语义——删除文件/反弹 shell/
+          WebShell 上传/容器逃逸/爆破逐次审批，其余声明（含 intrusive_write）
+          不打断；
+        - 未声明类别但宿主将其定为 INTRUSIVE 且工具无行为声明机制：本次
+          语义不可知，按能力级风险逐次审批兜底。带声明机制的工具注册时必有
+          声明（registry 对缺失声明直接报错），不会走到这里。
+        """
+        if action is not None:
+            return action in DANGEROUS_ACTIONS
+        return spec.risk == RiskLevel.INTRUSIVE and not spec.action_required
+
     async def ensure_tool_allowed(self, spec: ToolSpec, action: str | None = None) -> None:
-        """敏感动作逐次审批，只授权当前调用；不向会话级动作集合写入许可。"""
+        """危险语义动作逐次审批，只授权当前调用；不向会话级动作集合写入许可。"""
         act = action or spec.name
         granted = False
         if (
             spec.risk != RiskLevel.DESTRUCTIVE
             and spec.name not in self.forbidden_tools
-            and (spec.risk == RiskLevel.INTRUSIVE or act in SENSITIVE_ACTIONS)
+            and self.requires_approval(spec, action)
         ):
             if self.approval_gate is None:
                 # 无交互面：不能静默放行，留痕后交给 check_tool 拒绝
@@ -91,13 +116,19 @@ class PolicyEngine:
             self._deny(f"破坏性工具一律禁止: {spec.name}（G3 禁 DoS）")
         if spec.name in self.forbidden_tools:
             self._deny(f"模式 {self.mode.value} 禁用工具: {spec.name}（G2 模式能力边界）")
-        if spec.risk == RiskLevel.INTRUSIVE or (action and action in SENSITIVE_ACTIONS):
+        if self.requires_approval(spec, action):
             if not invocation_approved:
                 self._deny(
-                    f"敏感操作未授权: {action or spec.name}"
+                    f"危险动作未授权: {action or spec.name}"
                     f"（G5：需用户对本次调用即时审批放行）"
                 )
             act = action or spec.name
+            if act in self.platform_rule.requires_approval_for:
+                self._deny(
+                    f"平台 {self.platform_rule.platform} 要求敏感测试提前报备: {act}"
+                )
+        elif action and action != ActionCategory.ANALYSIS.value:
+            act = action
             if act in self.platform_rule.requires_approval_for:
                 self._deny(
                     f"平台 {self.platform_rule.platform} 要求敏感测试提前报备: {act}"

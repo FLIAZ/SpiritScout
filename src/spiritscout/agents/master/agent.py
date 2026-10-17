@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import operator
 import time
@@ -27,7 +28,7 @@ from spiritscout.blackboard import ConvergenceEngine
 from spiritscout.blackboard.store import Blackboard
 from spiritscout.bus.base import EventBus
 from spiritscout.core.audit import AuditLogger, NullAuditLogger
-from spiritscout.core.exceptions import SpiritScoutError
+from spiritscout.core.exceptions import ScopeViolation, SpiritScoutError
 from spiritscout.core.ids import new_id
 from spiritscout.core.models import (
     AgentType,
@@ -255,6 +256,7 @@ class MasterAgent:
 
         # 就绪节点 → 任务包（任务依赖：前置条件满足才下发，4.1.2）
         tactic_map = ctx.tactic_map or TACTIC_AGENT_MAP
+        platform = ctx.extra.get("platform")
         task_objs: list[tuple[Task, str]] = []
         for node in dag.ready_nodes():
             # 重攻节点战术名带 @轮次 后缀（同题换角度再攻），按基名解析归属
@@ -273,6 +275,23 @@ class MasterAgent:
             # 赛题绑定：规划器节点自带；复盘新增节点按 id 匹配/单题沿用，
             # 保证 CTF 任务永远带着赛题载荷下发（载荷为空的节点无题可解）
             challenge = node.meta.get("challenge") or self._bind_challenge(dag, node)
+            if challenge and platform is not None:
+                try:
+                    provisioned = (await platform.ensure_instance(challenge)
+                                   if platform.owns(str(challenge.get("id") or ""))
+                                   else challenge)
+                except Exception as exc:  # noqa: BLE001 —— 平台故障不连坐其他节点
+                    ctx.audit.log("platform.fact", self.agent_id, {
+                        "action": "ensure_error",
+                        "challenge": str(challenge.get("id") or ""),
+                        "error": str(exc)[:200]})
+                    provisioned = None
+                if provisioned is None:
+                    # 活跃名额已满 / 平台暂未接受：本轮不派发，节点保持待发，
+                    # 下轮补位（名额靠完成回收与平台自身节奏释放）
+                    continue
+                challenge = provisioned
+                self._approve_platform_target(challenge)
             if challenge:
                 node.meta["challenge"] = challenge
             task = Task(
@@ -286,7 +305,9 @@ class MasterAgent:
                          "execution_recovery": self.ctx.extra.get("execution_recovery", {}),
                          "rules": self._rules()[:1500],
                          "recent_experience": (self.ctx.extra.get("recent_experience") or [])[-3:],
-                         "challenge": challenge or None},
+                         # 题级事实深拷贝注入：同一赛题的多个任务各持副本，
+                         # 一方的运行期改写不污染其他方向/其他轮次
+                         "challenge": copy.deepcopy(challenge) if challenge else None},
             )
             dag.attach_task(node.node_id, task.task_id)
             dag.mark(node.node_id, TaskStatus.RUNNING)
@@ -317,6 +338,55 @@ class MasterAgent:
         if len(found) == 1:
             return next(iter(found.values()))
         return {}
+
+    def _approve_platform_target(self, challenge: dict[str, Any]) -> None:
+        """平台下发的容器地址并入会话范围（平台供给的实例即本题授权对象）。
+
+        只登记批准集（去掉运行期的「范围之外」标注），不碰禁打列表——
+        禁打仍是唯一硬边界；不合法目标静默保持越界标注，不抛不拦。
+        """
+        url = str(challenge.get("url") or "")
+        if not url.startswith(("http://", "https://")):
+            return
+        guard = getattr(self.ctx.policy, "guard", None)
+        if guard is None or guard.is_allowed(url):
+            return
+        try:
+            entry = guard.approve_target(url)
+        except (ScopeViolation, ValueError):
+            return
+        self.ctx.audit.log("scope.extended", self.agent_id, {
+            "target": entry, "challenge": str(challenge.get("id") or ""),
+            "source": "platform"})
+
+    async def _platform_release(self) -> None:
+        """平台完成态回收：每轮任务收口后关闭已完成赛题的容器（释放名额）。
+
+        平台声明了按题完成态时以平台通报为准；未声明时以「首个被平台判对
+        的 Flag」为完成信号（该判定在适配器内完成）。回收失败只留痕——
+        不连坐解题主链路，容器由会话结束时的一次性回收兜底。
+        """
+        extra = getattr(self.ctx, "extra", None) or {}
+        platform = extra.get("platform")
+        if platform is None:
+            return
+        accepted: set[str] = set()
+        flag_manager = extra.get("flag_manager")
+        if flag_manager is not None:
+            try:
+                accepted = {str(f.challenge_id)
+                            for f in flag_manager.accepted_flags()}
+            except Exception:  # noqa: BLE001 —— 统计失败不阻断回收
+                accepted = set()
+        try:
+            released = await platform.release_completed(accepted)
+        except Exception as exc:  # noqa: BLE001 —— 回收失败不连坐主链路
+            self.ctx.audit.log("platform.fact", self.agent_id, {
+                "action": "release_failed", "error": str(exc)[:200]})
+            return
+        if released:
+            self.ctx.audit.log("platform.fact", self.agent_id, {
+                "action": "instances_released", "challenges": list(released)})
 
     def _effort_options(self, task: Task) -> list[str]:
         """该任务可用的思考强度取值——按实际会用到的模型各自声明的档位算。
@@ -527,6 +597,7 @@ class MasterAgent:
                     await assign_task
         for node_id, status in results:
             dag.mark(node_id, status)
+        await self._platform_release()
         self._write_dag_snapshot(dag, state["round_no"])
         return {"dag": dag.to_dict()}
 
@@ -805,6 +876,18 @@ class MasterAgent:
         if flag_manager is not None:
             view["flags"] = {**flag_manager.stats(),
                              "submit_enabled": flag_manager.submit_fn is not None}
+        extra = getattr(self.ctx, "extra", None) or {}
+        platform = extra.get("platform")
+        if platform is not None:
+            # 平台操作事实进复盘视图：名额、容器开关、提交与列题异常都是
+            # 决策输入（如「活跃名额已满」解释为什么还有节点没开工）
+            facts = extra.get("platform_facts") or []
+            try:
+                summary = platform.summary()
+            except Exception:  # noqa: BLE001 —— 摘要失败不阻断复盘
+                summary = {}
+            view["platform"] = {"summary": summary,
+                                "recent": [dict(f) for f in facts][-8:]}
         await self.ctx.bus.publish(Event(topic="round.view", data_id=f"round-{state['round_no']}",
                                          source=self.agent_id, payload=view))
         return {"round_views": [view]}
@@ -829,11 +912,7 @@ class MasterAgent:
         # 再问一次模型）。
         stop_reason = ""
         flags_pending = self._ctf_flags_pending(view)
-        flag_done = (bool(view.get("flags"))
-                     and not flags_pending
-                     and not dag.has_unfinished()
-                     and not view.get("vuln_in_pipeline"))
-        if flag_done:
+        if self._flag_hard_stop(view, dag):
             stop_reason = "核心目标已达成，全部节点完成"
         llm_decision = (await self._llm_review(state, view)
                         if ctx.enable_llm_planning and not stop_reason else None)
@@ -916,6 +995,23 @@ class MasterAgent:
                 "continue_iteration": continue_iteration, "stop_reason": stop_reason}
 
     # ------------------------------------------------------------ 内部
+
+    def _flag_hard_stop(self, view: dict[str, Any], dag: TaskDAG) -> bool:
+        """确定性收手快路：Flag 已收且全部节点完成（该收手无需再问模型）。
+
+        平台托管多题会话（平台有按题完成态）例外：拿到一个 Flag 只是单题
+        得分，平台视野内还有未完成题时不走快路——继续重攻剩余赛题，是否
+        收手交模型复盘按全局态势裁量。
+        """
+        if not (bool(view.get("flags")) and not self._ctf_flags_pending(view)
+                and not dag.has_unfinished()
+                and not view.get("vuln_in_pipeline")):
+            return False
+        platform = (getattr(self.ctx, "extra", None) or {}).get("platform")
+        if (platform is not None and platform.has_completion_signal()
+                and not platform.all_completed()):
+            return False
+        return True
 
     def _ctf_flags_pending(self, view: dict[str, Any]) -> bool:
         """CTF/渗透赛语境且 Flag 尚未收录：硬收敛门让位于 LLM 复盘。"""

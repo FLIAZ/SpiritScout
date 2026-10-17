@@ -235,6 +235,27 @@ print('isolated')
             self.assertFalse(result.ok)
             self.assertIn("符号链接", result.error)
 
+    async def test_sandbox_workspace_scope_isolates_challenge_products(self) -> None:
+        if not sandbox_available():
+            self.skipTest("需要 bubblewrap")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = await sandbox_exec("echo A > marker", workspace_root=str(root),
+                                       workspace_scope="e1-01")
+            second = await sandbox_exec("echo B > marker", workspace_root=str(root),
+                                        workspace_scope="e1-02")
+            self.assertEqual(first.returncode, 0, first.stderr + first.error)
+            self.assertEqual(second.returncode, 0, second.stderr + second.error)
+            self.assertTrue(first.parsed["workdir"].endswith("sandbox/e1-01"),
+                            first.parsed)
+            self.assertTrue(second.parsed["workdir"].endswith("sandbox/e1-02"),
+                            second.parsed)
+            # 同名脚本产物与默认日志按题隔离，互不覆盖
+            self.assertEqual((root / "sandbox" / "e1-01" / "marker").read_text(), "A\n")
+            self.assertEqual((root / "sandbox" / "e1-02" / "marker").read_text(), "B\n")
+            self.assertTrue((root / "sandbox" / "e1-01" / "last_output.log").exists())
+            self.assertTrue((root / "sandbox" / "e1-02" / "last_output.log").exists())
+
 
 class AuditHTTPTests(unittest.IsolatedAsyncioTestCase):
     async def test_real_compressed_http_window_is_bounded_without_httpx_auto_decode(self) -> None:

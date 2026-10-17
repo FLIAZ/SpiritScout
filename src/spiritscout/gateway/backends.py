@@ -730,23 +730,23 @@ class MockBackend(ChatBackend):
                 ensure_ascii=False,
             )
         if role == "route_planner":
-            if '"direction_brief"' in user:
-                # CTF 调查角度提议（按题给 K 个角度；mock 无语义能力，给固定角度）
+            if '"existing_routes"' in user:
                 return json.dumps(
-                    {"angles": [
-                        {"name": "page_surface", "angle": "入口页与响应表面的线索"},
-                        {"name": "hidden_paths", "angle": "常见隐藏路径与源码泄露"},
-                    ]},
+                    {
+                        "routes": [
+                            {"name": "baseline", "strategy": "标准流水线", "tools": ["http_probe"]},
+                            {"name": "deep_params", "strategy": "参数深度探测", "tools": ["http_probe"]},
+                            {"name": "alt_vectors", "strategy": "替代攻击面", "tools": ["http_probe"]},
+                        ]
+                    },
                     ensure_ascii=False,
                 )
+            # CTF 调查角度提议（按题给 K 个角度；mock 无语义能力，给固定角度）
             return json.dumps(
-                {
-                    "routes": [
-                        {"name": "baseline", "strategy": "标准流水线", "tools": ["http_probe"]},
-                        {"name": "deep_params", "strategy": "参数深度探测", "tools": ["http_probe"]},
-                        {"name": "alt_vectors", "strategy": "替代攻击面", "tools": ["http_probe"]},
-                    ]
-                },
+                {"angles": [
+                    {"name": "page_surface", "angle": "入口页与响应表面的线索"},
+                    {"name": "hidden_paths", "angle": "常见隐藏路径与源码泄露"},
+                ]},
                 ensure_ascii=False,
             )
         if role == "payload_planner":

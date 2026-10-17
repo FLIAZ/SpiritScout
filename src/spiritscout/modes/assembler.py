@@ -199,11 +199,13 @@ class ModeAssembler:
         flag_manager: FlagManager | None = None,
         competition_engine: CompetitionEngine | None = None,
         resume: bool = False,
+        platform: Any = None,
     ) -> ModeAssembly:
         if mode == RunMode.SRC:
             return self._assemble_src()
         if mode == RunMode.CTF:
-            return self._assemble_ctf(challenges or [], flag_manager, resume=resume)
+            return self._assemble_ctf(challenges or [], flag_manager,
+                                      resume=resume, platform=platform)
         return self._assemble_competition(challenges or [], rules, flag_manager,
                                           competition_engine)
 
@@ -227,7 +229,7 @@ class ModeAssembler:
 
     def _assemble_ctf(
         self, challenges: list[dict[str, Any]], flag_manager: FlagManager | None,
-        *, resume: bool = False,
+        *, resume: bool = False, platform: Any = None,
     ) -> ModeAssembly:
         agents: dict[AgentType, SubAgent] = {
             AgentType.CTF_WEB: CTFWebAgent(self.ctx, flag_manager=flag_manager, **self.kw),
@@ -241,6 +243,13 @@ class ModeAssembler:
             """CTF 元规划：首轮并行分发 + 未破题的重攻轮（Flag 状态驱动）。"""
             solved = ({f.challenge_id for f in flag_manager.accepted_flags()}
                       if flag_manager is not None else set())
+            if platform is not None and platform.has_completion_signal():
+                # 平台按题给出完成态：完成判定以平台为准——多 Flag 题拿到
+                # 一个 Flag 不等于完赛（未竟 Flag 仍会重攻补分），只有平台
+                # 通报完成的题才停止派发
+                solved = {cid for cid in
+                          (str(ch.get("id") or "") for ch in challenges)
+                          if cid and platform.is_completed(cid)}
             pending: set[str] = set()
             tried: dict[str, set[str]] = {}
             for node in (state.get("dag") or {}).values():
@@ -255,14 +264,18 @@ class ModeAssembler:
                 solved=solved, pending=pending, tried=tried,
                 skip_solved=resume and int(state.get("round_no", 0) or 0) == 0)
 
+        notes = [("CTF 模式：五方向专项，不启用端口扫描（C7）；"
+                  "赛题直接分发至专项子 Agent（5.2.1）；未破题自动换角度重攻")]
+        if platform is not None:
+            notes.append("平台托管：列题/开容器/回收/提交由灵枢侧适配器执行，"
+                         "子 Agent 不接触平台凭据")
         return ModeAssembly(
             mode=RunMode.CTF,
             agents=agents,
             tactic_map=dict(CTF_TACTIC_MAP),
             plan_provider=_plan,
             flag_manager=flag_manager,
-            notes=[("CTF 模式：五方向专项，不启用端口扫描（C7）；"
-                    "赛题直接分发至专项子 Agent（5.2.1）；未破题自动换角度重攻")],
+            notes=notes,
         )
 
     # ------------------------------------------------------------ 渗透赛

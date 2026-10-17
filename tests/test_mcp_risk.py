@@ -112,18 +112,38 @@ class McpAssemblyRiskTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("browser_navigate", result.error)
         self.assertIn("isError=true", result.error)
 
-    async def test_state_changing_browser_action_still_requires_approval(self) -> None:
+    async def test_invasive_mcp_tool_requires_declaration_and_gates_only_dangerous_actions(self) -> None:
+        # 缺声明：不执行、不打扰用户
         result = await self.infra.tools.call("mcp__playwright__browser_click",
                                             {"url": "https://allowed.invalid"}, **self.infra.builtin_ctx)
         self.assertFalse(result.ok)
-        self.gate.assert_awaited_once()
+        self.assertIn("_safety_action", result.error)
+        self.gate.assert_not_awaited()
         self.client.call.assert_not_awaited()
+        # 普通写入类声明：如实注明即放行，不打断
+        result = await self.infra.tools.call(
+            "mcp__playwright__browser_click",
+            {"url": "https://allowed.invalid", "_safety_action": "intrusive_write"},
+            **self.infra.builtin_ctx)
+        self.assertTrue(result.ok)
+        self.gate.assert_not_awaited()
+        self.client.call.assert_awaited_once()
+        # 危险语义声明：逐次即时请示
+        result = await self.infra.tools.call(
+            "mcp__playwright__browser_click",
+            {"url": "https://allowed.invalid", "_safety_action": "delete_files"},
+            **self.infra.builtin_ctx)
+        self.assertFalse(result.ok)
+        self.gate.assert_awaited_once()
+        self.client.call.assert_awaited_once()
         self.gate.return_value = True
-        result = await self.infra.tools.call("mcp__playwright__browser_click",
-                                            {"url": "https://allowed.invalid"}, **self.infra.builtin_ctx)
+        result = await self.infra.tools.call(
+            "mcp__playwright__browser_click",
+            {"url": "https://allowed.invalid", "_safety_action": "delete_files"},
+            **self.infra.builtin_ctx)
         self.assertTrue(result.ok)
         self.assertEqual(self.gate.await_count, 2)
-        self.client.call.assert_awaited_once()
+        self.assertEqual(self.client.call.await_count, 2)
 
     async def test_readonly_navigation_override_cannot_approve_sensitive_declared_action(self) -> None:
         result = await self.infra.tools.call("mcp__playwright__browser_navigate",

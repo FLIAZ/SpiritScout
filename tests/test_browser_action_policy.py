@@ -15,6 +15,7 @@ from spiritscout.config.settings import (
     WorkspaceConfig,
 )
 from spiritscout.core.models import Authorization, RunMode, Scope
+from spiritscout.policy.engine import DANGEROUS_ACTIONS
 from spiritscout.runtime import _build_infra
 from spiritscout.tools.spec import ActionCategory
 
@@ -54,19 +55,19 @@ class BrowserActionPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.call.await_args.args[1], {"action": "list"})
         self.gate.assert_not_awaited()
 
-    async def test_each_dangerous_action_requires_its_own_approval(self) -> None:
+    async def test_dangerous_actions_require_approval_but_ordinary_writes_do_not(self) -> None:
+        # 只有危险语义逐次审批：普通浏览与 intrusive_write 如实声明即放行
         for action in ActionCategory:
-            if action == ActionCategory.ANALYSIS:
-                continue
-            result = await self.call("browser_evaluate", {"function": "() => 1", "_safety_action": action.value})
-            self.assertFalse(result.ok)
-        self.assertEqual(self.gate.await_count, len(ActionCategory) - 1)
-        self.client.call.assert_not_awaited()
+            result = await self.call("browser_evaluate", {
+                "function": "() => 1", "_safety_action": action.value})
+            self.assertEqual(result.ok, action.value not in DANGEROUS_ACTIONS,
+                             f"类别 {action.value} 的放行判定不符")
+        self.assertEqual(self.gate.await_count, len(DANGEROUS_ACTIONS))
         self.gate.return_value = True
         self.assertTrue((await self.call("browser_evaluate", {"function": "() => 1", "_safety_action": "delete_files"})).ok)
         self.gate.return_value = False
         self.assertFalse((await self.call("browser_evaluate", {"function": "() => 1", "_safety_action": "delete_files"})).ok)
-        self.client.call.assert_awaited_once()
+        self.assertEqual(self.client.call.await_count, 3)
 
     async def test_missing_or_invalid_classification_is_not_assumed_safe(self) -> None:
         for args in ({"action": "list"}, {"_safety_action": "unknown"}):

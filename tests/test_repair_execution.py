@@ -147,6 +147,41 @@ class DAGRegressionTests(unittest.TestCase):
             dag.upsert_from_plan([{"tactic": "PARENT", "depends_on": ["CHILD"]}], 1)
         self.assertEqual(dag.to_dict(), before)
 
+    def test_same_tactic_two_challenges_both_land_and_dedupe_per_challenge(self) -> None:
+        dag = TaskDAG()
+        result = dag.upsert_from_plan([
+            {"tactic": "CTF-EXPLOIT", "title": "题A 主攻",
+             "meta": {"challenge": {"id": "A"}}},
+            {"tactic": "CTF-EXPLOIT", "title": "题B 主攻",
+             "meta": {"challenge": {"id": "B"}}},
+        ], 0)
+        self.assertEqual(len(result.created), 2)
+        self.assertEqual(result.skipped, [])
+        # 同题同战术重复规划被跳过；异题新题不受影响
+        again = dag.upsert_from_plan([
+            {"tactic": "CTF-EXPLOIT", "title": "题A 重规划",
+             "meta": {"challenge": {"id": "A"}}},
+            {"tactic": "CTF-EXPLOIT", "title": "题C 主攻",
+             "meta": {"challenge": {"id": "C"}}},
+        ], 1)
+        self.assertEqual([n.meta["challenge"]["id"] for n in again.created], ["C"])
+        self.assertEqual(len(again.skipped), 1)
+        self.assertIn("赛题 A", again.skipped[0]["reason"])
+
+    def test_challenge_dependency_prefers_same_challenge(self) -> None:
+        dag = TaskDAG()
+        dag.upsert_from_plan([
+            {"tactic": "RECON", "title": "题A 侦察",
+             "meta": {"challenge": {"id": "A"}}},
+            {"tactic": "RECON", "title": "题B 侦察",
+             "meta": {"challenge": {"id": "B"}}},
+            {"tactic": "EXPLOIT", "title": "题B 攻击", "depends_on": ["RECON"],
+             "meta": {"challenge": {"id": "B"}}},
+        ], 0)
+        recon = {n.meta["challenge"]["id"]: n for n in dag.find_by_tactic("RECON")}
+        exploit = dag.find_by_tactic("EXPLOIT")[0]
+        self.assertEqual(exploit.depends_on, [recon["B"].node_id])
+
 
 class CredentialLedgerTests(unittest.IsolatedAsyncioTestCase):
     async def test_chinese_user_reply_credential_is_ledgered_redacted_and_idempotent(self) -> None:

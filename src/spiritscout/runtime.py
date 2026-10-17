@@ -75,7 +75,7 @@ from spiritscout.tools.executor import (
 from spiritscout.tools.registry import ToolRegistry
 from spiritscout.tools.run_lock import ExecutionRunLock
 from spiritscout.tools.sandbox import sandbox_exec
-from spiritscout.tools.spec import ToolKind, ToolResult, ToolSpec
+from spiritscout.tools.spec import RiskLevel, ToolKind, ToolResult, ToolSpec
 
 if TYPE_CHECKING:
     from spiritscout.competition import CompetitionRules
@@ -427,9 +427,14 @@ async def _build_infra(
                         if spec.scope_enforcement != "none"
                         and {"request", "actualAddr", "batchTarget"} & set(properties)
                         else None)
-                    action_param = "_safety_action" if spec.risk_by_action else "action"
+                    # 行为声明机制：宿主开启 risk_by_action 的服务器全部工具适用；
+                    # 此外，解析为 INTRUSIVE 的工具（如网络探测类 MCP）自动配发声明
+                    # 字段——能力级风险不再整体逐次审批，改为「调用时声明本次语义、
+                    # 仅危险语义逐次请示」（G5 收窄后的统一形态）。
+                    declaration = spec.risk_by_action or risk == RiskLevel.INTRUSIVE
+                    action_param = "_safety_action" if declaration else "action"
                     model_tool = copy.deepcopy(t)
-                    if spec.risk_by_action:
+                    if declaration:
                         from spiritscout.tools.spec import ActionCategory
 
                         if action_param in properties:
@@ -439,16 +444,17 @@ async def _build_infra(
                         schema.setdefault("properties", {})[action_param] = {
                             "type": "string", "enum": [a.value for a in ActionCategory],
                             "description": "声明本次实际行为，而非工具能力：普通浏览、点击、授权登录、"
-                            "只读分析选 analysis；改写业务数据选 intrusive_write；删除、爆破、反弹连接、"
-                            "WebShell、逃逸选对应类别，执行前逐次审批。与原生 action 独立。"}
+                            "只读探测与查询选 analysis；改写业务数据、上传、重启服务等选 "
+                            "intrusive_write；删除文件、爆破、反弹连接、WebShell、容器逃逸选对应"
+                            "类别，执行前逐次审批。与原生 action 独立。"}
                         schema["required"] = list(dict.fromkeys([*schema.get("required", []), action_param]))
                     tool_spec = ToolSpec(
                         name=exposed_name, kind=ToolKind.MCP,
                         description=t.get("description") or t["name"], risk=risk,
                         timeout_seconds=max(1, int(spec.timeout)),
-                        allowed_params=set(properties) | ({action_param} if spec.risk_by_action else set()),
-                        action_required=spec.risk_by_action, action_param=action_param,
-                        automatic_replay=not spec.risk_by_action, target_params=target_params,
+                        allowed_params=set(properties) | ({action_param} if declaration else set()),
+                        action_required=declaration, action_param=action_param,
+                        automatic_replay=not declaration, target_params=target_params,
                         scope_required=spec.scope_enforcement == "required",
                         scope_target_extractor=embedded_extractor,
                         allowed_agents=tuple(role.value for role in spec.allowed_agents))
@@ -568,6 +574,8 @@ async def _run_master(
     standing_rules: str = "",
     dialogue_history: list[dict[str, str]] | None = None,
     experience: Any = None,
+    platform: Any = None,
+    platform_facts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """装配主 Agent 并运行多轮闭环，返回 run_summary。"""
     from spiritscout.tools.journal import read_recovery_view
@@ -578,6 +586,23 @@ async def _run_master(
     # 开局召回：带标签与适用场景的经验，帮灵枢判断是否与本目标同场景
     recall = (experience.recent(limit=infra.cfg.experience.recall_limit)
               if experience else [])
+    master_extra: dict[str, Any] = {
+        "mode_notes": assembly.notes, "mission": mission,
+        "execution_recovery": recovery_context,
+        "secretary_enabled": infra.cfg.secretary.enabled,
+        "secretary_gateway": AgentBoundGateway(infra.gateway, infra.agent_models.get("secretary", "")),
+        "standing_rules": standing_rules,
+        "recent_experience": format_insights(recall),
+        "flag_manager": getattr(assembly, "flag_manager", None),
+        "user_inbox": user_inbox if user_inbox is not None else [],
+        "dialogue_history": dialogue_history,
+    }
+    if platform is not None:
+        # 平台适配器只在灵枢（主 Agent）侧：调度期开实例、完成期回收，
+        # 事实流进复盘视图；子 Agent 不接触平台凭据与接口
+        master_extra["platform"] = platform
+        master_extra["platform_facts"] = (
+            platform_facts if platform_facts is not None else [])
     master = MasterAgent(MasterContext(
         bus=infra.bus, blackboard=infra.blackboard, convergence=infra.convergence,
         gateway=AgentBoundGateway(
@@ -585,15 +610,7 @@ async def _run_master(
         policy=infra.policy, agents=assembly.agents,
         audit=infra.audit, enable_llm_planning=enable_llm_planning,
         tactic_map=assembly.tactic_map, plan_override=assembly.plan_provider,
-        extra={"mode_notes": assembly.notes, "mission": mission,
-               "execution_recovery": recovery_context,
-               "secretary_enabled": infra.cfg.secretary.enabled,
-               "secretary_gateway": AgentBoundGateway(infra.gateway, infra.agent_models.get("secretary", "")),
-               "standing_rules": standing_rules,
-               "recent_experience": format_insights(recall),
-               "flag_manager": getattr(assembly, "flag_manager", None),
-               "user_inbox": user_inbox if user_inbox is not None else [],
-               "dialogue_history": dialogue_history},
+        extra=master_extra,
         knowledge=infra.knowledge,   # 主 Agent 攻击路径模板接线（3.3.6）
         ring=infra.ring,             # 灵枢督导通道（与子 Agent 共持同一台账）
         pause_gate=infra.pause_gate,  # 暂停门共持（图节点边界挂起）
@@ -907,6 +924,7 @@ async def run_ctf_engagement(
     pause_gate: Any = None,
     resume: bool = False,
     dialogue_history: list[dict[str, str]] | None = None,
+    platform_profile: dict[str, Any] | None = None,
 ) -> EngagementResult:
     """CTF 专项任务入口（4.4/5.2）：五方向专项 Agent + Flag 统一管理。
 
@@ -915,6 +933,8 @@ async def run_ctf_engagement(
     flag_submit_fn=None 时只提取不提交（提交接口由使用者按赛方规范接入）。
     resume=True（续传）：Flag 库照常重载，已破题的赛题不再重解，
     未破题的与用户意见进入新一轮决策环。
+    platform_profile：平台档案（托管题/跑分平台）——列题/开容器/完成回收/
+    提交全部经适配器执行，题目源以平台清单为准；不提供时行为与原来一致。
     """
     if authorization.mode != RunMode.CTF:
         raise SpiritScoutError("run_ctf_engagement 要求授权模式为 CTF")
@@ -923,15 +943,43 @@ async def run_ctf_engagement(
                                approval_gate=approval_gate, ring=ring,
                                question_broker=question_broker,
                                pause_gate=pause_gate)
+    adapter: Any = None
     try:
+        challenges = [dict(ch) for ch in challenges]
+        if platform_profile:
+            from spiritscout.ctf.platform import (
+                PlatformAdapter,
+                parse_platform_profile,
+            )
+
+            try:
+                profile = parse_platform_profile(platform_profile)
+            except ValueError as exc:  # 档案已两处校验过；兜底不阻断任务
+                infra.audit.log("platform.fact", "runtime", {
+                    "action": "profile_invalid", "error": str(exc)[:200]})
+            else:
+                adapter = PlatformAdapter(profile, audit=infra.audit)
+                infra.audit.log("platform.fact", "runtime", {
+                    "action": "profile_loaded", "profile": profile.redacted()})
+                await adapter.precheck()
+                listed = await adapter.list_challenges()
+                if listed:
+                    # 平台列题即题目源：URL/文本推导的赛题不参与平台模式
+                    challenges = listed
+                else:
+                    infra.audit.log("platform.fact", "runtime", {
+                        "action": "list_empty",
+                        "detail": ("平台未列出题目，沿用任务提供的赛题清单"
+                                   if challenges else "平台未列出题目，任务未提供赛题")})
         flag_manager = FlagManager(
-            flag_patterns=flag_patterns, submit_fn=flag_submit_fn,
+            flag_patterns=flag_patterns,
+            submit_fn=flag_submit_fn or (adapter.submit if adapter is not None else None),
             audit=infra.audit, bus=infra.bus,
             store_path=infra.workspace / "flags.json",
         )
         assembly = _make_assembler(infra, enable_llm_planning).assemble(
             RunMode.CTF, challenges=challenges, flag_manager=flag_manager,
-            resume=resume)
+            resume=resume, platform=adapter)
         target = next(
             (str(c["url"]) for c in challenges if c.get("url")),
             "ctf://challenges",
@@ -941,12 +989,16 @@ async def run_ctf_engagement(
             user_inbox=user_inbox,
             standing_rules=standing_rules,
             dialogue_history=dialogue_history,
-            experience=infra.experience)
+            experience=infra.experience,
+            platform=adapter,
+            platform_facts=adapter.facts if adapter is not None else None)
 
         # ---- Flag 统一提交（4.4.6：格式校验/去重/频率控制/退避重试）
         submit_stats = await flag_manager.submit_all()
         run_summary["flag_submit"] = submit_stats
         flag_stats = flag_manager.stats()
+        if adapter is not None:
+            run_summary["platform"] = adapter.summary()
 
         report_path = report_path or _default_report_path(infra.workspace, "ctf_writeup")
         out = await _render_writeup(
@@ -971,6 +1023,12 @@ async def run_ctf_engagement(
         infra.outcome = "cancelled"
         raise
     finally:
+        if adapter is not None:
+            # 会话结束回收全部活跃容器（名额交还平台；失败只兜底不抛出）
+            with contextlib.suppress(Exception):
+                await adapter.close_all(reason="会话结束")
+            with contextlib.suppress(Exception):
+                await adapter.aclose()
         await infra.close()
 
 

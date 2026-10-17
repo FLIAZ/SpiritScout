@@ -24,6 +24,18 @@ class PlanUpsertResult:
     skipped: list[dict[str, str]] = field(default_factory=list)
 
 
+def _challenge_key(meta: dict | None) -> str:
+    """赛题归属键：meta.challenge.id；通用节点（无赛题）为空串。
+
+    去重与依赖绑定按「战术×赛题」判同：多道题并行时同战术节点
+    互不吞并，各题的路线只在自己的题内闭环。
+    """
+    ch = (meta or {}).get("challenge") or {}
+    if not isinstance(ch, dict):
+        return ""
+    return str(ch.get("id") or "")
+
+
 class TaskDAG:
     def __init__(self) -> None:
         self._nodes: dict[str, DAGNode] = {}
@@ -62,7 +74,8 @@ class TaskDAG:
     def _upsert_from_plan(
         self, plan_nodes: list[dict], round_no: int,
     ) -> tuple[list[DAGNode], list[dict[str, str]]]:
-        """从元规划输出合并节点（动态重规划：已存在同战术节点不重复建）。
+        """从元规划输出合并节点（动态重规划：同「战术×赛题」节点不重复建；
+        无赛题的通用节点维持原战术维度语义）。
 
         两遍构建：先建全部新节点、后解析依赖——计划内节点可以互相引用，
         节点在计划中的先后顺序不再决定依赖能否解析（子节点先于父节点
@@ -73,10 +86,13 @@ class TaskDAG:
         created: list[DAGNode] = []
         skipped: list[dict[str, str]] = []
         pairs: list[tuple[dict, DAGNode]] = []
-        # 第一遍：建节点（依赖先置空）
+        # 第一遍：建节点（依赖先置空）；去重键为「战术×赛题」——
+        # 多道题并行时同战术节点各题独立落图，不互相静默吞并。
         for spec in plan_nodes:
             tactic = str(spec.get("tactic", "CUSTOM"))
-            existing = self.find_by_tactic(tactic)
+            ckey = _challenge_key(spec.get("meta"))
+            existing = [n for n in self.find_by_tactic(tactic)
+                        if _challenge_key(n.meta) == ckey]
             # 历史失败不应让已重建成功的战术每轮再次生成。
             latest = max(enumerate(existing), key=lambda p: (p[1].round_created, p[0]))[1] \
                 if existing else None
@@ -86,7 +102,9 @@ class TaskDAG:
                 skipped.append({
                     "tactic": tactic,
                     "title": str(spec.get("title", tactic))[:120],
-                    "reason": f"同战术节点已存在（{latest.tactic}，状态 {latest.status.value}）",
+                    "reason": (f"同战术节点已存在（{latest.tactic}"
+                               + (f"·赛题 {ckey}" if ckey else "")
+                               + f"，状态 {latest.status.value}）"),
                 })
                 continue
             node = self.add_node(
@@ -112,13 +130,15 @@ class TaskDAG:
                             f"{dt}（depends_on 必须指向计划内或已存在的战术）")
                     dep_ids.append(target.node_id)
                 node.depends_on = dep_ids
-            replacements = {node.tactic: node for node in created}
+            replacements = {(node.tactic, _challenge_key(node.meta)): node
+                            for node in created}
             for node in self._nodes.values():
                 if node.status not in {TaskStatus.PENDING, TaskStatus.DISPATCHED}:
                     continue
                 for index, dep_id in enumerate(node.depends_on):
                     dep = self._nodes.get(dep_id)
-                    replacement = replacements.get(dep.tactic) if dep else None
+                    replacement = replacements.get(
+                        (dep.tactic, _challenge_key(dep.meta))) if dep else None
                     if (dep and replacement and dep.status in {
                         TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.PRUNED,
                     }):
@@ -133,11 +153,16 @@ class TaskDAG:
     def _pick_dependency(self, tactic: str, exclude: DAGNode) -> DAGNode | None:
         """依赖绑定规则：同战术候选取最新创建且未失败的——失败重建后
         下游绑到重建节点，不被旧失败节点卡死；全部失败仍绑最新（下游
-        等待重试完成后解锁，是否重建由复盘层决策）。"""
+        等待重试完成后解锁，是否重建由复盘层决策）。多赛题并行时优先
+        同赛题候选：A 题的后续阶段不绑到 B 题的同名战术节点上（无同题
+        候选时才回退全量候选）。"""
         cands = [n for n in self._nodes.values()
                  if n.tactic == tactic and n.node_id != exclude.node_id]
         if not cands:
             return None
+        ckey = _challenge_key(exclude.meta)
+        same = [n for n in cands if _challenge_key(n.meta) == ckey]
+        cands = same or cands
         pool = [n for n in cands if n.status != TaskStatus.FAILED] or cands
         best = pool[0]
         for n in pool[1:]:

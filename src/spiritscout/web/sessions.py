@@ -21,7 +21,9 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
+import yaml
 from pydantic import ValidationError
 
 from spiritscout.agents.ring import RingLedger
@@ -145,6 +147,96 @@ async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
         "intent": intent, "heuristic": heuristic.value,
         "rationale": str((data or {}).get("rationale", ""))[:200]})
     return mode, intent
+
+
+async def _llm_extract_platform(cfg: SystemConfig, models: list[ModelEntry],
+                                mission: str, audit: AuditLogger
+                                ) -> dict[str, Any] | None:
+    """平台档案抽取：任务文本若描述了托管平台（跑分/CTF）的 API 文档
+    （接口清单/字段/凭证/限额），把它机械转录为可执行的平台档案 JSON。
+
+    独立小调用（与语义路由同一条对话链路）。判定「是否描述了平台」完全
+    在提示词内交给模型；转录必须照抄文档事实，不得发明接口/字段。失败、
+    不适用或校验不过 → None（任务照常按赛题清单执行，不阻断开工）。
+    """
+    from spiritscout.ctf.platform import parse_platform_profile
+    from spiritscout.gateway.backends import extract_json
+
+    gateway = _conversation_gateway(cfg, models, audit)
+    try:
+        resp = await gateway.chat(
+            [{"role": "system", "content": (
+                "你是平台对接档案抽取器。用户任务文本里可能贴了某个托管平台"
+                "（跑分/CTF 平台）的使用说明与 API 文档。先判断：文本是否"
+                "描述了平台 API（HTTP 接口清单、鉴权方式、提交约定、并发"
+                "限额）？是 → 机械转录为 JSON 档案；不是（普通题目描述、"
+                "附件题、单站授权测试等）→ 返回 {\"platform\": null}。"
+                "转录纪律：只抄写文档中出现过的事实（URL、方法、字段名、"
+                "占位值、凭证原值），不得发明文档未出现的接口或字段；"
+                "接口用不到的就不写；没有把握的字段宁可省略。"
+                "ROLE: platform_extractor")},
+             {"role": "user", "content": json.dumps({
+                 "mission": mission[:16000],
+                 "answer_shape": {
+                     "platform": {
+                         "name": "平台名",
+                         "base_url": "API 根地址（文档给出的域名）",
+                         "headers": {"凭证头名": "文档原文中的凭证值"},
+                         "ops": {
+                             "precheck": {"method": "GET", "url": "健康检查完整 URL（如有）"},
+                             "list": {"method": "GET|POST", "path": "相对路径或完整 URL",
+                                      "query": {}, "body": {},
+                                      "items_field": "应答中题目数组的点路径（如 data.challenges；顶层数组则留空）"},
+                             "start": {"method": "…", "path": "…", "query": {}, "body": {},
+                                       "addr_field": "应答中容器地址字段的点路径（如 container_addr）"},
+                             "close": {"method": "…", "path": "…", "query": {}, "body": {}},
+                             "submit": {"method": "…", "path": "…", "query": {}, "body": {},
+                                        "accepted_field": "应答中「是否判对」字段的点路径（如 correct）",
+                                        "duplicate_code": "重复提交的业务错误码（如 duplicate）"},
+                             "hint": {"method": "…", "path": "…", "query": {}, "body": {}},
+                         },
+                         "limits": {"max_active": "并发容器上限（文档写了几就填几）"},
+                         "challenge_fields": {
+                             "id": "列表应答里的题号字段（必填）",
+                             "title": "标题字段（没有就省略）",
+                             "container_addr": "容器地址字段（有就填）",
+                             "is_completed": "该题是否完成的字段（有就填）",
+                             "（其余对解题有用的事实字段也映射进来，内部名自取英文名）": "字段路径"},
+                     },
+                 },
+                 "rules": [
+                     "题号/地址占位写 {challenge}，flag 值占位写 {flag}（例：query {\"unique_code\": \"{challenge}\"}，body {\"flag\": \"{flag}\"}）",
+                     "base_url 与 path 拼成完整地址；文档给的是完整 URL 就直接写 url 字段",
+                     "challenge_fields 的值是该字段在列表应答里的点路径",
+                 ],
+             }, ensure_ascii=False)}],
+            task_type="classification", response_format="json",
+            reasoning_effort="low", model=_bound_model(cfg, models),
+            timeout_seconds=min(90, cfg.gateway.request_timeout_seconds))
+    except Exception as exc:  # noqa: BLE001 —— 抽取失败不阻断开工
+        audit.log("system.lifecycle", "platform_extractor", {
+            "action": "platform_extract_failed", "error": str(exc)[:200]})
+        return None
+    try:
+        data = extract_json(resp.content)
+    except Exception:  # noqa: BLE001 —— 应答不可解析按「无平台」处理
+        data = None
+    raw = (data or {}).get("platform") if isinstance(data, dict) else None
+    if not isinstance(raw, dict) or not raw:
+        audit.log("decision.change", "platform_extractor", {
+            "action": "platform_not_found",
+            "rationale": str((data or {}).get("rationale", "")
+                             if isinstance(data, dict) else "")[:200]})
+        return None
+    try:
+        profile = parse_platform_profile(raw)
+    except ValueError as exc:
+        audit.log("decision.change", "platform_extractor", {
+            "action": "platform_profile_invalid", "error": str(exc)[:200]})
+        return None
+    audit.log("decision.change", "platform_extractor", {
+        "action": "platform_profile_extracted", "profile": profile.redacted()})
+    return profile.to_dict()
 
 TERMINAL_STATES = frozenset({"completed", "failed", "stopped", "interrupted"})
 
@@ -765,6 +857,7 @@ class SessionManager:
                 rps=float(req.get("rps", 10.0)),
                 flag_format=req.get("flag_format") or None,
                 challenges_yaml=req.get("challenges_yaml") or None,
+                platform_yaml=req.get("platform_yaml") or None,
                 rules_yaml=req.get("rules_yaml") or None,
                 accept_rule_conflicts=bool(req.get("accept_rule_conflicts", False)),
                 mission=mission if mission is not None
@@ -1061,6 +1154,26 @@ class SessionManager:
                             "action": "llm_mode_route_rejected",
                             "llm_mode": routed.value, "kept": mode.value,
                             "reason": str(exc)[:300]})
+                # CTF 无显式平台档案时做一次抽取：任务文本若描述了托管平台
+                # 的 API 文档（跑分/CTF 平台），把档案落进本次运行并按平台
+                # 列题/开容器/回收/提交；没描述则是零影响的小调用。抽到的
+                # 档案回写启动参数（续传/重建计划不再重抽）
+                if (mode == RunMode.CTF and plan.platform_profile is None
+                        and not no_llm and models and plan.mission):
+                    self._set_phase(session, "platform_profile", audit)
+                    found = await _llm_extract_platform(
+                        cfg, models, plan.mission, audit)
+                    if found:
+                        plan.platform_profile = found
+                        if isinstance(session.launch_request, dict):
+                            session.launch_request["platform_yaml"] = yaml.dump(
+                                found, allow_unicode=True, sort_keys=False)
+                        self._persist(session)
+                        # 平台宿主并入授权域（平台 API 由装配层直连；纯
+                        # 托管题任务在目标尚未下发时也能通过启动门）
+                        host = urlparse(str(found.get("base_url") or "")).hostname or ""
+                        if host and host not in plan.authorization.scope.allowed_domains:
+                            plan.authorization.scope.allowed_domains.append(host)
                 # 真任务缺任何授权对象（范围空）：不派工也不硬拒——让会话
                 # 以 ScopeViolation 摔死在启动门，续传还会再摔一次。灵枢
                 # 向用户说明缺口，补齐后发送即自动开工
@@ -1106,6 +1219,7 @@ class SessionManager:
                         standing_rules=session.standing_rules,
                         pause_gate=session.pause_gate,
                         dialogue_history=session.dialogue_history,
+                        platform_profile=plan.platform_profile,
                         resume=resume)
                 elif mode == RunMode.COMPETITION:
                     result = await run_competition_engagement(

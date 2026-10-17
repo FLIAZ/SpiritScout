@@ -95,21 +95,6 @@ _HTML_HINT = re.compile(
 # 观察保留的高信号响应头（跳转目标/会话/指纹/鉴权）
 _OBS_HEADERS = ("location", "set-cookie", "server", "x-powered-by",
                 "content-type", "www-authenticate", "x-flag", "allow")
-# 未裁定预算时的默认互补视角（与主路线的体验视角并行，零额外 LLM 延迟）
-_COMPLEMENTARY_ANGLE: dict[str, str] = {
-    "web": "互补视角：服务与技术面取证——指纹/响应头/接口清单/静态资源与"
-           "注释线索，不与体验视角重复走页面流程",
-}
-
-# 解题思维流程（提示词层的方法引导，不限定具体动作；具体出牌仍由 LLM 按题决定）
-_METHODOLOGY = (
-    "解题思路像人一样：拿到题先把这道题当成一个正常功能**完整用一遍**——"
-    "打开页面就顺着它的引导点进去、把表单填了、把按钮按了、按它设计的流程"
-    "从头走到尾，边用边想「这东西是干什么的、谁在用、正常走完会发生什么」；"
-    "用通了、看懂它怎么运转了，再回头看哪一步可以做得不对（参数被改、步骤"
-    "被跳过、状态被伪造、数据被换掉），针对那个点去试。不要一上来就盯着"
-    "静态文件反复读，也不要脱离这个应用本身去猜通用漏洞；每步能说出"
-    "「我看到/试出了什么，接下来想验证什么」。")
 
 
 def _challenge_text(ch: dict[str, Any]) -> str:
@@ -523,7 +508,8 @@ class CTFBaseAgent(SubAgent):
                            "DELETE 这类有副作用的请求必填：analysis=只是"
                            "查询/读取；intrusive_write=写入/上传/增删改数据；"
                            "brute_force=爆破；webshell_upload=上传 WebShell。"
-                           "敏感类别会即时请示用户，每次调用单独批准。"
+                           "危险类别（删除/爆破/反弹连接/WebShell/逃逸）会"
+                           "即时请示用户；其余如实注明即可。"
                            "缺声明的副作用请求会被退回。"},
             }),
         _fn("shell",
@@ -540,8 +526,9 @@ class CTFBaseAgent(SubAgent):
                            "delete_files=删除文件；reverse_shell=反弹 shell；"
                            "webshell_upload=上传 WebShell；container_escape="
                            "容器/沙箱逃逸尝试；brute_force=爆破；"
-                           "intrusive_write=其他有副作用的写入/上传。敏感类别"
-                           "会即时请示用户，批准后同类动作本会话不再重复询问。"},
+                           "intrusive_write=其他有副作用的写入/上传。删除/"
+                           "爆破/反弹连接/WebShell/逃逸会即时请示用户，每次"
+                           "单独批准；其余如实注明即可。"},
                 "timeout": {"type": "number",
                             "description": "超时秒数（缺省 60，上限 300）"},
             }, required=["command", "action"]),
@@ -560,8 +547,9 @@ class CTFBaseAgent(SubAgent):
                            "delete_files=删除文件；reverse_shell=反弹 shell；"
                            "webshell_upload=上传 WebShell；container_escape="
                            "容器/沙箱逃逸尝试；brute_force=爆破；"
-                           "intrusive_write=其他有副作用的写入/上传。敏感类别"
-                           "会即时请示用户，批准后同类动作本会话不再重复询问。"},
+                           "intrusive_write=其他有副作用的写入/上传。删除/"
+                           "爆破/反弹连接/WebShell/逃逸会即时请示用户，每次"
+                           "单独批准；其余如实注明即可。"},
                 "timeout": {"type": "number",
                             "description": "超时秒数（缺省 60，上限 300）"},
             }, required=["code", "action"]),
@@ -633,8 +621,6 @@ class CTFBaseAgent(SubAgent):
                         "description": "期望回传的结论"}},
             required=["brief"]),
     ]
-    # 方向知识（思路启发，不是步骤；LLM 按题面证据自选方向）
-    direction_brief: ClassVar[str] = ""
     # 解题路线的安全顶是回合上限与重复空转熔断；健康度剪枝面向多路线资源
     # 再分配场景，逐轮探索的起步进展分天然低于阈值，会误杀在途调查——豁免
     health_prune_enabled: ClassVar[bool] = False
@@ -671,6 +657,16 @@ class CTFBaseAgent(SubAgent):
     def challenge_id(self, task: Task) -> str:
         return str(self.challenge_of(task).get("id", task.task_id))
 
+    def _tool_ctx(self, task: Task) -> dict[str, Any]:
+        """本题工具调用上下文：沙箱工作目录按赛题隔离。
+
+        多题并行（或同题多分支重攻）时，各题的脚本、产物与上次输出日志
+        落 ``sandbox/<赛题 id>/``，互不覆盖；无赛题节点回落任务 id。
+        SRC 等非赛题链路不经这里，维持会话级工作目录。
+        """
+        ctx = getattr(self.ctx, "builtin_ctx", None) or {}
+        return {**ctx, "workspace_scope": self.challenge_id(task)}
+
     # ------------------------------------------------------------ Flag 闭环
 
     # ------------------------------------------------------------ 路线生成
@@ -701,15 +697,13 @@ class CTFBaseAgent(SubAgent):
         if not plans:
             plans = [RoutePlan(
                 name="solve",
-                strategy=self.direction_brief or "自主解题：从题面与目标出发自行决定方向",
+                strategy="自主解题：从题面与目标出发自行决定方向",
                 steps=[{"action": "investigate"}])]
             if k > 1:
+                # 角度提案不可用时维持单线语义的第二条路线：不注入任何
+                # 方法论提示，解题思路由 Agent 自己的思维链构造
                 plans.append(RoutePlan(
-                    name="solve_alt",
-                    strategy=_COMPLEMENTARY_ANGLE.get(
-                        self.direction,
-                        "互补视角：从服务与技术面取证——指纹、响应头、接口清单、"
-                        "静态资源与注释里的线索"),
+                    name="solve_alt", strategy="",
                     steps=[{"action": "investigate"}]))
         plans = plans[:k]
         if self.ctx.knowledge is not None:
@@ -717,22 +711,21 @@ class CTFBaseAgent(SubAgent):
         return plans
 
     async def _llm_propose_angles(self, task: Task, k: int) -> list[dict[str, str]]:
-        """LLM 按题面提出 k 个互不重叠的调查角度（仅在多角度并发时使用）。"""
+        """LLM 按题面提出 k 个互不重叠的调查角度（仅在多角度并发时使用）。
+
+        只约束输出形态与分工程度，不引导解题方法——思路由各路线自己构造。
+        """
         ch = self.challenge_of(task)
         data = await self._llm_chat_json("route_planner", {
             "challenge": _challenge_view(ch),
             "attachments": [str(a)[:300] for a in ch.get("attachments", [])[:10]],
             "slots": k,
             "tools": [t["function"]["name"] for t in self.tool_schemas],
-            "direction_brief": self.direction_brief,
             "constraints": (
                 "返回 JSON：{\"angles\": [{\"name\": 英文短名(小写字母数字下划线), "
                 "\"angle\": 一句话调查角度}]}。角度必须针对本题的具体信息"
                 "（题面/附件/目标特征），互相不重叠，最多 slots 条；"
-                + _METHODOLOGY +
-                " 角度先覆盖完整体验与目标理解，再考虑针对已见线索的深入利用；"
-                "不要以具体攻击技术（注入/爆破等）作为初始角度——除非题面信息"
-                "已明确指向它。题目信息不足以区分时给出 1 条即可。"),
+                "题目信息不足以区分时给出 1 条即可。"),
         }, max_user_chars=8000, timeout_seconds=_SOLVER_TIMEOUT,
             reasoning_effort=self.task_effort(task), task=task)
         raw_angles = (data or {}).get("angles")
@@ -1240,7 +1233,7 @@ class CTFBaseAgent(SubAgent):
         failed = 0
         for p in paths:
             res = await self.ctx.tools.call(
-                "http_probe", {"url": base + p}, **self.ctx.builtin_ctx)
+                "http_probe", {"url": base + p}, **self._tool_ctx(task))
             if not res.ok:
                 failed += 1
                 continue
@@ -1477,7 +1470,7 @@ class CTFBaseAgent(SubAgent):
         if entry is None:
             return _ToolOutcome(ok=False,
                                 text=f"MCP 工具 {name} 不在当前会话工具目录。")
-        res = await self.ctx.tools.call(name, args, **self.ctx.builtin_ctx)
+        res = await self.ctx.tools.call(name, args, **self._tool_ctx(task))
         text = res.stdout or res.error or res.stderr
         note = f"MCP {entry['server']}/{entry['tool']}"
         return _ToolOutcome(ok=res.ok,
@@ -1611,7 +1604,7 @@ class CTFBaseAgent(SubAgent):
             request["headers"] = headers
         if data:
             request["data"] = data
-        res = await self.ctx.tools.call("http_probe", request, **self.ctx.builtin_ctx)
+        res = await self.ctx.tools.call("http_probe", request, **self._tool_ctx(task))
         if not res.ok:
             if self.ctx.ring is not None:
                 self.ctx.ring.record_attempt(
@@ -1659,14 +1652,14 @@ class CTFBaseAgent(SubAgent):
         if not code:
             return _ToolOutcome(ok=False, text=f"{name} 工具需要 {param} 参数。")
         # 行为类别须模型如实自报（通用执行入口无法确认性质就不执行——
-        # 不以 readonly 自动放行）；敏感类别由策略门即时请示用户
+        # 不以 readonly 自动放行）；危险语义由策略门即时请示用户
         action = str(args.get("action", "") or "").strip()
         if not action:
             return _ToolOutcome(ok=False, text=(
                 f"{name} 工具需要 action 参数：如实声明本次执行的行为类别"
                 "（analysis / delete_files / reverse_shell / webshell_upload / "
                 "container_escape / brute_force / intrusive_write）。"
-                "这是审批与审计的依据，缺声明不执行。"))
+                "这是危险动作审批与审计的依据，缺声明不执行。"))
         try:
             timeout = float(args.get("timeout") or 60)
         except (TypeError, ValueError):
@@ -1678,7 +1671,7 @@ class CTFBaseAgent(SubAgent):
             {"code": code, "language": "python" if name == "python" else "shell",
              "timeout": timeout, "log_name": f"output_{route.name}",
              "action": action},
-            **self.ctx.builtin_ctx)
+            **self._tool_ctx(task))
         if not res.ok and not (res.stdout or res.stderr):
             state["observations"].append(
                 {"action": desc, "result": f"执行失败: {str(res.error)[:100]}"})
@@ -1739,7 +1732,7 @@ class CTFBaseAgent(SubAgent):
                 parsed_map[str(path)] = cached
                 continue
             res = await self.ctx.tools.call(
-                "file_analyze", {"path": path}, **self.ctx.builtin_ctx)
+                "file_analyze", {"path": path}, **self._tool_ctx(task))
             if res.ok and isinstance(res.parsed, dict):
                 self.cache.put(self.route_namespace, f"file|{path}", res.parsed)
                 parsed_map[str(path)] = res.parsed
@@ -1756,7 +1749,7 @@ class CTFBaseAgent(SubAgent):
         all_strings: list[str] = []
         for path in attachments:
             res = await self.ctx.tools.call(
-                "file_analyze", {"path": path}, **self.ctx.builtin_ctx)
+                "file_analyze", {"path": path}, **self._tool_ctx(task))
             if not res.ok:
                 notes.append(f"{path}: {res.error}")
                 body_lines.append(f"{path}: 解析失败 {str(res.error)[:120]}")
@@ -1801,7 +1794,7 @@ class CTFBaseAgent(SubAgent):
                     f"入口页 {url}：{prior['agent_name']} 已试过且无产出（环形避让，未重复请求）")
                 return 0.0, f"环形共享：{prior['agent_name']} 已试入口页（无产出）"
             res = await self.ctx.tools.call("http_probe", {"url": url},
-                                            **self.ctx.builtin_ctx)
+                                            **self._tool_ctx(task))
             if not res.ok:
                 state["seed"].append(f"入口页 {url}：不可达（{str(res.error)[:120]}）")
                 if self.ctx.ring is not None:
@@ -1848,8 +1841,6 @@ class CTFBaseAgent(SubAgent):
         return (
             agent_system_prompt(self.agent_type, allowed)
             + "\n"
-            f"{self.direction_brief}\n"
-            f"{_METHODOLOGY}\n"
             "工作方式：工具就是你的手——需要看什么就用工具去拿，不要凭空猜测"
             "页面内容或响应。每一轮可以调用一个或多个工具：互不依赖的请求放在"
             "同一轮并发发出，省时间。\n"
@@ -1941,9 +1932,8 @@ class CTFBaseAgent(SubAgent):
         if angle:
             parts.append("## 本路线调查角度（与并行分支分工，不重复做功）\n"
                          + angle[:200])
-        parts.append("## 任务\n夺取本题 Flag。Flag 常藏在响应正文/注释/编码串/"
-                     "响应头或附件里；判定拿到后用 submit_flag 提交，拿到应答"
-                     "即收尾。")
+        parts.append("## 任务\n夺取本题 Flag；判定拿到后用 submit_flag 提交，"
+                     "拿到应答即收尾。")
         history = self.ctx.blackboard.read(BlackboardLayer.TOPOLOGY, "historical-assets")
         if history:
             parts.append("## 同一资产的历史参考（本次未复核，不能沿用旧授权）\n" + json.dumps(history, ensure_ascii=False)[:8000])
@@ -2014,11 +2004,6 @@ class CTFWebAgent(CTFBaseAgent):
     agent_type = AgentType.CTF_WEB
     direction = "web"
     route_namespace = "ctf_web"
-    direction_brief = (
-        "先把入口页当用户界面用起来：按页面引导点开各个功能、提交表单、走完"
-        "它的正常业务流程，同时从响应内容里读懂这个应用是做什么的、有哪些"
-        "功能与角色。没有任何预设考点清单——信息由你自行收集，解题计划由你"
-        "从收集到的证据里分析得出。")
     tool_schemas: ClassVar[list[dict[str, Any]]] = [
         *CTFBaseAgent.tool_schemas,
         _fn("probe_paths",
@@ -2042,11 +2027,6 @@ class CTFCryptoAgent(CTFBaseAgent):
     agent_type = AgentType.CTF_CRYPTO
     direction = "crypto"
     route_namespace = "ctf_crypto"
-    direction_brief = (
-        "Crypto 题：先完整读题面与附件——密文长什么样、有没有算法描述与提示，"
-        "信息由你自行收集。本方向的解码/爆破工具与 shell/python 都是你可用的"
-        "手，怎么用、用不用由你依据证据决定；超出工具能力的数学结构，把你的"
-        "结构分析与卡点写进结论。")
     tool_schemas: ClassVar[list[dict[str, Any]]] = [
         *CTFBaseAgent.tool_schemas,
         _fn("decode_chain", "对指定串做 Base64/Hex/URL/Rot13 递归解码。",
@@ -2111,10 +2091,6 @@ class CTFMiscAgent(CTFBaseAgent):
     agent_type = AgentType.CTF_MISC
     direction = "misc"
     route_namespace = "ctf_misc"
-    direction_brief = (
-        "Misc 题：线索面由你自行勘察——附件（魔数/元信息/字符串）与题面里的"
-        "一切可见形态都值得先看一遍。工具与 shell/python 由你按观察到的形态"
-        "自行选择；超出工具能力的部分，把观察与假设写进结论，供复盘换方向。")
     tool_schemas: ClassVar[list[dict[str, Any]]] = [
         *CTFBaseAgent.tool_schemas,
         _fn("deep_strings",
@@ -2160,10 +2136,6 @@ class CTFReverseAgent(CTFBaseAgent):
     agent_type = AgentType.CTF_REVERSE
     direction = "reverse"
     route_namespace = "ctf_reverse"
-    direction_brief = (
-        "Reverse 题：先用 analyze_attachments 认识附件（魔数/架构/字符串），"
-        "之后算法与校验逻辑由你从收集到的信息自行归纳推演；需要动态调试或"
-        "符号执行时，把线索与卡点写进结论。")
     tool_schemas: ClassVar[list[dict[str, Any]]] = [
         *CTFBaseAgent.tool_schemas,
         _fn("algo_hints",
@@ -2206,10 +2178,6 @@ class CTFPwnAgent(CTFBaseAgent):
     agent_type = AgentType.CTF_PWN
     direction = "pwn"
     route_namespace = "ctf_pwn"
-    direction_brief = (
-        "Pwn 题：先用 analyze_attachments/checksec/danger_funcs 认识二进制与"
-        "题面远程入口（nc 地址/协议），利用思路由你从收集到的证据出发自行形成；"
-        "需要构造与发送利用脚本时用 shell/python（pwntools 可直接导入）。")
     tool_schemas: ClassVar[list[dict[str, Any]]] = [
         *CTFBaseAgent.tool_schemas,
         _fn("checksec",
