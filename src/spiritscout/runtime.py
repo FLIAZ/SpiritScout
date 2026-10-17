@@ -12,6 +12,7 @@ import contextlib
 import copy
 import hashlib
 import os
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -50,7 +51,11 @@ from spiritscout.gateway import (
     ModelRegistry,
 )
 from spiritscout.knowledge import KnowledgeStore
-from spiritscout.knowledge.experience import ExperienceStore
+from spiritscout.knowledge.experience import (
+    ExperienceStore,
+    experience_db_path,
+    format_insights,
+)
 from spiritscout.modes import ModeAssembler
 from spiritscout.policy import PolicyEngine, ScopeGuard
 from spiritscout.tools.builtin import (
@@ -347,7 +352,10 @@ async def _build_infra(
         from spiritscout.gateway.usage import bind_usage
 
         bind_usage(gateway, workspace / "usage.json")
-        experience = ExperienceStore(workspace / "experience.db", audit=audit)
+        # 经验库默认跟随工作区；Web 会话在 _session_cfg 里把 root 指向共享目录，
+        # 保证提炼出的经验跨会话可见（会话隔离不隔离经验）。
+        experience = ExperienceStore(
+            experience_db_path(cfg.experience.root, str(workspace)), audit=audit)
         for name in ("attachments", "sandbox", "artifacts"):
             if (workspace / name).is_symlink():
                 raise ConfigurationError(f"共享目录不能是符号链接: {name}")
@@ -567,6 +575,9 @@ async def _run_master(
     recovery = read_recovery_view(Path(infra.cfg.blackboard.sqlite_path))
     recovery_context = (infra.tools.journal.planning_context(recovery)
                         if infra.tools.journal is not None else {})
+    # 开局召回：带标签与适用场景的经验，帮灵枢判断是否与本目标同场景
+    recall = (experience.recent(limit=infra.cfg.experience.recall_limit)
+              if experience else [])
     master = MasterAgent(MasterContext(
         bus=infra.bus, blackboard=infra.blackboard, convergence=infra.convergence,
         gateway=AgentBoundGateway(
@@ -579,8 +590,7 @@ async def _run_master(
                "secretary_enabled": infra.cfg.secretary.enabled,
                "secretary_gateway": AgentBoundGateway(infra.gateway, infra.agent_models.get("secretary", "")),
                "standing_rules": standing_rules,
-               "recent_experience": [
-                   e["insight"] for e in (experience.recent(limit=5) if experience else [])],
+               "recent_experience": format_insights(recall),
                "flag_manager": getattr(assembly, "flag_manager", None),
                "user_inbox": user_inbox if user_inbox is not None else [],
                "dialogue_history": dialogue_history},
@@ -603,10 +613,23 @@ async def _run_master(
     verifier = VerificationQueue(_sub_ctx(infra), verification_rules, enabled=enable_llm_planning)
     verifier.start()
     master.ctx.extra["verification_drain"] = verifier.drain
+    run_summary: dict[str, Any] = {}
     try:
         run_summary = await master.run(authorization=infra.authorization, target=target)
         await verifier.drain()
         run_summary["verification"] = verifier.stats()
+    except asyncio.CancelledError:
+        # 用户主动停止：已跑的轮次与试错同样值得沉淀（受 distill_timeout 硬顶约束）
+        await _distill_best_effort(infra, assembly, experience, enable_llm_planning,
+                                   run_summary or None, mission=mission,
+                                   outcome="cancelled")
+        raise
+    except Exception as exc:  # noqa: BLE001 —— 失败先沉淀教训，再原样抛给上层
+        await _distill_best_effort(infra, assembly, experience, enable_llm_planning,
+                                   run_summary or None, mission=mission,
+                                   outcome="failed",
+                                   error=f"{type(exc).__name__}: {exc}")
+        raise
     finally:
         await verifier.close()
     run_summary["recovery_mode"] = recovery_context.get("mode", "history_replan")
@@ -614,19 +637,14 @@ async def _run_master(
         run_summary["execution_run_id"] = infra.tools.journal.run_id
     run_summary["model_usage"] = infra.gateway.usage_report()
 
-    # 灵枢收尾提炼经验：从全场审计与结论中提炼解题思维（非步骤），存入经验库
-    if enable_llm_planning and experience:
-        try:
-            await _extract_experience(
-                AgentBoundGateway(
-                    infra.gateway, infra.agent_models.get("master", "")),
-                experience, run_summary, infra.audit)
-        except (SpiritScoutError, OSError, ValueError, TypeError):
-            pass
+    # 灵枢收尾提炼经验：从全场战报中提炼可复用洞察（非步骤），存入经验库
+    await _distill_best_effort(infra, assembly, experience, enable_llm_planning,
+                               run_summary, mission=mission, outcome="completed")
 
-    # 刷新灵枢 extra 中的经验（新提炼的经验立即可用于下一轮规划）
-    recent_exp = experience.recent(limit=5) if experience else []
-    master.ctx.extra["recent_experience"] = [e["insight"] for e in recent_exp]
+    # 刷新灵枢 extra 中的经验（提炼结果立即对后续派工可见）
+    recent_exp = (experience.recent(limit=infra.cfg.experience.recall_limit)
+                  if experience else [])
+    master.ctx.extra["recent_experience"] = format_insights(recent_exp)
     run_summary["mode_notes"] = assembly.notes
     if mission:
         run_summary["mission"] = mission
@@ -660,45 +678,146 @@ async def _render_writeup(
                                    context=fallback_context)
 
 
-async def _extract_experience(gateway, experience, run_summary, audit):
-    """灵枢收尾提炼经验：从全场数据中提炼可复用的解题思维（非步骤）。
+def _distill_digest(infra: _Infra, assembly: Any,
+                    run_summary: dict[str, Any] | None,
+                    mission: str, outcome: str, error: str = "") -> dict[str, Any]:
+    """收尾提炼的战报：把成/败/坑的可复用信号压成小块 JSON（不含步骤序列）。"""
+    summary = run_summary or {}
+    digest: dict[str, Any] = {
+        "mode": infra.authorization.mode.value,
+        "platform": infra.authorization.src_platform or "",
+        "target": str(summary.get("target")
+                      or infra.authorization.target_description or "")[:200],
+        "mission": str(mission or "")[:200],
+        "outcome": outcome,
+        "rounds": summary.get("rounds_executed", 0),
+        "stop_reason": str(summary.get("stop_reason") or "")[:160],
+    }
+    if error:
+        digest["error"] = error[:300]
+    flag_manager = getattr(assembly, "flag_manager", None)
+    if flag_manager is not None:
+        try:
+            digest["flags"] = flag_manager.stats()
+        except Exception:  # noqa: BLE001 —— 统计失败不阻断提炼
+            pass
+    dag = summary.get("dag_nodes") or []
+    if dag:
+        digest["plan"] = [{"title": str(node.get("title", ""))[:80],
+                           "status": str(node.get("status", ""))}
+                          for node in dag[:10]]
+    try:
+        bb = infra.blackboard
+        findings: dict[str, Any] = {"total": bb.count(BlackboardLayer.VULN),
+                                    "by_status": bb.status_counts(BlackboardLayer.VULN)}
+        accepted = []
+        for rec in bb.query(BlackboardLayer.VULN, limit=200):
+            data = rec["data"]
+            if str(data.get("status")) == "accepted" and data.get("title"):
+                accepted.append({"title": str(data["title"])[:100],
+                                 "severity": str(data.get("severity", "")),
+                                 "type": str(data.get("vuln_type", ""))})
+        if accepted:
+            findings["accepted"] = accepted[:8]
+        digest["findings"] = findings
+        trials: list[dict[str, str]] = []
+        for rec in bb.query(BlackboardLayer.TASK_STATE, limit=100):
+            data = rec["data"]
+            if "dag_snapshot" in data:
+                continue
+            task = data.get("task", {})
+            for route in data.get("routes", []):
+                if str(route.get("status")) in {"pruned", "failed"}:
+                    note = (route.get("notes") or [""])[-1]
+                    trials.append({"agent": str(task.get("agent_type", "")),
+                                   "route": str(route.get("name", ""))[:60],
+                                   "status": str(route.get("status")),
+                                   "note": str(note)[:140]})
+        if trials:
+            digest["trials"] = trials[:8]
+        digest["tasks_recorded"] = bb.count(BlackboardLayer.TASK_STATE)
+    except Exception:  # noqa: BLE001 —— 黑板读取异常时保留最小战报
+        pass
+    return digest
 
-    不是解题步骤（模型已经会做），而是「这类场景下我学到了什么」——
-    平台特性、绕过手法的适用条件、容易踩的坑。存入全局经验库供
-    后续会话检索。
-    """
+
+def _worth_distilling(digest: dict[str, Any]) -> bool:
+    """正常收尾总提炼（提示词自行决定是否空数组）；中止/失败需确实跑过东西。"""
+    if digest.get("outcome") == "completed":
+        return True
+    flags = digest.get("flags") or {}
+    findings = digest.get("findings") or {}
+    return bool(digest.get("rounds") or digest.get("tasks_recorded")
+                or flags.get("extracted") or findings.get("total"))
+
+
+async def _distill_experience(gateway: Any, experience: ExperienceStore,
+                              digest: dict[str, Any], *,
+                              timeout_seconds: int) -> dict[str, Any]:
+    """一次提炼调用：返回结果摘要（审计留痕由调用方负责）。"""
     import json as _json
 
     from spiritscout.gateway.backends import extract_json
 
-    flags = run_summary.get("flag_stats", {})
-    digest = {
-        "flags": flags,
-        "rounds": run_summary.get("rounds_executed", 0),
-        "target": str(run_summary.get("target", "")),
-    }
-    resp = await gateway.chat(
+    resp = await asyncio.wait_for(gateway.chat(
         [{"role": "system", "content": (
-            "你是灵枢。一场安全测试刚结束。从以下数据中提炼出 3~5 条"
-            "可复用的解题思维——不是解题步骤（模型已经会做），而是"
-            "「这类场景下我学到了什么」：平台特性、绕过手法的适用条件、"
-            "容易踩的坑、判读信号。每条一句话，独立可复用。"
+            "你是灵枢。一场安全测试刚结束（正常收尾、被中断或失败均可能）。"
+            "从以下战报中提炼 3~5 条可复用的实战洞察——不是解题步骤，"
+            "而是「这类场景下我学到了什么」：目标/平台特性、手法适用条件、"
+            "容易踩的坑、判读信号、中断或失败的教训。每条一句话独立可复用；"
+            "context 写适用场景（目标类型/业务/技术栈），tags 写 2~4 个"
+            "检索标签（如 web、登录、越权、ctf、java）。"
             "没有值得提炼的就返回空数组。"
             '返回 JSON：{"insights": [{"insight": str, "context": str, '
             '"tags": [str]}]}')},
-         {"role": "user", "content": _json.dumps(digest, ensure_ascii=False)[:6000]}],
+         {"role": "user", "content": _json.dumps(digest, ensure_ascii=False)[:8000]}],
         task_type="meta_planning", response_format="json",
         max_tokens=1024, reasoning_effort="low",
-        timeout_seconds=60)
+        timeout_seconds=timeout_seconds),
+        timeout=timeout_seconds + 20)
     data = extract_json(resp.content) or {}
+    added = 0
     for item in (data.get("insights") or [])[:5]:
-        if isinstance(item, dict) and item.get("insight"):
-            experience.add(
-                item["insight"][:600],
-                context=item.get("context", "")[:300],
-                tags=item.get("tags", []),
-                source_session=str(run_summary.get("target", "")),
-                source_model="master")
+        if isinstance(item, dict) and str(item.get("insight") or "").strip():
+            tags = item.get("tags") if isinstance(item.get("tags"), list) else []
+            if experience.add(str(item["insight"]),
+                              context=str(item.get("context", "")),
+                              tags=[str(tag) for tag in tags],
+                              source_session=str(digest.get("target", "")),
+                              source_model="master"):
+                added += 1
+    return {"result": "ok" if added else "empty", "insights": added}
+
+
+async def _distill_best_effort(infra: _Infra, assembly: Any, experience: Any,
+                               enabled: bool,
+                               run_summary: dict[str, Any] | None,
+                               *, mission: str, outcome: str,
+                               error: str = "") -> None:
+    """终态提炼（尽力而为）：任何失败都不改变会话本身的终态。"""
+    if not enabled or experience is None:
+        return
+    started = time.monotonic()
+    digest = _distill_digest(infra, assembly, run_summary, mission, outcome, error)
+    if not _worth_distilling(digest):
+        infra.audit.log("experience.distill", "master", {
+            "result": "skipped", "outcome": outcome,
+            "reason": "没有值得沉淀的活动"})
+        return
+    timeout_seconds = infra.cfg.experience.distill_timeout_seconds
+    if outcome != "completed":
+        # 中止/失败路径：用户的停止动作在等这次提炼，别拖太久
+        timeout_seconds = min(timeout_seconds, 20)
+    try:
+        result = await _distill_experience(
+            AgentBoundGateway(infra.gateway, infra.agent_models.get("master", "")),
+            experience, digest, timeout_seconds=timeout_seconds)
+    except Exception as exc:  # noqa: BLE001 —— 不吞 CancelledError（停止语义优先）
+        result = {"result": "error", "insights": 0,
+                  "error": f"{type(exc).__name__}: {exc}"[:200]}
+    infra.audit.log("experience.distill", "master", {
+        **result, "outcome": outcome,
+        "duration_ms": round((time.monotonic() - started) * 1000, 1)})
 
 
 def _default_report_path(workspace: Path, prefix: str) -> Path:

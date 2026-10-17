@@ -209,6 +209,15 @@ class ResourcesConfig(ValidatedConfig):
     npm_registry: str = Field(default="https://registry.npmjs.org", pattern=r"^https?://")
 
 
+class ExperienceConfig(ValidatedConfig):
+    """经验库（跨会话自我进化）：会话收尾提炼实战洞察，后续会话开工召回。"""
+
+    root: str = Field(default="", description="经验库目录（含 experience.db）；空=跟随工作区")
+    distill_timeout_seconds: int = Field(
+        default=45, gt=0, description="收尾提炼单次 LLM 调用硬顶（秒），仅终态路径使用")
+    recall_limit: int = Field(default=6, gt=0, le=20, description="会话开工注入的经验条数上限")
+
+
 class SystemConfig(ValidatedConfig):
     """系统总配置。"""
 
@@ -223,6 +232,7 @@ class SystemConfig(ValidatedConfig):
     web: WebConfig = Field(default_factory=WebConfig)
     secretary: SecretaryConfig = Field(default_factory=SecretaryConfig)
     resources: ResourcesConfig = Field(default_factory=ResourcesConfig)
+    experience: ExperienceConfig = Field(default_factory=ExperienceConfig)
     mcp_servers: list[McpServerConfig] = Field(
         default_factory=list,
         description="外部 MCP 服务器（stdio/http），工具并入智能体工具目录")

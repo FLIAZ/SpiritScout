@@ -424,7 +424,13 @@ class Session:
         out["cost_usd"] = usage.get("used_usd", 0.0)
         # 运行中实时用量优先：网关逐笔持久化的 usage.db（兼容旧 usage.json）（列表/仪表盘随轮询跳动）
         out["rounds"] = run.get("rounds_executed", 0)
-        out["flag_stats"] = run.get("flag_stats")
+        # Flag 统计：CTF 结果在 summary["flags"]（运行摘要本身不带 flag_stats）；
+        # 面板口径统一为 total/submitted/accepted/rejected
+        flags = run.get("flag_stats") or (
+            self.summary.get("flags") if isinstance(self.summary, dict) else None)
+        if flags:
+            flags = {**flags, "total": flags.get("total", flags.get("extracted", 0))}
+        out["flag_stats"] = flags
         if include_summary:
             out["summary"] = self.summary
         return out
@@ -577,6 +583,8 @@ class SessionManager:
         resources = ResourceStore(cfg.resources.root, cfg.resources.freshness_hours)
         cfg.mcp_servers = resources.effective_mcp(cfg.mcp_servers)
         cfg.workspace.root = str(ws)
+        # 经验库跨会话共享：不随会话工作区重定向（显式配置优先）
+        cfg.experience.root = self._cfg.experience.root or str(self._cfg.workspace.root)
         cfg.blackboard.sqlite_path = str(session.bb_path)
         cfg.knowledge.sqlite_path = str(ws / "kb.db")
         cfg.knowledge.chroma_path = str(ws / "chroma")

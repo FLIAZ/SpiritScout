@@ -635,6 +635,8 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             for ev in mu.get("call_series", []):
                 day = time.strftime("%Y-%m-%d", time.gmtime(ev.get("ts", 0)))
                 daily[day] = daily.get(day, 0) + ev.get("tokens", 0)
+        from spiritscout.knowledge.experience import experience_db_path, read_recent
+
         return {
             "total_tokens": total_tokens,
             "total_cost": round(total_cost, 4),
@@ -642,6 +644,8 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             "running": running,
             "per_model": per_model,
             "daily": dict(sorted(daily.items())),
+            "experience": read_recent(
+                experience_db_path(cfg.experience.root, cfg.workspace.root), limit=8),
         }
 
     @app.post("/api/sessions/{session_id}/questions/{question_id}")

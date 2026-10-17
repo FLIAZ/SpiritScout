@@ -264,7 +264,9 @@ async function renderDash() {
 
   // 发现台账
   const findings = (S.cur && S.state && S.state.findings) || [];
-  const exps = (S.state && S.state.experience_insights) || [];
+  // 经验沉淀：跨会话共享经验库（提炼自历史会话，供下次遇到同场景时参考）
+  const exps = (metrics.experience && metrics.experience.items) || [];
+  const expTotal = (metrics.experience && metrics.experience.total) || exps.length;
 
   box.innerHTML = `
     <div class="tiles">
@@ -302,7 +304,12 @@ async function renderDash() {
     <div class="dash-sec">最近发现</div>
     <div class="dash-findings">${findings.slice(-6).reverse().map(f => `
       <div class="find-card"><span class="fc-tag ${f.type || ""}">${esc(f.type || "")}</span>
-        <span class="fc-txt">${esc(f.text || "")}</span></div>`).join("")}</div>` : ""}`;
+        <span class="fc-txt">${esc(f.text || "")}</span></div>`).join("")}</div>` : ""}
+    ${exps.length ? `
+    <div class="dash-sec">经验沉淀 · 共 ${expTotal} 条（跨会话自我进化）</div>
+    <div class="dash-findings">${exps.map(e => `
+      <div class="find-card"><span class="fc-tag">${esc((e.tags || [])[0] || "经验")}</span>
+        <span class="fc-txt">${esc(e.insight || "")}${e.context ? " —— " + esc(e.context) : ""}</span></div>`).join("")}</div>` : ""}`;
   box.querySelectorAll("[data-open]").forEach(row =>
     row.onclick = () => openSession(row.dataset.open));
 }
