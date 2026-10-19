@@ -268,6 +268,38 @@ class PlatformExtractionTests(unittest.IsolatedAsyncioTestCase):
         actions = [line["detail"].get("action") for line in audit_lines]
         self.assertIn("platform_not_found", actions)
 
+    async def test_competition_mode_also_extracts_platform_profile(self) -> None:
+        """渗透赛与 CTF 同权：任务描述平台文档时同样抽取并直供运行时。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = SystemConfig(workspace=WorkspaceConfig(root=str(root)))
+            models = [ModelEntry(model="test-model")]
+            manager = SessionManager(cfg, models)
+            workspace = root / "sessions" / "sess-comp"
+            workspace.mkdir(parents=True)
+            session = Session(session_id="sess-comp", mode="competition",
+                              target="competition://contest", workspace=workspace)
+            session.launch_request = {"mission": PLATFORM_DOC_MISSION,
+                                      "mode": "competition"}
+            cfg.audit_log_path = str(session.audit_path)
+            plan = prepare_launch(LaunchRequest(
+                mode=RunMode.COMPETITION, mission=PLATFORM_DOC_MISSION,
+                rules_yaml="contest_type: jeopardy\n"))
+            gateway = _FakeChatGateway(_EXTRACTED_PROFILE)
+            with patch("spiritscout.web.sessions._conversation_gateway",
+                       return_value=gateway), patch(
+                    "spiritscout.runtime.run_competition_engagement",
+                    new=AsyncMock(return_value=SimpleNamespace(
+                        run_summary={}, verify_stats={}, flag_stats={},
+                        report_path=str(workspace / "report.md")))) as run_mock:
+                await manager._run(session, cfg, plan, False, models)
+
+            self.assertEqual(session.status, "completed")
+            profile = run_mock.call_args.kwargs["platform_profile"]
+            self.assertEqual(profile["base_url"], "http://10.0.100.58")
+            # 平台宿主并入授权域（纯托管题任务也能通过启动门）
+            self.assertIn("10.0.100.58", plan.authorization.scope.allowed_domains)
+
 
 class SessionUsageTests(unittest.IsolatedAsyncioTestCase):
     """会话用量口径：旁路调用不进会话台账，终场汇总以台账为准。"""

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,6 +33,7 @@ from spiritscout.runtime import (
     _distill_best_effort,
     _distill_digest,
     _distill_experience,
+    _schedule_background_distill,
     _worth_distilling,
 )
 from spiritscout.web.sessions import Session, SessionManager
@@ -189,8 +191,8 @@ class SharedExperienceRootTests(unittest.TestCase):
 
 
 class DistillTests(unittest.IsolatedAsyncioTestCase):
-    async def test_cancelled_path_caps_distill_timeout(self) -> None:
-        """停止按钮在等这次提炼：中止路径的单次上限收紧到 20 秒。"""
+    async def test_cancelled_path_hands_distill_to_background(self) -> None:
+        """停止不再干等：退场提炼转后台，没人等就不再收紧超时。"""
         with tempfile.TemporaryDirectory() as tmp:
             audit = NullAuditLogger()
             store = ExperienceStore(Path(tmp) / "experience.db", audit=audit)
@@ -208,14 +210,20 @@ class DistillTests(unittest.IsolatedAsyncioTestCase):
 
             try:
                 with patch("spiritscout.runtime._distill_experience", new=fake_distill):
-                    await _distill_best_effort(
+                    task = _schedule_background_distill(
                         infra, SimpleNamespace(), store, True,
                         {"target": "https://a.example", "rounds_executed": 1},
                         mission="", outcome="cancelled")
+                    self.assertIsNotNone(task)
+                    await task      # 生产不等待；测试里等它跑完好断言
             finally:
                 blackboard.close()
-                store.close()
-            self.assertEqual(captured["timeout"], 20)
+            # 旧实现为「停止按钮在等」砍到 20 秒；现在没人等，用完整预算
+            self.assertEqual(captured["timeout"], 45)
+            # 经验库托付后台收尾：infra.close 跳过它，任务完成即关闭
+            self.assertTrue(infra.experience_deferred)
+            with self.assertRaises(sqlite3.ProgrammingError):
+                store.add("后台提炼完成后连接已关闭")
 
     async def test_completed_run_distills_and_logs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

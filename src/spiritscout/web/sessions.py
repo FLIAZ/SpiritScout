@@ -1419,11 +1419,12 @@ class SessionManager:
                             "action": "llm_mode_route_rejected",
                             "llm_mode": routed.value, "kept": mode.value,
                             "reason": str(exc)[:300]})
-                # CTF 无显式平台档案时做一次抽取：任务文本若描述了托管平台
-                # 的 API 文档（跑分/CTF 平台），把档案落进本次运行并按平台
+                # CTF/渗透赛无显式平台档案时做一次抽取：任务文本若描述了托管
+                # 平台的 API 文档（跑分/CTF 平台），把档案落进本次运行并按平台
                 # 列题/开容器/回收/提交；没描述则是零影响的小调用。抽到的
                 # 档案回写启动参数（续传/重建计划不再重抽）
-                if (mode == RunMode.CTF and plan.platform_profile is None
+                if (mode in (RunMode.CTF, RunMode.COMPETITION)
+                        and plan.platform_profile is None
                         and not no_llm and models and plan.mission):
                     self._set_phase(session, "platform_profile", audit)
                     found = await _llm_extract_platform(
@@ -1499,7 +1500,8 @@ class SessionManager:
                         question_broker=session.questions,
                         standing_rules=session.standing_rules,
                         pause_gate=session.pause_gate,
-                        dialogue_history=session.dialogue_history)
+                        dialogue_history=session.dialogue_history,
+                        platform_profile=plan.platform_profile)
                 else:
                     result = await run_engagement(
                         cfg=cfg, models=models,

@@ -207,7 +207,7 @@ class ModeAssembler:
             return self._assemble_ctf(challenges or [], flag_manager,
                                       resume=resume, platform=platform)
         return self._assemble_competition(challenges or [], rules, flag_manager,
-                                          competition_engine)
+                                          competition_engine, platform=platform)
 
     # ------------------------------------------------------------ SRC
 
@@ -286,6 +286,7 @@ class ModeAssembler:
         rules: CompetitionRules | None,
         flag_manager: FlagManager | None,
         engine: CompetitionEngine | None,
+        platform: Any = None,
     ) -> ModeAssembly:
         rules = rules or CompetitionRules()
         notes: list[str] = []
@@ -294,7 +295,8 @@ class ModeAssembler:
             notes.extend(f"规则冲突待人工确认: {c}" for c in conflicts)
 
         if rules.contest_type == ContestType.JEOPARDY:
-            assembly = self._assemble_ctf(challenges, flag_manager)
+            # Jeopardy=CTF 池：平台完成态过滤、开容器等语义与 CTF 模式同源
+            assembly = self._assemble_ctf(challenges, flag_manager, platform=platform)
             assembly.mode = RunMode.COMPETITION
             assembly.notes.append("Jeopardy 赛制：按 6.7 公式动态排题（Jeopardy=CTF 池）")
         elif rules.contest_type == ContestType.RANGE:

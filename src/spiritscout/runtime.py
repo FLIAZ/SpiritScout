@@ -184,6 +184,7 @@ class _Infra:
     pause_gate: Any = None      # PauseGate 暂停门（Web 层注入；None=无暂停能力）
     run_lock: ExecutionRunLock | None = None
     outcome: str = "failed"
+    experience_deferred: bool = False   # 退场提炼托管后台中：close 跳过经验库
 
     async def close(self) -> None:
         try:
@@ -202,7 +203,9 @@ class _Infra:
             try:
                 await _teardown_infra(
                     mcp_clients=self.mcp_clients, blackboard=self.blackboard,
-                    experience=self.experience, knowledge=self.knowledge, bus=self.bus)
+                    # 提炼托管后台时经验库交由后台任务关闭（其余资源即刻回收）
+                    experience=None if self.experience_deferred else self.experience,
+                    knowledge=self.knowledge, bus=self.bus)
             finally:
                 if self.run_lock is not None:
                     self.run_lock.close()
@@ -690,16 +693,16 @@ async def _run_master(
         await verifier.drain()
         run_summary["verification"] = verifier.stats()
     except asyncio.CancelledError:
-        # 用户主动停止：已跑的轮次与试错同样值得沉淀（受 distill_timeout 硬顶约束）
-        await _distill_best_effort(infra, assembly, experience, enable_llm_planning,
-                                   run_summary or None, mission=mission,
-                                   outcome="cancelled")
+        # 用户主动停止：提炼转后台（最长约一分钟），不干等——立即退场
+        _schedule_background_distill(infra, assembly, experience, enable_llm_planning,
+                                     run_summary or None, mission=mission,
+                                     outcome="cancelled")
         raise
-    except Exception as exc:  # noqa: BLE001 —— 失败先沉淀教训，再原样抛给上层
-        await _distill_best_effort(infra, assembly, experience, enable_llm_planning,
-                                   run_summary or None, mission=mission,
-                                   outcome="failed",
-                                   error=f"{type(exc).__name__}: {exc}")
+    except Exception as exc:  # noqa: BLE001 —— 失败同样不拖终态：后台沉淀教训后原样抛
+        _schedule_background_distill(infra, assembly, experience, enable_llm_planning,
+                                     run_summary or None, mission=mission,
+                                     outcome="failed",
+                                     error=f"{type(exc).__name__}: {exc}")
         raise
     finally:
         await verifier.close()
@@ -878,31 +881,37 @@ async def _distill_experience(gateway: Any, experience: ExperienceStore,
     return {"result": "ok" if added else "empty", "insights": added}
 
 
-async def _distill_best_effort(infra: _Infra, assembly: Any, experience: Any,
-                               enabled: bool,
-                               run_summary: dict[str, Any] | None,
-                               *, mission: str, outcome: str,
-                               error: str = "") -> None:
-    """终态提炼（尽力而为）：任何失败都不改变会话本身的终态。"""
+def _prepare_distill(infra: _Infra, assembly: Any, enabled: bool, experience: Any,
+                     run_summary: dict[str, Any] | None, *,
+                     mission: str, outcome: str,
+                     error: str = "") -> dict[str, Any] | None:
+    """提炼前判定：战报同步取好（读黑板/统计），不值得提炼则留痕返回 None。
+
+    同步完成是硬要求：退场路径必须在 infra 回收前拿到快照，后台任务才能
+    脱离黑板/知识库等已回收资源独立跑完。
+    """
     if not enabled or experience is None:
-        return
-    started = time.monotonic()
+        return None
     digest = _distill_digest(infra, assembly, run_summary, mission, outcome, error)
     if not _worth_distilling(digest):
         infra.audit.log("experience.distill", "master", {
             "result": "skipped", "outcome": outcome,
             "reason": "没有值得沉淀的活动"})
-        return
-    timeout_seconds = infra.cfg.experience.distill_timeout_seconds
-    if outcome != "completed":
-        # 中止/失败路径：用户的停止动作在等这次提炼，别拖太久
-        timeout_seconds = min(timeout_seconds, 20)
+        return None
+    return digest
+
+
+async def _distill_run(infra: _Infra, experience: Any, digest: dict[str, Any], *,
+                       outcome: str) -> None:
+    """一次提炼执行 + 审计留痕（完成态原地等待与退场后台任务共用）。"""
+    started = time.monotonic()
     # 来源记真实会话 ID（Web 会话工作区名即 sess-xxx，经验页据此回链）
     workspace_root = getattr(getattr(infra.cfg, "workspace", None), "root", "")
     try:
         result = await _distill_experience(
             AgentBoundGateway(infra.gateway, infra.agent_models.get("master", "")),
-            experience, digest, timeout_seconds=timeout_seconds,
+            experience, digest,
+            timeout_seconds=infra.cfg.experience.distill_timeout_seconds,
             audit=infra.audit,
             source_session=Path(str(workspace_root)).name if workspace_root else "")
     except Exception as exc:  # noqa: BLE001 —— 不吞 CancelledError（停止语义优先）
@@ -911,6 +920,58 @@ async def _distill_best_effort(infra: _Infra, assembly: Any, experience: Any,
     infra.audit.log("experience.distill", "master", {
         **result, "outcome": outcome,
         "duration_ms": round((time.monotonic() - started) * 1000, 1)})
+
+
+async def _distill_best_effort(infra: _Infra, assembly: Any, experience: Any,
+                               enabled: bool,
+                               run_summary: dict[str, Any] | None,
+                               *, mission: str, outcome: str,
+                               error: str = "") -> None:
+    """终态提炼（尽力而为，原地等待）：正常收尾与报告并行，用户等得起。"""
+    digest = _prepare_distill(infra, assembly, enabled, experience, run_summary,
+                              mission=mission, outcome=outcome, error=error)
+    if digest is None:
+        return
+    await _distill_run(infra, experience, digest, outcome=outcome)
+
+
+_BACKGROUND_DISTILLS: set[asyncio.Task[Any]] = set()
+
+
+def _schedule_background_distill(infra: _Infra, assembly: Any, experience: Any,
+                                 enabled: bool,
+                                 run_summary: dict[str, Any] | None,
+                                 *, mission: str, outcome: str,
+                                 error: str = "") -> asyncio.Task[Any] | None:
+    """退场（停止/失败）提炼转后台：用户不再干等最长约一分钟。
+
+    战报在 infra 回收前同步取好；经验库托付后台任务收尾（close 跳过它），
+    其余资源照常即刻回收。提炼超时不再因「有人在等」而收紧——没人等了。
+    """
+    digest = _prepare_distill(infra, assembly, enabled, experience, run_summary,
+                              mission=mission, outcome=outcome, error=error)
+    if digest is None:
+        return None
+    infra.experience_deferred = True
+    task = asyncio.create_task(_background_distill(infra, experience, digest,
+                                                   outcome=outcome))
+    _BACKGROUND_DISTILLS.add(task)
+    task.add_done_callback(_BACKGROUND_DISTILLS.discard)
+    return task
+
+
+async def _background_distill(infra: _Infra, experience: Any,
+                              digest: dict[str, Any], *, outcome: str) -> None:
+    """后台提炼收尾：执行提炼并关闭托付的经验库（连接不泄漏）。
+
+    任何失败只吞掉不冒泡——后台任务无人接管异常，会话终态早已落定。
+    """
+    try:
+        with contextlib.suppress(Exception):
+            await _distill_run(infra, experience, digest, outcome=outcome)
+    finally:
+        with contextlib.suppress(Exception):
+            experience.close()
 
 
 def _default_report_path(workspace: Path, prefix: str) -> Path:
@@ -1144,12 +1205,16 @@ async def run_competition_engagement(
     standing_rules: str = "",
     pause_gate: Any = None,
     dialogue_history: list[dict[str, str]] | None = None,
+    platform_profile: dict[str, Any] | None = None,
 ) -> EngagementResult:
     """智能渗透赛任务入口（4.5/5.3）：赛制自适应调度。
 
     - Jeopardy：6.7 优先级公式排序后按 CTF 池分发；
     - AWD：攻击线允许端口扫描（仅限赛方授权 CIDR，已并入 scope）；
     - 靶场：SRC 链路 + 全链路核验，产出渗透报告（5.3.4）。
+
+    platform_profile：平台档案（托管题/跑分平台）——列题/开容器/完成回收/
+    提交全部经适配器执行（与 CTF 模式同一套语义）；不提供时行为与原来一致。
     """
     from spiritscout.competition import ChallengeCard, CompetitionEngine, ContestType
 
@@ -1167,7 +1232,35 @@ async def run_competition_engagement(
                                approval_gate=approval_gate, ring=ring,
                                question_broker=question_broker,
                                pause_gate=pause_gate)
+    adapter: Any = None
     try:
+        # 平台档案（托管题/跑分平台）：列题即题目源；赛制（Jeopardy/AWD/靶场）
+        # 不受影响——平台只换题源与提交/供给通道
+        if platform_profile:
+            from spiritscout.ctf.platform import (
+                PlatformAdapter,
+                parse_platform_profile,
+            )
+
+            try:
+                profile = parse_platform_profile(platform_profile)
+            except ValueError as exc:  # 档案已两处校验过；兜底不阻断任务
+                infra.audit.log("platform.fact", "runtime", {
+                    "action": "profile_invalid", "error": str(exc)[:200]})
+            else:
+                adapter = PlatformAdapter(profile, audit=infra.audit)
+                infra.audit.log("platform.fact", "runtime", {
+                    "action": "profile_loaded", "profile": profile.redacted()})
+                await adapter.precheck()
+                listed = await adapter.list_challenges()
+                if listed:
+                    # 平台列题即题目源：URL/文本推导的赛题不参与平台模式
+                    challenges = listed
+                else:
+                    infra.audit.log("platform.fact", "runtime", {
+                        "action": "list_empty",
+                        "detail": ("平台未列出题目，沿用任务提供的赛题清单"
+                                   if challenges else "平台未列出题目，任务未提供赛题")})
         # 赛方禁止行为按工具名登记为动态禁用（4.5.1 规则冲突之外的运行时边界）
         for behavior in rules.forbidden_behaviors:
             infra.policy.forbid_tool(behavior)
@@ -1177,7 +1270,8 @@ async def run_competition_engagement(
         )
         flag_manager = FlagManager(
             flag_patterns=rules.flag_patterns or None,
-            submit_fn=flag_submit_fn, audit=infra.audit, bus=infra.bus,
+            submit_fn=flag_submit_fn or (adapter.submit if adapter is not None else None),
+            audit=infra.audit, bus=infra.bus,
             rate_limit_per_minute=rules.submit.rate_limit_per_minute,
             store_path=infra.workspace / "flags.json",
         )
@@ -1201,7 +1295,8 @@ async def run_competition_engagement(
 
         assembly = _make_assembler(infra, enable_llm_planning).assemble(
             RunMode.COMPETITION, challenges=ordered, rules=rules,
-            flag_manager=flag_manager, competition_engine=engine)
+            flag_manager=flag_manager, competition_engine=engine,
+            platform=adapter)
         target = next(
             (str(c["url"]) for c in ordered if c.get("url")),
             authorization.target_description or "competition://contest",
@@ -1211,7 +1306,9 @@ async def run_competition_engagement(
             user_inbox=user_inbox,
             standing_rules=standing_rules,
             dialogue_history=dialogue_history,
-            experience=infra.experience)
+            experience=infra.experience,
+            platform=adapter,
+            platform_facts=adapter.facts if adapter is not None else None)
 
         verify_stats = run_summary.get("verification", {})
 
@@ -1226,6 +1323,8 @@ async def run_competition_engagement(
             for cand in flag_manager.accepted_flags():
                 engine.mark_solved([], cand.challenge_id)   # 审计留痕（卡片态在调度循环内维护）
             flag_stats = flag_manager.stats()
+            if adapter is not None:
+                run_summary["platform"] = adapter.summary()
 
             report = ReportAgent(infra.blackboard)
             if rules.contest_type == ContestType.RANGE:
@@ -1263,6 +1362,12 @@ async def run_competition_engagement(
         infra.outcome = "cancelled"
         raise
     finally:
+        if adapter is not None:
+            # 会话结束回收全部活跃容器（名额交还平台；失败只兜底不抛出）
+            with contextlib.suppress(Exception):
+                await adapter.close_all(reason="会话结束")
+            with contextlib.suppress(Exception):
+                await adapter.aclose()
         await infra.close()
 
 

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 from spiritscout.agents.ring import attempt_key
 from spiritscout.agents.sub.base import RoutePlan
+from spiritscout.core.audit import NullAuditLogger
 from spiritscout.core.models import AgentType, Task
 from spiritscout.ctf.agents import (
     CTFBaseAgent,
@@ -547,6 +548,7 @@ class PeerAcceptedFlagValveTests(unittest.TestCase):
         agent.agent_type = AgentType.CTF_WEB
         agent.direction = "web"
         agent.cache = SimpleNamespace(get=Mock(return_value=list(records)), put=Mock())
+        agent.ctx = SimpleNamespace(audit=NullAuditLogger())
         return agent
 
     @staticmethod
@@ -586,6 +588,24 @@ class PeerAcceptedFlagValveTests(unittest.TestCase):
         fresh = agent._peer_accepted_flags(
             self._task(), SimpleNamespace(name="solve"), {"flags": ["flag{x}"]})
         self.assertEqual(fresh, [])
+
+    def test_peer_win_is_reported_once_and_never_forced_to_conclude(self) -> None:
+        """松绑收敛阀：同伴夺旗只是事实通报，收不收工由模型决定。"""
+        agent = self._agent([self._record("flag{x}", route="peer")])
+        state: dict = {"flags": [], "turn": 3}
+        notice = agent._peer_win_notice(
+            self._task(), SimpleNamespace(name="solve"), state)
+        self.assertIn("flag{x}", notice)
+        self.assertIn("由你决定", notice)
+        self.assertFalse(state.get("concluded"))
+        # 同一枚 Flag 不每回合重复通报
+        self.assertEqual(agent._peer_win_notice(
+            self._task(), SimpleNamespace(name="solve"), state), "")
+
+    def test_pending_peer_flag_is_not_reported_as_win(self) -> None:
+        agent = self._agent([self._record("flag{x}", route="peer", verdict="pending")])
+        self.assertEqual(agent._peer_win_notice(
+            self._task(), SimpleNamespace(name="solve"), {"flags": [], "turn": 1}), "")
 
 
 class FindingDedupKeyTests(unittest.TestCase):

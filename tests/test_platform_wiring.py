@@ -18,6 +18,7 @@ from spiritscout.agents.master.dag import TaskDAG
 from spiritscout.agents.sub.base import SubAgentContext
 from spiritscout.blackboard import Blackboard, ConvergenceEngine
 from spiritscout.bus.inprocess import InProcessBus
+from spiritscout.competition import CompetitionRules, ContestType
 from spiritscout.core.audit import NullAuditLogger
 from spiritscout.core.models import AgentType, RunMode, Scope, TaskStatus
 from spiritscout.modes.assembler import ModeAssembler
@@ -224,6 +225,43 @@ class CflAssemblyPlatformTests(unittest.IsolatedAsyncioTestCase):
         plan = assembly.plan_provider({"round_no": 1, "dag": {}})
         cids = {n["meta"]["challenge"]["id"] for n in plan["dag_nodes"]}
         self.assertEqual(cids, {"c1", "c2"})  # 无完成态信号：照常全量重攻
+
+
+class CompetitionAssemblyPlatformTests(unittest.IsolatedAsyncioTestCase):
+    """渗透赛（Jeopardy）平台接线：题源/完成态过滤与 CTF 同源。"""
+
+    async def asyncSetUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.bb = Blackboard(root / "bb.db")
+        self.addAsyncCleanup(self.bb.aclose)
+        self.bus = InProcessBus(rate_limit_per_second=0)
+        await self.bus.start()
+        self.addAsyncCleanup(self.bus.stop)
+        self.ctx = SubAgentContext(
+            self.bus, self.bb, ConvergenceEngine(self.bb), SimpleNamespace(),
+            ToolRegistry(LocalExecutor()),
+            PolicyEngine(RunMode.CTF, ScopeGuard(Scope(local_analysis=True))))
+
+    def _assembly(self, platform: StubPlatform | None) -> Any:
+        return ModeAssembler(self.ctx, enable_llm_planning=False).assemble(
+            RunMode.COMPETITION,
+            challenges=[{"id": "c1", "title": "题一", "url": "http://a/1"},
+                        {"id": "c2", "title": "题二", "url": "http://a/2"}],
+            rules=CompetitionRules(contest_type=ContestType.JEOPARDY),
+            flag_manager=None, competition_engine=None, platform=platform)
+
+    async def test_jeopardy_assembly_honours_platform_completion(self) -> None:
+        plan = self._assembly(StubPlatform(completed={"c1"})).plan_provider(
+            {"round_no": 1, "dag": {}})
+        cids = {n["meta"]["challenge"]["id"] for n in plan["dag_nodes"]}
+        self.assertEqual(cids, {"c2"})   # 平台通报完成的题不再重攻
+
+    async def test_jeopardy_assembly_without_platform_keeps_all(self) -> None:
+        plan = self._assembly(None).plan_provider({"round_no": 1, "dag": {}})
+        cids = {n["meta"]["challenge"]["id"] for n in plan["dag_nodes"]}
+        self.assertEqual(cids, {"c1", "c2"})
 
 
 if __name__ == "__main__":

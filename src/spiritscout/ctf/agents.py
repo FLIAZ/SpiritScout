@@ -23,7 +23,8 @@
 
 分支并行：路线预算由灵枢按任务复杂度裁定（1~8），K>1 时按题面提出
 互不重叠的调查角度并行展开——分支共享现场（已探入口/笔记/Flag）
-相互接力，任一分支夺旗其余立即收尾；简单题自然落在单线。
+相互接力；任一分支夺旗会即时通报其余路线，是否收尾由模型依现场决定
+（多 Flag 题还可继续深挖）；简单题自然落在单线。
 
 不启用端口扫描（C7）；仅访问赛题入口（URL 需在授权范围内）与本地附件。
 """
@@ -954,8 +955,8 @@ class CTFBaseAgent(SubAgent):
                              state: dict[str, Any]) -> list[str]:
         """本轮并行同伴（不含本路线自己）获平台判定正确的 Flag 值。
 
-        收敛阀此前不看提交者：本路线刚提交成功的 Flag 下一回合会被当成
-        「同伴夺旗」把自己收掉（文本谎报同伴、多 Flag 题失去再挖机会）。
+        识别口径此前不看提交者：本路线刚提交成功的 Flag 下一回合会被当成
+        「同伴夺旗」通报（文本谎报出处、多 Flag 题失去再挖机会）。
         记录里的 route 字段据此区分自行提交与同伴战果。
         """
         rnd = int(getattr(task, "round_no", 0) or 0)
@@ -965,6 +966,29 @@ class CTFBaseAgent(SubAgent):
                 and int(f.get("round", 0) or 0) == rnd
                 and f["value"] not in mine
                 and self._flag_verdict(f) == "accepted"]
+
+    def _peer_win_notice(self, task: Task, route,
+                         state: dict[str, Any]) -> str:
+        """同伴夺旗的事实通报（每枚 Flag 只通报一次；收不收工由模型定）。
+
+        收敛不再由后端下令：把已获平台判定正确的同伴 Flag 原样交给模型，
+        由它结合现场决定继续（多 Flag 题/未竟面）还是收尾。
+        """
+        seen = state.setdefault("peer_win_seen", [])
+        fresh = [v for v in self._peer_accepted_flags(task, route, state)
+                 if v not in seen]
+        if not fresh:
+            return ""
+        seen.extend(fresh)
+        self.ctx.audit.log("agent.peer_win", self.agent_id, {
+            "route": route.name, "challenge": self.challenge_id(task),
+            "turn": state["turn"], "flags": fresh[:4]})
+        return ("## 同伴夺旗（事实通报）\n"
+                "本轮并行同伴的这些 Flag 已获平台判定正确："
+                + ", ".join(fresh[:4]) + "。\n"
+                "这通常意味着该攻击面已被他路拿下——是否收尾由你决定："
+                "本题若已无未竟面（或多 Flag 题已无别的目标），直接给出"
+                "收尾结论；若还有值得继续的攻击面，说明理由后继续。")
 
     def _peer_updates(self, task: Task, state: dict[str, Any]) -> str:
         """同伴动态：自本路线上次查看以来，其他方向新增的入口/笔记/Flag。"""
@@ -1026,19 +1050,11 @@ class CTFBaseAgent(SubAgent):
             return StepResult(ok=True, value=0.0,
                               final_note=True,
                               note=state["stall"] or "本路线已收尾")
-        # 并行收敛阀：本轮并行同伴的 Flag 获平台判定正确 → 本路线立即收尾
-        # ——并行铺开的分支在结果处汇合，不做重复功。候选/未判定不是战果
-        # （可能被判错，收早了谎报成功）；判错的进提示词当禁提交清单。
-        fresh = self._peer_accepted_flags(task, route, state)
-        if fresh:
-            state["concluded"] = True
-            state["conclusion_text"] = f"同伴路线已夺旗（{', '.join(fresh[:2])}），交叉验证收尾"
-            self.ctx.audit.log("agent.conclude", self.agent_id, {
-                "route": route.name, "challenge": self.challenge_id(task),
-                "turn": state["turn"]})
-            return StepResult(ok=True, value=0.0,
-                              note=state["conclusion_text"],
-                              final_note=True)
+        # 并行同伴夺旗 → 事实通报（不再由后端下令收尾）：本轮并行同伴的
+        # Flag 获平台判定正确，每枚只通报一次；继续深挖（多 Flag 题/未竟面）
+        # 还是收尾，由模型依现场决定。候选/未判定不算战果；判错的进提示词
+        # 当禁提交清单。
+        win_notice = self._peer_win_notice(task, route, state)
 
         boot_value, boot_note = 0.0, ""
         if not state["messages"]:
@@ -1061,7 +1077,11 @@ class CTFBaseAgent(SubAgent):
                     ok=True, value=boot_value, final_note=True,
                     note=self._merge_note(boot_note, summary))
             self._seed_messages(task, route, plan, state)
+            if win_notice:
+                state["messages"].append({"role": "user", "content": win_notice})
         else:
+            if win_notice:
+                state["messages"].append({"role": "user", "content": win_notice})
             if (update := self._peer_updates(task, state)):
                 # 同伴动态作为新消息注入：并行 Agent 的现场即时互通
                 state["messages"].append({"role": "user", "content": update})
