@@ -386,6 +386,35 @@ class CrossReplayDisclosureTests(unittest.IsolatedAsyncioTestCase):
         agent.ctx.tools.call.assert_awaited_once()
         self.assertIn("fresh", out.text)
 
+    async def test_post_response_is_not_stored_for_cross_replay(self) -> None:
+        """只有裸 GET 进回放池：表单提交/登录跳转的应答被 GET 回放会答错现场。"""
+        agent = self._agent(None)
+        out = await agent._tool_http(
+            self._task(), SimpleNamespace(name="solve"),
+            {"observations": [], "fetches": {}, "flags": [], "turn": 2},
+            {"path": "/login", "method": "POST", "action": "analysis",
+             "data": {"user": "admin"}})
+        self.assertTrue(out.ok)
+        agent.ctx.tools.call.assert_awaited_once()
+        put_keys = [c.args[1] for c in agent.cache.put.call_args_list]
+        self.assertFalse([k for k in put_keys if k.startswith("fetch|")])
+
+    async def test_header_variant_record_is_not_cross_replayed(self) -> None:
+        """共享回放键含请求头指纹：Range 等分段读取不被无头 GET 顶掉。"""
+        agent = self._agent(None)
+        stored = {"fetch|GET|http://t/kb|range:bytes=0-99":
+                  "GET /kb → 206\n正文: 前 100 字节"}
+        agent.cache = SimpleNamespace(
+            get=Mock(side_effect=lambda ns, key: stored.get(key)), put=Mock())
+        out = await agent._tool_http(
+            self._task(), SimpleNamespace(name="solve"),
+            {"observations": [], "fetches": {}, "flags": [], "turn": 2},
+            {"path": "/kb"})
+        agent.ctx.tools.call.assert_awaited_once()
+        self.assertIn("fresh", out.text)
+        put_keys = [c.args[1] for c in agent.cache.put.call_args_list]
+        self.assertIn("fetch|GET|http://t/kb", put_keys)
+
 
 class EmptyReplyRepairTests(unittest.IsolatedAsyncioTestCase):
     """思考型模型空正文回合不是结论：注入提示再给一次机会，连续两次才收尾。"""
@@ -539,7 +568,7 @@ class BlackboardDedupTests(unittest.TestCase):
 
 
 class PeerAcceptedFlagValveTests(unittest.TestCase):
-    """并行收敛阀只看同伴战果：本路线自己提交的 Flag 不算「同伴夺旗」。"""
+    """并行收敛阀只看同伴战果：本方向自己提交的 Flag 不算「同伴夺旗」。"""
 
     @staticmethod
     def _agent(records: list[dict]) -> CTFBaseAgent:
@@ -552,9 +581,9 @@ class PeerAcceptedFlagValveTests(unittest.TestCase):
         return agent
 
     @staticmethod
-    def _record(value: str, *, route: str, rnd: int = 2,
-                verdict: str = "accepted") -> dict:
-        return {"value": value, "by": "web", "route": route,
+    def _record(value: str, *, by: str = "crypto", route: str = "solve",
+                rnd: int = 2, verdict: str = "accepted") -> dict:
+        return {"value": value, "by": by, "route": route,
                 "round": rnd, "verdict": verdict}
 
     @staticmethod
@@ -563,35 +592,35 @@ class PeerAcceptedFlagValveTests(unittest.TestCase):
                     agent_type=AgentType.CTF_WEB, round_no=2,
                     payload={"challenge": {"id": "c1"}})
 
-    def _fresh(self, records: list[dict], *, route: str = "solve") -> list[str]:
+    def _fresh(self, records: list[dict]) -> list[str]:
         agent = self._agent(records)
-        return agent._peer_accepted_flags(
-            self._task(), SimpleNamespace(name=route), {"flags": []})
+        return agent._peer_accepted_flags(self._task(), {"flags": []})
 
-    def test_own_route_flag_is_not_a_convergence_signal(self) -> None:
-        # 修复前：记录无 route 字段，本路线刚提交成功的 Flag 下一回合
-        # 被当「同伴夺旗」收尾（结论文本谎报出处、多 Flag 题提前收工）
-        self.assertEqual(self._fresh([self._record("flag{x}", route="solve")]), [])
+    def test_own_direction_flag_is_not_a_convergence_signal(self) -> None:
+        # 修复前：识别不看提交者，本路线刚提交成功的 Flag 下一回合
+        # 被当「同伴夺旗」通报（结论文本谎报出处、多 Flag 题提前收工）
+        self.assertEqual(self._fresh([self._record("flag{x}", by="web")]), [])
 
-    def test_peer_accepted_same_round_is_a_convergence_signal(self) -> None:
-        self.assertEqual(self._fresh([self._record("flag{x}", route="peer")]),
-                         ["flag{x}"])
+    def test_peer_direction_flag_with_same_route_name_is_a_signal(self) -> None:
+        # route 名会撞：各方向路线默认全部叫 solve——按名字区分会把同伴
+        # 战果统统滤掉（通报从此静默成死代码），归属只能看提交者方向
+        self.assertEqual(
+            self._fresh([self._record("flag{x}", by="crypto", route="solve")]),
+            ["flag{x}"])
 
     def test_peer_pending_or_old_round_is_not(self) -> None:
         self.assertEqual(
-            self._fresh([self._record("flag{x}", route="peer", verdict="pending")]), [])
-        self.assertEqual(
-            self._fresh([self._record("flag{x}", route="peer", rnd=1)]), [])
+            self._fresh([self._record("flag{x}", verdict="pending")]), [])
+        self.assertEqual(self._fresh([self._record("flag{x}", rnd=1)]), [])
 
     def test_flag_already_held_by_this_route_is_not(self) -> None:
-        agent = self._agent([self._record("flag{x}", route="peer")])
-        fresh = agent._peer_accepted_flags(
-            self._task(), SimpleNamespace(name="solve"), {"flags": ["flag{x}"]})
+        agent = self._agent([self._record("flag{x}")])
+        fresh = agent._peer_accepted_flags(self._task(), {"flags": ["flag{x}"]})
         self.assertEqual(fresh, [])
 
     def test_peer_win_is_reported_once_and_never_forced_to_conclude(self) -> None:
         """松绑收敛阀：同伴夺旗只是事实通报，收不收工由模型决定。"""
-        agent = self._agent([self._record("flag{x}", route="peer")])
+        agent = self._agent([self._record("flag{x}")])
         state: dict = {"flags": [], "turn": 3}
         notice = agent._peer_win_notice(
             self._task(), SimpleNamespace(name="solve"), state)
@@ -603,9 +632,73 @@ class PeerAcceptedFlagValveTests(unittest.TestCase):
             self._task(), SimpleNamespace(name="solve"), state), "")
 
     def test_pending_peer_flag_is_not_reported_as_win(self) -> None:
-        agent = self._agent([self._record("flag{x}", route="peer", verdict="pending")])
+        agent = self._agent([self._record("flag{x}", verdict="pending")])
         self.assertEqual(agent._peer_win_notice(
             self._task(), SimpleNamespace(name="solve"), {"flags": [], "turn": 1}), "")
+
+
+class PeerUpdateWatermarkTests(unittest.TestCase):
+    """同伴笔记/结论按内容水位去重：共享缓冲区写满后 len 不再增长。
+
+    按长度记账时写满即永久静默——同伴动态里再也看不到任何新笔记与
+    新结论，接力信息断流。
+    """
+
+    @staticmethod
+    def _task() -> Task:
+        return Task(task_id="t1", task_type="ctf_solve", target="http://x",
+                    agent_type=AgentType.CTF_WEB,
+                    payload={"challenge": {"id": "c1"}})
+
+    @staticmethod
+    def _agent(notes: list[str], concl: list[str]) -> CTFBaseAgent:
+        agent = object.__new__(CTFBaseAgent)
+        agent.agent_id = "a"
+        agent.agent_type = AgentType.CTF_WEB
+        agent.direction = "web"
+
+        def cache_get(ns: str, key: str):
+            if key.startswith("notes|"):
+                return list(notes)
+            if key.startswith("shared|"):
+                return list(concl)
+            if key.startswith("site|"):
+                return {}
+            if key.startswith("flags|"):
+                return []
+            return None
+
+        agent.cache = SimpleNamespace(get=Mock(side_effect=cache_get), put=Mock())
+        agent.ctx = SimpleNamespace(audit=NullAuditLogger())
+        return agent
+
+    def test_new_note_and_conclusion_surface_after_buffer_saturation(self) -> None:
+        old = [f"[crypto] 旧笔记 {i}" for i in range(20)]     # 已达 20 条上限
+        concl = ["[crypto/solve] 旧结论"]
+        state: dict = {}
+        first = self._agent(old, concl)._peer_updates(self._task(), state)
+        self.assertIn("旧笔记 19", first)
+        # 新条目入列后缓冲长度不变（仍 20 条）：仍须作为动态出现
+        fresh = old[1:] + ["[crypto] 新笔记：拿到管理员入口"]
+        concl2 = concl + ["[crypto/solve] 新结论：已拿到 shell"]
+        upd = self._agent(fresh, concl2)._peer_updates(self._task(), state)
+        self.assertIn("管理员入口", upd)
+        self.assertIn("新结论", upd)
+        # 重复查看不重复播报
+        again = self._agent(fresh, concl2)._peer_updates(self._task(), state)
+        self.assertNotIn("管理员入口", again)
+        self.assertNotIn("新结论", again)
+
+    def test_legacy_length_watermark_migrates_without_replaying(self) -> None:
+        """旧检查点按长度记账：迁移后已汇报条目不被当新动态重播一次。"""
+        old = [f"[crypto] 旧笔记 {i}" for i in range(20)]
+        state: dict = {"peer_seen": {"site": [], "notes": 20, "concl": 0,
+                                     "flags": []}}
+        upd = self._agent(old, [])._peer_updates(self._task(), state)
+        self.assertNotIn("旧笔记", upd)
+        fresh = old[1:] + ["[crypto] 新笔记：迁移后新入口"]
+        upd2 = self._agent(fresh, [])._peer_updates(self._task(), state)
+        self.assertIn("迁移后新入口", upd2)
 
 
 class FindingDedupKeyTests(unittest.TestCase):

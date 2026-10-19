@@ -951,18 +951,19 @@ class CTFBaseAgent(SubAgent):
             out.append(f)
         return out
 
-    def _peer_accepted_flags(self, task: Task, route,
+    def _peer_accepted_flags(self, task: Task,
                              state: dict[str, Any]) -> list[str]:
-        """本轮并行同伴（不含本路线自己）获平台判定正确的 Flag 值。
+        """本轮并行同伴（不含本方向自己）获平台判定正确的 Flag 值。
 
         识别口径此前不看提交者：本路线刚提交成功的 Flag 下一回合会被当成
-        「同伴夺旗」通报（文本谎报出处、多 Flag 题失去再挖机会）。
-        记录里的 route 字段据此区分自行提交与同伴战果。
+        「同伴夺旗」通报（文本谎报出处、多 Flag 题失去再挖机会）。归属
+        只能看提交者方向 by——route 名会撞：各方向路线默认全部叫 solve，
+        拿名字比会把同伴战果统统滤掉（通报从此静默）。
         """
         rnd = int(getattr(task, "round_no", 0) or 0)
         mine = set(state.get("flags") or [])
         return [f["value"] for f in self._shared_flags(task)
-                if f.get("route") != route.name
+                if f.get("by") != self.direction
                 and int(f.get("round", 0) or 0) == rnd
                 and f["value"] not in mine
                 and self._flag_verdict(f) == "accepted"]
@@ -975,7 +976,7 @@ class CTFBaseAgent(SubAgent):
         由它结合现场决定继续（多 Flag 题/未竟面）还是收尾。
         """
         seen = state.setdefault("peer_win_seen", [])
-        fresh = [v for v in self._peer_accepted_flags(task, route, state)
+        fresh = [v for v in self._peer_accepted_flags(task, state)
                  if v not in seen]
         if not fresh:
             return ""
@@ -1001,16 +1002,32 @@ class CTFBaseAgent(SubAgent):
             lines.append(f"· {url} → {line}")
             seen["site"].append(url)
         seen["site"] = seen["site"][-200:]
+        # 笔记/结论按内容水位去重：共享列表有存储上限（写满后 len 不再
+        # 增长），按长度记账会让上限之外的新条目永久静默
         notes = self._shared_notes(task)
-        for note in notes[seen["notes"]:][-8:]:
-            if not note.startswith(f"[{self.direction}]"):
-                lines.append(f"· 同伴笔记 {note}")
-        seen["notes"] = len(notes)
+        seen_notes = seen.get("notes_seen")
+        if not isinstance(seen_notes, list):
+            # 旧检查点形态（按长度记账）：以旧水位为基线迁移一次，
+            # 已汇报过的旧条目不被当新动态重播
+            legacy = seen.get("notes")
+            legacy = legacy if isinstance(legacy, int) and legacy > 0 else 0
+            seen_notes = list(notes[:legacy])
+        fresh_notes = [n for n in notes if n not in seen_notes]
+        seen["notes_seen"] = (seen_notes + fresh_notes)[-64:]
+        for note in [n for n in fresh_notes
+                     if not n.startswith(f"[{self.direction}]")][-8:]:
+            lines.append(f"· 同伴笔记 {note}")
         concl = self._shared_conclusions(task)
-        for c in concl[seen.get("concl", 0):][-4:]:
-            if not c.startswith(f"[{self.direction}/"):
-                lines.append(f"· 同伴结论 {c}")
-        seen["concl"] = len(concl)
+        seen_concl = seen.get("concl_seen")
+        if not isinstance(seen_concl, list):
+            legacy = seen.get("concl")
+            legacy = legacy if isinstance(legacy, int) and legacy > 0 else 0
+            seen_concl = list(concl[:legacy])
+        fresh_concl = [c for c in concl if c not in seen_concl]
+        seen["concl_seen"] = (seen_concl + fresh_concl)[-48:]
+        for c in [c for c in fresh_concl
+                  if not c.startswith(f"[{self.direction}/")][-4:]:
+            lines.append(f"· 同伴结论 {c}")
         fresh = [f for f in self._peer_flags(task, state)
                  if self._flag_line(f) not in seen["flags"]]
         if fresh:
@@ -1667,11 +1684,18 @@ class CTFBaseAgent(SubAgent):
         # 不再发请求；需要重新获取（页面状态可能已变化）时模型显式加
         # refresh 参数。Range 等头不同的请求键不同，分段取原文不受影响。
         refresh = bool(args.get("refresh"))
+        hsig = ""
+        if headers:
+            hsig = "|" + "|".join(sorted(
+                f"{k}:{str(v)[:60]}" for k, v in headers.items()))[:300]
         # 跨分支共享缓存：同伴已读取过的裸 GET 直接回放，不重复发请求。
         # 回放必须自我披露：回灌文本若无标记，模型会把旧录像当成新鲜响应
         # （登录后再访问仍见登录前快照 → 误判未登录 → 死循环）；带参数的
-        # GET 不回放——缓存键不含参数，回放会答非所问
-        shared_fetch = self.cache.get(self.shared_namespace, f"fetch|{url}")
+        # GET 不回放——缓存键不含参数，回放会答非所问。键含方法与请求头
+        # 指纹：POST 的应答不能被同伴的 GET 回放（表单提交/登录跳转的
+        # 应答顶掉页面快照），Range 等头不同的分段读取各记各的
+        shared_key = f"fetch|{method}|{url}{hsig}"
+        shared_fetch = self.cache.get(self.shared_namespace, shared_key)
         if (shared_fetch and not refresh and method == "GET"
                 and not params and not data):
             state["observations"].append({
@@ -1683,10 +1707,6 @@ class CTFBaseAgent(SubAgent):
                       "本次未发请求；页面状态可能已变化——登录/写入之后要看"
                       "最新现场，在参数中加 \"refresh\": true 重新获取）\n"
                       + str(shared_fetch))[:_FETCH_RECORD_CAP])
-        hsig = ""
-        if headers:
-            hsig = "|" + "|".join(sorted(
-                f"{k}:{str(v)[:60]}" for k, v in headers.items()))[:300]
         rkey = attempt_key(method, url, params) + hsig
         fetches = state.setdefault("fetches", {})
         if (method == "GET" and not params and not data and not refresh
@@ -1747,8 +1767,11 @@ class CTFBaseAgent(SubAgent):
         obs = _http_observation(desc, res, url, [])
         state["observations"].append(obs)
         fetches[rkey] = {"round": int(state.get("turn") or 0), "obs": obs}
-        self.cache.put(self.shared_namespace, f"fetch|{url}",
-                       _obs_text(obs)[:_FETCH_RECORD_CAP])
+        if method == "GET" and not params and not data:
+            # 只有裸 GET 进跨分支回放池：POST/带参请求的应答进池会被
+            # 同伴的 GET 回放成语义错位的“现场”（登录态、写操作结果）
+            self.cache.put(self.shared_namespace, shared_key,
+                           _obs_text(obs)[:_FETCH_RECORD_CAP])
         # 环形共享缓存：入口与关键信号登记，同伴不再重复探同一入口
         signal = _signal_line(obs)
         self._record_site(task, url, f"{status}{signal}", route=route.name)

@@ -180,5 +180,9 @@ class QuestionBroker:
     # ------------------------------------------------------------ 展示侧
 
     def view(self) -> list[dict]:
-        """当前待答列表（/state 折入，前端渲染提问卡）。"""
-        return [dict(rec) for rec in self._pending.values()]
+        """当前待答列表（/state 折入，前端渲染提问卡）。
+
+        先复制 pending 字典再遍历：/state 在线程池执行，与本事件循环的
+        登记/作答并发时，直接迭代活字典会撞「changed size」。
+        """
+        return [dict(rec) for rec in self._pending.copy().values()]

@@ -77,7 +77,7 @@ class SessionArchiveTests(unittest.TestCase):
         session = Session(session_id="sess-archive", mode="src", target="archive.test",
                           workspace=self.workspace, status="completed")
         app.state.manager._sessions[session.session_id] = session
-        with TestClient(app) as client:
+        with TestClient(app, base_url="http://127.0.0.1") as client:
             prefix = "/api/sessions/sess-archive"
             response = client.get(prefix + "/deliverables", params={"kind": "fact"})
             self.assertEqual(response.status_code, 200)

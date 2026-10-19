@@ -402,6 +402,9 @@ async def _build_infra(
             # 可以直接接续 file_analyze/analyze_attachments
             "allowed_dirs": [str(attachments), str(sandbox_dir), str(artifacts_dir)],
             "workspace_root": str(workspace),
+            # 控制面根目录（Web 会话为基础工作区）：沙箱需整层遮蔽后再
+            # 开放会话产物目录（[]/空 = 无额外遮蔽，CLI 直连场景）
+            "guard_root": str(getattr(cfg.workspace, "guard_root", "") or ""),
             "resources": resources,
         }
         # 外部 MCP 服务器：握手 + 工具清单并入智能体工具目录（失败留痕跳过，

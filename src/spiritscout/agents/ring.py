@@ -87,5 +87,6 @@ class RingLedger:
         """当前台账快照（/state 折入，前端呈现共享与督导状态）。"""
         return {
             "attempts": len(self._attempts),
-            "steering": {k: dict(v) for k, v in self._steering.items()},
+            # 先复制再遍历（/state 在线程池执行，避开并发登记/写督导）
+            "steering": {k: dict(v) for k, v in self._steering.copy().items()},
         }

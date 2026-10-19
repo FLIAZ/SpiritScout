@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from spiritscout.core.audit import NullAuditLogger
+from spiritscout.core.exceptions import SpiritScoutError
 from spiritscout.core.ids import new_id
 
 _INSIGHT_CAP = 600
@@ -149,10 +150,11 @@ def read_page(db_path: str | Path, *, q: str = "", tag: str = "",
 
 def delete_insight(db_path: str | Path, insight_id: str, *,
                    audit: Any = None) -> dict[str, Any] | None:
-    """人工审核删除：按 ID 删一条经验，返回被删快照（未命中/坏库返回 None）。
+    """人工审核删除：按 ID 删一条经验，返回被删快照（未命中返回 None）。
 
     经验是模型产出、用户随时可审的仓库——提炼跑偏（如把单题解题步骤
     当成可复用事实）时用户可就地清理；删除动作经 audit 留痕（actor=user）。
+    库故障（锁/损坏）显式抛出：不能假装「未命中」，让用户以为条目已删。
     """
     path = Path(db_path)
     if not path.exists() or not str(insight_id or "").strip():
@@ -170,8 +172,9 @@ def delete_insight(db_path: str | Path, insight_id: str, *,
                              (insight_id,))
         finally:
             conn.close()
-    except sqlite3.Error:
-        return None
+    except sqlite3.Error as exc:
+        raise SpiritScoutError(
+            f"经验库操作失败（{type(exc).__name__}）: {str(exc)[:200]}") from exc
     item = _normalize(row)
     if audit is not None:
         audit.log("experience.deleted", "user", {

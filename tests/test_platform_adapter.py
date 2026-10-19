@@ -260,6 +260,33 @@ class PlatformAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restarted["url"], "http://c2.box:9000")
         self.assertEqual(adapter.summary()["active_instances"], 1)
 
+    async def test_start_without_addr_is_not_treated_as_ready(self) -> None:
+        """2xx 但缺地址（异步供给/字段不符）：不能占着名额装成就绪。
+
+        修复前：空地址照记「已启动」，该题永远拿不到入口还白占一个活跃
+        名额——其他题也被名额挡在门外，会话整体停滞。
+        """
+        adapter, fake = self.adapter(max_active=1)
+        calls: list[str] = []
+
+        def start(req: httpx.Request) -> httpx.Response:
+            cid = json.loads(req.content)["unique_code"]
+            calls.append(cid)
+            if len(calls) == 1:
+                return httpx.Response(200, json={"unique_code": cid})   # 无地址
+            return httpx.Response(200, json={"container_addr": f"{cid}.box:8080"})
+
+        fake.route("/api/v1/challenge/start", start)
+        self.assertIsNone(await adapter.ensure_instance({"id": "c1"}))  # 未就绪
+        self.assertIsNone(await adapter.ensure_instance({"id": "c1"}))  # 退避内不重发
+        self.assertEqual(calls, ["c1"])
+        self.assertIn("instance_addr_missing",
+                      [f["action"] for f in adapter.facts])
+        adapter._start_blocked_until = 0.0                              # 退避结束
+        got = await adapter.ensure_instance({"id": "c1"})
+        self.assertEqual(got["url"], "http://c1.box:8080")
+        self.assertEqual(calls, ["c1", "c1"])
+
     async def test_release_completed_prefers_platform_completion_signal(self) -> None:
         adapter, fake = self.adapter(max_active=2)
         fake.route("/api/v1/challenge/start",

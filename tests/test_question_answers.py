@@ -30,7 +30,7 @@ class QuestionAnswerTests(unittest.IsolatedAsyncioTestCase):
         self.guard = ScopeGuard(Scope(local_analysis=True))
         self.session.questions.bind_guard(self.guard)
         self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app),
-                                       base_url="http://test")
+                                       base_url="http://127.0.0.1")
         self.addAsyncCleanup(self.client.aclose)
         self.tasks: list[asyncio.Task] = []
         self.addAsyncCleanup(self.cleanup_questions)

@@ -27,6 +27,11 @@ gateway:                       # 多模型网关（模型在 models.yaml 注册�
   vote_min_models: 2
   request_timeout_seconds: 300  # 重推理模型单次调用可达数分钟，过短会中途掐死解题环
   max_retries: 2
+  mode_budget_tokens:          # 按模式记录的 Token 参考值，不作为执行上限
+    src: 2000000
+    ctf: 1000000
+    competition: 1500000
+  degrade_at_ratio: 0.8        # 兼容旧配置；当前不按消耗自动降级
 
 executor:                      # 工具执行器（CLI/Docker/MCP 三态）
   backend: local               # local / docker
@@ -34,6 +39,12 @@ executor:                      # 工具执行器（CLI/Docker/MCP 三态）
   default_timeout_seconds: 300
   max_output_chars: 20000      # 输出窗口截断（防上下文污染）
   ctf_network_isolation: true  # CTF 模式网络隔离（硬约束）
+  docker_memory_mb: 512        # Docker 沙箱加固：资源硬限额
+  docker_cpus: 1.0
+  docker_pids_limit: 256
+  docker_read_only: true       # 只读根文件系统 + 受限 tmpfs
+  docker_tmpfs: "/tmp:rw,noexec,nosuid,size=64m"
+  docker_user: ""              # 空 = 镜像默认用户；可配 "65534:65534" 降权
 
 knowledge:                     # 五库 + 两经验库
   sqlite_path: .spiritscout/knowledge.db
@@ -68,7 +79,7 @@ mcp_servers:
   - name: playwright
     enabled: false
     command: npx
-    args: ["@playwright/mcp@latest", "--headless", "--snapshot-boxes"]
+    args: ["@playwright/mcp@0.0.83", "--headless", "--snapshot-boxes"]  # 钉版本：@latest 每次联网解析，网络抖动可挂满握手超时连累开工
     default_risk: readonly
     risk_by_action: true
     scope_enforcement: required

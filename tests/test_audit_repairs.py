@@ -487,7 +487,7 @@ class AuditPlaintextTests(unittest.IsolatedAsyncioTestCase):
             cfg = SystemConfig(workspace=WorkspaceConfig(root=tmp),
                                models_config_path=str(root / "models.yaml"))
             app = create_app(cfg, [])
-            with TestClient(app) as client:
+            with TestClient(app, base_url="http://127.0.0.1") as client:
                 session = Session(session_id="audit-test", mode="src", target="local",
                                   workspace=root / "sessions" / "audit-test", status="completed")
                 session.workspace.mkdir(parents=True)

@@ -17,6 +17,7 @@ from spiritscout.config.settings import (
     WorkspaceConfig,
 )
 from spiritscout.core.audit import NullAuditLogger
+from spiritscout.core.exceptions import SpiritScoutError
 from spiritscout.core.models import Authorization, BlackboardLayer, RunMode, Scope
 from spiritscout.gateway import ModelGateway, ModelRegistry
 from spiritscout.gateway.backends import MockBackend
@@ -152,6 +153,14 @@ class ExperienceStoreTests(unittest.TestCase):
             page = read_page(db)
             self.assertEqual(page["total"], 1)
             self.assertEqual(page["items"][0]["insight_id"], keep)
+
+    def test_delete_insight_reports_db_failure_instead_of_missing(self) -> None:
+        """坏库（路径被目录/损坏文件占位）不谎报「未命中」，由调用方回 5xx。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            broken = Path(tmp) / "experience.db"
+            broken.mkdir()                     # 目录冒充数据库：连接必然失败
+            with self.assertRaises(SpiritScoutError):
+                delete_insight(broken, "exp-1")
 
 
 class SharedExperienceRootTests(unittest.TestCase):
@@ -390,7 +399,7 @@ class ExperiencePageTests(unittest.TestCase):
                                        "error": "ValueError: 模型输出为空"}}) + "\n",
                 encoding="utf-8")
             app.state.manager._sessions["sess-known"] = session
-            with TestClient(app) as client:
+            with TestClient(app, base_url="http://127.0.0.1") as client:
                 resp = client.get("/api/experience")
                 self.assertEqual(resp.status_code, 200)
                 data = resp.json()
@@ -424,7 +433,7 @@ class ExperiencePageTests(unittest.TestCase):
             keep = store.add("GET 状态变更是 CSRF 判读信号", tags=["csrf"])
             drop = store.add("本题入口位于 /log，应优先探测日志端点", tags=["web"])
             store.close()
-            with TestClient(app) as client:
+            with TestClient(app, base_url="http://127.0.0.1") as client:
                 resp = client.delete(f"/api/experience/{drop}")
                 self.assertEqual(resp.status_code, 200)
                 self.assertEqual(resp.json(), {"deleted": drop})

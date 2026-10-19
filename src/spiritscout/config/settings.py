@@ -69,6 +69,9 @@ class ValidatedConfig(BaseModel):
 
 class WorkspaceConfig(ValidatedConfig):
     root: str = Field(default=".spiritscout", description="工作区根目录（SQLite/审计/报告产出）")
+    # Web 会话的工作区在基础根目录内部；沙箱遮蔽需连基础根一起（vault 密钥
+    # 库/兄弟会话/审计都在里面），仅遮蔽会话自身目录不足以隔离
+    guard_root: str = Field(default="", description="控制面根目录（沙箱遮蔽用）：空 = 不额外遮蔽")
 
 
 class BusConfig(ValidatedConfig):

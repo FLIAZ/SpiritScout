@@ -294,7 +294,10 @@ class PlatformAdapter:
         if self._client is None:
             self._client = httpx.AsyncClient(
                 timeout=self.timeout, headers=dict(self.profile.headers),
-                follow_redirects=True)
+                # 重定向手动跟随（_request）：httpx 自动跟随时只会剥离
+                # Authorization，profile.headers 里的平台凭据头（Token/
+                # X-Api-Key 等自定义头）会被原样带往任意目标站
+                follow_redirects=False)
         return self._client
 
     async def aclose(self) -> None:
@@ -322,15 +325,37 @@ class PlatformAdapter:
         url = self._render_url(op, ctx)
         query = _render(op.query, ctx) if op.query else None
         body = _render(op.body, ctx) if op.body else None
+        client = self._ensure_client()
+        method = op.http_method()
         try:
-            resp = await self._ensure_client().request(
-                op.http_method(), url,
-                params=query or None,
-                json=body if body else None,
-            )
+            resp = await client.request(method, url,
+                                        params=query or None,
+                                        json=body if body else None)
         except Exception as exc:  # noqa: BLE001 —— 传输失败交调用方定性
             return _Resp(False, 0, None, "",
                          f"{type(exc).__name__}: {str(exc)[:200]}")
+        # 重定向手动跟随（httpx 自动跟随会把平台凭据头带往任意目标站，
+        # 见 _ensure_client）：只跟同主机，且不允许 https→http 降级
+        hops = 0
+        while resp.is_redirect and hops < 3:
+            location = str(resp.headers.get("location") or "").strip()
+            if not location:
+                break
+            target = resp.url.join(location)
+            if target.host != resp.url.host or (
+                    resp.url.scheme == "https" and target.scheme == "http"):
+                return _Resp(False, 0, None, "", (
+                    "平台接口重定向到其他站点，已阻止凭据转发: "
+                    f"{str(target)[:200]}"))
+            hops += 1
+            if resp.status_code in (301, 302, 303):
+                method, query, body = "GET", None, None
+            try:
+                resp = await client.request(method, target,
+                                            json=body if body else None)
+            except Exception as exc:  # noqa: BLE001
+                return _Resp(False, 0, None, "",
+                             f"{type(exc).__name__}: {str(exc)[:200]}")
         try:
             data = resp.json()
         except Exception:  # noqa: BLE001 —— 非 JSON 应答保留原文
@@ -448,12 +473,17 @@ class PlatformAdapter:
             addr = self._instances[cid]
             if addr and not challenge.get("url"):
                 return {**challenge, "container_addr": addr, "url": _maybe_url(addr)}
-            return challenge
-        limit = self._max_active()
-        if limit and len(self._instances) >= limit:
-            self._record("instance_wait", challenge=cid,
-                         active=len(self._instances), limit=limit)
-            return None
+            if addr or challenge.get("url"):
+                return challenge
+            # 已登记但地址空缺且题面无入口（平台异步供给/字段不符）：不能
+            # 当成就绪回给调用方——该题将永远拿不到入口，还白占一个活跃
+            # 名额；按退避重试供给（本题名额已占，不再走名额检查）
+        else:
+            limit = self._max_active()
+            if limit and len(self._instances) >= limit:
+                self._record("instance_wait", challenge=cid,
+                             active=len(self._instances), limit=limit)
+                return None
         now = time.monotonic()
         if now < self._start_blocked_until:
             return None
@@ -469,6 +499,12 @@ class PlatformAdapter:
             return None
         addr = _as_str(_dig(resp.data, op.addr_field or "container_addr"))
         self._instances[cid] = addr
+        if not addr and not challenge.get("url"):
+            # 2xx 但没给地址：按未就绪处理（记录事实 + 退避再试），下轮补位
+            self._start_blocked_until = now + self._START_RETRY_BACKOFF
+            self._record("instance_addr_missing", challenge=cid,
+                         status=resp.status, detail=resp.text[:160])
+            return None
         self._record("instance_started", challenge=cid, addr=addr, status=resp.status)
         if addr:
             return {**challenge, "container_addr": addr, "url": _maybe_url(addr)}

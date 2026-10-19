@@ -199,7 +199,7 @@ class ResourceApiTests(unittest.TestCase):
                 )
             ]
             app = create_app(cfg, [])
-            with TestClient(app) as client:
+            with TestClient(app, base_url="http://127.0.0.1") as client:
                 page = client.get("/").text
                 for key in ("view-mcp", "view-skill", "view-assets"):
                     self.assertIn(key, page)
@@ -238,7 +238,7 @@ class ResourceApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             cfg = cfg_at(Path(directory))
             app = create_app(cfg, [])
-            with TestClient(app) as client:
+            with TestClient(app, base_url="http://127.0.0.1") as client:
                 response = client.put(
                     "/api/resources/skills/custom-reference",
                     json={

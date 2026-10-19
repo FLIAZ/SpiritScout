@@ -204,6 +204,8 @@ class SubAgent(abc.ABC):
         # 环形共享现场（ctf_shared 等）因此跨 Agent 可见
         self.cache = self.ctx.shared_cache or LocalSharedCache(default_ttl_seconds=3600)
         self.agent_id = new_id(self.agent_type.value.replace("_", "-"))
+        # 灵枢督导注入水位：同一条建议只进一次决策载荷（见 _llm_chat_json）
+        self._steer_seen_ts = 0.0
 
     @staticmethod
     def task_effort(task: Task) -> str:
@@ -661,12 +663,15 @@ class SubAgent(abc.ABC):
             intent = {k: v for k, v in intent.items() if v}
             if intent:
                 user_obj = {**user_obj, "task_intent": intent}
-        # 灵枢督导：主 Agent 按全局实时进度给出的方向建议（上下文而非指令）
+        # 灵枢督导：主 Agent 按全局实时进度给出的方向建议（上下文而非指令）。
+        # 一条建议只注入一次（ts 水位）——同一条建议跟着每次决策重复出现
+        # 只是花 Token 的脏上下文；换新建议（ts 更新）才再次注入
         steering = (self.ctx.ring.steering_for(self.agent_type.value)
                     if self.ctx.ring is not None else None)
-        if steering:
+        if steering and float(steering.get("ts") or 0) > self._steer_seen_ts:
             user_obj = {**user_obj, "灵枢督导": {
                 "hint": steering["hint"], "rationale": steering.get("rationale", "")}}
+            self._steer_seen_ts = float(steering.get("ts") or 0)
         # 后续执行读取最新持久化事实；业务建模本身仍以本次直接观测为准。
         if task is not None and role != "business_analyst" and "business_context" not in user_obj:
             shared = shared_context(getattr(self.ctx, "blackboard", None))
@@ -708,7 +713,8 @@ class SubAgent(abc.ABC):
                 data, role=role, user_obj=user_obj,
                 max_user_chars=max_user_chars,
                 timeout_seconds=timeout_seconds,
-                reasoning_effort=reasoning_effort, task=task)
+                reasoning_effort=reasoning_effort, task=task,
+                allow_ask=_allow_ask)
         except Exception as exc:  # noqa: BLE001 —— 降级为规则骨架，不阻断（留痕可见）
             self.ctx.audit.log("llm.step_fallback", self.agent_id,
                                {"role": role, "error": str(exc)[:200]})
@@ -718,7 +724,8 @@ class SubAgent(abc.ABC):
                           user_obj: dict[str, Any], max_user_chars: int,
                           timeout_seconds: int | None,
                           reasoning_effort: str,
-                          task: Task | None) -> dict[str, Any] | None:
+                          task: Task | None,
+                          allow_ask: bool = True) -> dict[str, Any] | None:
         """决策里的 ask_user 落地：向用户发问（挂起等答），答复回灌重裁本决策。
 
         会话停止/用户未给明确答复 → 按模型原决策继续（与 CTF ask_user 同
@@ -727,6 +734,9 @@ class SubAgent(abc.ABC):
         发起同参决策，重裁调用不再开放提问（一轮决策至多一问，防循环）。
         """
         ask = data.pop("ask_user", None)
+        if not allow_ask:
+            # 重裁不再开放提问：一轮决策至多一问，防问答循环
+            return data
         if not isinstance(ask, dict) or not str(ask.get("question") or "").strip():
             return data
         assert self.ctx.audit is not None

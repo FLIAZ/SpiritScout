@@ -78,7 +78,7 @@ class ToolParameterTests(unittest.TestCase):
         app = create_app(cfg, [])
         app.state.manager._sessions["sess-params"] = Session(session_id="sess-params", mode="src",
             target="example.test", workspace=self.root, status="completed")
-        with TestClient(app) as client:
+        with TestClient(app, base_url="http://127.0.0.1") as client:
             path = "/api/sessions/sess-params/tool-parameters"
             response = client.get(path, params={"tool": "nav", "digest": self.digest(args)})
             self.assertEqual(response.json()["parameters"], args)

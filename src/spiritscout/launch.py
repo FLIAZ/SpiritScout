@@ -282,8 +282,12 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
         if host and host not in allowed_domains:
             allowed_domains.append(host)
 
+    # 赛制禁打列表是唯一硬边界：规则里的 denied_hosts 并入授权 Scope，
+    # 由 ScopeGuard.ensure_not_denied 逐请求校验（此前解析了却无人消费）
+    denied_hosts = list(rules.denied_hosts) if rules is not None else []
     scope = Scope(
         allowed_domains=allowed_domains, allowed_urls=allowed_urls,
+        denied=denied_hosts,
         max_requests_per_second=req.rps,
         allow_sensitive_actions=req.allow_sensitive,
         # 携带附件即已授权分析这些本地文件（离线题常态）——授权数据里

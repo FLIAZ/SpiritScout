@@ -851,7 +851,9 @@ class SessionManager:
         tmp.replace(session.meta_path)
 
     def list(self) -> list[Session]:
-        return sorted(self._sessions.values(),
+        # 先复制再遍历：/api/sessions 等同步端点在线程池执行，与本事件
+        # 循环的创建/删除并发时会撞「dictionary changed size」
+        return sorted(self._sessions.copy().values(),
                       key=lambda s: s.created_at, reverse=True)
 
     def get(self, session_id: str) -> Session | None:
@@ -874,6 +876,9 @@ class SessionManager:
         """会话级配置副本：全部状态路径重定向到会话工作区（隔离核心）。"""
         cfg = self._cfg.model_copy(deep=True)
         ws = session.workspace
+        # 控制面根目录：会话工作区在基础工作区内部，沙箱遮蔽需连基础根
+        # 一起（vault 密钥库/兄弟会话/审计都在里面），只遮会话目录不够
+        cfg.workspace.guard_root = str(self._cfg.workspace.root)
         try:
             cfg.mode = RunMode(session.mode)
         except ValueError:
@@ -1004,39 +1009,53 @@ class SessionManager:
         self._sessions[session.session_id] = session
         self._persist(session)
 
-        cfg = self._session_cfg(session, payload.get("budget_tokens"))
-        session.approvals = ApprovalBroker(AuditLogger(cfg.audit_log_path))
-        session.questions = QuestionBroker(AuditLogger(cfg.audit_log_path))
-        session.ring = RingLedger(AuditLogger(cfg.audit_log_path))
-        session.pause_gate = PauseGate(AuditLogger(cfg.audit_log_path))
-        no_llm = bool(payload.get("no_llm", False))
-        # 暂存附件材料化：移入工作区 attachments/ + 注入无附件的赛题载荷
-        # （方向判类/附件分析工具/题面视图直接可用）+ 种入灵枢收件箱
-        if staged_files:
-            dest_dir = session.workspace / "attachments"
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            audit = AuditLogger(cfg.audit_log_path)
-            records: list[dict[str, Any]] = []
-            for src in staged_files:
-                dest = dest_dir / src.name
-                n = 2
-                while dest.exists():                # 同名不覆盖
-                    dest = dest_dir / f"{src.stem}-{n}{src.suffix}"
-                    n += 1
-                shutil.move(str(src), str(dest))
-                records.append({"kind": "attachment", "name": dest.name,
-                                "path": str(dest), "size": dest.stat().st_size})
-                audit.log("user.attachment", "user", {
-                    "name": dest.name, "size": records[-1]["size"],
-                    "path": str(dest)})
-            session.user_inbox.extend(records)
-            for ch in plan.challenges:
-                if not ch.get("attachments"):
-                    ch["attachments"] = [r["path"] for r in records]
-            for updir in {p.parent for p in staged_files}:
-                shutil.rmtree(updir, ignore_errors=True)
-        self.start()            # 直接使用（非 Web lifespan）时懒启动监督协程
-        await self._queue.put((session, cfg, plan, no_llm, models, False))
+        try:
+            cfg = self._session_cfg(session, payload.get("budget_tokens"))
+            session.approvals = ApprovalBroker(AuditLogger(cfg.audit_log_path))
+            session.questions = QuestionBroker(AuditLogger(cfg.audit_log_path))
+            session.ring = RingLedger(AuditLogger(cfg.audit_log_path))
+            session.pause_gate = PauseGate(AuditLogger(cfg.audit_log_path))
+            no_llm = bool(payload.get("no_llm", False))
+            # 暂存附件材料化：移入工作区 attachments/ + 注入无附件的赛题载荷
+            # （方向判类/附件分析工具/题面视图直接可用）+ 种入灵枢收件箱
+            if staged_files:
+                dest_dir = session.workspace / "attachments"
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                audit = AuditLogger(cfg.audit_log_path)
+                records: list[dict[str, Any]] = []
+                for src in staged_files:
+                    dest = dest_dir / src.name
+                    n = 2
+                    while dest.exists():            # 同名不覆盖
+                        dest = dest_dir / f"{src.stem}-{n}{src.suffix}"
+                        n += 1
+                    shutil.move(str(src), str(dest))
+                    records.append({"kind": "attachment", "name": dest.name,
+                                    "path": str(dest),
+                                    "size": dest.stat().st_size})
+                    audit.log("user.attachment", "user", {
+                        "name": dest.name, "size": records[-1]["size"],
+                        "path": str(dest)})
+                session.user_inbox.extend(records)
+                for ch in plan.challenges:
+                    if not ch.get("attachments"):
+                        ch["attachments"] = [r["path"] for r in records]
+                for updir in {p.parent for p in staged_files}:
+                    shutil.rmtree(updir, ignore_errors=True)
+            self.start()        # 直接使用（非 Web lifespan）时懒启动监督协程
+            await self._queue.put((session, cfg, plan, no_llm, models, False))
+        except Exception as exc:
+            # 登记后中途失败（配置构建/附件搬运/入队）：落终态再原样抛出——
+            # 「created」既非终态也无法续传，留下就成了删不掉也开不了的僵尸
+            session.status = "failed"
+            session.phase = "failed"
+            session.error = f"会话创建中途失败（{type(exc).__name__}）"[:500]
+            session.finished_at = time.time()
+            try:
+                self._persist(session)
+            except Exception:  # noqa: BLE001 —— 落盘失败不遮蔽原始异常
+                pass
+            raise
         if not no_llm:
             # 命名是旁路增强：不阻塞入队，失败静默（展示回退 mission 首行）
             self._schedule_naming(session, models, plan)
@@ -1239,11 +1258,13 @@ class SessionManager:
         session.approvals = ApprovalBroker(AuditLogger(cfg.audit_log_path))
         session.questions = QuestionBroker(AuditLogger(cfg.audit_log_path))
         session.ring = RingLedger(AuditLogger(cfg.audit_log_path))
-        # 暂停门换新（带本轮审计器），暂停态跨续传保留：用户没手动继续前
-        # 重开的任务在检查点挂起等待
+        # 暂停门换新（带本轮审计器），暂停态与已扣账的暂停/间隙时长跨续传
+        # 保留：用户没手动继续前重开的任务在检查点挂起等待；时长丢失会让
+        # 用时展示把此前暂停的时段重新计入
         was_paused = session.pause_gate.paused
+        was_excluded = session.pause_gate.excluded_seconds
         session.pause_gate = PauseGate(AuditLogger(cfg.audit_log_path))
-        session.pause_gate.restore(was_paused)
+        session.pause_gate.restore(was_paused, was_excluded)
         no_llm = bool(session.request.get("no_llm", False))
         session.status = "running"
         session.phase = "queued"

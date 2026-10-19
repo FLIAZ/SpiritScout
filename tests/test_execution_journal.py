@@ -292,7 +292,7 @@ class ExecutionApiTests(unittest.TestCase):
             root = Path(tmp)
             app = create_app(SystemConfig(workspace=WorkspaceConfig(root=tmp),
                                           models_config_path=str(root / "models.yaml")), [])
-            with TestClient(app) as client:
+            with TestClient(app, base_url="http://127.0.0.1") as client:
                 workspace = root / "sessions" / "test-session"
                 workspace.mkdir(parents=True)
                 session = Session(session_id="test-session", mode="src", target="local",

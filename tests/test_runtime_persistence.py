@@ -377,7 +377,7 @@ class RecoveryApiTests(unittest.TestCase):
                 journal.begin("inflight", "write", "digest", "never_automatic", params={"key": "private"})
                 journal.transition("inflight", "running", effect="unknown")
                 journal.checkpoint("master", "master", "before_dispatch", {"secret": "private"})
-                with TestClient(app) as client:
+                with TestClient(app, base_url="http://127.0.0.1") as client:
                     response = client.get("/api/sessions/interrupted/recovery")
                     self.assertEqual(response.status_code, 200)
                     self.assertEqual(response.json()["unresolved_count"], 1)

@@ -239,7 +239,7 @@ class VerifierTests(unittest.IsolatedAsyncioTestCase):
         self.bb.write(BlackboardLayer.VULN, v.vuln_id, v.model_dump(mode="json"))
         app.state.manager._sessions["fixture"] = Session(session_id="fixture", mode="src",
             target=self.url, workspace=root, status="completed")
-        with TestClient(app) as client:
+        with TestClient(app, base_url="http://127.0.0.1") as client:
             state = client.get("/api/sessions/fixture/state").json()
             page = client.get("/api/sessions/fixture/vulnerabilities").json()
         self.assertEqual(state["vulns"]["items"][0]["verification"]["rule_quote"], RULE)

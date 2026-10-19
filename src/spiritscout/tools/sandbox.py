@@ -103,7 +103,8 @@ def _venv_site_dirs(venv: Path) -> list[str]:
     return [str(p) for p in sorted(venv.glob("lib/python*/site-packages"))]
 
 
-def _build_argv(workspace: Path, rundir: Path, inner: list[str]) -> list[str]:
+def _build_argv(workspace: Path, rundir: Path, inner: list[str], *,
+                guard_root: Path | None = None) -> list[str]:
     """bwrap 参数：整机只读 + 控制面遮蔽 + 产物可写/附件只读 + 干净环境。
 
     工具来源：项目内 .venv（只读回挂并入 PATH/PYTHONPATH）——用户主目录、
@@ -124,6 +125,14 @@ def _build_argv(workspace: Path, rundir: Path, inner: list[str]) -> list[str]:
         # 需整目录替换而非逐项挂载）
         "--tmpfs", "/usr/local",
     ]
+    # 控制面根目录整层遮蔽（Web 会话：基础工作区，vault 密钥库/兄弟会话/
+    # 审计都在里面）。只遮蔽会话自身目录时，同级会话与 vault.key/vault.db
+    # 在沙箱内照样可读（密钥与密文同处可读＝供应商 Key 全量可解密）。
+    # 置于 .venv 回挂之前：会话工作区含项目根时不把工具层一起盖掉
+    if (guard_root is not None and str(guard_root) != "/"
+            and guard_root != workspace and guard_root.is_dir()
+            and workspace.is_relative_to(guard_root)):
+        argv += ["--tmpfs", str(guard_root)]
     venv = _project_venv()
     path_dirs = ["/usr/bin", "/bin"]
     site_dirs: list[str] = []
@@ -212,6 +221,7 @@ async def sandbox_exec(
     timeout: float = 60.0,
     workspace_root: str | None = None,
     workspace_scope: str | None = None,
+    guard_root: str | None = None,
     log_name: str = "last_output",
     max_output_chars: int = 20000,
     **_: Any,
@@ -270,7 +280,8 @@ async def sandbox_exec(
     else:
         inner = ["bash", "-c", code]
 
-    argv = _build_argv(workspace, rundir, inner)
+    guard = Path(guard_root).resolve() if guard_root else None
+    argv = _build_argv(workspace, rundir, inner, guard_root=guard)
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,

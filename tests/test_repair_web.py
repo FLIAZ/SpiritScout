@@ -26,7 +26,8 @@ class WebRepairTests(unittest.TestCase):
             audit_log_path=str(self.root / "audit.jsonl"),
         )
         self.app = create_app(self.cfg, [])
-        self.client = self.enterContext(TestClient(self.app, raise_server_exceptions=False))
+        self.client = self.enterContext(TestClient(self.app, base_url="http://127.0.0.1",
+                                 raise_server_exceptions=False))
 
     def test_bad_request_shapes_return_422_without_creating_sessions(self) -> None:
         for payload in [
@@ -108,7 +109,8 @@ class NamingChainApiTests(unittest.TestCase):
             modelcfg.write_config(cfg.models_config_path, [],
                                   [{"model": "mini", "provider": "mock"},
                                    {"model": "backup", "provider": "mock"}])
-            client = TestClient(create_app(cfg, []))
+            client = TestClient(create_app(cfg, []),
+                                base_url="http://127.0.0.1")
             self.assertEqual(client.get("/api/models/naming").json()["chain"], [])
             # 顺序即用户排的降级顺序；重复项去重保序
             r = client.put("/api/models/naming",

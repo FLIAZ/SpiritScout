@@ -30,6 +30,16 @@ class LaunchRoutingTests(unittest.TestCase):
         self.assertTrue(plan.needs_mode_routing)
         self.assertEqual(len(plan.challenges), 1)
 
+    def test_competition_denied_hosts_reach_authorization_scope(self) -> None:
+        """赛制禁打列表是唯一硬边界：解析后必须并入授权 Scope 才真正生效。"""
+        plan = prepare_launch(LaunchRequest(
+            mode=RunMode.COMPETITION,
+            mission=PLATFORM_DOC_MISSION,
+            rules_yaml=("contest_type: jeopardy\n"
+                        "denied_hosts: ['admin.contest.example', '10.9.9.9']\n")))
+        self.assertIn("admin.contest.example", plan.authorization.scope.denied)
+        self.assertIn("10.9.9.9", plan.authorization.scope.denied)
+
     def test_ambiguous_web_mission_still_uses_semantic_router(self) -> None:
         plan = prepare_launch(LaunchRequest(
             mission="检查 https://example.test 的登录流程"))
@@ -701,6 +711,84 @@ class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
             reloaded = SessionManager(cfg, []).get("sess-meta")
             self.assertEqual(reloaded.auto_title, "自动短名")
             self.assertEqual(reloaded.display_title(), "自动短名")
+
+
+class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
+    """建会话登记后中途失败：落终态，不留「created」僵尸。"""
+
+    async def test_setup_failure_marks_session_terminal_and_deletable(self) -> None:
+        """created 既非终态（删不掉）又无法续传：中途失败必须落 failed。
+
+        修复前：配置构建/附件搬运/入队抛错时会话停在 created——界面上
+        看着像能续传，实际 resume 拒绝、delete 拒绝，只能重启进程清理。
+        """
+        from spiritscout.web import modelcfg, vault
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = SystemConfig(
+                workspace=WorkspaceConfig(root=str(root)),
+                models_config_path=str(root / "models.yaml"),
+                agent_models_path=str(root / "agents.yaml"),
+                audit_log_path=str(root / "audit.jsonl"))
+            modelcfg.write_config(cfg.models_config_path, [],
+                                  [{"model": "mini", "provider": "mock"}])
+            vault.configure(str(root))
+            manager = SessionManager(cfg, [])
+            plan = prepare_launch(LaunchRequest(
+                mode=RunMode.SRC, mission="检查 https://example.com",
+                target="https://example.com"))
+            with patch.object(SessionManager, "_session_cfg",
+                              side_effect=RuntimeError("boom")):
+                with self.assertRaises(RuntimeError):
+                    await manager.create(
+                        {"mode": "src", "mission": "检查 https://example.com",
+                         "target": "https://example.com"}, plan)
+            sessions = manager.list()
+            self.assertEqual(len(sessions), 1)
+            self.assertEqual(sessions[0].status, "failed")
+            self.assertEqual(sessions[0].phase, "failed")
+            self.assertTrue(sessions[0].error)
+            # 终态即可删除，不再卡在 created
+            deleted = await manager.delete(sessions[0].session_id, confirm=True)
+            self.assertIsNotNone(deleted)
+            self.assertEqual(manager.list(), [])
+
+
+class ResumePauseStateTests(unittest.IsolatedAsyncioTestCase):
+    """续传换新暂停门：暂停态与已扣账时长保留。"""
+
+    async def test_resume_preserves_pause_state_and_excluded_time(self) -> None:
+        """重开的任务没等用户点击继续就自动跑起来、或用时展示把此前
+        暂停的时段重新计入，都是对「暂停」语义的破坏。"""
+        from spiritscout.web import modelcfg, vault
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = SystemConfig(
+                workspace=WorkspaceConfig(root=str(root)),
+                models_config_path=str(root / "models.yaml"),
+                agent_models_path=str(root / "agents.yaml"),
+                audit_log_path=str(root / "audit.jsonl"))
+            modelcfg.write_config(cfg.models_config_path, [],
+                                  [{"model": "mini", "provider": "mock"}])
+            vault.configure(str(root))
+            manager = SessionManager(cfg, [])
+            manager._run = AsyncMock()
+            workspace = root / "sessions" / "sess-pause"
+            workspace.mkdir(parents=True)
+            session = Session(session_id="sess-pause", mode="src",
+                              target="https://t.example.com", workspace=workspace)
+            session.plan = prepare_launch(LaunchRequest(
+                mode=RunMode.SRC, mission="检查 https://t.example.com",
+                target="https://t.example.com"))
+            session.status = "completed"
+            session.pause_gate.restore(True, 12.5)
+            manager._sessions["sess-pause"] = session
+            await manager.resume("sess-pause")
+            self.assertTrue(session.pause_gate.paused)
+            self.assertEqual(session.pause_gate.excluded_seconds, 12.5)
+            await manager.aclose()
 
 
 if __name__ == "__main__":

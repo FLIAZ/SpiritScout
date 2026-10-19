@@ -278,6 +278,10 @@ def _read_state(session: Session) -> dict[str, Any]:
     return state
 
 
+# 无密码本机模式允许的 Host（DNS 重绑定防护）：正规本机访问只会用回环名
+_LOCAL_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
 def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                max_concurrent: int = 4) -> FastAPI:
     password = os.environ.get(cfg.web.password_env, "")
@@ -348,6 +352,14 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                 return PlainTextResponse(
                     "需要管理认证", status_code=401,
                     headers={"WWW-Authenticate": 'Basic realm="SpiritScout"'})
+        # DNS 重绑定防护：无密码的本机模式只接受回环 Host——恶意网页把
+        # 自有域名解析到 127.0.0.1 后，Host 与 Origin 都是攻击者域名，
+        # 下面的同源自洽检查分辨不出；远程访问应设置管理密码。
+        if loopback and not password:
+            if (request.url.hostname or "").lower() not in _LOCAL_HOSTNAMES:
+                return PlainTextResponse(
+                    "拒绝非同源主机访问（本机控制台仅响应回环地址）",
+                    status_code=403)
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             fetch_site = request.headers.get("sec-fetch-site", "").lower()
             origin = request.headers.get("origin", "").rstrip("/")
@@ -691,9 +703,12 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         """
         from spiritscout.knowledge.experience import delete_insight, experience_db_path
 
-        item = delete_insight(
-            experience_db_path(cfg.experience.root, cfg.workspace.root),
-            insight_id, audit=AuditLogger(cfg.audit_log_path))
+        try:
+            item = delete_insight(
+                experience_db_path(cfg.experience.root, cfg.workspace.root),
+                insight_id, audit=AuditLogger(cfg.audit_log_path))
+        except SpiritScoutError as exc:
+            raise HTTPException(500, str(exc)) from exc
         if item is None:
             raise HTTPException(404, f"经验不存在: {insight_id}")
         return {"deleted": insight_id}
