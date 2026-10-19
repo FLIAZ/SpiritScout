@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import re
 import socket
 import time
@@ -121,6 +122,32 @@ class RateLimiter:
             await self._shared_acquire()
 
 
+def _body_content_type(data: Any) -> str:
+    """请求体兜底 Content-Type：JSON 原文按 JSON 发，其余按表单发。
+
+    httpx 对 content=<原文> 不会自动补 Content-Type——服务端按表单解析时
+    读不到字段（实测 Flask request.form 为空 → 400），模型拿着「和字段
+    规则无关的 400」无从纠错，只能反复试值。这里替调用方兜底；headers
+    显式给了 Content-Type 就以调用方为准。
+    """
+    if isinstance(data, (bytes, bytearray)):
+        try:
+            text = bytes(data).decode("utf-8")
+        except UnicodeDecodeError:
+            return ""
+    elif isinstance(data, str):
+        text = data
+    else:
+        return ""
+    if text.lstrip()[:1] in ("{", "["):
+        try:
+            json.loads(text)
+            return "application/json"
+        except ValueError:
+            pass
+    return "application/x-www-form-urlencoded"
+
+
 async def http_probe(
     url: str,
     *,
@@ -144,6 +171,11 @@ async def http_probe(
 
     req_headers = {"User-Agent": _UA, "Accept-Encoding": "gzip, deflate, identity",
                    **(headers or {})}
+    if data is not None and not any(
+            str(k).lower() == "content-type" for k in req_headers):
+        ctype = _body_content_type(data)
+        if ctype:
+            req_headers["Content-Type"] = ctype
     try:
         current_url = url
         current_method = method.upper()
@@ -262,6 +294,14 @@ async def dns_resolve(
     except (TimeoutError, socket.gaierror) as exc:
         return ToolResult(tool="dns_resolve", ok=False, error=f"解析失败: {exc}",
                           returncode=-2, duration_ms=(time.perf_counter() - started) * 1000)
+    try:
+        # 解析出的地址逐个过禁打门：以域名解析禁打 IP 同样不放过，与
+        # tcp_scan 同口径——白名单不拦，禁打列表是唯一硬边界
+        guard.ensure_addrs_not_denied(ips)
+    except ScopeViolation as exc:
+        return ToolResult(tool="dns_resolve", ok=False, returncode=-3,
+                          error=str(exc),
+                          duration_ms=(time.perf_counter() - started) * 1000)
     # fake-ip 识别：解析全部落在代理虚拟段时如实标注，上层据此不入册 IP 资产
     proxy_virtual = _all_proxy_virtual(ips)
     return ToolResult(

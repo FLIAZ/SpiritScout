@@ -1,7 +1,8 @@
 """结果汇聚引擎（设计书 4.2.2）：统一采集 → 去重 → 冲突校验 → 聚合视图。
 
 - 全局去重：不同子 Agent 发现的重复资产/漏洞按 dedup_key 合并，保留最完整验证结果；
-- 冲突校验：同 dedup_key 不同结论 → 标记冲突、触发二次核验，以验证更充分者为准（6.1）；
+- 冲突校验：同 dedup_key 不同结论 → 标记冲突；结论不在这层裁决——有新
+  实证就交回模型核验（鉴真）重判，否则保留既有载体（6.1）；
 - 数据聚合：按资产/漏洞类型/危害等级多维聚合，形成全局统一视图，供主 Agent 决策。
 """
 
@@ -98,6 +99,8 @@ class ConvergenceEngine:
 
         prev = Vulnerability.model_validate(existing["data"])
         conflict = self._detect_vuln_conflict(prev, vuln)
+        merged_evidence = self._merge_evidence(prev, vuln)
+        new_material = len(merged_evidence) > len(prev.evidence)
         if conflict:
             self.conflicts.append(
                 {
@@ -107,13 +110,12 @@ class ConvergenceEngine:
                                  "severity": prev.severity.value, "by": prev.found_by},
                     "incoming": {"vuln_id": vuln.vuln_id, "status": vuln.status.value,
                                  "severity": vuln.severity.value, "by": vuln.found_by},
-                    "resolution": "keep_better_verified",
+                    # 后端不做结论裁决：有新实证就交回模型核验重判，否则保留既有载体
+                    "resolution": "requeue_reverify" if new_material else "keep_existing",
                 }
             )
-        # 冲突解决：以验证更充分、证据更完整者为准（6.1）
         winner = self._pick_better_vuln(prev, vuln)
-        merged_evidence = self._merge_evidence(prev, vuln)
-        if prev.verification and len(merged_evidence) > len(prev.evidence):
+        if prev.verification and new_material:
             # 新实证交回独立复测，不把“上次误报/上次收录”当成永远有效。
             winner = winner.model_copy(deep=True)
             winner.status = VulnStatus.CANDIDATE
@@ -186,23 +188,17 @@ class ConvergenceEngine:
 
     @staticmethod
     def _pick_better_vuln(a: Vulnerability, b: Vulnerability) -> Vulnerability:
-        """以验证更充分（状态机进度、复现数、PoC 验证、置信度）者为准。"""
-        if a.verification or b.verification:
-            # 独立复测的拒收/待补证不能被探测侧候选重新升级为收录。
-            if a.verification and not b.verification:
-                return a
-            if b.verification and not a.verification:
-                return b
-        def score(v: Vulnerability) -> tuple:
-            return (
-                v.status.value,
-                v.poc_verified,
-                len(v.reproductions),
-                v.confidence,
-                len(v.evidence),
-            )
+        """后端不做结论裁决（不排状态优先级）：只认「事实载体」。
 
-        return b if score(b) >= score(a) else a
+        一侧有独立核验（鉴真）背书而另一侧没有 → 保留有背书的一侧；
+        其余情况保留既有记录、证据取并集——结论文由模型核验裁决，
+        有新实证时经 merge_vulnerability 的重开路径交回重判。
+        """
+        if a.verification and not b.verification:
+            return a
+        if b.verification and not a.verification:
+            return b
+        return a
 
     @staticmethod
     def _merge_evidence(a: Vulnerability, b: Vulnerability) -> list[dict[str, Any]]:

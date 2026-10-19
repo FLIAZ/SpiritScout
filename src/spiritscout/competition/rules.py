@@ -123,7 +123,4 @@ class CompetitionRules:
         if self.submit.rate_limit_per_minute > 60:
             conflicts.append(f"提交频率 {self.submit.rate_limit_per_minute}/min 异常偏高，"
                              f"疑似规则抽取错误")
-        for behavior in self.forbidden_behaviors:
-            if re.search(r"(?i)(ddos|dos|暴力破解生产|破坏)", behavior):
-                continue  # 禁止行为本身与基线一致
         return conflicts

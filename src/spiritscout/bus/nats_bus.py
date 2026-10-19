@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 
-from spiritscout.bus.base import EventBus, EventHandler, Subscription
+from spiritscout.bus.base import EventBus, EventHandler, Subscription, remember_event
 from spiritscout.core.models import Event
 
 
@@ -82,9 +82,8 @@ class NatsBus(EventBus):
                 event = Event.model_validate_json(msg.data.decode())
             except Exception:  # noqa: BLE001
                 return
-            if event.event_id in sub.seen_event_ids:
+            if not remember_event(sub, event.event_id):
                 return
-            sub.seen_event_ids.add(event.event_id)
             try:
                 await sub.handler(event)
                 self._delivered += 1

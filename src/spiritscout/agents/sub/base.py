@@ -21,6 +21,7 @@ import dataclasses
 import json
 import re
 import time
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -95,8 +96,8 @@ class SubAgentContext:
     # 按命名空间隔离；会话内共持一份，for_agent 的 replace 共享同一引用
     shared_cache: LocalSharedCache | None = None
     # 外部 MCP 工具（mcp__<server>__<tool> → {client, server, tool, schema}）；
-    # 会话基建建立时握手拉取，智能体初始化时并入自身工具目录
-    mcp_tools: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # 会话基建握手拉取、后台续握的活目录（for_agent 生成按角色过滤的活视图）
+    mcp_tools: Mapping[str, dict[str, Any]] = field(default_factory=dict)
     # 模型发起的用户询问通道（ask_user 工具的后端：挂起-作答-回传；
     # for_agent 的 replace 共享同一引用）
     questions: Any = None
@@ -128,11 +129,33 @@ class SubAgentContext:
             self,
             gateway=gateway,
             tools=tool_view,
-            mcp_tools={
-                name: entry for name, entry in self.mcp_tools.items()
-                if tool_view.allows(name)
-            },
+            mcp_tools=_AgentMcpView(self.mcp_tools, tool_view.allows),
         )
+
+
+class _AgentMcpView(Mapping):
+    """按 Agent 可用性过滤的 MCP 工具活视图。
+
+    会话基建里 MCP 服务器后台续握、就绪一台注册一台（源 dict 实时生长）
+    ——活视图让长生命周期 Agent 的目录在下次读取时自然长出新工具，
+    无需重建上下文。
+    """
+
+    def __init__(self, source: Mapping[str, dict[str, Any]],
+                 allowed: Any) -> None:
+        self._source = source
+        self._allowed = allowed
+
+    def __iter__(self) -> Iterator[str]:
+        return iter([k for k in self._source if self._allowed(k)])
+
+    def __len__(self) -> int:
+        return sum(1 for k in self._source if self._allowed(k))
+
+    def __getitem__(self, key: str) -> dict[str, Any]:
+        if key in self._source and self._allowed(key):
+            return self._source[key]
+        raise KeyError(key)
 
 
 # 用户询问通道说明（随每次 LLM 决策载荷下发，预算内保底）：模型遇「只有

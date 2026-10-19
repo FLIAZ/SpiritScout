@@ -89,7 +89,7 @@ try { applyTheme(localStorage.getItem("ss-theme") || "system"); } catch {}
 
 /* ================= 视图切换 ================= */
 const VIEWS = { home: "#view-home", session: "#view-session", dash: "#view-dash",
-                agents: "#view-agents", models: "#view-models", mcp:"#view-mcp", skill:"#view-skill", assets:"#view-assets" };
+                agents: "#view-agents", models: "#view-models", mcp:"#view-mcp", skill:"#view-skill", assets:"#view-assets", exp:"#view-exp" };
 function show(view) {
   S.view = view;
   for (const [k, sel] of Object.entries(VIEWS)) $(sel).hidden = k !== view;
@@ -99,6 +99,7 @@ function show(view) {
   if (view === "models") loadModels();
   if (view === "dash") renderDash();
   if (["mcp","skill","assets"].includes(view) && typeof ResourceConsole !== "undefined") ResourceConsole.open(view);
+  if (view === "exp" && typeof ExperiencePage !== "undefined") ExperiencePage.open();
   if (view !== "session") stopStreams();
 }
 document.querySelectorAll(".side > nav button").forEach(b =>
@@ -201,17 +202,27 @@ function startRename(id, host) {
   input.onclick = (ev) => ev.stopPropagation();
 }
 
-/* 删除：两段式确认（首击变「删除?」，3 秒内再击生效） */
-function armDelete(btn, id) {
-  if (btn.dataset.armed) { delete btn.dataset.armed; doDelete(id); return; }
+/* 两段式确认：首击变「删除?」，3 秒内再击才执行 run（会话/经验等删除共用） */
+function armConfirm(btn, run) {
+  if (btn.dataset.armed) {
+    delete btn.dataset.armed;
+    btn.disabled = true;
+    Promise.resolve().then(run).catch(() => {}).finally(() => {
+      btn.disabled = false;
+      btn.classList.remove("armed");
+      btn.textContent = btn.dataset.label || "删除";
+    });
+    return;
+  }
   btn.dataset.armed = "1"; btn.classList.add("armed");
-  const old = btn.textContent; btn.textContent = "删除?";
+  btn.dataset.label = btn.textContent; btn.textContent = "删除?";
   setTimeout(() => {
     if (btn.dataset.armed) {
-      delete btn.dataset.armed; btn.classList.remove("armed"); btn.textContent = old;
+      delete btn.dataset.armed; btn.classList.remove("armed"); btn.textContent = btn.dataset.label;
     }
   }, 3000);
 }
+function armDelete(btn, id) { armConfirm(btn, () => doDelete(id)); }
 async function doDelete(id) {
   try {
     await api(`/api/sessions/${id}?confirm=true`, { method: "DELETE" });

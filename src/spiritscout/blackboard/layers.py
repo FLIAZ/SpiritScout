@@ -23,6 +23,7 @@ LAYER_WRITE_PERMISSIONS: dict[AgentType, set[BlackboardLayer]] = {
     },
     AgentType.PORT_SCAN: {
         BlackboardLayer.ASSET,
+        BlackboardLayer.RECON_CLUE,   # 服务指纹/技术栈线索（4.8.1 表）
         BlackboardLayer.TASK_STATE,
     },
     AgentType.WEB_VULN: {
@@ -33,6 +34,7 @@ LAYER_WRITE_PERMISSIONS: dict[AgentType, set[BlackboardLayer]] = {
     },
     AgentType.HOST_VULN: {
         BlackboardLayer.VULN,
+        BlackboardLayer.RECON_CLUE,   # 主机审计产出的技术栈线索
         BlackboardLayer.TASK_STATE,
     },
     AgentType.POST_EXPLOIT: {

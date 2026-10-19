@@ -1,4 +1,8 @@
-"""从执行台账只读查看调用参数；不修改审计，也不重放工具。"""
+"""从执行台账只读查看调用参数；不修改审计，也不重放工具。
+
+新审计记录的参数已原文落盘（前端直接显示，不走这里）；本模块服务
+脱敏时代落盘的旧记录——按 digest 从加密台账解密读取，原文返回。
+"""
 
 from __future__ import annotations
 
@@ -9,34 +13,8 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from cryptography.fernet import Fernet, InvalidToken
-
-from spiritscout.core.audit import _COUNTER_KEYS, _redact
-
-_SENSITIVE = re.compile(r"api[-_]?key|secret|password|passwd|token|authorization|cookie|credential|session(?:[_-]?id)?|csrf|xsrf", re.IGNORECASE)
-
-
-def display_parameters(value: Any) -> Any:
-    """保留代码、命令、请求结构，仅脱敏凭据字段与字符串中的显式凭据。"""
-    if isinstance(value, dict):
-        return {key: item if key in _COUNTER_KEYS and type(item) is int and item >= 0
-                     else "***REDACTED***" if _SENSITIVE.search(str(key)) else display_parameters(item)
-                for key, item in value.items()}
-    if isinstance(value, list):
-        return [display_parameters(item) for item in value]
-    if isinstance(value, str):
-        def clean_url(match: re.Match[str]) -> str:
-            try:
-                url = urlsplit(match.group())
-                query = urlencode([(key, "***REDACTED***" if _SENSITIVE.search(key) else val)
-                                   for key, val in parse_qsl(url.query, keep_blank_values=True)])
-                return urlunsplit((url.scheme, url.netloc, url.path, query, url.fragment))
-            except ValueError:
-                return match.group()
-        return re.sub(r"https?://[^\s'\"<>]+", clean_url, _redact(value))
-    return value
 
 
 def read_tool_parameters(workspace: Path, tool: str, digest: str) -> dict[str, Any]:
@@ -88,6 +66,6 @@ def read_tool_parameters(workspace: Path, tool: str, digest: str) -> dict[str, A
         actual = hashlib.sha256(json.dumps(parameters, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         if actual != digest:
             return {"available": False, "reason": "参数副本校验失败"}
-        return {"available": True, "parameters": display_parameters(parameters)}
+        return {"available": True, "parameters": parameters}
     except (OSError, ValueError, InvalidToken, sqlite3.Error):
         return {"available": False, "reason": "参数副本暂时无法读取"}

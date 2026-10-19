@@ -87,6 +87,99 @@ def read_recent(db_path: str | Path, *, limit: int = 6) -> dict[str, Any]:
     return {"total": int(total), "items": [_normalize(row) for row in rows]}
 
 
+def read_page(db_path: str | Path, *, q: str = "", tag: str = "",
+              limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    """经验提炼页数据：过滤分页 + 标签分布/来源统计（只读，坏库返回空态）。
+
+    q 关键词命中 insight/context/tags 任意字段；tag 精确匹配一个标签
+    （标签以 JSON 数组存储，LIKE 匹配带引号串避免前缀误命中）。
+    """
+    empty: dict[str, Any] = {"total": 0, "items": [], "has_more": False,
+                             "tags": [], "sources": 0, "last_ts": None}
+    path = Path(db_path)
+    if not path.exists():
+        return empty
+    try:
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            where, args = [], []
+            if q.strip():
+                where.append("(insight LIKE ? OR context LIKE ? OR tags LIKE ?)")
+                like = f"%{q.strip()}%"
+                args += [like, like, like]
+            if tag.strip():
+                where.append("tags LIKE ?")
+                args += [f'%"{tag.strip()}"%']
+            clause = f" WHERE {' AND '.join(where)}" if where else ""
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM insights{clause}", args).fetchone()[0]
+            rows = conn.execute(
+                f"SELECT * FROM insights{clause}"
+                " ORDER BY ts DESC LIMIT ? OFFSET ?",
+                [*args, max(1, int(limit)), max(0, int(offset))]).fetchall()
+            # 标签分布与来源数始终对全量统计（过滤只作用于列表）
+            tag_rows = conn.execute(
+                "SELECT tags FROM insights").fetchall()
+            src_row = conn.execute(
+                "SELECT COUNT(DISTINCT source_session), MAX(ts)"
+                " FROM insights").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return empty
+    counter: dict[str, int] = {}
+    for (raw,) in tag_rows:
+        try:
+            tags = json.loads(raw or "[]")
+        except (TypeError, ValueError):
+            tags = []
+        if isinstance(tags, list):
+            for item in tags:
+                counter[str(item)] = counter.get(str(item), 0) + 1
+    items = [_normalize(row) for row in rows]
+    return {
+        "total": int(total), "items": items,
+        "has_more": offset + len(items) < int(total),
+        "tags": [{"tag": t, "count": c} for t, c in
+                 sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))],
+        "sources": int(src_row[0] or 0),
+        "last_ts": float(src_row[1]) if src_row and src_row[1] else None,
+    }
+
+
+def delete_insight(db_path: str | Path, insight_id: str, *,
+                   audit: Any = None) -> dict[str, Any] | None:
+    """人工审核删除：按 ID 删一条经验，返回被删快照（未命中/坏库返回 None）。
+
+    经验是模型产出、用户随时可审的仓库——提炼跑偏（如把单题解题步骤
+    当成可复用事实）时用户可就地清理；删除动作经 audit 留痕（actor=user）。
+    """
+    path = Path(db_path)
+    if not path.exists() or not str(insight_id or "").strip():
+        return None
+    try:
+        conn = sqlite3.connect(str(path))
+        try:
+            with conn:
+                row = conn.execute(
+                    "SELECT * FROM insights WHERE insight_id = ?",
+                    (insight_id,)).fetchone()
+                if row is None:
+                    return None
+                conn.execute("DELETE FROM insights WHERE insight_id = ?",
+                             (insight_id,))
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    item = _normalize(row)
+    if audit is not None:
+        audit.log("experience.deleted", "user", {
+            "insight_id": insight_id,
+            "insight": str(item.get("insight") or "")[:200]})
+    return item
+
+
 class ExperienceStore:
     """全局经验库：写入（灵枢提炼）+ 检索（智能体查询）。"""
 

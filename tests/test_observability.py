@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -15,19 +14,19 @@ from spiritscout.gateway.registry import ModelRegistry
 from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
 
 
-class ObservationPrivacyTests(unittest.TestCase):
-    def test_numeric_usage_visible_but_authentication_tokens_hidden(self) -> None:
+class ObservationPlaintextTests(unittest.TestCase):
+    def test_usage_and_token_values_kept_verbatim_for_live_monitoring(self) -> None:
         audit = NullAuditLogger()
         record = audit.log("model.call", "test", {
             "tokens": 123, "input_tokens": 100, "output_tokens": 23,
             "access_token": "AUTH_SECRET", "api_key": "KEY_SECRET"})
         self.assertEqual(record["detail"]["tokens"], 123)
         self.assertEqual(record["detail"]["input_tokens"], 100)
-        self.assertNotIn("AUTH_SECRET", json.dumps(record))
-        self.assertNotIn("KEY_SECRET", json.dumps(record))
-        self.assertNotIn("SECRET", json.dumps(audit.log("test", "test", {"tokens": "SECRET"})))
+        self.assertEqual(record["detail"]["access_token"], "AUTH_SECRET")
+        self.assertEqual(record["detail"]["api_key"], "KEY_SECRET")
+        self.assertEqual(audit.log("test", "test", {"tokens": "SECRET"})["detail"]["tokens"], "SECRET")
 
-    def test_safe_tool_target_preview_keeps_endpoint_without_credentials_or_payload(self) -> None:
+    def test_tool_preview_stays_terse_while_arguments_go_verbatim(self) -> None:
         args = {"url": "https://user:PASS_SECRET@example.test/api/list?token=TOKEN_SECRET&page=42#hidden",
                 "method": "GET", "headers": {"Authorization": "HEADER_SECRET"},
                 "code": "ARBITRARY_SCRIPT_SECRET"}
@@ -38,10 +37,10 @@ class ObservationPrivacyTests(unittest.TestCase):
         record = audit.log("agent.tool_call", "test", {"calls": [
             {"name": "http_probe", "arguments": args}]})
         call = record["detail"]["calls"][0]
-        self.assertTrue(call["arguments"]["_redacted"])
+        # 参数原文直达（会话页实时监控），preview 只是轨迹条短摘要
+        self.assertEqual(call["arguments"]["code"], "ARBITRARY_SCRIPT_SECRET")
+        self.assertEqual(call["arguments"]["headers"]["Authorization"], "HEADER_SECRET")
         self.assertIn("example.test/api/list", call["preview"])
-        for secret in ("PASS_SECRET", "TOKEN_SECRET", "HEADER_SECRET", "ARBITRARY_SCRIPT_SECRET"):
-            self.assertNotIn(secret, json.dumps(record))
 
 
 class ModelLifecycleTests(unittest.IsolatedAsyncioTestCase):

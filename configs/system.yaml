@@ -83,7 +83,7 @@ mcp_servers:
     timeout: 600                  # 大型二进制自动分析可跑数分钟
     default_risk: readonly        # 只读分析；可能修改环境的提示按侵入性能力处理（调用时声明行为）
     scope_enforcement: none       # 仅分析会话附件，不触网
-  - name: yakit                   # Web 渗透：编解码 / HTTP 流量 / 模糊测试 / 指纹 / 端口 / 反序列化
+  - name: yakit                   # Web 渗透：编解码 / HTTP 流量重放与模糊测试 / 指纹 / 端口 / 反序列化 / MITM / DNSLog 带外接收
     transport: stdio
     command: .tools/yak/yak       # 项目自带 Yakit 引擎（无头运行，不依赖图形端）
     args: ["mcp"]                 # 需要全部工具集时加 "--enable-all"
@@ -93,7 +93,7 @@ mcp_servers:
   - name: playwright              # 浏览器自动化：JS 渲染页面真实 DOM / 点击 / 表单 / 截图
     transport: stdio
     command: npx
-    args: ["@playwright/mcp@latest", "--headless", "--snapshot-boxes"]  # 快照附元素坐标，辅助判断视口外目标
+    args: ["@playwright/mcp@0.0.83", "--headless", "--snapshot-boxes"]  # 钉版本：@latest 迫使 npx 每次联网解析，网络抖动可挂满 60s 握手超时连累开工
     timeout: 120
     default_risk: readonly        # 普通浏览器操作不按工具能力判危险
     risk_by_action: true          # 模型声明本次实际行为，危险操作执行前逐次审批

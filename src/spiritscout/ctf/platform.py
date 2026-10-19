@@ -475,12 +475,16 @@ class PlatformAdapter:
         return {**challenge}
 
     async def close_instance(self, cid: str, *, reason: str = "") -> bool:
-        self._instances.pop(cid, None)
         op = self.profile.ops.get("close")
         if op is None or not cid:
+            self._instances.pop(cid, None)   # 平台无关闭能力：本地销账即可
             return False
         resp = await self._request(op, {"challenge": cid})
         ok = bool(resp.ok and 200 <= resp.status < 300)
+        if ok:
+            # 成功才销账：请求失败记录留档，close_all 收尾还能重试；
+            # 先销账会让失败被永久遗忘，平台容器继续占用启动名额
+            self._instances.pop(cid, None)
         self._record("instance_closed" if ok else "instance_close_failed",
                      challenge=cid, status=resp.status, reason=reason[:80],
                      detail="" if ok else (resp.error or resp.text)[:160])

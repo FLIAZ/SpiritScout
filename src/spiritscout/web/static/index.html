@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>灵枢 SpiritScout</title>
 <link rel="stylesheet" href="/static/css/base.css?v=20261016-live">
-<link rel="stylesheet" href="/static/css/views.css?v=20261017-workers3">
+<link rel="stylesheet" href="/static/css/views.css?v=20261018-topo2">
 <link rel="stylesheet" href="/static/css/deliverables.css?v=20261016-review2">
-<link rel="stylesheet" href="/static/css/resources.css?v=20261017-campaigns">
+<link rel="stylesheet" href="/static/css/resources.css?v=20261019-expdel">
 </head>
 <body>
 <div class="aurora" aria-hidden="true"></div>
@@ -35,9 +35,10 @@
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="3.5" y="3.5" width="17" height="7" rx="2"/><rect x="3.5" y="13.5" width="17" height="7" rx="2"/><circle cx="7.5" cy="7" r="1" fill="currentColor"/><circle cx="7.5" cy="17" r="1" fill="currentColor"/></svg>
         模型
       </button>
-      <button data-nav="mcp"><span aria-hidden="true">⌘</span> MCP 管理</button>
-      <button data-nav="skill"><span aria-hidden="true">◇</span> Skill 管理</button>
-      <button data-nav="assets"><span aria-hidden="true">▤</span> 资产收集</button>
+      <button data-nav="mcp"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="7" cy="7" r="2.5"/><circle cx="17" cy="7" r="2.5"/><circle cx="7" cy="17" r="2.5"/><circle cx="17" cy="17" r="2.5"/><path d="M9.5 7h5M9.5 17h5M7 9.5v5M17 9.5v5"/></svg> MCP 管理</button>
+      <button data-nav="skill"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4l8 8-8 8-8-8z"/></svg> Skill 管理</button>
+      <button data-nav="assets"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="4" y="5" width="3.6" height="3.6" rx="1"/><rect x="4" y="10.2" width="3.6" height="3.6" rx="1"/><rect x="4" y="15.4" width="3.6" height="3.6" rx="1"/><path d="M10.8 6.8h9M10.8 12h9M10.8 17.2h9"/></svg> 资产收集</button>
+      <button data-nav="exp"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5l7 7.5-7 7.5-7-7.5z"/></svg> 经验提炼</button>
     </nav>
     <div class="side-label">会话 <button id="btn-new" title="新建任务">+ 新任务</button></div>
     <div id="sess-list"></div>
@@ -190,6 +191,7 @@
     <section id="view-mcp" class="resource-page" hidden></section>
     <section id="view-skill" class="resource-page" hidden></section>
     <section id="view-assets" class="resource-page" hidden></section>
+    <section id="view-exp" class="resource-page" hidden></section>
     <section id="view-models" hidden>
       <div class="models-head">
         <div>
@@ -304,14 +306,15 @@
 <div id="toasts"></div>
 
 <script src="/static/js/polling.js?v=20261017-perf"></script>
-<script src="/static/js/core.js?v=20261017-perf"></script>
+<script src="/static/js/core.js?v=20261019-expdel"></script>
 <script src="/static/js/observer.js?v=20261016-review2"></script>
 <script src="/static/js/deliverables.js?v=20261016-review2"></script>
 <script src="/static/js/tool-parameters.js?v=20261016-review2"></script>
 <script src="/static/js/markdown.js?v=20261017-perf"></script>
 <script src="/static/js/agent-workbench.js?v=20261017-workers3"></script>
-<script src="/static/js/views.js?v=20261017-workers"></script>
-<script src="/static/js/console.js?v=20261017-naming2"></script>
+<script src="/static/js/experience.js?v=20261019-expdel"></script>
+<script src="/static/js/views.js?v=20261019-topo3"></script>
+<script src="/static/js/console.js?v=20261019-launch"></script>
 <dialog id="resource-editor"><form method="dialog"><div class="resource-editor-head"><h3 id="resource-editor-title">资源配置</h3><button class="btn sm" aria-label="关闭" value="cancel">关闭</button></div></form>
 <label>标识<input id="resource-key" autocomplete="off" placeholder="唯一名称"></label>
 <label>配置内容（JSON）<textarea id="resource-json" rows="15" spellcheck="false"></textarea></label>

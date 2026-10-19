@@ -462,8 +462,8 @@ class AuditFlagTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(candidate.accepted, accepted)
 
 
-class AuditPrivacyTests(unittest.IsolatedAsyncioTestCase):
-    async def test_new_and_historical_audit_are_redacted_on_disk_stream_and_export(self) -> None:
+class AuditPlaintextTests(unittest.IsolatedAsyncioTestCase):
+    async def test_new_and_historical_audit_stay_verbatim_on_disk_stream_and_export(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "audit.jsonl"
             log = AuditLogger(path)
@@ -471,17 +471,17 @@ class AuditPrivacyTests(unittest.IsolatedAsyncioTestCase):
                 {"arguments": {"code": "UNMARKED_SECRET_VALUE", "url": "https://x/?token=URL_SECRET"}}],
                 "note": "Authorization: Bearer HEADER_SECRET", "url": "https://user:PASS_SECRET@x"}}
             log.log(record["type"], record["actor"], record["detail"])
+            # 原文落盘：会话页实时监控 agent 的真实数据流，不做键值脱敏
             for secret in ("UNMARKED_SECRET_VALUE", "URL_SECRET", "HEADER_SECRET", "PASS_SECRET"):
-                self.assertNotIn(secret, path.read_text())
-            # 模拟旧版日志落盘；不改写历史证据，所有展示出口必须过滤。
+                self.assertIn(secret, path.read_text())
             path.write_text(json.dumps(record) + "\n")
             frames = "".join([frame async for frame in stream_audit(path, max_frames=1)])
             exported = log.export(Path(tmp) / "export.jsonl").read_text()
             self.assertEqual(sanitize_record(sanitize_record(record)), sanitize_record(record))
             for secret in ("UNMARKED_SECRET_VALUE", "URL_SECRET", "HEADER_SECRET", "PASS_SECRET"):
-                self.assertNotIn(secret, frames + exported + json.dumps(log.read_all()))
+                self.assertIn(secret, frames + exported + json.dumps(log.read_all()))
 
-    async def test_historical_audit_download_is_redacted(self) -> None:
+    async def test_historical_audit_download_returns_records_as_written(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             cfg = SystemConfig(workspace=WorkspaceConfig(root=tmp),
@@ -496,5 +496,5 @@ class AuditPrivacyTests(unittest.IsolatedAsyncioTestCase):
                 app.state.manager._sessions[session.session_id] = session
                 response = client.get("/api/sessions/audit-test/audit/download")
                 self.assertEqual(response.status_code, 200)
-                self.assertNotIn("UNMARKED_SECRET_VALUE", response.text)
+                self.assertIn("UNMARKED_SECRET_VALUE", response.text)
                 self.assertIn("attachment", response.headers["content-disposition"])

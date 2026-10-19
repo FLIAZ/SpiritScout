@@ -31,6 +31,12 @@ DeltaCallback = Callable[[str, str], Any]
 # （对照同类 Agent 实践：按模型最大输出给足，思考型模型不再被小顶截断）
 _ANTHROPIC_MIN_MAX_TOKENS = 32000
 
+# 工具参数被截断时回灌给模型的事实说明（重发一次时追加进对话）
+_TRUNCATED_TOOL_ARGS_NOTE = (
+    "上一条回复中的工具调用参数在生成中途被截断（输出超长），该调用未执行。"
+    "请重新发起这次调用；单次参数要明显缩短——大段代码拆成多次小步完成，"
+    "或先分步写入文件再执行。")
+
 
 def cache_usage(usage: Any) -> dict[str, int | None]:
     """兼容 SDK 对象和字典；未提供的指标保留 None，不能伪造零命中。"""
@@ -231,8 +237,12 @@ class LiteLLMBackend(ChatBackend):
         tool_choice: str | None = None,
         on_delta: DeltaCallback | None = None,
         reasoning_effort: str = "",
+        _retry_truncated: bool = False,
     ) -> dict[str, Any]:
         import litellm  # 延迟导入
+        # litellm 认不出供应商时往终端打红色 Provider List 横幅——纯提示
+        # 噪音（真实错误仍会抛 BadRequestError），官方开关一次关掉
+        litellm.suppress_debug_info = True
 
         messages = copy.deepcopy(messages)
         tools = copy.deepcopy(tools)
@@ -271,12 +281,10 @@ class LiteLLMBackend(ChatBackend):
             kwargs["api_base"] = entry.base_url
         if entry.api_key:
             kwargs["api_key"] = entry.api_key
-        if anthropic and not entry.model.startswith("anthropic/"):
-            kwargs["model"] = f"anthropic/{entry.model}"
-        elif (not anthropic and entry.provider == "openai_compatible" and entry.base_url
-                and not entry.model.startswith("openai/")):
-            # OpenAI 兼容端点：走 openai/ 前缀 + 自定义 base
-            kwargs["model"] = f"openai/{entry.model}"
+        # 发给 litellm 的模型名必须带可路由前缀：裸名解析不出供应商时
+        # litellm 打红字横幅且调用必败（前缀规则见 _routed_model_name）
+        kwargs["model"] = self._routed_model_name(
+            entry.model, entry.base_url, anthropic=anthropic)
         self._apply_effort(kwargs, reasoning_effort, anthropic=anthropic)
         if tools:
             kwargs["tools"] = tools
@@ -307,12 +315,28 @@ class LiteLLMBackend(ChatBackend):
             if not retried and response_format == "json" and self._json_mode_unsupported(exc):
                 kwargs.pop("response_format", None)
                 retried = True
+            if not retried and self._tool_args_truncated(exc) and not _retry_truncated:
+                return await self._reissue_truncated_call(
+                    entry, messages, temperature=temperature, max_tokens=max_tokens,
+                    timeout=timeout, response_format=response_format, anthropic=anthropic,
+                    tools=tools, tool_choice=tool_choice, on_delta=on_delta,
+                    reasoning_effort=reasoning_effort)
             if not retried:
                 raise
             resp = await litellm.acompletion(**kwargs)
 
         if streaming:
-            return await self._consume_stream(resp, on_delta, started=requested_at)
+            try:
+                return await self._consume_stream(resp, on_delta, started=requested_at)
+            except Exception as exc:
+                # 流式的截断错误在增量消费时才抛出（非流式在 acompletion 就抛）
+                if self._tool_args_truncated(exc) and not _retry_truncated:
+                    return await self._reissue_truncated_call(
+                        entry, messages, temperature=temperature, max_tokens=max_tokens,
+                        timeout=timeout, response_format=response_format, anthropic=anthropic,
+                        tools=tools, tool_choice=tool_choice, on_delta=on_delta,
+                        reasoning_effort=reasoning_effort)
+                raise
 
         choice = resp.choices[0]
         usage = getattr(resp, "usage", None)
@@ -326,6 +350,26 @@ class LiteLLMBackend(ChatBackend):
                 getattr(choice.message, "tool_calls", None)),
             "finish_reason": str(getattr(choice, "finish_reason", "") or ""),
         }
+
+    async def _reissue_truncated_call(
+        self, entry: ModelEntry, messages: list[dict[str, Any]], **params: Any,
+    ) -> dict[str, Any]:
+        """工具参数截断后的重发（只重发一次）。
+
+        模型把单次工具参数写得超长、生成在中途被掐断时，残缺 JSON 过不了
+        litellm 的严格解析直接抛错——工具环收不到 parse_error 无从回灌。
+        这里把「截断、未执行」作为事实追加进对话重发一次，怎么缩短参数
+        由模型自己决定（与 parse_tool_arguments 把解析错误回灌模型自纠是
+        同一语义，只是故障点在更底层的协议转换）。
+        """
+        retry = copy.deepcopy(messages)
+        retry.append({"role": "user", "content": _TRUNCATED_TOOL_ARGS_NOTE})
+        return await self._complete_chat(entry, retry, **params, _retry_truncated=True)
+
+    @staticmethod
+    def _tool_args_truncated(exc: Exception) -> bool:
+        """litellm 协议层工具参数解析失败的特征串（Anthropic tool invoke）。"""
+        return "Failed to parse tool call arguments" in str(exc)
 
     # ------------------------------------------------------------ 流式累积
 
@@ -572,6 +616,22 @@ class LiteLLMBackend(ChatBackend):
         kwargs["thinking"] = thinking if thinking is not None else {"type": "enabled"}
         if thinking is None:
             kwargs["reasoning_effort"] = effort
+
+    @staticmethod
+    def _routed_model_name(model: str, base_url: str, *, anthropic: bool) -> str:
+        """发给 litellm 的模型名：带协议前缀才有可路由的供应商。
+
+        Anthropic 协议走 anthropic/ 前缀；其余带自定义 base_url 的端点一律
+        openai/ 前缀（自定义端点即 OpenAI 兼容传输）。此前 openai/ 前缀只认
+        openai_compatible 一种字面值——手写 YAML 带其它 provider 值的条目会
+        以裸模型名落进 litellm，解析不出供应商即终端刷红字横幅且调用必败。
+        无 base_url 的裸名保持原样：留给 litellm 按模型名原生路由。
+        """
+        if anthropic:
+            return model if model.startswith("anthropic/") else f"anthropic/{model}"
+        if base_url and not model.startswith(("openai/", "anthropic/")):
+            return f"openai/{model}"
+        return model
 
     @staticmethod
     def _anthropic_native_effort(model: str) -> bool:

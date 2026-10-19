@@ -190,6 +190,8 @@ class PlatformAdapterTests(unittest.IsolatedAsyncioTestCase):
                                              "container_addr": f"{body['unique_code']}.box:8080"})
 
         fake.route("/api/v1/challenge/start", start)
+        fake.route("/api/v1/challenge/close",
+                   lambda req: httpx.Response(200, json={"closed": True}))
         c1 = {"id": "c1", "title": "题目"}
         got = await adapter.ensure_instance(c1)
         self.assertEqual(got["url"], "http://c1.box:8080")
@@ -202,6 +204,31 @@ class PlatformAdapterTests(unittest.IsolatedAsyncioTestCase):
         got2 = await adapter.ensure_instance({"id": "c2"})
         self.assertEqual(got2["url"], "http://c2.box:8080")  # 名额释放后补位
         self.assertEqual(starts, ["c1", "c2"])
+
+    async def test_close_failure_keeps_instance_for_close_all_retry(self) -> None:
+        adapter, fake = self.adapter(max_active=2)
+        fake.route("/api/v1/challenge/start", lambda req: httpx.Response(
+            200, json={"container_addr": "c1.box:8080"}))
+        got = await adapter.ensure_instance({"id": "c1", "title": "题目"})
+        self.assertEqual(got["url"], "http://c1.box:8080")
+        attempts: list[int] = []
+
+        def close(req: httpx.Request) -> httpx.Response:
+            attempts.append(1)
+            if len(attempts) == 1:
+                return httpx.Response(500, json={"code": "boom"})
+            return httpx.Response(200, json={"closed": True})
+
+        fake.route("/api/v1/challenge/close", close)
+        self.assertFalse(await adapter.close_instance("c1", reason="故障"))
+        # 失败不销账：记录仍在，会话收尾 close_all 还能重试并成功
+        self.assertEqual(adapter.summary()["active_instances"], 1)
+        self.assertEqual(await adapter.close_all(), 1)
+        self.assertEqual(adapter.summary()["active_instances"], 0)
+        self.assertEqual(len(attempts), 2)
+        actions = [f["action"] for f in adapter.facts]
+        self.assertIn("instance_close_failed", actions)
+        self.assertIn("instance_closed", actions)
 
     async def test_start_failure_backoff_and_multi_challenge_isolation(self) -> None:
         adapter, fake = self.adapter(max_active=2)

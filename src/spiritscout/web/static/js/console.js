@@ -630,8 +630,10 @@ async function launchMission(payload, files = []) {
     toast(files.length ? "任务已下达，附件已交给灵枢" : "任务已下达，灵枢开始规划");
     $("#c-mission").value = "";
     if (files.length) { S.homeFiles = []; renderFileChips("#home-files", S.homeFiles); }
-    await refreshSessions();
+    // 先进会话页：列表刷新是附带动作，不该挡在进场前面（服务器侧若正被
+    // 长任务占住，await 列表会把进页一起压住）
     openSession(s.session_id);
+    refreshSessions();
   } catch (e) {
     if (e.detail && e.detail.code === "rule_conflict") openRuleConflict(payload, e.detail);
     else toast(e.message, true);

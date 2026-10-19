@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-SEED_VERSION = "2026-10-11.k1"
+SEED_VERSION = "2026-10-18.k1"
 
 V_ATTACK = "2026-10-09"   # 附录B 调研日期
 V_SRC = "2026-10-09"      # 附录C 调研日期
@@ -45,6 +45,7 @@ def seed_rows() -> dict[str, list[dict[str, Any]]]:
         "base_fp_signatures": _fp_signatures(),
         "base_poc_templates": _poc_templates(),
         "base_competition_rules": _competition_rules(),
+        "base_env_capabilities": _env_capabilities(),
         "exp_attack_map": _attack_map(),
         "exp_redteam_entries": _redteam_entries(),
         "exp_attack_paths": _attack_paths(),
@@ -1029,18 +1030,18 @@ def _fp_signatures() -> list[dict[str, Any]]:
                 "source": source, "last_verified": verified}
 
     return [
-        # —— 命名代码检查（与核验流水线 _fp_check 内置逻辑一一对应）
+        # —— 命名特征检查（内置误报特征事实，供核验与检索参考）
         fp("fp-encoded-reflect", "xss",
            "反射内容经 HTML 实体编码，浏览器不可执行", "code", "xss_encoded",
-           "reject", "内置核验流水线（verify/pipeline.py）", v_code),
+           "reject", "内置误报特征（核验参考）", v_code),
         fp("fp-static-error-page", "sqli",
            "报错特征来自静态自定义错误页（基线响应即含同样特征，且无布尔差异）",
            "code", "error_in_baseline", "reject",
-           "内置核验流水线（verify/pipeline.py）", v_code),
+           "内置误报特征（核验参考）", v_code),
         fp("fp-canary-no-reflect", "ssrf",
            "canary 出现在响应中但为原样回显参数而非实际请求结果",
            "code", "ssrf_echo_only", "reject",
-           "内置核验流水线（verify/pipeline.py）", v_code),
+           "内置误报特征（核验参考）", v_code),
         # —— 正则模式检查（附录C-2.2 拒收清单的机器可判子集）
         fp("fp-self-xss", "xss",
            "Self-XSS（仅自己输入自己看到）：无受害者，各平台明确不收",
@@ -1120,6 +1121,51 @@ def _competition_rules() -> list[dict[str, Any]]:
                    "交付": "渗透报告（非 WriteUp）",
                    "边界": "按赛方划定靶标范围，Flag 与漏洞双产出"},
          "source": src, "last_verified": v},
+    ]
+
+
+def _env_capabilities() -> list[dict[str, Any]]:
+    """运行环境能力事实：只陈述「存在什么」，不写何时使用。
+
+    这是给 kb_search 的「地图」——模型想到某类能力却没想起具体
+    工具名时（如想到数据外带却不知道有 DNSLog 工具），按词命中。
+    何时走这条路由模型判断，条目里不写行为指引。
+    """
+    src = "运行环境实测（yak mcp tools/list + 装配配置）"
+    v = "2026-10-18"
+    return [
+        {"fact_id": "ENV-DNSLOG-RECV", "title": "带外数据接收（DNSLog 回调）",
+         "facts": [
+             "mcp__yakit__require_dnslog_domain 申请一次性 DNSLog 子域，"
+             "返回 Domain 与 Token（默认走远端 Yak Bridge）",
+             "mcp__yakit__query_dnslog_by_token 以同一 Token 查命中记录，"
+             "DNS 查询与 HTTP 回调均能收到",
+             "让目标侧（浏览器脚本/SSRF/命令执行）向该子域发起请求，"
+             "数据即随子域名或路径带出（带外/OOB）",
+             "本方沙箱可直接访问该接收服务；题目环境能否出网属题目事实，"
+             "以实测为准",
+         ], "source": src, "last_verified": v},
+        {"fact_id": "ENV-YAKIT-SUITE", "title": "yakit 渗透套件能力",
+         "facts": [
+             "编解码 exec_codec；模糊标签渲染 render_fuzztag",
+             "HTTP 流量重放与模糊测试 http_fuzzer；流量记录查询 query_http_flow",
+             "Web 指纹 query_fingerprint；端口探测 port_scan",
+             "Java 反序列化载荷 generate_yso_bytes；反连命令生成 "
+             "generate_reverse_shell_command",
+             "MITM 中间人 start_mitm_v2；全局反连服务 get_global_reverse_server",
+             "SyntaxFlow 代码审计 syntaxflow_scan",
+         ], "source": src, "last_verified": v},
+        {"fact_id": "ENV-IDA-REVERSE", "title": "IDA 无头逆向能力",
+         "facts": [
+             "mcp__ida__*：idalib 无头反编译、交叉引用、函数与类型检索",
+             "工具带 database 参数，先用 idb_open 打开目标；"
+             "大型二进制自动分析可跑数分钟",
+         ], "source": src, "last_verified": v},
+        {"fact_id": "ENV-PLAYWRIGHT-BROWSER", "title": "浏览器自动化能力",
+         "facts": [
+             "mcp__playwright__*：JS 渲染页面真实 DOM、点击、填表、截图",
+             "导航目标须在授权范围内（范围门强制）",
+         ], "source": src, "last_verified": v},
     ]
 
 

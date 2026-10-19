@@ -9,26 +9,19 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from spiritscout.blackboard import Blackboard
 from spiritscout.config.settings import (
     McpServerConfig,
     ModelEntry,
     SystemConfig,
     WorkspaceConfig,
 )
-from spiritscout.core.audit import NullAuditLogger
-from spiritscout.core.exceptions import VersionConflict
 from spiritscout.core.models import (
     Authorization,
-    BlackboardLayer,
     RunMode,
     Scope,
-    Vulnerability,
-    VulnStatus,
 )
 from spiritscout.runtime import _build_infra
 from spiritscout.tools.sandbox import _RotatingLog
-from spiritscout.verify.pipeline import VerifyPipeline
 
 
 class LifecycleRepairTests(unittest.IsolatedAsyncioTestCase):
@@ -61,43 +54,6 @@ class LifecycleRepairTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.gather(task, return_exceptions=True)
             fast.close.assert_awaited_once()
             slow.close.assert_awaited_once()
-
-    async def test_stale_pipeline_write_preserves_concurrent_evidence(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            bb = Blackboard(Path(tmp) / "bb.db")
-            self.addCleanup(bb.close)
-            stale = Vulnerability(vuln_id="v", title="audit", vuln_type="xss", target="audit",
-                                  status=VulnStatus.SCREENED, evidence=[{"source": "old"}])
-            bb.write(BlackboardLayer.VULN, "v", stale.model_dump(mode="json"))
-            latest = stale.model_copy(deep=True)
-            latest.evidence.append({"source": "peer"})
-            bb.write(BlackboardLayer.VULN, "v", latest.model_dump(mode="json"), expected_version=1)
-            pipeline = object.__new__(VerifyPipeline)
-            pipeline.bb = bb
-            pipeline.audit = NullAuditLogger()
-            stale.status = VulnStatus.REPRODUCED
-            with self.assertRaises(VersionConflict):
-                pipeline._save("v", stale, 1)
-            saved = bb.read(BlackboardLayer.VULN, "v")
-            self.assertEqual(saved["evidence"], latest.model_dump(mode="json")["evidence"])
-            self.assertEqual(saved["status"], "screened")
-            # 中间态下轮仍会重新读取核验，不因放弃过期迁移而永久漏掉。
-            pipeline.process = AsyncMock(return_value=latest)
-            await pipeline.run()
-            pipeline.process.assert_awaited_once_with("v", 2)
-
-    async def test_terminal_verdict_is_not_reprocessed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            bb = Blackboard(Path(tmp) / "bb.db")
-            self.addCleanup(bb.close)
-            verdict = Vulnerability(vuln_id="v", title="audit", vuln_type="xss", target="audit",
-                                    status=VulnStatus.REJECTED_FP)
-            bb.write(BlackboardLayer.VULN, "v", verdict.model_dump(mode="json"))
-            pipeline = object.__new__(VerifyPipeline)
-            pipeline.bb = bb
-            result = await pipeline.process("v", 0)
-            self.assertEqual(result.status, VulnStatus.REJECTED_FP)
-            self.assertEqual(bb.read_versioned(BlackboardLayer.VULN, "v")[1], 1)
 
 
 class LogRepairTests(unittest.TestCase):

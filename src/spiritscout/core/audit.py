@@ -1,37 +1,24 @@
-"""审计日志（设计书 4.7 监控与审计模块的日志基座；合规自查 G7/G8）。
+"""审计日志（设计书 4.7 监控与审计模块的日志基座）。
 
 - JSONL 追加写，单调序号 + UTC 时间戳，全流程可追溯；
-- 自动脱敏：api_key / password / secret / token 等字段不落明文（G8）；
+- 原文落盘、原文转播：会话页实时监控 agent 的真实数据流（脚本、请求
+  正文、参数一律明文）；信任边界是本机文件系统（.spiritscout/ 与工作区
+  均在版本库外），不做键值脱敏；
 - 覆盖：工具调用、决策变更、漏洞核验流转、Flag/漏洞提交、合规阻断。
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
-import re
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-_SENSITIVE_KEYS = re.compile(
-    r"(api_?key|secret|password|passwd|token|authorization|cookie|credential)", re.IGNORECASE
-)
-_RAW_KEYS = {"arguments", "params", "code", "command", "body", "request_body", "headers"}
-_COUNTER_KEYS = {"tokens", "used_tokens", "prompt_tokens", "completion_tokens", "total_tokens",
-                 "input_tokens", "output_tokens", "reasoning_tokens", "budget_tokens",
-                 "cached_input_tokens", "cache_write_tokens"}
-_AUTH_VALUE = re.compile(r"(?i)(\b(?:Bearer|Basic)\s+)[^\s\"'<>]+")
-_NAMED_VALUE = re.compile(
-    r"(?i)((?:api[_-]?key|password|passwd|secret|token|authorization|cookie|credential)"
-    r"[\w-]*[\"']?\s*[:=]\s*[\"']?)[^\s\"'&;,}]+")
-_URL_USERINFO = re.compile(r"(?i)(https?://)[^/\s@]+@")
-
 
 def tool_preview(arguments: Any) -> str:
-    """只提取工具目标和方法；不展示脚本、请求正文、凭据或查询参数值。"""
+    """轨迹条短摘要：只提取工具目标与方法（完整参数在 arguments 原文里）。"""
     if not isinstance(arguments, dict):
         return ""
     raw = arguments.get("url") or arguments.get("target")
@@ -56,39 +43,24 @@ def tool_preview(arguments: Any) -> str:
     return " ".join(parts)[:300]
 
 
-def _opaque(value: Any) -> dict[str, Any]:
-    """审计不复制原始脚本/请求；完整工具参数由执行台账加密保管。"""
-    if (isinstance(value, dict) and set(value) == {"_redacted", "digest"}
-            and value["_redacted"] is True and isinstance(value["digest"], str)
-            and re.fullmatch(r"[0-9a-f]{64}", value["digest"])):
-        return value
-    encoded = json.dumps(value, sort_keys=True, ensure_ascii=False, default=str).encode()
-    return {"_redacted": True, "digest": hashlib.sha256(encoded).hexdigest()}
-
-
-def _redact(value: Any) -> Any:
-    """递归脱敏：敏感键值替换为 ***REDACTED***。"""
+def prepare_detail(value: Any) -> Any:
+    """detail 原样保留，只为工具调用项附加轨迹条摘要（preview）。"""
     if isinstance(value, dict):
         if isinstance(value.get("name"), str) and isinstance(value.get("arguments"), dict):
             value = {**value, "preview": value.get("preview") or tool_preview(value["arguments"])}
-        return {
-            k: (v if str(k) in _COUNTER_KEYS and (v is None or type(v) is int and v >= 0)
-                else "***REDACTED***" if _SENSITIVE_KEYS.search(str(k))
-                else _opaque(v) if str(k).lower() in _RAW_KEYS else _redact(v))
-            for k, v in value.items()
-        }
+        return {k: prepare_detail(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_redact(v) for v in value]
-    if isinstance(value, str):
-        value = _URL_USERINFO.sub(r"\1***REDACTED***@", value)
-        value = _AUTH_VALUE.sub(r"\1***REDACTED***", value)
-        return _NAMED_VALUE.sub(r"\1***REDACTED***", value)
+        return [prepare_detail(v) for v in value]
     return value
 
 
 def sanitize_record(record: dict[str, Any]) -> dict[str, Any]:
-    """读取旧日志也走同一脱敏口，不将历史明文送入 SSE/下载。"""
-    detail = _redact(record.get("detail", {}))
+    """读取口统一走这里：剥掉加密副本字段（SSE/下载不需要），不脱敏。
+
+    脱敏时代落盘的旧记录读出来仍是当时写下的 REDACTED 形态——有损不可
+    逆；新记录起原文落盘、原文转播。
+    """
+    detail = record.get("detail", {})
     if isinstance(detail, dict) and isinstance(detail.get("calls"), list):
         detail = {**detail, "calls": [
             {k: v for k, v in call.items() if k != "arguments_cipher"}
@@ -130,8 +102,8 @@ class AuditLogger:
         budget.exceeded / human.approval / system.lifecycle
         """
         if event_type == "agent.tool_call" and isinstance(detail.get("calls"), list):
-            # 模型入口参数可能与执行器转换后的参数不同，额外保存加密副本供会话查看。
-            # 日志/SSE 仍不暴露正文，展示接口按当前会话密钥解密并脱敏。
+            # 模型入口参数另存加密副本（执行台账），供旧审计记录的参数查看
+            # 兼容读取；新记录的 arguments 已原文落盘，SSE 直达。
             key = self._path.parent / "execution.key"
             if key.is_file():
                 from cryptography.fernet import Fernet
@@ -152,7 +124,7 @@ class AuditLogger:
             "ts": datetime.now(UTC).isoformat(),
             "type": event_type,
             "actor": actor,
-            "detail": _redact(detail),
+            "detail": prepare_detail(detail),
         }
         with self._lock, self._path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -192,7 +164,7 @@ class NullAuditLogger(AuditLogger):
             "ts": datetime.now(UTC).isoformat(),
             "type": event_type,
             "actor": actor,
-            "detail": _redact(detail),
+            "detail": prepare_detail(detail),
         }
         self.records.append(record)
         return record

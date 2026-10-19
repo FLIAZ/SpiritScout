@@ -11,9 +11,8 @@ import asyncio
 import json
 import math
 import uuid
-from collections import deque
 
-from spiritscout.bus.base import EventBus, EventHandler, Subscription
+from spiritscout.bus.base import EventBus, EventHandler, Subscription, remember_event
 from spiritscout.core.exceptions import ConfigurationError
 from spiritscout.core.models import Event
 
@@ -22,7 +21,6 @@ class RedisBus(EventBus):
     def __init__(self, url: str = "redis://127.0.0.1:6379/0", channel_prefix: str = "spiritscout",
                  connect_timeout_seconds: float = 5.0):
         self._timeout = connect_timeout_seconds
-        self._seen_order: dict[str, deque[str]] = {}
         self._connected = False
         self._connection_errors = 0
         self._url = url
@@ -108,7 +106,6 @@ class RedisBus(EventBus):
         sub_id = sub_id or f"sub-{uuid.uuid4().hex[:8]}"
         sub = Subscription(pattern=pattern, handler=handler, sub_id=sub_id)
         self._subs[sub_id] = sub
-        self._seen_order[sub_id] = deque()
         return sub
 
     async def acquire_request_slot(self, rps: float, key: str) -> None:
@@ -139,7 +136,6 @@ class RedisBus(EventBus):
 
     def unsubscribe(self, sub_id: str) -> None:
         self._subs.pop(sub_id, None)
-        self._seen_order.pop(sub_id, None)
 
     def stats(self) -> dict:
         return {
@@ -175,15 +171,12 @@ class RedisBus(EventBus):
             except Exception:  # noqa: BLE001, S112
                 continue
             for sub in list(self._subs.values()):
-                if not sub.matches(event.topic) or event.event_id in sub.seen_event_ids:
+                if not sub.matches(event.topic):
                     continue
-                order = self._seen_order.get(sub.sub_id)
-                if order is None:
+                # 事件幂等：同一订阅者对重复 event_id 不重复执行（6.9），
+                # 去重窗口有界（长会话内存不随事件数增长）
+                if not remember_event(sub, event.event_id):
                     continue
-                if len(order) >= 4096:
-                    sub.seen_event_ids.discard(order.popleft())
-                sub.seen_event_ids.add(event.event_id)
-                order.append(event.event_id)
                 try:
                     await sub.handler(event)
                     self._delivered += 1

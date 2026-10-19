@@ -401,13 +401,21 @@ def _merge_providers(cfg: ModelConfigFile) -> list[ModelEntry]:
     return out
 
 
+_TIER_WARNED = False    # 弃用提示只说一次：热路径每次请求都重新装载
+                         # models.yaml，逐次警告会在终端刷屏
+
+
 def load_model_config(path: str | Path) -> list[ModelEntry]:
     """装载模型注册表（供应商接入信息已合并进各模型）。"""
+    global _TIER_WARNED
     data = _expand_env(_load_yaml(path))
     for entry in data.get("models", []) if isinstance(data.get("models"), list) else []:
         if isinstance(entry, dict) and "tier" in entry:
             entry.pop("tier")
-            warnings.warn("模型 tier 已废弃，请在编队页指派模型", UserWarning, stacklevel=2)
+            if not _TIER_WARNED:
+                _TIER_WARNED = True
+                warnings.warn("模型 tier 已废弃，请在编队页指派模型",
+                              UserWarning, stacklevel=2)
     try:
         cfg = ModelConfigFile.model_validate(data)
     except Exception as exc:

@@ -379,7 +379,8 @@ function renderChips() {
   const coverage = { observed_transaction_flow: "交易流", public_flow: "公开流程",
                      entry_only: "仅入口", none: "无" }[bc.coverage];
   const phase = { queued: "等待调度", starting: "启动任务", mode_routing: "判断任务类型",
-    model_preflight: "检查模型", runtime_starting: "初始化工具与智能体",
+    model_preflight: "检查模型", platform_profile: "解析平台档案",
+    master_reply: "灵枢回复中", runtime_starting: "初始化工具与智能体",
     executing: "执行中", completed: "已完成", failed: "失败", stopped: "已停止",
     interrupted: "已中断" }[TERMINAL.has(st.session.status) ? st.session.status : st.session.phase] || st.session.phase || "等待启动";
   const firstChip = st.session.mode === "src" && coverage
@@ -475,6 +476,7 @@ function drawTopo() {
   if (!S.state) { box.innerHTML = ""; return; }
   const { nodes, layers, cardsOf, orphans } = topoModel();
   const running = !TERMINAL.has(S.state.session.status);
+  // 督导台账（灵枢实时给子 Agent 的方向建议），任务卡据此挂提示芯片
   const ring = S.state.ring || { attempts: 0, steering: {} };
   const routeRow = r => {
     const pct = Math.round((r.progress || 0) * 100);
@@ -564,22 +566,34 @@ function drawTopo() {
     });
   }
 
-  // 发现组：共享笔记/入口/Flag 落黑板后作为互连元素挂在最右列（链式相连）
+  // 发现组：黑板发现台账直投——发现即节点、产出即连线（拓扑=黑板架构的
+  // 直观投影）。节点随进度自动扩充，连线是真实出处：写下它的路线分支，
+  // 路线不在当前图上（旧轮）时挂该轮 DAG 方向节点；不凭空造边
   const findings = (S.state && S.state.findings) || [];
-  // 概括显示：入口/资产去重合并，笔记与 Flag 只留最近的——不把 URL 刷成一片
+  // 展示上限：防画布刷屏；被折叠的数量写进图例，台账仍在发现组详情
   const uniqAssets = [...new Map(
     findings.filter(f => f.type === "asset")
             .map(f => [String(f.url || f.text || ""), f])).values()];
-  const dispFindings = [];
-  if (uniqAssets.length) {
-    dispFindings.push({ type: "asset", count: uniqAssets.length,
-      text: uniqAssets.slice(0, 2).map(f => String(f.url || f.text).slice(0, 70)).join("\n")
-            + (uniqAssets.length > 2 ? `\n…等 ${uniqAssets.length} 个入口` : "") });
-  }
-  findings.filter(f => f.type === "note").slice(-4)
-          .forEach(f => dispFindings.push(f));
-  findings.filter(f => f.type === "flag").slice(-1)
-          .forEach(f => dispFindings.push(f));
+  const dispFindings = [
+    ...uniqAssets.slice(-12),
+    ...findings.filter(f => f.type === "note").slice(-10),
+    ...findings.filter(f => f.type === "flag").slice(-4),
+  ].sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  const foldedFindings = Math.max(0, findings.length - dispFindings.length);
+  const producerOf = f => {
+    if (f.agent && f.route) {
+      const idx = routesAll.findIndex(
+        r => r.agent === f.agent && r.name === f.route);
+      if (idx >= 0 && depthIndex.has(`__route_${idx}`)) return `__route_${idx}`;
+    }
+    if (f.round != null) {
+      const n = nodes.find(x => x.round_created === f.round
+                                && depthIndex.has(x.node_id)
+                                && !String(x.node_id).startsWith("__"));
+      if (n) return n.node_id;
+    }
+    return "";
+  };
   const FNODE = i => `__finding_${i}`;
   if (dispFindings.length) {
     const layerIdx = layerIds.length;
@@ -588,10 +602,12 @@ function drawTopo() {
       const id = FNODE(i);
       layerIds[layerIdx].push(id);
       depthIndex.set(id, layerIdx);
-      const kind = ({ note: "笔记", flag: "Flag", asset: `入口 ×${f.count || 1}` })[f.type]
+      const kind = ({ note: "笔记", flag: "Flag", asset: "入口" })[f.type]
         || f.type || "发现";
-      nodes.push({ node_id: id, title: String(f.text || "").slice(0, 90),
-                   tactic: kind, status: f.type === "flag" ? "done" : "running",
+      nodes.push({ node_id: id,
+                   title: String(f.url || f.text || "").slice(0, 90),
+                   tactic: f.round ? `${kind} · R${f.round}` : kind,
+                   status: f.type === "flag" ? "done" : "running",
                    depends_on: [] });
     });
   }
@@ -620,16 +636,20 @@ function drawTopo() {
       succs.get(r.parent).push(id);
     }
   });
-  // 发现连线：从锚点（路线层/任务层首个节点）星形展开到每个发现节点
+  // 发现连线：产出者（路线分支/该轮 DAG 节点）→ 其写下的发现；无出处
+  // 信息（旧记录/SRC 发现）时退回前一列锚点。连线即真实出处
+  let findingAnchor = "";
   if (dispFindings.length) {
-    const prevLayer = layerIds[depthIndex.get(FNODE(0)) - 1] || [];
-    const anchor = prevLayer.find(id => id !== ORPHAN) || prevLayer[0];
-    if (anchor) {
-      for (let i = 0; i < dispFindings.length; i++) {
-        preds.get(FNODE(i)).push(anchor);
-        succs.get(anchor).push(FNODE(i));
+    const prevLayer = (layerIds[depthIndex.get(FNODE(0)) - 1] || [])
+      .filter(id => id !== ORPHAN);
+    findingAnchor = prevLayer[prevLayer.length - 1] || prevLayer[0] || "";
+    dispFindings.forEach((f, i) => {
+      const src = producerOf(f) || findingAnchor;
+      if (src && depthIndex.has(src)) {
+        preds.get(FNODE(i)).push(src);
+        succs.get(src).push(FNODE(i));
       }
-    }
+    });
   }
   topoReorder(layerIds, preds, succs);
 
@@ -686,15 +706,12 @@ function drawTopo() {
       <button id="topo-zout" title="缩小">－</button>
       <button id="topo-fit" title="适应窗口">⤢</button>
     </div>
-    <div class="topo-hint">滚轮缩放 · 拖拽平移 · 双击复位 · 点击节点看详情</div>
+    <div class="topo-hint">滚轮缩放 · 拖拽平移 · 双击复位 · 点击节点看详情${foldedFindings > 0 ? ` · 黑板 ${findings.length} 条发现（展示最近 ${dispFindings.length} 条）` : ""}</div>
     <div class="topo-detail" id="topo-detail" hidden>
       <div class="td-head"><b id="td-title"></b>
         <button class="td-close" id="td-close">×</button></div>
       <div class="td-body" id="td-body"></div>
-    </div>
-    <div class="rnode" id="topo-ring" style="visibility:hidden"
-      title="环形共享台账：已尝试登记 ${ring.attempts} 条，同伴无产出的入口自动避让">
-      <b>环形台账</b><span class="rn">${ring.attempts} 条登记</span></div>`;
+    </div>`;
   renderApprovals();
   renderQuestions();
 
@@ -739,11 +756,6 @@ function drawTopo() {
     unodeEl.style.visibility = "";
   }
   hubEl.style.visibility = "";
-  const ringEl = box.querySelector("#topo-ring");
-  if (ringEl) {
-    ringEl.style.transform = `translate(${hubXpos}px, ${centerY + hubH / 2 + 16}px)`;
-    ringEl.style.visibility = "";
-  }
   stage.style.width = stageW + "px";
   stage.style.height = stageH + "px";
 
@@ -784,6 +796,20 @@ function drawTopo() {
     if (nid && xOf.has(nid)) {
       paths += link(hubX, hubY, xOf.get(nid), midY(nid), "steer-edge",
                     `灵枢 → ${agentName(agent)}：${v.hint || ""}`);
+    }
+  }
+  // 积累链：同一产出者的连续发现按时间上下相连——先探到的节点支撑
+  // 后续发现，黑板节点互相提供数据支撑的可视形态（同列短竖线，散开不画）
+  const srcOf = f => producerOf(f) || findingAnchor;
+  for (let i = 1; i < dispFindings.length; i++) {
+    const prev = dispFindings[i - 1];
+    if (!srcOf(prev) || srcOf(prev) !== srcOf(dispFindings[i])) continue;
+    const ia = FNODE(i - 1), ib = FNODE(i);
+    if (!xOf.has(ia) || !xOf.has(ib) || xOf.get(ia) !== xOf.get(ib)) continue;
+    const y1 = yOf.get(ia) + heights.get(ia), y2 = yOf.get(ib);
+    if (y2 > y1 && y2 - y1 < 140) {
+      const cx = xOf.get(ia) + TOPO_GEO.NODE_W / 2;
+      paths += `<path class="chain-edge" d="M ${cx} ${y1} C ${cx} ${y1 + 20}, ${cx} ${y2 - 20}, ${cx} ${y2}"></path>`;
     }
   }
   svg.innerHTML = paths;
@@ -897,12 +923,16 @@ function showNodeDetail(nodeId) {
       </div>`;
     }
   } else if (nodeId.startsWith("__finding_")) {
-    // 发现节点：完整内容（节点卡上只是截断摘要）
+    // 发现节点：完整内容与出处（哪条路线/哪一轮写下——黑板记录直读）
     const f = (S.topoFindings || [])[Number(nodeId.slice(10))];
     if (f) {
       title = ({ note: "共享笔记", flag: "Flag", asset: "入口 / 资产" })[f.type] || "发现";
-      body = `<div class="td-task"><div class="td-note"
-        style="white-space:pre-wrap">${esc(f.text || "")}</div></div>`;
+      const who = [f.agent && agentName(f.agent), f.route,
+                   f.round != null ? `第 ${f.round} 轮` : ""].filter(Boolean).join(" · ");
+      body = `<div class="td-task">
+        ${who ? `<div class="td-agent">出处：${esc(who)}</div>` : ""}
+        ${f.url ? `<div class="td-note" style="word-break:break-all">${esc(f.url)}</div>` : ""}
+        <div class="td-note" style="white-space:pre-wrap">${esc(f.text || "")}</div></div>`;
     }
   } else if (nodeId === "__orphan__") {
     title = "下发任务";

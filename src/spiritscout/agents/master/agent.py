@@ -1028,7 +1028,7 @@ class MasterAgent:
         )
 
     def _final_verdicts(self) -> list[dict[str, Any]]:
-        """终审：复核核验流水线结论（规则引擎再确认，模型仅建议）。"""
+        """终审：复核独立核验（鉴真）结论（规则引擎再确认，模型仅建议）。"""
         from spiritscout.core.models import Vulnerability, VulnStatus
 
         verdicts = []
@@ -1462,7 +1462,8 @@ class MasterAgent:
                        f"以规则为准）：\n「{rules[:2500]}」\n"
                        if rules else "")
         exp_block = self._recent_experience()
-        exp_block = (f"实战经验（前几次会话积累的解题思维，供参考）：\n{exp_block}\n"
+        exp_block = (f"实战经验（前几次会话积累的参考事实与信号，非步骤；"
+                     f"采纳自行判断）：\n{exp_block}\n"
                      if exp_block else "")
         actual_agents = [get_profile(agent_type) for agent_type in self.ctx.agents]
         roster = "；".join(

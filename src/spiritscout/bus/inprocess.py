@@ -11,7 +11,7 @@ import itertools
 import time
 import uuid
 
-from spiritscout.bus.base import EventBus, EventHandler, Subscription
+from spiritscout.bus.base import EventBus, EventHandler, Subscription, remember_event
 from spiritscout.core.models import Event
 
 
@@ -112,9 +112,8 @@ class InProcessBus(EventBus):
                 if not sub.matches(event.topic):
                     continue
                 # 事件幂等：同一订阅者对重复 event_id 不重复执行（6.9）
-                if event.event_id in sub.seen_event_ids:
+                if not remember_event(sub, event.event_id):
                     continue
-                sub.seen_event_ids.add(event.event_id)
                 try:
                     await sub.handler(event)
                     self._delivered += 1

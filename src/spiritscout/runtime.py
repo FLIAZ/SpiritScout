@@ -97,10 +97,12 @@ def _mcp_embedded_scope_targets(params: dict[str, Any]) -> list[str]:
             return
         if raw.startswith(("http://", "https://")):
             target = raw
-        elif any(ch.isspace() for ch in raw) or "/" in raw:
-            return
         else:
-            target = f"{scheme}://{raw}/"
+            # 裸值（host / host:port / host/path 等）：补 scheme 交 ScopeGuard
+            # 解析主机名。含 / 或空白的值不能静默跳过——跳一个值就少一道
+            # 禁打校验；取首个空白分隔 token，其余部分交由 URL 解析
+            token = raw.split()[0]
+            target = f"{scheme}://{token}/"
         if target not in targets:
             targets.append(target)
 
@@ -129,6 +131,12 @@ def _mcp_embedded_scope_targets(params: dict[str, Any]) -> list[str]:
     for host in hosts:
         add(f"{scheme}://{host}{path}")
     return targets
+
+
+# MCP 握手开工宽限：快服务器（秒级）宽限内就绪即开工前并入；超时的转入
+# 后台续握、就绪后中途并入——握手不再门控开工（实测 npx 解析 @latest 可
+# 挂满 60s 握手超时，整场白等一台最终失败的服务器）
+_MCP_STARTUP_GRACE = 10.0
 
 
 @dataclass
@@ -167,6 +175,8 @@ class _Infra:
     ring: Any = None            # RingLedger 环形台账（主/子 Agent 共持，随会话消亡）
     shared_cache: Any = None    # LocalSharedCache 环形共享缓存（同题并行 Agent 共持）
     mcp_clients: list[Any] = field(default_factory=list)   # MCP 客户端（关停回收）
+    mcp_startup_tasks: list[asyncio.Task[Any]] = field(
+        default_factory=list)   # 后台续握的 MCP 任务（close 先取消再回收客户端）
     mcp_tools: dict[str, dict[str, Any]] = field(
         default_factory=dict)   # mcp__<server>__<tool> → {client, server, tool, timeout}
     questions: Any = None       # QuestionBroker（ask_user 工具后端；None=不可用）
@@ -180,6 +190,15 @@ class _Infra:
             if self.tools.journal is not None:
                 self.tools.journal.finish_run(self.outcome)
         finally:
+            # 后台仍在握手的 MCP：先取消任务再回收客户端（握手被中断的
+            # start() 由 close 唤醒，不会悬挂）
+            for task in self.mcp_startup_tasks:
+                if not task.done():
+                    task.cancel()
+            if self.mcp_startup_tasks:
+                with contextlib.suppress(BaseException):
+                    await asyncio.gather(*self.mcp_startup_tasks,
+                                         return_exceptions=True)
             try:
                 await _teardown_infra(
                     mcp_clients=self.mcp_clients, blackboard=self.blackboard,
@@ -245,6 +264,7 @@ async def _build_infra(
     cfg.mcp_servers = resources.effective_mcp(cfg.mcp_servers)
     # 以下资源在创建后任何一步失败都要回收：先置空占位，异常路径统一收口
     mcp_clients: list[Any] = []
+    mcp_startup_tasks: list[asyncio.Task[Any]] = []   # 在握 MCP 任务（中断时取消回收）
     experience: Any = None
     bus: Any = None
     blackboard: Blackboard | None = None
@@ -407,13 +427,15 @@ async def _build_infra(
                             await client.close()
                     return spec, None, [], str(exc)[:300]
 
-            for spec, client, tools, err in await asyncio.gather(
-                    *(_start_mcp(s) for s in enabled_specs)):
+            def _register_mcp(result: tuple[Any, Any, list[dict[str, Any]], str],
+                              *, late: bool = False) -> None:
+                """单台服务器的工具注册：开工前与后台续握完成时共用。"""
+                spec, client, tools, err = result
                 if client is None:
                     audit.log("system.lifecycle", "runtime", {
                         "action": "mcp_server_failed", "server": spec.name,
-                        "error": err})
-                    continue
+                        "error": err, "late": late})
+                    return
                 for t in tools:
                     t = {**t, "description": (t.get("description") or t["name"])
                          + browser_tool_guidance(t["name"])}
@@ -492,7 +514,31 @@ async def _build_infra(
                         "scope_enforcement": spec.scope_enforcement}
                 audit.log("system.lifecycle", "runtime", {
                     "action": "mcp_server_ready", "server": spec.name,
-                    "transport": spec.transport, "tools": [t["name"] for t in tools]})
+                    "transport": spec.transport, "late": late,
+                    "tools": [t["name"] for t in tools]})
+
+            # 并发握手但只等一个宽限期：快服务器照常开工前并入；慢/卡死的
+            # 转入后台续握、就绪一台并入一台（活目录，智能体下回合可见）
+            startup = [asyncio.ensure_future(_start_mcp(s)) for s in enabled_specs]
+            # 先登记后等待：宽限期内遭中断/异常时，这些在握任务同样要取消
+            # 回收——若等 wait 返回后才登记，收口路径就会漏掉它们
+            mcp_startup_tasks.extend(startup)
+            done, pending = await asyncio.wait(startup, timeout=_MCP_STARTUP_GRACE)
+            for finished in done:
+                _register_mcp(finished.result())
+            if pending:
+
+                async def _finish_mcp_startup() -> None:
+                    # 后台续握：逐台注册；取消时静默退出（客户端回收在收口）
+                    for fut in asyncio.as_completed(pending):
+                        try:
+                            _register_mcp(await fut, late=True)
+                        except asyncio.CancelledError:
+                            raise
+                        except BaseException:  # noqa: BLE001 —— 单台异常不拖累其余
+                            continue
+
+                mcp_startup_tasks.append(asyncio.ensure_future(_finish_mcp_startup()))
         from spiritscout.tools.builtin import asset_memory_lookup
 
         for name, fn in (("asset_memory_lookup", asset_memory_lookup), ("http_probe", http_probe), ("dns_resolve", dns_resolve),
@@ -516,7 +562,8 @@ async def _build_infra(
             builtin_ctx=builtin_ctx, workspace=workspace, knowledge=knowledge,
             agent_models=bound, ring=ring if ring is not None else RingLedger(audit),
             shared_cache=LocalSharedCache(default_ttl_seconds=3600),
-            mcp_clients=mcp_clients, mcp_tools=mcp_tools,
+            mcp_clients=mcp_clients, mcp_startup_tasks=mcp_startup_tasks,
+            mcp_tools=mcp_tools,
             questions=question_broker,
             experience=experience,
             pause_gate=pause_gate,
@@ -529,6 +576,13 @@ async def _build_infra(
                 with contextlib.suppress(Exception):
                     journal.finish_run("cancelled" if isinstance(exc, asyncio.CancelledError)
                                        else "failed")
+            # 后台仍在握手的 MCP：取消任务后统一回收客户端
+            for task in mcp_startup_tasks:
+                if not task.done():
+                    task.cancel()
+            if mcp_startup_tasks:
+                with contextlib.suppress(BaseException):
+                    await asyncio.gather(*mcp_startup_tasks, return_exceptions=True)
             await _teardown_infra(
                 mcp_clients=mcp_clients, blackboard=blackboard,
                 experience=experience, knowledge=knowledge, bus=bus)
@@ -654,10 +708,9 @@ async def _run_master(
         run_summary["execution_run_id"] = infra.tools.journal.run_id
     run_summary["model_usage"] = infra.gateway.usage_report()
 
-    # 灵枢收尾提炼经验：从全场战报中提炼可复用洞察（非步骤），存入经验库
-    await _distill_best_effort(infra, assembly, experience, enable_llm_planning,
-                               run_summary, mission=mission, outcome="completed")
-
+    # 灵枢收尾提炼经验：从全场战报中提炼可复用洞察（非步骤），存入经验库。
+    # 完成态提炼移到调用方与报告生成并行（两笔模型调用互不依赖，串行磨
+    # 是收尾等待的大头）；取消/失败路径无报告可搭，仍在原地提炼
     # 刷新灵枢 extra 中的经验（提炼结果立即对后续派工可见）
     recent_exp = (experience.recent(limit=infra.cfg.experience.recall_limit)
                   if experience else [])
@@ -770,28 +823,47 @@ def _worth_distilling(digest: dict[str, Any]) -> bool:
 
 async def _distill_experience(gateway: Any, experience: ExperienceStore,
                               digest: dict[str, Any], *,
-                              timeout_seconds: int) -> dict[str, Any]:
-    """一次提炼调用：返回结果摘要（审计留痕由调用方负责）。"""
+                              timeout_seconds: int,
+                              audit: Any = None,
+                              source_session: str = "") -> dict[str, Any]:
+    """一次提炼调用：返回结果摘要（审计留痕由调用方负责）。
+
+    走 chat_decision：思考型模型可能把输出额度全耗在思考上、正文为空
+    ——加大余量重试一次，而不是让整场经验提炼静默失败（实测 glm-5.3
+    思考可吃满 1024 额度，此前经验库因此长期为空）。
+    """
     import json as _json
 
     from spiritscout.gateway.backends import extract_json
+    from spiritscout.gateway.gateway import chat_decision
 
-    resp = await asyncio.wait_for(gateway.chat(
+    resp = await asyncio.wait_for(chat_decision(
+        gateway,
         [{"role": "system", "content": (
             "你是灵枢。一场安全测试刚结束（正常收尾、被中断或失败均可能）。"
             "从以下战报中提炼 3~5 条可复用的实战洞察——不是解题步骤，"
             "而是「这类场景下我学到了什么」：目标/平台特性、手法适用条件、"
-            "容易踩的坑、判读信号、中断或失败的教训。每条一句话独立可复用；"
-            "context 写适用场景（目标类型/业务/技术栈），tags 写 2~4 个"
-            "检索标签（如 web、登录、越权、ctf、java）。"
+            "容易踩的坑、判读信号、中断或失败的教训。"
+            "纪律：①洞察必须脱离本题仍然成立——单题发现要抽象成同类场景"
+            "的信号与事实，抽象不出来的（具体路径、参数、口令、端口、命令、"
+            "flag 原文）一律不写；②不写操作序列与处方（「先…再…」「应优先…」"
+            "「直接…即可」），只写陈述句：什么条件下、能看到什么信号、"
+            "为什么值得注意。反例（禁止写成这样）：「本题入口位于 /xxx 路径，"
+            "应优先探测登录/日志等端点」——单题坐标加步骤处方。"
             "没有值得提炼的就返回空数组。"
+            "每条一句话独立可复用；context 写适用场景（目标类型/业务/"
+            "技术栈），tags 写 2~4 个检索标签（如 web、登录、越权、ctf、java）。"
             '返回 JSON：{"insights": [{"insight": str, "context": str, '
             '"tags": [str]}]}')},
          {"role": "user", "content": _json.dumps(digest, ensure_ascii=False)[:8000]}],
         task_type="meta_planning", response_format="json",
-        max_tokens=1024, reasoning_effort="low",
-        timeout_seconds=timeout_seconds),
-        timeout=timeout_seconds + 20)
+        # 起步额度给足：思考型模型首调常把额度耗在思考上（正文 0 字符
+        # 作废重试白烧一次调用）——实测 glm-5.3 提炼可吃满 2048 额度，
+        # 8192 起步一次成功，比失败后重试省一整轮
+        max_tokens=8192, reasoning_effort="low",
+        timeout_seconds=timeout_seconds,
+        audit=audit, actor="master"),
+        timeout=timeout_seconds + 40)
     data = extract_json(resp.content) or {}
     added = 0
     for item in (data.get("insights") or [])[:5]:
@@ -800,7 +872,7 @@ async def _distill_experience(gateway: Any, experience: ExperienceStore,
             if experience.add(str(item["insight"]),
                               context=str(item.get("context", "")),
                               tags=[str(tag) for tag in tags],
-                              source_session=str(digest.get("target", "")),
+                              source_session=source_session,
                               source_model="master"):
                 added += 1
     return {"result": "ok" if added else "empty", "insights": added}
@@ -825,10 +897,14 @@ async def _distill_best_effort(infra: _Infra, assembly: Any, experience: Any,
     if outcome != "completed":
         # 中止/失败路径：用户的停止动作在等这次提炼，别拖太久
         timeout_seconds = min(timeout_seconds, 20)
+    # 来源记真实会话 ID（Web 会话工作区名即 sess-xxx，经验页据此回链）
+    workspace_root = getattr(getattr(infra.cfg, "workspace", None), "root", "")
     try:
         result = await _distill_experience(
             AgentBoundGateway(infra.gateway, infra.agent_models.get("master", "")),
-            experience, digest, timeout_seconds=timeout_seconds)
+            experience, digest, timeout_seconds=timeout_seconds,
+            audit=infra.audit,
+            source_session=Path(str(workspace_root)).name if workspace_root else "")
     except Exception as exc:  # noqa: BLE001 —— 不吞 CancelledError（停止语义优先）
         result = {"result": "error", "insights": 0,
                   "error": f"{type(exc).__name__}: {exc}"[:200]}
@@ -885,11 +961,19 @@ async def run_engagement(
         # 独立复测已在候选提交时运行，不能再用模板成功覆盖用户规则裁决。
         verify_stats = run_summary.get("verification", {})
 
-        # ---- 报告生成（4.6）
-        report_path = report_path or _default_report_path(infra.workspace, "src_report")
-        report = ReportAgent(infra.blackboard)
-        out = report.generate(infra.authorization, target, report_path,
-                              run_summary=run_summary)
+        # 经验提炼与报告互不依赖：并行执行，收尾等待不再串行叠加两段
+        distill = asyncio.ensure_future(_distill_best_effort(
+            infra, assembly, infra.experience, enable_llm_planning,
+            run_summary, mission=mission, outcome="completed"))
+        try:
+            # ---- 报告生成（4.6）
+            report_path = report_path or _default_report_path(
+                infra.workspace, "src_report")
+            report = ReportAgent(infra.blackboard)
+            out = report.generate(infra.authorization, target, report_path,
+                                  run_summary=run_summary)
+        finally:
+            await distill
         infra.audit.log("system.lifecycle", "runtime", {
             "action": "engagement_complete", "mode": "src",
             "report": str(out), "verify": verify_stats,
@@ -994,24 +1078,33 @@ async def run_ctf_engagement(
             platform_facts=adapter.facts if adapter is not None else None)
 
         # ---- Flag 统一提交（4.4.6：格式校验/去重/频率控制/退避重试）
-        submit_stats = await flag_manager.submit_all()
-        run_summary["flag_submit"] = submit_stats
-        flag_stats = flag_manager.stats()
-        if adapter is not None:
-            run_summary["platform"] = adapter.summary()
+        # 经验提炼与提交/WriteUp 互不依赖：并行执行（两笔模型调用串行磨
+        # 曾让 flag 后还要白等三分半钟）
+        distill = asyncio.ensure_future(_distill_best_effort(
+            infra, assembly, infra.experience, enable_llm_planning,
+            run_summary, mission="", outcome="completed"))
+        try:
+            submit_stats = await flag_manager.submit_all()
+            run_summary["flag_submit"] = submit_stats
+            flag_stats = flag_manager.stats()
+            if adapter is not None:
+                run_summary["platform"] = adapter.summary()
 
-        report_path = report_path or _default_report_path(infra.workspace, "ctf_writeup")
-        out = await _render_writeup(
-            infra, challenges, flag_manager, run_summary, report_path,
-            contest="ctf", enable_llm=enable_llm_planning,
-            fallback_context={
-                "contest_type": "ctf", "flag_stats": flag_stats,
-                "submit_enabled": flag_manager.submit_fn is not None,
-                "notes": assembly.notes,
-                "current_task_ids": [
-                    task_id for node in run_summary.get("dag_nodes", [])
-                    for task_id in node.get("task_ids", [])]},
-        )
+            report_path = report_path or _default_report_path(
+                infra.workspace, "ctf_writeup")
+            out = await _render_writeup(
+                infra, challenges, flag_manager, run_summary, report_path,
+                contest="ctf", enable_llm=enable_llm_planning,
+                fallback_context={
+                    "contest_type": "ctf", "flag_stats": flag_stats,
+                    "submit_enabled": flag_manager.submit_fn is not None,
+                    "notes": assembly.notes,
+                    "current_task_ids": [
+                        task_id for node in run_summary.get("dag_nodes", [])
+                        for task_id in node.get("task_ids", [])]},
+            )
+        finally:
+            await distill
         infra.audit.log("system.lifecycle", "runtime", {
             "action": "engagement_complete", "mode": "ctf", "report": str(out),
             "flags": flag_stats, "rounds": run_summary["rounds_executed"],
@@ -1122,35 +1215,42 @@ async def run_competition_engagement(
 
         verify_stats = run_summary.get("verification", {})
 
-        submit_stats = await flag_manager.submit_all()
-        run_summary["flag_submit"] = submit_stats
-        # 已判定正确的 Flag → 标记赛题完成，驱动调度器资源转移（4.5.2）
-        for cand in flag_manager.accepted_flags():
-            engine.mark_solved([], cand.challenge_id)   # 审计留痕（卡片态在调度循环内维护）
-        flag_stats = flag_manager.stats()
+        # 经验提炼与提交/报告互不依赖：并行执行，收尾等待不再串行叠加
+        distill = asyncio.ensure_future(_distill_best_effort(
+            infra, assembly, infra.experience, enable_llm_planning,
+            run_summary, mission="", outcome="completed"))
+        try:
+            submit_stats = await flag_manager.submit_all()
+            run_summary["flag_submit"] = submit_stats
+            # 已判定正确的 Flag → 标记赛题完成，驱动调度器资源转移（4.5.2）
+            for cand in flag_manager.accepted_flags():
+                engine.mark_solved([], cand.challenge_id)   # 审计留痕（卡片态在调度循环内维护）
+            flag_stats = flag_manager.stats()
 
-        report = ReportAgent(infra.blackboard)
-        if rules.contest_type == ContestType.RANGE:
-            # 靶场赛交付物为渗透报告（5.3.4）
-            report_path = report_path or _default_report_path(
-                infra.workspace, "range_report")
-            out = report.generate(infra.authorization, target, report_path,
-                                  run_summary=run_summary)
-        else:
-            report_path = report_path or _default_report_path(
-                infra.workspace, "competition_writeup")
-            out = await _render_writeup(
-                infra, ordered, flag_manager, run_summary, report_path,
-                contest=rules.contest_type.value, enable_llm=enable_llm_planning,
-                fallback_context={
-                    "contest_type": rules.contest_type.value,
-                    "flag_stats": flag_stats,
-                    "submit_enabled": flag_manager.submit_fn is not None,
-                    "notes": assembly.notes,
-                    "current_task_ids": [
-                        task_id for node in run_summary.get("dag_nodes", [])
-                        for task_id in node.get("task_ids", [])]},
-            )
+            report = ReportAgent(infra.blackboard)
+            if rules.contest_type == ContestType.RANGE:
+                # 靶场赛交付物为渗透报告（5.3.4）
+                report_path = report_path or _default_report_path(
+                    infra.workspace, "range_report")
+                out = report.generate(infra.authorization, target, report_path,
+                                      run_summary=run_summary)
+            else:
+                report_path = report_path or _default_report_path(
+                    infra.workspace, "competition_writeup")
+                out = await _render_writeup(
+                    infra, ordered, flag_manager, run_summary, report_path,
+                    contest=rules.contest_type.value, enable_llm=enable_llm_planning,
+                    fallback_context={
+                        "contest_type": rules.contest_type.value,
+                        "flag_stats": flag_stats,
+                        "submit_enabled": flag_manager.submit_fn is not None,
+                        "notes": assembly.notes,
+                        "current_task_ids": [
+                            task_id for node in run_summary.get("dag_nodes", [])
+                            for task_id in node.get("task_ids", [])]},
+                )
+        finally:
+            await distill
         infra.audit.log("system.lifecycle", "runtime", {
             "action": "engagement_complete", "mode": "competition",
             "contest_type": rules.contest_type.value, "report": str(out),

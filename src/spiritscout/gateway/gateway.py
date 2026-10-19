@@ -312,6 +312,10 @@ class ModelGateway:
 
             # 字符阈值是保守的软投影，不是回合数/Token 熔断；约束不被丢弃。
             reserve = max_tokens or entry.max_output_tokens or 4096
+            # 输出余量不得反超窗口本身：档案把输出上限配得比窗口大时
+            # （如 128K 输出遇上 100K 窗口的旧配置），宁可少压缩也不能
+            # 把历史预算钳到 1024 字符压死现场
+            reserve = min(reserve, entry.context_window // 2)
             compact_history(messages, max(1024, entry.context_window - reserve))
         if tools:
             tools = sorted(copy.deepcopy(tools), key=lambda t: str(t.get("function", {}).get("name", t.get("name", ""))))

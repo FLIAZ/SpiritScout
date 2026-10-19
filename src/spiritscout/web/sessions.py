@@ -249,6 +249,9 @@ _NAMING_SYSTEM = (
     "你是安全测试平台的登记员，负责给测试会话归档。只输出 JSON。"
     "name：会话短名（4~16 个字，中文，概括测试对象与目的，如"
     "「BiliBili 登录越权测试」「某靶场 SQL 注入」）；"
+    "mission 也可能根本不是测试任务（如问候、闲聊、提问咨询）：这时"
+    "name 如实概括对话主题（如「问候」「系统用法咨询」），不得照着"
+    "示例编造不存在的测试对象或比赛，campaign 给空串；"
     "campaign：本次测试归属的项目名称——厂商 SRC、比赛或漏洞平台"
     "（如「BiliBili SRC」「2026 某CTF」）——同一次调用顺便确定资产归类。"
     "existing_campaigns 是平台上已有的项目清单：本次任务若属于其中某个"
@@ -1036,10 +1039,10 @@ class SessionManager:
         await self._queue.put((session, cfg, plan, no_llm, models, False))
         if not no_llm:
             # 命名是旁路增强：不阻塞入队，失败静默（展示回退 mission 首行）
-            self._schedule_naming(session, cfg, models, plan)
+            self._schedule_naming(session, models, plan)
         return session
 
-    def _schedule_naming(self, session: Session, cfg: SystemConfig,
+    def _schedule_naming(self, session: Session,
                          models: list[ModelEntry], plan: LaunchPlan) -> None:
         """创建后立刻后台命名：小模型给「会话短名 + 归属项目」，不阻塞开工。"""
         if not (plan.mission or plan.target):
@@ -1047,16 +1050,20 @@ class SessionManager:
         if not models:
             return              # 没有模型可调（创建链路已保证注册表非空，兜底）
         task = asyncio.create_task(
-            self._name_session(session, cfg, models, plan),
+            self._name_session(session, models, plan),
             name=f"spiritscout-naming-{session.session_id}")
         self._naming_tasks.add(task)
         task.add_done_callback(self._naming_tasks.discard)
 
-    async def _name_session(self, session: Session, cfg: SystemConfig,
+    async def _name_session(self, session: Session,
                             models: list[ModelEntry], plan: LaunchPlan) -> None:
         from spiritscout.resources.store import ResourceStore, resource_root
 
-        audit = AuditLogger(cfg.audit_log_path)
+        # 命名是平台旁路调用：计量与审计都走全局台账（与开工前路由预检、
+        # 历史补名同一口径），不混入该会话——否则会话页的「模型消耗」背上
+        # 命名开销（一句问候也被记几百 token），时间线还多出一条莫名的
+        # classification 调用
+        audit = AuditLogger(self._cfg.audit_log_path)
         try:
             try:
                 store: ResourceStore | None = ResourceStore(
@@ -1065,8 +1072,8 @@ class SessionManager:
             except (OSError, sqlite3.Error):
                 store, campaigns = None, []
             result = await _llm_name(
-                cfg, models, audit, mission=plan.mission or "", target=plan.target,
-                mode=session.mode, campaigns=campaigns)
+                self._cfg, models, audit, mission=plan.mission or "",
+                target=plan.target, mode=session.mode, campaigns=campaigns)
             if not result or self._sessions.get(session.session_id) is not session:
                 return          # 调用失败，或会话已被删除/替换：不落库不回写
             if result.get("name"):
@@ -1516,6 +1523,11 @@ class SessionManager:
                     "flags": result.flag_stats,
                     "report": result.report_path,
                 }
+                # 终场用量以台账为准：收尾的经验提炼与报告生成发生在运行
+                # 快照（usage_report）之后，快照口径会漏记这几笔调用
+                live = session.model_usage()
+                if live and isinstance(result.run_summary.get("model_usage"), dict):
+                    result.run_summary["model_usage"] = live
         except asyncio.CancelledError:
             # stop() 主动取消：runtime finally 已关闭 infra；落 stopped 终态后
             # 正常结束（不向上 re-raise——任务目的即被终止）

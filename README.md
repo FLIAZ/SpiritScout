@@ -211,7 +211,6 @@ src/spiritscout/
 ├── policy/          # 范围守卫、风险审批、用户提问
 ├── tools/           # 内置工具、MCP 客户端、bwrap 沙箱、注册表
 ├── knowledge/       # 经验知识库（红队/SRC 检索 + 平台规则）
-├── verify/          # 漏洞全链路核验流水线
 ├── modes/           # 模式装配器（SRC/CTF/渗透赛）
 ├── competition/     # 渗透赛赛制引擎
 ├── traffic/         # HAR 导入（脱敏）

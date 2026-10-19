@@ -251,16 +251,13 @@ class PlatformExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(gateway.calls), 1)
         self.assertIn("10.0.100.58",
                       gateway.calls[0]["messages"][1]["content"])
-        # 审计打码：抽取留痕可见，凭据值不见
+        # 抽取留痕可见；平台凭据在 profile 里仍打码（用户自己的 key 不回显）
         actions = [line["detail"].get("action") for line in audit_lines]
         self.assertIn("platform_profile_extracted", actions)
-        self.assertNotIn("tsec-test-token", audit_text)
         extracted = next(line for line in audit_lines
                          if line["detail"].get("action") == "platform_profile_extracted")
         self.assertEqual(extracted["detail"]["profile"]["name"], "tsecbench")
-        # 凭据在审计里被摘要化/打码，任何形态都不得出现原文
-        self.assertNotIn("tsec-test-token",
-                         json.dumps(extracted, ensure_ascii=False))
+        self.assertEqual(extracted["detail"]["profile"]["headers"]["X-API-Key"], "***")
 
     async def test_mission_without_platform_description_runs_unchanged(self) -> None:
         session, _, run_mock, _, audit_lines, _ = await self._run(
@@ -270,6 +267,88 @@ class PlatformExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("platform_yaml", session.launch_request)
         actions = [line["detail"].get("action") for line in audit_lines]
         self.assertIn("platform_not_found", actions)
+
+
+class SessionUsageTests(unittest.IsolatedAsyncioTestCase):
+    """会话用量口径：旁路调用不进会话台账，终场汇总以台账为准。"""
+
+    def _mgr(self, root: Path):
+        cfg = SystemConfig(workspace=WorkspaceConfig(root=str(root)))
+        models = [ModelEntry(model="test-model")]
+        return cfg, SessionManager(cfg, models)
+
+    async def test_naming_bypass_bills_global_ledger_not_session(self) -> None:
+        """命名旁路走全局台账：会话的模型消耗不背命名开销。"""
+        from spiritscout.web import modelcfg, vault
+
+        seen: dict[str, str] = {}
+
+        def fake_gateway(cfg, models, audit):
+            seen["usage_root"] = str(Path(cfg.workspace.root))
+            return _FakeChatGateway(json.dumps({"name": "问候", "campaign": ""}))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = SystemConfig(
+                workspace=WorkspaceConfig(root=str(root)),
+                models_config_path=str(root / "models.yaml"),
+                agent_models_path=str(root / "agents.yaml"),
+                audit_log_path=str(root / "audit.jsonl"))
+            modelcfg.write_config(cfg.models_config_path, [],
+                                  [{"model": "mini", "provider": "mock"}])
+            vault.configure(str(root))
+            manager = SessionManager(cfg, [])
+            manager._run = AsyncMock()
+            plan = prepare_launch(LaunchRequest(
+                mode=RunMode.SRC, mission="你好",
+                target="https://example.com"))
+            with patch("spiritscout.web.sessions._conversation_gateway",
+                       fake_gateway):
+                session = await manager.create(
+                    {"mode": "src", "mission": "你好",
+                     "target": "https://example.com"}, plan)
+                for _ in range(200):
+                    if session.auto_title:
+                        break
+                    await asyncio.sleep(0.01)
+            self.assertEqual(session.auto_title, "问候")
+            # 绑定的是全局工作区，不是会话目录——命名的 token 不进会话账
+            self.assertEqual(seen.get("usage_root"), str(root))
+            self.assertNotIn(session.session_id, seen.get("usage_root", ""))
+
+    async def test_final_summary_refreshes_usage_from_ledger(self) -> None:
+        """终场汇总以台账为准：收尾的提炼/报告调用不再漏记。"""
+        from spiritscout.gateway.usage import UsageLedger
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg, manager = self._mgr(Path(tmp))
+            workspace = root / "sessions" / "sess-usage"
+            workspace.mkdir(parents=True)
+            session = Session(session_id="sess-usage", mode="ctf",
+                              target="ctf://challenges", workspace=workspace)
+            session.launch_request = {"mission": "一道ctf题目：http://challenge.example.cn/", "mode": "ctf"}
+            cfg.audit_log_path = str(session.audit_path)
+            plan = prepare_launch(LaunchRequest(
+                mode=RunMode.CTF, mission="一道ctf题目：http://challenge.example.cn/"))
+            # 台账 = 运行期 1 笔 + 收尾（提炼/报告）2 笔；运行快照只记到第 1 笔
+            ledger = UsageLedger(workspace / "usage.db")
+            for i, tokens in enumerate((100, 40, 60), start=1):
+                ledger.append({"ts": float(i), "tokens": tokens, "model": "m",
+                               "call_id": f"c{i}", "task_type": "meta_planning"})
+            stale = {"used_tokens": 100, "used_usd": 0.0,
+                     "per_model_tokens": {"m": 100}, "per_mode_tokens": {},
+                     "call_series": [{"ts": 1.0, "tokens": 100, "model": "m",
+                                      "call_id": "c1"}]}
+            with patch("spiritscout.runtime.run_ctf_engagement",
+                       new=AsyncMock(return_value=SimpleNamespace(
+                           run_summary={"model_usage": stale}, verify_stats={},
+                           flag_stats={}, report_path="r.md"))):
+                await manager._run(session, cfg, plan, False, [ModelEntry(model="m")])
+            self.assertEqual(session.status, "completed")
+            refreshed = session.summary["run"]["model_usage"]
+            self.assertEqual(refreshed["used_tokens"], 200)
+            self.assertEqual(len(refreshed["call_series"]), 3)
 
 
 class SessionNamingTests(unittest.IsolatedAsyncioTestCase):

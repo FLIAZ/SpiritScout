@@ -12,31 +12,11 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from spiritscout.agents.sub.base import RoutePlan, StepResult, SubAgent
 from spiritscout.core.audit import tool_preview
 from spiritscout.core.ids import new_id
 from spiritscout.core.models import AgentType, Asset, BlackboardLayer, Task
-
-
-def _redacted_url(raw: str) -> str:
-    """保留 URL 结构和查询参数名，移除用户信息与参数值（入黑板不带敏感值）。"""
-    parsed = urlsplit(raw)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        return raw
-    try:
-        port = parsed.port
-    except ValueError:
-        return raw
-    host = parsed.hostname.lower()
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    netloc = f"{host}:{port}" if port is not None else host
-    names = [(name[:128], "") for name, _ in parse_qsl(
-        parsed.query, keep_blank_values=True) if name]
-    return urlunsplit((parsed.scheme.lower(), netloc, parsed.path or "/",
-                       urlencode(names), ""))
 
 
 class BusinessContextAgent(SubAgent):
@@ -249,7 +229,7 @@ class BusinessContextAgent(SubAgent):
             return
         st = self._explore.setdefault(task.task_id, {
             "messages": [], "concluded": False, "pages": [], "turn": 0})
-        clean = _redacted_url(url)
+        clean = url
         if any(p["url"] == clean for p in st["pages"]):
             return
         st["pages"].append({"url": clean})
@@ -259,14 +239,14 @@ class BusinessContextAgent(SubAgent):
             source_agent=self.agent_id), self.agent_type)
 
     async def _tool_record_endpoint(self, task: Task, args: dict[str, Any]) -> tuple[bool, str]:
-        """模型登记的接口交易：URL 脱敏入黑板，作为端点证据。"""
+        """模型登记的接口交易：URL 原文入黑板，作为端点证据。"""
         url = str((args or {}).get("url") or "").strip()
         if not url.startswith(("http://", "https://")):
             return False, "登记失败：url 必须是 http(s) 地址"
         status = args.get("status_code")
         endpoint = Asset(
             asset_id=new_id("asset"), asset_type="endpoint",
-            value=_redacted_url(url),
+            value=url,
             attrs={
                 "method": str(args.get("method") or "GET").upper()[:10],
                 "params": [str(p)[:128] for p in (args.get("params") or [])][:32],

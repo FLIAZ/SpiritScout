@@ -198,13 +198,17 @@ class McpClient:
                     tool, arguments,
                     read_timeout_seconds=timedelta(seconds=timeout))
             except Exception as exc:  # noqa: BLE001 —— 单次调用失败不拆会话
-                future.set_exception(McpError(
-                    f"MCP[{self.name}].{tool} 调用失败: {str(exc)[:300]}"))
+                # 等待方可能在调用途中取消（future 已 done）——回填前须确认，
+                # 否则 InvalidStateError 会把整条常驻会话拆掉
+                if not future.done():
+                    future.set_exception(McpError(
+                        f"MCP[{self.name}].{tool} 调用失败: {str(exc)[:300]}"))
                 continue
-            future.set_result({
-                "text": "\n".join(_content_texts(result))[:16000],
-                "is_error": bool(result.isError),
-            })
+            if not future.done():
+                future.set_result({
+                    "text": "\n".join(_content_texts(result))[:16000],
+                    "is_error": bool(result.isError),
+                })
 
 
 class McpStdioClient(McpClient):

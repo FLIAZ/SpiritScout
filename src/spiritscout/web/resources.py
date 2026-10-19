@@ -10,11 +10,9 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
-from spiritscout.core.audit import _redact
 from spiritscout.core.exceptions import SpiritScoutError
 from spiritscout.resources.assistant import ResourceAssistant, validate_skill
-from spiritscout.resources.store import ResourceStore, validate_mcp
-from spiritscout.web.tool_parameters import display_parameters
+from spiritscout.resources.store import ResourceStore, redact_credentials, validate_mcp
 
 
 class ResourceChange(BaseModel):
@@ -39,7 +37,7 @@ def public_mcp(config: Any, version: int = 0, origin: str = "config") -> dict[st
         "id": config.name,
         "version": version,
         "origin": origin,
-        "data": display_parameters(data),
+        "data": redact_credentials(data),
     }
 
 
@@ -68,7 +66,7 @@ def mount_resources(
             )
         return HTTPException(
             409 if isinstance(exc, SpiritScoutError) else 422,
-            str(_redact(str(exc)))[:600],
+            str(exc)[:600],
         )
 
     @app.get("/api/resources/mcp")

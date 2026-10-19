@@ -286,5 +286,330 @@ class SpawnGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("brief", out.text)
 
 
+class SpawnIdentityTests(unittest.IsolatedAsyncioTestCase):
+    """spawn 的子路线必须有真实身份：_solve_turn 构造 ExecutionScope 与
+    journal checkpoint 都读 route.route_id——缺了就 100% 摔 AttributeError，
+    整个 spawn 分支连一次模型调用都到不了。"""
+
+    async def test_spawn_child_route_carries_route_id(self) -> None:
+        agent = object.__new__(CTFBaseAgent)
+        agent.agent_id = "a"
+        agent.agent_type = AgentType.CTF_WEB
+        agent.direction = "web"
+        agent.route_namespace = "ctf_web"
+        agent.cache = SimpleNamespace(get=Mock(return_value=None), put=Mock())
+        agent.ctx = SimpleNamespace(audit=Mock())
+        seen: list[str] = []
+
+        class _Stop(Exception):
+            pass
+
+        async def fake_solve(task, route, plan):
+            seen.append(str(getattr(route, "route_id", "")))
+            raise _Stop()
+
+        agent._solve_turn = fake_solve
+        task = Task(task_id="t1", task_type="ctf_solve", target="http://x",
+                    agent_type=AgentType.CTF_WEB, payload={"challenge": {"id": "c1"}})
+        state = {"depth": 0, "child_seq": 0, "observations": []}
+
+        with self.assertRaises(_Stop):
+            await agent._tool_spawn(task, SimpleNamespace(name="solve"), state,
+                                    {"brief": "试点分支"})
+
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0])
+
+
+class CrossReplayDisclosureTests(unittest.IsolatedAsyncioTestCase):
+    """跨分支回放必须自我披露并留 refresh 逃生口；带参数 GET 不回放。
+
+    回放若无标记，模型会把旧录像当成新鲜响应（登录后再访问仍见登录前
+    快照 → 误判未登录 → 死循环）；缓存键不含参数，带参回放会答非所问。
+    """
+
+    @staticmethod
+    def _agent(shared: str | None) -> CTFBaseAgent:
+        agent = object.__new__(CTFBaseAgent)
+        agent.agent_id = "agent-test"
+        agent.agent_type = AgentType.CTF_WEB
+        agent.direction = "web"
+        agent.flag_manager = None
+
+        def cache_get(ns: str, key: str):
+            if shared and ns == "ctf_shared" and key.startswith("fetch|"):
+                return shared
+            return None
+
+        agent.cache = SimpleNamespace(get=Mock(side_effect=cache_get), put=Mock())
+        agent.ctx = SimpleNamespace(
+            audit=Mock(), ring=None, builtin_ctx={},
+            blackboard=SimpleNamespace(write=Mock()),
+            tools=SimpleNamespace(call=AsyncMock(return_value=SimpleNamespace(
+                ok=True, parsed={"status_code": 200, "headers": {}},
+                stdout="<html><title>fresh</title></html>", error=None))))
+        return agent
+
+    @staticmethod
+    def _task() -> Task:
+        return Task(task_id="task-1", task_type="ctf_solve", target="http://t",
+                    agent_type=AgentType.CTF_WEB,
+                    payload={"challenge": {"url": "http://t"}})
+
+    async def test_cross_branch_replay_discloses_itself(self) -> None:
+        agent = self._agent("GET /kb → 200\n正文: 登录页快照")
+        out = await agent._tool_http(
+            self._task(), SimpleNamespace(name="solve"),
+            {"observations": [], "fetches": {}, "flags": [], "turn": 2},
+            {"path": "/kb"})
+        self.assertTrue(out.ok)
+        self.assertIn("记录回放", out.text)
+        self.assertIn("refresh", out.text)
+        agent.ctx.tools.call.assert_not_awaited()
+
+    async def test_parameterized_get_is_never_cross_replayed(self) -> None:
+        agent = self._agent("GET /kb → 200\n正文: 旧答案")
+        out = await agent._tool_http(
+            self._task(), SimpleNamespace(name="solve"),
+            {"observations": [], "fetches": {}, "flags": [], "turn": 2},
+            {"path": "/kb", "params": {"q": "flag"}})
+        agent.ctx.tools.call.assert_awaited_once()
+        self.assertIn("fresh", out.text)
+
+    async def test_cross_branch_refresh_forces_live_request(self) -> None:
+        agent = self._agent("GET /kb → 200\n正文: 登录前快照")
+        out = await agent._tool_http(
+            self._task(), SimpleNamespace(name="solve"),
+            {"observations": [], "fetches": {}, "flags": [], "turn": 2},
+            {"path": "/kb", "refresh": True})
+        agent.ctx.tools.call.assert_awaited_once()
+        self.assertIn("fresh", out.text)
+
+
+class EmptyReplyRepairTests(unittest.IsolatedAsyncioTestCase):
+    """思考型模型空正文回合不是结论：注入提示再给一次机会，连续两次才收尾。"""
+
+    def _agent(self, responses: list) -> CTFBaseAgent:
+        agent = object.__new__(CTFBaseAgent)
+        agent.agent_id = "agent-test"
+        agent.agent_type = AgentType.CTF_WEB
+        agent.direction = "web"
+        agent.flag_manager = None
+        agent.tool_schemas = []
+        state = {"messages": [{"role": "system", "content": "s"},
+                              {"role": "user", "content": "题面"}],
+                 "seed": [], "observations": [], "flags": [],
+                 "concluded": False, "stall": "", "turn": 0,
+                 "llm_failures": 0, "empty_streak": 0,
+                 "system_initialized": True, "fetches": {},
+                 "empty_replies": 0, "peer_seen":
+                     {"site": [], "notes": 0, "concl": 0, "flags": []}}
+        self.state = state
+
+        def cache_get(ns: str, key: str):
+            return state if key.startswith("inv|") else None
+
+        agent.cache = SimpleNamespace(get=Mock(side_effect=cache_get), put=Mock())
+        agent.ctx = SimpleNamespace(
+            audit=Mock(), ring=None, journal=None, builtin_ctx={},
+            blackboard=SimpleNamespace(write=Mock()),
+            gateway=SimpleNamespace(chat=AsyncMock(side_effect=responses)))
+        return agent
+
+    @staticmethod
+    def _task() -> Task:
+        return Task(task_id="task-1", task_type="ctf_solve", target="http://t",
+                    agent_type=AgentType.CTF_WEB,
+                    payload={"challenge": {"url": "http://t"}})
+
+    @staticmethod
+    def _route() -> SimpleNamespace:
+        return SimpleNamespace(name="solve", route_id="route-1")
+
+    @staticmethod
+    def _reply(content: str) -> SimpleNamespace:
+        return SimpleNamespace(content=content, tool_calls=[],
+                               finish_reason="stop")
+
+    async def test_first_empty_reply_gets_nudge_not_conclusion(self) -> None:
+        agent = self._agent([self._reply("")])
+        plan = RoutePlan(name="solve", strategy="", steps=[{"action": "investigate"}])
+        result = await agent._solve_turn(self._task(), self._route(), plan)
+        self.assertFalse(self.state["concluded"])
+        self.assertEqual(self.state["empty_replies"], 1)
+        nudges = [m for m in self.state["messages"] if m.get("role") == "user"
+                  and "没有收到你的输出" in str(m.get("content"))]
+        self.assertEqual(len(nudges), 1)
+        self.assertTrue(result.ok)
+
+    async def test_second_empty_reply_concludes_with_fallback(self) -> None:
+        agent = self._agent([self._reply(""), self._reply("")])
+        plan = RoutePlan(name="solve", strategy="", steps=[{"action": "investigate"}])
+        await agent._solve_turn(self._task(), self._route(), plan)
+        await agent._solve_turn(self._task(), self._route(), plan)
+        self.assertTrue(self.state["concluded"])
+        self.assertIn("未输出结论文本", self.state["conclusion_text"])
+
+    async def test_nonempty_reply_concludes_immediately(self) -> None:
+        agent = self._agent([self._reply("结论：Flag 在 /kb 的提示里")])
+        plan = RoutePlan(name="solve", strategy="", steps=[{"action": "investigate"}])
+        await agent._solve_turn(self._task(), self._route(), plan)
+        self.assertTrue(self.state["concluded"])
+        self.assertIn("/kb", self.state["conclusion_text"])
+        self.assertEqual(self.state["empty_replies"], 0)
+
+
+class BlackboardDedupTests(unittest.TestCase):
+    """同层同 dedup_key 只存一条：后续写入升级既有记录而非追加新条。"""
+
+    def test_same_dedup_key_updates_single_record(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from spiritscout.blackboard.store import Blackboard
+        from spiritscout.core.models import BlackboardLayer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bb = Blackboard(Path(tmp) / "bb.db")
+            bb.write(BlackboardLayer.TOPOLOGY, "finding-a",
+                     {"kind": "finding", "text": "首页 200"},
+                     agent_type=AgentType.CTF_WEB, dedup_key="k1")
+            bb.write(BlackboardLayer.TOPOLOGY, "finding-b",
+                     {"kind": "finding", "text": "首页 200 再核"},
+                     agent_type=AgentType.CTF_WEB, dedup_key="k1")
+            self.assertEqual(bb.count(BlackboardLayer.TOPOLOGY), 1)
+            row = bb.find_by_dedup_key(BlackboardLayer.TOPOLOGY, "k1")
+            assert row is not None
+            self.assertEqual(row["data"]["text"], "首页 200 再核")
+            self.assertEqual(row["version"], 2)
+
+    def test_distinct_dedup_keys_stay_separate(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from spiritscout.blackboard.store import Blackboard
+        from spiritscout.core.models import BlackboardLayer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bb = Blackboard(Path(tmp) / "bb.db")
+            bb.write(BlackboardLayer.TOPOLOGY, "finding-a", {"text": "a"},
+                     agent_type=AgentType.CTF_WEB, dedup_key="k1")
+            bb.write(BlackboardLayer.TOPOLOGY, "finding-b", {"text": "b"},
+                     agent_type=AgentType.CTF_WEB, dedup_key="k2")
+            self.assertEqual(bb.count(BlackboardLayer.TOPOLOGY), 2)
+
+    def test_legacy_duplicates_redirect_to_most_recent_record(self) -> None:
+        """历史重复（去重上线前的旧库）下，写入重定向须与读取同口径。
+
+        读取按 updated_at 取最新一条；写入若重定向到旧条，收敛写回带着
+        读取侧版本号就会撞 VersionConflict。
+        """
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from spiritscout.blackboard.store import Blackboard
+        from spiritscout.core.models import BlackboardLayer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bb = Blackboard(Path(tmp) / "bb.db")
+            bb.write(BlackboardLayer.TOPOLOGY, "finding-a", {"text": "旧"},
+                     agent_type=AgentType.CTF_WEB, dedup_key="k1")
+            # 模拟旧库残留：同键第二条记录（版本更高、更新时间更新）
+            bb._conn.execute(
+                "INSERT INTO bb_records (layer, record_id, version, dedup_key,"
+                " data, updated_by, updated_at) VALUES (?,?,?,?,?,?,?)",
+                (BlackboardLayer.TOPOLOGY.value, "legacy-b", 3, "k1",
+                 json.dumps({"text": "历史重复"}), "", "9999-12-31T00:00:00+00:00"))
+            bb._conn.commit()
+
+            target = bb.find_by_dedup_key(BlackboardLayer.TOPOLOGY, "k1")
+            assert target is not None
+            self.assertEqual(target["record_id"], "legacy-b")
+
+            bb.write(BlackboardLayer.TOPOLOGY, "finding-c", {"text": "收敛"},
+                     agent_type=AgentType.CTF_WEB, dedup_key="k1",
+                     expected_version=target["version"])
+            row = bb.find_by_dedup_key(BlackboardLayer.TOPOLOGY, "k1")
+            assert row is not None
+            self.assertEqual(row["record_id"], "legacy-b")
+            self.assertEqual(row["data"]["text"], "收敛")
+            self.assertEqual(row["version"], 4)
+
+
+class PeerAcceptedFlagValveTests(unittest.TestCase):
+    """并行收敛阀只看同伴战果：本路线自己提交的 Flag 不算「同伴夺旗」。"""
+
+    @staticmethod
+    def _agent(records: list[dict]) -> CTFBaseAgent:
+        agent = object.__new__(CTFBaseAgent)
+        agent.agent_id = "a"
+        agent.agent_type = AgentType.CTF_WEB
+        agent.direction = "web"
+        agent.cache = SimpleNamespace(get=Mock(return_value=list(records)), put=Mock())
+        return agent
+
+    @staticmethod
+    def _record(value: str, *, route: str, rnd: int = 2,
+                verdict: str = "accepted") -> dict:
+        return {"value": value, "by": "web", "route": route,
+                "round": rnd, "verdict": verdict}
+
+    @staticmethod
+    def _task() -> Task:
+        return Task(task_id="t1", task_type="ctf_solve", target="http://x",
+                    agent_type=AgentType.CTF_WEB, round_no=2,
+                    payload={"challenge": {"id": "c1"}})
+
+    def _fresh(self, records: list[dict], *, route: str = "solve") -> list[str]:
+        agent = self._agent(records)
+        return agent._peer_accepted_flags(
+            self._task(), SimpleNamespace(name=route), {"flags": []})
+
+    def test_own_route_flag_is_not_a_convergence_signal(self) -> None:
+        # 修复前：记录无 route 字段，本路线刚提交成功的 Flag 下一回合
+        # 被当「同伴夺旗」收尾（结论文本谎报出处、多 Flag 题提前收工）
+        self.assertEqual(self._fresh([self._record("flag{x}", route="solve")]), [])
+
+    def test_peer_accepted_same_round_is_a_convergence_signal(self) -> None:
+        self.assertEqual(self._fresh([self._record("flag{x}", route="peer")]),
+                         ["flag{x}"])
+
+    def test_peer_pending_or_old_round_is_not(self) -> None:
+        self.assertEqual(
+            self._fresh([self._record("flag{x}", route="peer", verdict="pending")]), [])
+        self.assertEqual(
+            self._fresh([self._record("flag{x}", route="peer", rnd=1)]), [])
+
+    def test_flag_already_held_by_this_route_is_not(self) -> None:
+        agent = self._agent([self._record("flag{x}", route="peer")])
+        fresh = agent._peer_accepted_flags(
+            self._task(), SimpleNamespace(name="solve"), {"flags": ["flag{x}"]})
+        self.assertEqual(fresh, [])
+
+
+class FindingDedupKeyTests(unittest.TestCase):
+    """发现去重键跨进程稳定：内建 hash() 带随机盐，重启后同一发现重复落板。"""
+
+    def test_dedup_key_uses_stable_digest(self) -> None:
+        import zlib
+
+        agent = object.__new__(CTFBaseAgent)
+        agent.agent_id = "a"
+        agent.agent_type = AgentType.CTF_WEB
+        agent.direction = "web"
+        calls: list[dict] = []
+        agent.ctx = SimpleNamespace(blackboard=SimpleNamespace(
+            write=Mock(side_effect=lambda layer, rid, data, **kw: calls.append(kw))))
+        task = Task(task_id="t1", task_type="ctf_solve", target="http://x",
+                    agent_type=AgentType.CTF_WEB,
+                    payload={"challenge": {"id": "c1"}})
+
+        agent._record_finding(task, "flag", "flag{deadbeef}", url="http://x/f")
+
+        expected = f"finding|c1|flag|{zlib.crc32(b'http://x/f'):08x}"
+        self.assertEqual(calls[0]["dedup_key"], expected)
+
+
 if __name__ == "__main__":
     unittest.main()

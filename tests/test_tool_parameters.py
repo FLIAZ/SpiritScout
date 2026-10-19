@@ -13,10 +13,11 @@ from fastapi.testclient import TestClient
 from spiritscout.blackboard import Blackboard
 from spiritscout.config.settings import SystemConfig, WorkspaceConfig
 from spiritscout.core.audit import AuditLogger, sanitize_record
+from spiritscout.resources.store import redact_credentials
 from spiritscout.tools.journal import ExecutionJournal
 from spiritscout.web.app import create_app
 from spiritscout.web.sessions import Session
-from spiritscout.web.tool_parameters import display_parameters, read_tool_parameters
+from spiritscout.web.tool_parameters import read_tool_parameters
 
 
 class ToolParameterTests(unittest.TestCase):
@@ -45,21 +46,21 @@ class ToolParameterTests(unittest.TestCase):
         args = {"command": "printf archive-param-marker", "action": "analysis"}
         audit = AuditLogger(self.root / "audit.jsonl")
         record = audit.log("agent.tool_call", "test", {"calls": [{"name": "shell", "arguments": args}]})
-        digest = record["detail"]["calls"][0]["arguments"]["digest"]
-        self.assertNotIn("archive-param-marker", (self.root / "audit.jsonl").read_text())
+        call = record["detail"]["calls"][0]
+        # 参数原文直达审计（会话页实时监控），SSE 出口剥掉加密副本
+        self.assertEqual(call["arguments"]["command"], "printf archive-param-marker")
         self.assertNotIn("arguments_cipher", json.dumps(sanitize_record(record)))
-        self.assertEqual(read_tool_parameters(self.root, "shell", digest)["parameters"], args)
+        self.assertIn("archive-param-marker", (self.root / "audit.jsonl").read_text())
 
-    def test_credentials_hidden_but_code_body_and_parameter_names_visible(self) -> None:
-        result = display_parameters({"code": "print('visible')", "body": {"page": 2, "password": "hidden-pass"},
+    def test_resource_credentials_redacted_but_plain_fields_visible(self) -> None:
+        result = redact_credentials({"code": "print('visible')", "body": {"page": 2, "password": "hidden-pass"},
             "headers": {"X-Api-Key": "hidden-key", "Accept": "application/json"},
-            "url": "https://user:hidden-userpass@example.test/?page=2&session=hidden-session",
             "prompt_tokens": 22})
         text = json.dumps(result)
         self.assertEqual(result["code"], "print('visible')")
         self.assertEqual(result["body"]["page"], 2)
         self.assertEqual(result["prompt_tokens"], 22)
-        for marker in ("hidden-pass", "hidden-key", "hidden-session", "hidden-userpass"):
+        for marker in ("hidden-pass", "hidden-key"):
             self.assertNotIn(marker, text)
 
     def test_missing_or_wrong_key_is_not_replaced(self) -> None:

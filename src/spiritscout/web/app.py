@@ -524,7 +524,8 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
 
         try:
             file = open_artifact(_require(session_id).workspace, path)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
+            # NUL 等非法路径字符抛 ValueError——按「不存在」404 处理而非 500
             raise HTTPException(404, "产出文件不存在或不在本会话产出目录中") from exc
 
         def chunks() -> Iterator[bytes]:
@@ -658,6 +659,74 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             "experience": read_recent(
                 experience_db_path(cfg.experience.root, cfg.workspace.root), limit=8),
         }
+
+    @app.get("/api/experience")
+    def experience_page(q: str = "", tag: str = "",
+                        limit: int = Query(50, ge=1, le=200),
+                        offset: int = Query(0, ge=0)) -> dict[str, Any]:
+        """经验提炼页：自我进化的全部产出（可检索/按标签过滤）+ 提炼过程记录。
+
+        history 从各会话审计尾段提取 experience.distill 事件——含失败与
+        跳过，让「学没学到、为什么没学到」对用户完全可见。
+        """
+        from spiritscout.knowledge.experience import experience_db_path, read_page
+
+        data = read_page(
+            experience_db_path(cfg.experience.root, cfg.workspace.root),
+            q=q, tag=tag, limit=limit, offset=offset)
+        titles = {s.session_id: s.brief(include_summary=False)["title"]
+                  for s in manager.list()}
+        for item in data["items"]:
+            item["source_title"] = titles.get(
+                str(item.get("source_session") or ""), "")
+        data["history"] = _distill_history(cfg)
+        return data
+
+    @app.delete("/api/experience/{insight_id}")
+    def delete_experience(insight_id: str) -> dict[str, Any]:
+        """人工审核：删除一条提炼跑偏的经验（如把单题步骤当成可复用事实）。
+
+        经验库是模型产出、用户可审可清；删除在系统审计留痕（actor=user），
+        被删内容不参与后续会话召回。
+        """
+        from spiritscout.knowledge.experience import delete_insight, experience_db_path
+
+        item = delete_insight(
+            experience_db_path(cfg.experience.root, cfg.workspace.root),
+            insight_id, audit=AuditLogger(cfg.audit_log_path))
+        if item is None:
+            raise HTTPException(404, f"经验不存在: {insight_id}")
+        return {"deleted": insight_id}
+
+    def _distill_history(cfg: SystemConfig, *, limit: int = 12) -> list[dict[str, Any]]:
+        """最近提炼记录（成功/空/失败/跳过）：会话审计尾段反向扫描。"""
+        sessions_dir = Path(cfg.workspace.root) / "sessions"
+        events: list[dict[str, Any]] = []
+        if not sessions_dir.is_dir():
+            return events
+        for audit_path in sorted(sessions_dir.glob("*/audit.jsonl")):
+            sid = audit_path.parent.name
+            try:
+                with audit_path.open("rb") as fh:
+                    fh.seek(0, 2)
+                    size = fh.tell()
+                    fh.seek(max(0, size - 131072))     # 提炼在收尾：只看尾段 128KB
+                    tail = fh.read().decode("utf-8", "ignore")
+            except OSError:
+                continue
+            for line in tail.splitlines():
+                if '"experience.distill"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("type") != "experience.distill":
+                    continue
+                events.append({"session_id": sid, "ts": rec.get("ts", ""),
+                               **(rec.get("detail") or {})})
+        events.sort(key=lambda e: str(e.get("ts", "")), reverse=True)
+        return events[:limit]
 
     @app.post("/api/sessions/{session_id}/questions/{question_id}")
     async def answer_question(session_id: str, question_id: str,

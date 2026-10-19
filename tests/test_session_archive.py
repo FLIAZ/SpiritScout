@@ -89,6 +89,10 @@ class SessionArchiveTests(unittest.TestCase):
             self.assertEqual(response.content, b"saved output")
             self.assertIn("attachment", response.headers["content-disposition"])
             self.assertEqual(client.get(prefix + "/artifacts/download", params={"path": "bb.db"}).status_code, 404)
+            # NUL 字符路径抛 ValueError：按「不存在」404，不能炸成 500
+            self.assertEqual(client.get(prefix + "/artifacts/download",
+                                        params={"path": "artifacts/\x00.txt"}).status_code,
+                             404)
 
     def test_empty_session_does_not_create_database(self) -> None:
         empty = self.root / "empty"

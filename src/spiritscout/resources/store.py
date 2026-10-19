@@ -22,6 +22,27 @@ from spiritscout.config.settings import McpServerConfig
 from spiritscout.core.audit import sanitize_record
 from spiritscout.core.exceptions import SpiritScoutError
 
+# 资源配置里的凭据字段：资源页/提案展示不回显（用户自己填的 key，
+# 与会话页 agent 数据流的原文监控是两回事）
+_CREDENTIAL_KEYS = re.compile(
+    r"api[-_]?key|secret|password|passwd|token|authorization|cookie|credential"
+    r"|session(?:[_-]?id)?|csrf|xsrf", re.IGNORECASE)
+# 计量字段名含 "token" 但不是凭据，豁免
+_USAGE_KEYS = {"tokens", "used_tokens", "prompt_tokens", "completion_tokens", "total_tokens",
+               "input_tokens", "output_tokens", "reasoning_tokens", "budget_tokens",
+               "cached_input_tokens", "cache_write_tokens", "max_tokens", "max_output_tokens"}
+
+
+def redact_credentials(value: Any) -> Any:
+    """递归打码凭据键的值（仅资源域配置展示用，不涉审计/会话数据流）。"""
+    if isinstance(value, dict):
+        return {key: ("***" if str(key) not in _USAGE_KEYS and _CREDENTIAL_KEYS.search(str(key))
+                      else redact_credentials(item))
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_credentials(item) for item in value]
+    return value
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS assets(id TEXT PRIMARY KEY,kind TEXT,identity TEXT,host TEXT,first_seen REAL,last_seen REAL);
 CREATE TABLE IF NOT EXISTS observations(id INTEGER PRIMARY KEY,asset_id TEXT,source TEXT,observed_at REAL,digest TEXT,data TEXT,campaign TEXT NOT NULL DEFAULT '',UNIQUE(asset_id,source));

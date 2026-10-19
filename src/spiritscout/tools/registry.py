@@ -233,6 +233,15 @@ class ToolRegistry:
             targets.extend(str(v) for v in values if isinstance(v, str))
         if spec.scope_target_extractor is not None:
             targets.extend(str(v) for v in spec.scope_target_extractor(params))
+        if (spec.scope_required and spec.scope_target_extractor is not None
+                and not any(v.strip() for v in targets)):
+            # fail-closed：复合入参工具（如 HTTP 报文里带 Host）声明了目标
+            # 必须过禁打门，却一个可校验目标都提不出——放行等于硬边界被
+            # 静默绕过。只对「有提取器」的工具生效：普通目标参数是可选
+            # 参数（浏览器 tabs/click 等缺省不带 url），缺省不误杀
+            raise ScopeViolation(
+                f"工具 {spec.name} 声明目标必须过禁打校验（scope_enforcement=required），"
+                "但本次参数无法给出任何可校验目标——按 fail-closed 拒绝执行")
         for value in targets:
             if value.strip():
                 self.policy.guard.ensure_not_denied(value.strip())

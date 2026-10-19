@@ -105,6 +105,9 @@ async def writeup_body(
                     json.dumps(digest, ensure_ascii=False)[:_DIGIT_BUDGET]},
             ],
             task_type="meta_planning", max_tokens=8192, timeout_seconds=420,
+            # 战报综合是散文写作不是规划：限定低思考强度（不限时单次可磨
+            # 100 秒+，占收尾等待的大头）
+            reasoning_effort="low",
         )
         body = (resp.content or "").strip()
         if not body:

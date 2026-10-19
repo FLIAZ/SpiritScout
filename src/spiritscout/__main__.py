@@ -13,6 +13,13 @@ import argparse
 import os
 import sys
 
+# litellm 导入期会同步联网拉模型价格表（3 次重试+退避，慢网实测 22s+，
+# 且跑在事件循环上会把整个控制台冻住）；官方开关改用内置表。本网络下
+# 远端表本来就永远拉不到、每次都回退同一份内置表，设此开关只是省掉
+# 注定失败的网络往返（取值必须为 True，"1" 不生效）。须在任何
+# litellm 导入前设置。
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
 from spiritscout import __version__
 from spiritscout.config import load_model_config, load_system_config
 from spiritscout.core.exceptions import SpiritScoutError
@@ -61,6 +68,13 @@ def main(argv: list[str] | None = None) -> int:
     cfg.web.port = port
     app = create_app(cfg, models,
                      max_concurrent=cfg.web.max_concurrent_sessions)
+    # 预热 litellm：把 ~2s 的库导入成本从「首次调用途中」挪到启动时
+    # （调用在事件循环上，冷导入曾把控制台冻 22s+）；失败留待调用路径
+    # 原生报错，不阻断启动
+    try:
+        import litellm  # noqa: F401
+    except Exception as exc:  # noqa: BLE001
+        print(f"[警告] litellm 预热失败（首次调用时重试）：{exc}", file=sys.stderr)
     print(f"灵枢 Web 控制台: http://{host}:{port}  "
           f"(并发上限 {cfg.web.max_concurrent_sessions}，Ctrl+C 停止)")
     uvicorn.run(app, host=host, port=port, log_level="warning")

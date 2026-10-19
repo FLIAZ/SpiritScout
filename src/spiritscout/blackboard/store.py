@@ -143,6 +143,18 @@ class Blackboard:
         now = datetime.now(UTC).isoformat()
         payload = json.dumps(data, ensure_ascii=False)
         with self.transaction():
+            if dedup_key:
+                # 同层同 dedup_key 只存一条：后续写入升级既有记录（版本
+                # 递增、历史留痕）而不是追加新条——「同一发现只存一条」
+                # 在此落实，否则同一 URL 的重复观察会刷满发现组。
+                # 排序口径与读取方（find_by_dedup_key/query）一致：历史
+                # 重复时两边都落在最近更新的一条，否则收敛写回撞版本冲突
+                hit = self._conn.execute(
+                    "SELECT record_id FROM bb_records WHERE layer=? AND dedup_key=?"
+                    " ORDER BY updated_at DESC LIMIT 1",
+                    (layer.value, dedup_key)).fetchone()
+                if hit:
+                    record_id = hit["record_id"]
             row = self._conn.execute(
                 "SELECT version FROM bb_records WHERE layer=? AND record_id=?",
                 (layer.value, record_id),
