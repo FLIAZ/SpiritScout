@@ -35,7 +35,8 @@ configs/models.yaml
 .env.*
 !.env.example
 
-# 本地修复分析与实施记录（不提交）
+# 本地修复分析与实施记录，以及一次性审计的复现脚本与证据（过程材料，不提交）
+/audits/
 /BROWSER_CLICK_FIX_2026-10-16.md
 /BUG_AUDIT_2026-10-15.md
 /BUG_RECHECK_2026-10-15.md
