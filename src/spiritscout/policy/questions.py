@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 from typing import Any
 
 from spiritscout.core.audit import AuditLogger, NullAuditLogger
@@ -55,8 +56,11 @@ class QuestionBroker:
     回收），创建者退出不再误删仍有人等待的问题。
     """
 
-    def __init__(self, audit: AuditLogger | None = None):
+    def __init__(self, audit: AuditLogger | None = None, *,
+                 context_path: str | Path | None = None):
         self._audit = audit or NullAuditLogger()
+        self._blackboard: Any = None
+        self._context_path = context_path
         self._guard: Any = None                       # ScopeGuard（扩围写入）
         self._pending: dict[str, dict] = {}           # question_id → 待答记录
         self._waiters: dict[str, asyncio.Future[dict]] = {}
@@ -67,6 +71,14 @@ class QuestionBroker:
     def bind_guard(self, guard: Any) -> None:
         """绑定会话守卫：用户勾选扩围时写入其会话批准集。"""
         self._guard = guard
+
+    def bind_context(self, blackboard: Any) -> None:
+        """绑定会话事实库，所有用户答复完整回灌各 Agent 的上下文。"""
+        self._blackboard = blackboard
+
+    def bind_context_path(self, path: str | Path) -> None:
+        """预检阶段也可通过短连接落盘，运行态关闭后仍保留答复原文。"""
+        self._context_path = path
 
     # ------------------------------------------------------------ 询问侧（agent 调用）
 
@@ -170,14 +182,14 @@ class QuestionBroker:
                     raise ValueError("请选择有效选项")
                 if index not in picked:
                     picked.append(index)
-        answer_text = str(text or "").strip()[:1000]
+        answer_text = str(text or "").strip()
         if multiple:
             parts: list[str] = []
             if picked:
                 parts.append("、".join(rec["options"][i] for i in picked))
             if answer_text:
                 parts.append(answer_text)
-            answer = "；".join(parts)[:1000]
+            answer = "；".join(parts)
         elif answer_text:
             answer = answer_text
         elif picked:
@@ -200,6 +212,17 @@ class QuestionBroker:
             answer = "已确认目标：" + "、".join(added)
         if not answer:
             raise ValueError("请选择有效选项或填写答复")
+        from spiritscout.gateway.world_state import (
+            record_user_statement,
+            record_user_statement_at_path,
+        )
+
+        statement = {"kind": "answer", "question": rec["question"], "answer": answer,
+                     "scope_added": added, "statement_id": question_id}
+        if self._blackboard is not None:
+            record_user_statement(self._blackboard, statement)
+        elif self._context_path is not None:
+            record_user_statement_at_path(self._context_path, statement)
         payload = {"answer": answer, "choices": picked, "scope_added": added}
         self._audit.log("user.answered", "web", {
             "question_id": question_id, "answer": answer[:300],

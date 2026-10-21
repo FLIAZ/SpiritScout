@@ -85,6 +85,28 @@ class CacheEfficiencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(rebased)
         self.assertEqual(memory.snapshot["observations"]["index"], 49)
 
+    def test_boundary_update_and_rebase_keep_latest_complete_originals(self) -> None:
+        memory = DecisionMemory(soft_chars=1000)
+        rules = "只测测试环境\n" * 3000 + "尾部不测生产"
+        first = {"world_state": {"authorization": {"testing_rules": rules},
+                                  "user_context": {"statements": [{"text": "仅测 A"}]}},
+                 "observations": "旧现场"}
+        memory.prepare(decision_messages("稳定契约", first, max_chars=100))
+        memory.commit("继续")
+        latest = copy.deepcopy(first)
+        latest["world_state"]["user_context"]["statements"].append({"answer": "B 不允许\n" * 1500})
+        update = memory.prepare(decision_messages("稳定契约", latest, max_chars=100))
+        patch_rows = [row for row in json.loads(update[-1]["content"])["patch"]
+                      if row["path"].startswith("/world_state/")]
+        self.assertEqual(patch_rows, [{"op": "replace", "path": "/world_state/user_context/statements",
+                                       "value": latest["world_state"]["user_context"]["statements"]}])
+        memory.commit("很长的助手观察" * 40000)
+        rebased = memory.prepare(decision_messages("稳定契约", latest, max_chars=100))
+        self.assertEqual(len(rebased), 2)
+        self.assertEqual(json.loads(rebased[-1]["content"])["snapshot"]["world_state"], latest["world_state"])
+        memory.commit("完成本轮")
+        self.assertEqual(memory.snapshot["world_state"], latest["world_state"])
+
     async def test_probe_token_is_data_not_system_contract(self) -> None:
         agent = WebVulnAgent.__new__(WebVulnAgent)
         agent.ctx = SimpleNamespace(blackboard=None)

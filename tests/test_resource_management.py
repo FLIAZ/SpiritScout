@@ -697,7 +697,7 @@ class ResourceConversationTests(unittest.IsolatedAsyncioTestCase):
                             {"host": "blocked.example.test"},
                             **infra.builtin_ctx,
                         )
-                        self.assertFalse(denied.ok)
+                        self.assertTrue(denied.ok, denied.error)
                 finally:
                     await infra.close()
 

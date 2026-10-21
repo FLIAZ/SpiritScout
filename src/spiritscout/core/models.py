@@ -107,12 +107,16 @@ class BlackboardLayer(str, enum.Enum):
 
 
 class Scope(BaseModel):
-    """授权范围（合规硬约束；默认 deny，未配置即拒绝启动 —— 合规自查 G1）。"""
+    """用户授权事实（模型上下文与范围标注，不作为运行期目标围栏）。"""
 
     allowed_domains: list[str] = Field(default_factory=list, description="允许的域名（含子域通配 *.example.com）")
     allowed_cidrs: list[str] = Field(default_factory=list, description="允许的网段（CIDR）")
     allowed_urls: list[str] = Field(default_factory=list, description="允许的 URL 前缀")
-    denied: list[str] = Field(default_factory=list, description="禁打列表（域名/IP/CIDR 网段/URL 前缀，最高优先）")
+    denied: list[str] = Field(
+        default_factory=list,
+        description="兼容旧配置的排除目标声明，仅注入模型上下文，不由后端匹配或拦截",
+    )
+    testing_rules: str = Field(default="", description="用户原始测试规则，完整传入模型上下文")
     time_window_start: datetime | None = None
     time_window_end: datetime | None = None
     max_requests_per_second: float = 10.0

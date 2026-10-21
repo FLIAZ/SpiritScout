@@ -59,8 +59,8 @@ class _EchoHandler(BaseHTTPRequestHandler):
 
 
 class ToolBoundaryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_denied_target_is_blocked_before_execution(self) -> None:
-        """禁打列表是唯一硬边界：命中即拒，不触碰执行器。"""
+    async def test_legacy_denied_target_executes_without_backend_boundary_gate(self) -> None:
+        """旧排除声明只传模型，执行层不做禁打匹配。"""
         executor = _RecordingExecutor()
         policy = PolicyEngine(
             RunMode.SRC,
@@ -79,10 +79,8 @@ class ToolBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
         )
 
-        self.assertFalse(result.ok)
-        self.assertEqual(result.returncode, -3)
-        self.assertIn("禁打", result.error)
-        self.assertEqual(executor.calls, 0)
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(executor.calls, 1)
 
     async def test_out_of_scope_target_executes_without_hard_block(self) -> None:
         """授权白名单不拦截：范围外目标照常执行（扩围由用户决定）。"""
@@ -123,7 +121,8 @@ class ToolBoundaryTests(unittest.IsolatedAsyncioTestCase):
         try:
             url = f"http://127.0.0.1:{server.server_port}/start"
             result = await http_probe(
-                url, guard=ScopeGuard(Scope(allowed_urls=[url])))
+                url, guard=ScopeGuard(Scope(allowed_urls=[url],
+                                            denied=["127.0.0.1", url.replace("/start", "/outside")])))
         finally:
             server.shutdown()
             server.server_close()
@@ -172,21 +171,15 @@ class ToolBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DnsResolveDeniedAddressTests(unittest.IsolatedAsyncioTestCase):
-    """以域名解析出的禁打 IP 如实拒绝：dns_resolve 与 tcp_scan 同门。
+    """真实 localhost 解析不因上下文中的旧排除声明被后端拒绝。"""
 
-    回归：曾被 localhost 这类经由 /etc/hosts 指向禁打地址的域名绕过——
-    只查了字面主机名，不查解析结果。
-    """
-
-    async def test_resolved_denied_ip_is_refused(self) -> None:
+    async def test_legacy_denied_dns_address_still_resolves(self) -> None:
         from spiritscout.tools.builtin import dns_resolve
 
         guard = ScopeGuard(Scope(denied=["127.0.0.1", "::1"]))
         result = await dns_resolve("localhost", guard=guard)
-
-        self.assertFalse(result.ok)
-        self.assertEqual(result.returncode, -3)
-        self.assertIn("禁打", result.error)
+        self.assertTrue(result.ok, result.error)
+        self.assertTrue(result.parsed["ips"])
 
     async def test_normal_host_still_resolves(self) -> None:
         from spiritscout.tools.builtin import dns_resolve

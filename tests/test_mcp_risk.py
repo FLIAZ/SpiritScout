@@ -90,11 +90,11 @@ class McpAssemblyRiskTests(unittest.IsolatedAsyncioTestCase):
         self.gate.assert_not_awaited()
         self.client.call.assert_awaited_once()
 
-    async def test_navigation_to_denied_target_does_not_reach_mcp(self) -> None:
+    async def test_navigation_legacy_denied_target_reaches_mcp(self) -> None:
         result = await self.infra.tools.call("mcp__playwright__browser_navigate",
                                             {"url": "https://denied.invalid"}, **self.infra.builtin_ctx)
-        self.assertFalse(result.ok)
-        self.client.call.assert_not_awaited()
+        self.assertTrue(result.ok, result.error)
+        self.client.call.assert_awaited_once()
 
     async def test_mcp_error_text_is_preserved_without_identical_retry(self) -> None:
         self.client.call.return_value = {"text": "Invalid arguments: url is required", "is_error": True}

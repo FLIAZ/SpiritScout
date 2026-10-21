@@ -1,6 +1,6 @@
 """内置工具：HTTP 探测（http_probe）、DNS 解析（dns_resolve）、本地文件分析（file_analyze）。
 
-内置工具直接由 Python 实现，所有网络请求强制过 ScopeGuard（合规 G1），
+内置工具直接由 Python 实现，网络测试边界由模型结合完整用户上下文维护，
 速率受全局限制（9.2 流量管控）。这是 MVP 阶段侦察/Web 子 Agent 的
 基础执行能力；外部工具（nmap/nuclei 等）经 CLI 封装接入。
 file_analyze 仅访问本地文件（CTF 附件分析），不触网，路径需位于允许目录内。
@@ -22,7 +22,6 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
-from spiritscout.core.exceptions import ScopeViolation
 from spiritscout.policy.scope import ScopeGuard
 from spiritscout.tools.fingerprint import web_fingerprint
 from spiritscout.tools.http_transport import ScopedHTTPTransport
@@ -165,7 +164,7 @@ async def http_probe(
     """HTTP 探测工具：限速 → 请求（重定向逐跳跟随）→ 结构化解析。
 
     授权白名单不拦截：范围外目标照常请求，最终响应带 scope_note 标注，
-    由模型决定是否向用户确认扩围；禁打列表在工具门（registry）拦截。
+    由模型结合用户规则决定是否向用户确认扩围，后端不匹配排除目标。
     """
     started = time.perf_counter()
 
@@ -187,9 +186,6 @@ async def http_probe(
             transport=ScopedHTTPTransport(guard),
         ) as client:
             for hop in range(max(0, max_redirects) + 1):
-                # 每一跳请求前过禁打硬边界（含解析地址）：重定向链不得
-                # 把请求带进禁打目标
-                guard.ensure_not_denied(current_url)
                 if limiter:
                     await limiter.acquire()
                 # 流式发送：响应体不全额进内存——中转跳不读体（省带宽），
@@ -238,10 +234,6 @@ async def http_probe(
     except httpx.HTTPError as exc:
         return ToolResult(tool="http_probe", ok=False, error=f"HTTP 错误: {exc}",
                           returncode=-2, duration_ms=(time.perf_counter() - started) * 1000)
-    except ScopeViolation as exc:
-        # 禁打边界（含跳转落点/解析地址）在请求前拦截，执行器未发出请求
-        return ToolResult(tool="http_probe", ok=False, error=str(exc),
-                          returncode=-3, duration_ms=(time.perf_counter() - started) * 1000)
 
     if len(body) > max_output_chars:
         body = body[: max_output_chars * 3 // 4] + "\n...[截断]...\n" + body[-max_output_chars // 4 :]
@@ -280,9 +272,8 @@ async def dns_resolve(
     host: str, *, guard: ScopeGuard, limiter: RateLimiter | None = None,
     timeout: float = 5.0, **_: Any,
 ) -> ToolResult:
-    """DNS 解析（被动信息收集）。禁打列表在工具门拦截；白名单不拦。"""
+    """DNS 解析（被动信息收集）。测试边界由模型上下文判断；白名单仅标注。"""
     started = time.perf_counter()
-    guard.ensure_not_denied(host)
     if limiter:
         await limiter.acquire()
     loop = asyncio.get_running_loop()
@@ -294,14 +285,6 @@ async def dns_resolve(
     except (TimeoutError, socket.gaierror) as exc:
         return ToolResult(tool="dns_resolve", ok=False, error=f"解析失败: {exc}",
                           returncode=-2, duration_ms=(time.perf_counter() - started) * 1000)
-    try:
-        # 解析出的地址逐个过禁打门：以域名解析禁打 IP 同样不放过，与
-        # tcp_scan 同口径——白名单不拦，禁打列表是唯一硬边界
-        guard.ensure_addrs_not_denied(ips)
-    except ScopeViolation as exc:
-        return ToolResult(tool="dns_resolve", ok=False, returncode=-3,
-                          error=str(exc),
-                          duration_ms=(time.perf_counter() - started) * 1000)
     # fake-ip 识别：解析全部落在代理虚拟段时如实标注，上层据此不入册 IP 资产
     proxy_virtual = _all_proxy_virtual(ips)
     return ToolResult(
@@ -333,7 +316,7 @@ async def tcp_scan(
 ) -> ToolResult:
     """TCP 连接级端口扫描：授权主机上的存活端口与服务横幅（听风）。
 
-    禁打列表在工具门（registry）拦截；连接为只读探测，并发受信号量约束、
+    模型依据用户上下文判断测试边界；连接为只读探测，并发受信号量约束、
     频率受全局 RPS 约束。开放端口抓取首包横幅（非 HTTP 服务给协议指纹），
     白名单外主机照常可达、结果带范围标注（扩围由用户决定）。
     """
@@ -341,7 +324,6 @@ async def tcp_scan(
     host = str(host or "").strip()
     if not host:
         return ToolResult(tool="tcp_scan", ok=False, returncode=-1, error="host 必填")
-    guard.ensure_not_denied(host)
     loop = asyncio.get_running_loop()
     try:
         infos = await asyncio.wait_for(
@@ -350,13 +332,6 @@ async def tcp_scan(
     except (TimeoutError, socket.gaierror, OSError) as exc:
         return ToolResult(tool="tcp_scan", ok=False, returncode=-2,
                           error=f"主机解析失败: {exc}",
-                          duration_ms=(time.perf_counter() - started) * 1000)
-    try:
-        # 解析出的连接地址逐个过禁打门：以域名访问禁打 IP 不绕过
-        guard.ensure_addrs_not_denied(addrs)
-    except ScopeViolation as exc:
-        return ToolResult(tool="tcp_scan", ok=False, returncode=-3,
-                          error=str(exc),
                           duration_ms=(time.perf_counter() - started) * 1000)
     ip = min(addrs)
     # fake-ip 前置门：解析落在代理虚拟段时端口扫描只会探测到代理栈（全端口
@@ -494,16 +469,16 @@ async def file_analyze(
 BUILTIN_SPECS: dict[str, ToolSpec] = {
     "http_probe": ToolSpec(
         name="http_probe", kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY,
-        description="HTTP 探测（任意 HTTP 方法，授权门 + 限速 + 结构化解析）",
+        description="HTTP 探测（任意 HTTP 方法，范围标注 + 限速 + 结构化解析）",
         target_params=("url",), scope_required=True),
     "dns_resolve": ToolSpec(
         name="dns_resolve", kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY,
-        description="DNS 解析（A/AAAA/PTR，授权门 + 限速）",
+        description="DNS 解析（A/AAAA/PTR，范围标注 + 限速）",
         target_params=("host",), scope_required=True),
     # 端口扫描：SRC/渗透赛测绘面（CTF 模式 C7 不装配该角色，模式层排除）
     "tcp_scan": ToolSpec(
         name="tcp_scan", kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY,
-        description="TCP 端口扫描（连接级探测 + 服务横幅，禁打门 + 限速 + 并发上限）",
+        description="TCP 端口扫描（连接级探测 + 服务横幅，范围标注 + 限速 + 并发上限）",
         target_params=("host",), scope_required=True),
     "file_analyze": ToolSpec(
         name="file_analyze", kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY,
@@ -522,11 +497,10 @@ BUILTIN_SPECS: dict[str, ToolSpec] = {
 
 async def asset_memory_lookup(host: str, query: str = "", offset: int = 0, *, guard: ScopeGuard,
                               resources=None, **kwargs) -> ToolResult:
-    """只读共享观测；禁打边界仍适用，不代表当前目标已复核。"""
+    """只读共享观测；历史记录不代表授权，也不代表当前目标已复核。"""
     host = host.strip().lower()
     if not host or resources is None:
         return ToolResult(tool="asset_memory_lookup", ok=False, error="需要主机名和已装配的共享资产库")
-    guard.ensure_not_denied(host)
     import json
 
     result = resources.assets(query=query, host=host, offset=max(0,int(offset)), limit=20)

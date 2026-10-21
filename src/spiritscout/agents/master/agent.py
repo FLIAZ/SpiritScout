@@ -303,7 +303,7 @@ class MasterAgent:
                          "node_title": node.title,
                          "mission": self._mission(),
                          "execution_recovery": self.ctx.extra.get("execution_recovery", {}),
-                         "rules": self._rules()[:1500],
+                         "rules": self._rules(),
                          "recent_experience": (self.ctx.extra.get("recent_experience") or [])[-3:],
                          # 题级事实深拷贝注入：同一赛题的多个任务各持副本，
                          # 一方的运行期改写不污染其他方向/其他轮次
@@ -358,8 +358,8 @@ class MasterAgent:
     def _approve_platform_target(self, challenge: dict[str, Any]) -> None:
         """平台下发的容器地址并入会话范围（平台供给的实例即本题授权对象）。
 
-        只登记批准集（去掉运行期的「范围之外」标注），不碰禁打列表——
-        禁打仍是唯一硬边界；不合法目标静默保持越界标注，不抛不拦。
+        只登记批准事实（去掉运行期的「范围之外」标注），不匹配排除列表；
+        规则冲突由模型结合用户答复判断，不合法目标静默保持范围外标注。
         """
         url = str(challenge.get("url") or "")
         if not url.startswith(("http://", "https://")):
@@ -755,7 +755,15 @@ class MasterAgent:
         inbox = self.ctx.extra.get("user_inbox")
         if not inbox:
             return []
+        from spiritscout.gateway.world_state import record_user_statement
+
         items = list(inbox)
+        for item in items:
+            if isinstance(item, dict) and item.get("text"):
+                statement = {"kind": "message", "text": str(item["text"])}
+                if item.get("statement_id"):
+                    statement["statement_id"] = item["statement_id"]
+                record_user_statement(self.ctx.blackboard, statement)
         inbox.clear()
         return items
 
@@ -1418,8 +1426,8 @@ class MasterAgent:
                 continue
             self.ctx.blackboard.write(
                 BlackboardLayer.RECON_CLUE, new_id("clue"),
-                {"clue_type": "user_reply", "value": answer[:500],
-                 "confidence": 1.0, "detail": question[:200],
+                {"clue_type": "user_reply", "value": answer,
+                 "confidence": 1.0, "detail": question,
                  "task_id": "", "found_by": self.agent_id},
                 agent_type=AgentType.MASTER, updated_by=self.agent_id)
 
@@ -1507,7 +1515,7 @@ class MasterAgent:
             if mission else "")
         rules = self._rules()
         rules_block = (f"用户既定执行规则（全程严格遵守，与其冲突的临时判断"
-                       f"以规则为准）：\n「{rules[:2500]}」\n"
+                       f"以规则为准）：\n「{rules}」\n"
                        if rules else "")
         exp_block = self._recent_experience()
         exp_block = (f"实战经验（前几次会话积累的参考事实与信号，非步骤；"
@@ -1541,4 +1549,4 @@ class MasterAgent:
         from spiritscout.gateway.world_state import snapshot
 
         guard = getattr(getattr(self.ctx, "policy", None), "guard", None)
-        return snapshot(guard=guard)
+        return snapshot(guard=guard, blackboard=getattr(self.ctx, "blackboard", None))

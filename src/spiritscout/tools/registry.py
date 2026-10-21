@@ -1,6 +1,6 @@
 """工具注册表：统一调度内置工具与 CLI/Docker 封装工具。
 
-- 所有调用先经 PolicyEngine 风险门（敏感操作拦截）与 ScopeGuard（目标授权）；
+- 所有调用先经 PolicyEngine 风险门（危险动作即时审批）；测试边界由模型判断；
 - 失败自动重试与降级替代（4.3.1：fallback_tool 链）。
 """
 
@@ -18,7 +18,6 @@ from spiritscout.agents.profiles import AgentProfile, get_profile
 from spiritscout.core.audit import AuditLogger, NullAuditLogger
 from spiritscout.core.exceptions import (
     PolicyViolation,
-    ScopeViolation,
     SpiritScoutError,
     ToolExecutionError,
 )
@@ -143,7 +142,7 @@ class ToolRegistry:
 
     async def _call(self, name: str, params: dict[str, Any], *,
                     transition: Callable[[str], None], **builtin_ctx) -> ToolResult:
-        """统一调用入口：策略门 → 授权范围门 → 执行/重试 → 结构化结果。"""
+        """统一调用入口：工具权限与危险动作审批 → 执行/重试 → 结构化结果。"""
         spec = self.get(name)
         # 行为声明在统一入口校验，不能依赖某个 Agent 的包装函数。
         # MCP 的 action 可能是远端业务参数；其风险仍由工具规格门把关。
@@ -178,12 +177,11 @@ class ToolRegistry:
                 return ToolResult(tool=name, ok=False, error=reason, returncode=-4)
         if self.policy is not None:
             try:
-                self._check_scope(spec, params)
                 if self.policy.requires_approval(spec, action):
                     transition("awaiting_approval")
                 await self.policy.ensure_tool_allowed(
                     spec, action=action)
-            except (PolicyViolation, ScopeViolation) as exc:
+            except PolicyViolation as exc:
                 self.audit.log("tool.denied", "registry", {"tool": name, "reason": str(exc)})
                 return ToolResult(tool=name, ok=False, error=str(exc), returncode=-3)
         attempts = 0
@@ -215,36 +213,6 @@ class ToolRegistry:
         assert last is not None
         return last
 
-    def _check_scope(self, spec: ToolSpec, params: dict[str, Any]) -> None:
-        """禁打列表硬校验（用户显式配置的拒绝边界），内置/CLI/Docker/MCP 共用。
-
-        授权白名单不在此拦截：范围外目标照常执行、结果带范围标注，
-        是否扩大测试范围由模型向用户提问确认（ask_user）——后端不做
-        进度与探索的刽子手。
-        """
-        if self.policy is None:
-            return
-        targets: list[str] = []
-        for field in spec.target_params:
-            if field not in params or params[field] in (None, ""):
-                continue
-            values = params[field] if isinstance(params[field], (list, tuple, set)) \
-                else [params[field]]
-            targets.extend(str(v) for v in values if isinstance(v, str))
-        if spec.scope_target_extractor is not None:
-            targets.extend(str(v) for v in spec.scope_target_extractor(params))
-        if (spec.scope_required and spec.scope_target_extractor is not None
-                and not any(v.strip() for v in targets)):
-            # fail-closed：复合入参工具（如 HTTP 报文里带 Host）声明了目标
-            # 必须过禁打门，却一个可校验目标都提不出——放行等于硬边界被
-            # 静默绕过。只对「有提取器」的工具生效：普通目标参数是可选
-            # 参数（浏览器 tabs/click 等缺省不带 url），缺省不误杀
-            raise ScopeViolation(
-                f"工具 {spec.name} 声明目标必须过禁打校验（scope_enforcement=required），"
-                "但本次参数无法给出任何可校验目标——按 fail-closed 拒绝执行")
-        for value in targets:
-            if value.strip():
-                self.policy.guard.ensure_not_denied(value.strip())
 
 
 class AgentToolView:

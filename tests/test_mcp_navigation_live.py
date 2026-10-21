@@ -32,11 +32,12 @@ from spiritscout.runtime import _build_infra
 
 _MCP_CLI = os.environ.get("SPIRITSCOUT_TEST_MCP_CLI")
 _BROWSER = os.environ.get("SPIRITSCOUT_TEST_BROWSER")
+_BROWSER_FLAGS = ["--headless"] if os.environ.get("SPIRITSCOUT_TEST_HEADLESS") == "1" else []
 
 
 @unittest.skipUnless(_MCP_CLI and _BROWSER, "需要隔离 Playwright MCP CLI 与 Chromium 路径")
 class LiveNavigationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_real_navigation_through_registry_and_policy_then_deny_without_request(self) -> None:
+    async def test_real_navigation_ignores_legacy_deny_and_keeps_tool_contract(self) -> None:
         requests: list[str] = []
 
         async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -58,7 +59,7 @@ class LiveNavigationTests(unittest.IsolatedAsyncioTestCase):
             with tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 spec = McpServerConfig(name="playwright", command=shutil.which("node") or "node",
-                    args=[str(_MCP_CLI), "--headless", "--isolated", "--executable-path", str(_BROWSER),
+                    args=[str(_MCP_CLI), *_BROWSER_FLAGS, "--isolated", "--executable-path", str(_BROWSER),
                           "--output-dir", str(root / "browser-output")],
                     default_risk="intrusive", tool_risk_overrides={"browser_navigate": "readonly"})
                 cfg = SystemConfig(workspace=WorkspaceConfig(root=temporary),
@@ -78,8 +79,8 @@ class LiveNavigationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("Page Title: SpiritScout navigation regression", result.stdout)
                     self.assertIn("/probe", requests)
                     denied = await infra.tools.call(name, {"url": base + "/blocked"}, **infra.builtin_ctx)
-                    self.assertFalse(denied.ok)
-                    self.assertNotIn("/blocked", requests)
+                    self.assertTrue(denied.ok, denied.error)
+                    self.assertIn("/blocked", requests)
                     gate.assert_not_awaited()
 
                     # 使用生产业务 Agent 工具环复验：旧测试只覆盖了 Registry，
@@ -157,7 +158,7 @@ class LiveNavigationTests(unittest.IsolatedAsyncioTestCase):
             with tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 spec = McpServerConfig(name="playwright", command=shutil.which("node") or "node",
-                    args=[str(_MCP_CLI), "--headless", "--isolated", "--executable-path", str(_BROWSER),
+                    args=[str(_MCP_CLI), *_BROWSER_FLAGS, "--isolated", "--executable-path", str(_BROWSER),
                           "--timeout-action", "500", "--snapshot-boxes", "--output-dir", str(root / "browser-output")],
                     default_risk="readonly", risk_by_action=True)
                 cfg = SystemConfig(workspace=WorkspaceConfig(root=temporary),

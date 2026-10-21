@@ -33,7 +33,6 @@ from spiritscout.core.audit import AuditLogger
 from spiritscout.core.exceptions import (
     ConfigurationError,
     PolicyViolation,
-    ScopeViolation,
     SpiritScoutError,
 )
 from spiritscout.core.ids import new_id
@@ -79,58 +78,6 @@ from spiritscout.tools.spec import RiskLevel, ToolKind, ToolResult, ToolSpec
 
 if TYPE_CHECKING:
     from spiritscout.competition import CompetitionRules
-
-
-def _mcp_embedded_scope_targets(params: dict[str, Any]) -> list[str]:
-    """从 MCP 复合入参中提取网络目标。
-
-    Yakit ``http_fuzzer`` 的主目标位于 ``request`` 原始报文的
-    Host 头，而不是独立 ``url`` 字段。这里同时校验 absolute-form
-    请求行与 Host，避免二者不一致时绕过授权边界。
-    """
-    scheme = "https" if bool(params.get("isHttps")) else "http"
-    targets: list[str] = []
-
-    def add(value: Any) -> None:
-        raw = str(value or "").strip()
-        if not raw:
-            return
-        if raw.startswith(("http://", "https://")):
-            target = raw
-        else:
-            # 裸值（host / host:port / host/path 等）：补 scheme 交 ScopeGuard
-            # 解析主机名。含 / 或空白的值不能静默跳过——跳一个值就少一道
-            # 禁打校验；取首个空白分隔 token，其余部分交由 URL 解析
-            token = raw.split()[0]
-            target = f"{scheme}://{token}/"
-        if target not in targets:
-            targets.append(target)
-
-    add(params.get("actualAddr"))
-    batch = params.get("batchTarget")
-    if isinstance(batch, (list, tuple, set)):
-        for item in batch:
-            add(item)
-
-    request = params.get("request")
-    if not isinstance(request, str) or not request.strip():
-        return targets
-    # 只解析首个 HTTP 头块；不读请求体，避免把体内文本误当目标。
-    header = request[:65536].replace("\r\n", "\n").split("\n\n", 1)[0]
-    lines = header.splitlines()
-    request_target = ""
-    if lines:
-        first = lines[0].strip().split()
-        if len(first) >= 2:
-            request_target = first[1]
-            if request_target.startswith(("http://", "https://")):
-                add(request_target)
-    hosts = [line.split(":", 1)[1].strip() for line in lines[1:]
-             if line.lower().startswith("host:")]
-    path = request_target if request_target.startswith("/") else "/"
-    for host in hosts:
-        add(f"{scheme}://{host}{path}")
-    return targets
 
 
 # MCP 握手开工宽限：快服务器（秒级）宽限内就绪即开工前并入；超时的转入
@@ -187,6 +134,8 @@ class _Infra:
     experience_deferred: bool = False   # 退场提炼托管后台中：close 跳过经验库
 
     async def close(self) -> None:
+        if self.questions is not None:
+            self.questions.bind_context(None)
         try:
             if self.tools.journal is not None:
                 self.tools.journal.finish_run(self.outcome)
@@ -299,6 +248,8 @@ async def _build_infra(
                 cfg.bus.shared_request_rps, f"ss:{cfg.bus.namespace}:limits:requests"))
             if cfg.bus.backend == "redis" else None)
         blackboard = Blackboard(cfg.blackboard.sqlite_path, bus=bus)
+        if question_broker is not None:
+            question_broker.bind_context(blackboard)
         blackboard.start_notifications()
         from spiritscout.core.models import AgentType
 
@@ -327,10 +278,6 @@ async def _build_infra(
         hosts.update(urlsplit(value).hostname for value in authorization.scope.allowed_urls)
         prior = []
         for host in sorted(value for value in hosts if value)[:3]:
-            try:
-                guard.ensure_not_denied(host)
-            except ScopeViolation:
-                continue
             prior.extend(resources.assets(host=host, limit=8)["items"])
         if prior:
             blackboard.write(BlackboardLayer.TOPOLOGY, "historical-assets", {
@@ -459,15 +406,7 @@ async def _build_infra(
                     properties = (t.get("inputSchema") or {}).get("properties") or {}
                     target_params = (() if spec.scope_enforcement == "none" else
                                      tuple(p for p in spec.target_params if p in properties))
-                    embedded_extractor = (
-                        _mcp_embedded_scope_targets
-                        if spec.scope_enforcement != "none"
-                        and {"request", "actualAddr", "batchTarget"} & set(properties)
-                        else None)
-                    # 行为声明机制：宿主开启 risk_by_action 的服务器全部工具适用；
-                    # 此外，解析为 INTRUSIVE 的工具（如网络探测类 MCP）自动配发声明
-                    # 字段——能力级风险不再整体逐次审批，改为「调用时声明本次语义、
-                    # 仅危险语义逐次请示」（G5 收窄后的统一形态）。
+                    # 行为声明与测试范围解耦：危险语义仍按每次调用即时审批。
                     declaration = spec.risk_by_action or risk == RiskLevel.INTRUSIVE
                     action_param = "_safety_action" if declaration else "action"
                     model_tool = copy.deepcopy(t)
@@ -492,8 +431,6 @@ async def _build_infra(
                         allowed_params=set(properties) | ({action_param} if declaration else set()),
                         action_required=declaration, action_param=action_param,
                         automatic_replay=not declaration, target_params=target_params,
-                        scope_required=spec.scope_enforcement == "required",
-                        scope_target_extractor=embedded_extractor,
                         allowed_agents=tuple(role.value for role in spec.allowed_agents))
 
                     async def _call_mcp(*, _client=client, _tool=t["name"],
@@ -586,6 +523,8 @@ async def _build_infra(
         )
     except BaseException as exc:
         # 初始化中断不留泄漏：已建资源统一收口（MCP/黑板/经验库/知识库/总线）
+        if question_broker is not None:
+            question_broker.bind_context(None)
         try:
             if journal is not None:
                 with contextlib.suppress(Exception):
@@ -652,6 +591,11 @@ async def _run_master(
     recovery = read_recovery_view(Path(infra.cfg.blackboard.sqlite_path))
     recovery_context = (infra.tools.journal.planning_context(recovery)
                         if infra.tools.journal is not None else {})
+    from spiritscout.gateway.world_state import sync_user_context
+
+    # 接收时已落盘的原话按消息 ID 幂等恢复；任务更新也不能覆盖并发答复。
+    sync_user_context(infra.blackboard, dialogue_history=dialogue_history,
+                      mission=mission, standing_rules=standing_rules)
     # 开局召回：带标签与适用场景的经验，帮灵枢判断是否与本目标同场景
     recall = (experience.recent(limit=infra.cfg.experience.recall_limit)
               if experience else [])

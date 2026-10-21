@@ -12,7 +12,7 @@ class ConfigurationError(SpiritScoutError):
 
 
 class ScopeViolation(SpiritScoutError):
-    """目标超出授权范围（合规硬阻断，默认 deny）。"""
+    """授权声明无效（如范围为空或不在声明的测试时间窗口）。"""
 
 
 class PolicyViolation(SpiritScoutError):

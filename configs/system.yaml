@@ -89,7 +89,7 @@ mcp_servers:
     args: ["mcp"]                 # 需要全部工具集时加 "--enable-all"
     timeout: 300
     default_risk: intrusive       # 网络探测类能力：调用时逐次声明本次行为，仅危险语义即时审批
-    scope_enforcement: required   # 参数无法给出可校验目标时默认拒绝
+    scope_enforcement: required   # 旧字段仅兼容目标元数据，不做硬性禁打匹配
   - name: playwright              # 浏览器自动化：JS 渲染页面真实 DOM / 点击 / 表单 / 截图
     transport: stdio
     command: npx
@@ -97,7 +97,7 @@ mcp_servers:
     timeout: 120
     default_risk: readonly        # 普通浏览器操作不按工具能力判危险
     risk_by_action: true          # 模型声明本次实际行为，危险操作执行前逐次审批
-    scope_enforcement: required   # 导航目标必须在授权范围内
+    scope_enforcement: required   # 模型结合用户上下文判断导航边界
 
 # —— idalib 装配（一次性，项目根执行；<IDA> 为 IDA Pro 安装目录）：
 #   .venv/bin/pip install <IDA>/idalib/python/idapro-*.whl

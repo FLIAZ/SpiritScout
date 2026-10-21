@@ -61,7 +61,7 @@ class CompetitionRules:
     submit: SubmitInterface = field(default_factory=SubmitInterface)
     dynamic_scoring: bool = False        # 动态分值（血条/时间衰减）
     allowed_cidrs: list[str] = field(default_factory=list)   # AWD 允许攻击的 IP 段
-    denied_hosts: list[str] = field(default_factory=list)    # 禁打主机列表
+    denied_hosts: list[str] = field(default_factory=list)    # 旧排除声明（模型上下文参考，不编译为执行门）
     forbidden_behaviors: list[str] = field(default_factory=list)  # 赛方禁止行为
     start_time: datetime | None = None
     end_time: datetime | None = None

@@ -1,5 +1,5 @@
 /* 项目分区：用户创建的共享记忆分区，不是授权边界。
-   项目页只做归属与历史浏览；授权仍由每个会话自己的 ScopeGuard 决定。 */
+   项目页只做归属与历史浏览；测试边界由各会话模型结合用户原文上下文维护。 */
 const ProjectsPage = (() => {
   const ALL = "*";
   let catalog = null;                 // {projects, unclassified, all}

@@ -31,7 +31,7 @@ from pydantic import ValidationError
 from spiritscout.agents.ring import RingLedger
 from spiritscout.config.settings import ModelEntry, SystemConfig
 from spiritscout.core.audit import AuditLogger
-from spiritscout.core.exceptions import ScopeViolation, SpiritScoutError
+from spiritscout.core.exceptions import SpiritScoutError
 from spiritscout.core.models import RunMode
 from spiritscout.core.pause import PauseGate
 from spiritscout.gateway.usage import UsageSnapshot as _UsageSnapshot
@@ -743,6 +743,43 @@ class Session:
     pause_gate: PauseGate = field(
         default_factory=PauseGate, repr=False, compare=False)
 
+    def __post_init__(self) -> None:
+        self.questions.bind_context_path(self.bb_path)
+
+    def remember_user_message(self, text: str) -> dict[str, str]:
+        """原话先落完整事实库，展示对话仍可滚动裁剪；收件箱共用稳定 ID。"""
+        from spiritscout.blackboard import Blackboard
+        from spiritscout.gateway.world_state import (
+            record_user_statement,
+            sync_user_context,
+        )
+
+        statement = {"kind": "message", "text": text, "statement_id": f"message-{uuid.uuid4().hex}"}
+        blackboard = Blackboard(self.bb_path)
+        try:
+            sync_user_context(blackboard, dialogue_history=self.dialogue_history)
+            record_user_statement(blackboard, statement)
+        finally:
+            blackboard.close()
+        self.dialogue_history.append({"role": "user", "content": text,
+                                      "statement_id": statement["statement_id"]})
+        del self.dialogue_history[:-DIALOGUE_HISTORY_MAX]
+        return statement
+
+    def has_runtime_state(self) -> bool:
+        """用户原话可在开工前建库，不能再用文件存在推断业务已经启动。"""
+        if not self.bb_path.exists():
+            return False
+        from spiritscout.blackboard import Blackboard
+        from spiritscout.core.models import BlackboardLayer
+
+        blackboard = Blackboard(self.bb_path, readonly=True)
+        try:
+            return any(row["record_id"] != "user-context"
+                       for row in blackboard.query(BlackboardLayer.TARGET_AUTH, limit=10000))
+        finally:
+            blackboard.close()
+
     # ---- 路径（隔离边界）
     @property
     def bb_path(self) -> Path:
@@ -1147,8 +1184,7 @@ class SessionManager:
         # 对话史首条：用户的任务原文即这段会话的第一句话（与会话页首颗
         # 气泡同源），此后的续传对话从这里接着长
         if plan.mission:
-            session.dialogue_history.append(
-                {"role": "user", "content": plan.mission[:4000]})
+            session.remember_user_message(plan.mission)
         self._sessions[session.session_id] = session
         self._persist(session)
 
@@ -1157,7 +1193,8 @@ class SessionManager:
             store.set_session_project(session.session_id, session.project_id)
             cfg = self._session_cfg(session, payload.get("budget_tokens"))
             session.approvals = ApprovalBroker(AuditLogger(cfg.audit_log_path))
-            session.questions = QuestionBroker(AuditLogger(cfg.audit_log_path))
+            session.questions = QuestionBroker(
+                AuditLogger(cfg.audit_log_path), context_path=session.bb_path)
             session.ring = RingLedger(AuditLogger(cfg.audit_log_path))
             session.pause_gate = PauseGate(AuditLogger(cfg.audit_log_path))
             no_llm = bool(payload.get("no_llm", False))
@@ -1265,10 +1302,9 @@ class SessionManager:
             limit: int = 8) -> list[dict[str, str]]:
         """项目记忆里的资产 → 可勾选目标（按 origin/域名去重）。
 
-        只取能落进授权表的 URL/域名形态；禁打列表是唯一硬边界，命中
-        的候选直接剔除，不摆给用户。
+        只规范化 URL/域名形态，不按排除目标筛选；是否测试由模型结合
+        项目规则向用户确认，历史观测本身不构成授权。
         """
-        guard = ScopeGuard(plan.authorization.scope)
         out: list[dict[str, str]] = []
         seen: set[str] = set()
         assets = memory.get("assets")
@@ -1278,10 +1314,6 @@ class SessionManager:
             value = str(item.get("value") or "").strip()
             target = _project_target_value(value, str(item.get("kind") or ""))
             if not target:
-                continue
-            try:
-                guard.ensure_not_denied(target)
-            except ScopeViolation:
                 continue
             key = _project_target_key(target)
             if not key or key in seen:
@@ -1304,7 +1336,7 @@ class SessionManager:
         返回 (是否真的问过, 确认的目标, 用户答复)。记忆不是授权：只有
         用户勾选或自由输入的目标才返回，调用方据此重建启动计划；取消/
         「先不测」/会话停止返回空目标。问题与选项由模型按记忆撰写
-        （LLM 不可用时用确定性兜底），禁打列表是唯一硬边界。
+        （LLM 不可用时用确定性兜底），目标声明原样回灌模型上下文。
         """
         if not project_memory:
             return False, [], ""
@@ -1337,23 +1369,19 @@ class SessionManager:
         added = [str(t).strip() for t in (result.get("scope_added") or [])
                  if str(t).strip()]
         if not added and answer:
-            # 自由输入的新目标：与勾选项同受禁打边界约束
+            # 自由输入与勾选项都记录为用户声明，交由模型结合现有规则理解
             urls, domains = extract_targets(answer)
             for raw in [*urls, *domains]:
                 target = _project_target_value(
                     raw, "url" if "://" in raw else "domain")
                 if not target:
                     continue
-                try:
-                    guard.ensure_not_denied(target)
-                except ScopeViolation:
-                    continue
                 if target not in added:
                     added.append(target)
         if answer:
             # 让后续轮次与灵枢回复看得到这次范围确认的答复（不是新任务）
             session.dialogue_history.append(
-                {"role": "user", "content": f"（范围确认答复）{answer}"[:1000]})
+                {"role": "user", "content": f"（范围确认答复）{answer}"})
             del session.dialogue_history[:-DIALOGUE_HISTORY_MAX]
         audit.log("master.ask_answered", "master", {
             "source": "project_memory", "answer": answer[:300],
@@ -1366,15 +1394,15 @@ class SessionManager:
 
         mission/extra_scope 供续传真任务的计划重建覆盖：新任务消息替换
         原任务原文，既有授权范围并入 extra_scope（用户追加目标时不缩
-        既有边界——授权只增不减，禁打列表仍是唯一硬边界）。
+        既有目标事实；测试边界及变更由模型结合用户上下文判断）。
         """
         req = session.launch_request or {}
         if not req:
             return None
         try:
-            # 自动模式且尚未创建黑板，说明旧进程在真正开工前中断；应按原始
+            # 自动模式且黑板没有开工记录，说明旧进程在预检期间中断；应按原始
             # 用户意图重新判定，而不是把当时的临时兜底模式永久钉死。
-            untouched_auto = bool(req.get("mode_auto")) and not session.bb_path.exists()
+            untouched_auto = bool(req.get("mode_auto")) and not session.has_runtime_state()
             try:
                 mode_override = RunMode(session.mode)
             except ValueError:
@@ -1490,7 +1518,7 @@ class SessionManager:
         # 开工前中断的自动模式会在 _rebuild_plan 中重新确定装配模式；
         # 对话/规则会话没有开工记录，展示态模式保持不动——新消息是否
         # 开工、进哪个分支由 _run 的语义路由重新裁决
-        if not session.bb_path.exists() \
+        if not session.has_runtime_state() \
                 and str((session.summary or {}).get("intent") or "") \
                 not in ("dialogue", "rules"):
             session.mode = session.plan.authorization.mode.value
@@ -1505,7 +1533,8 @@ class SessionManager:
         # 不会卡出「运行中/等待调度」的僵尸态
         cfg = self._session_cfg(session, session.request.get("budget_tokens"))
         session.approvals = ApprovalBroker(AuditLogger(cfg.audit_log_path))
-        session.questions = QuestionBroker(AuditLogger(cfg.audit_log_path))
+        session.questions = QuestionBroker(
+            AuditLogger(cfg.audit_log_path), context_path=session.bb_path)
         session.ring = RingLedger(AuditLogger(cfg.audit_log_path))
         # 暂停门换新（带本轮审计器），暂停态与已扣账的暂停/间隙时长跨续传
         # 保留：用户没手动继续前重开的任务在检查点挂起等待；时长丢失会让

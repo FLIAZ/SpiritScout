@@ -27,6 +27,7 @@ from spiritscout.core.models import (
     Vulnerability,
     VulnStatus,
 )
+from spiritscout.gateway import world_state
 from spiritscout.gateway.gateway import ChatResponse
 from spiritscout.policy import PolicyEngine, ScopeGuard
 from spiritscout.resources.store import ResourceStore, record_asset
@@ -94,6 +95,69 @@ class VerifierTests(unittest.IsolatedAsyncioTestCase):
             "evidence": [{"execution_id": tools[1].get("execution_id", "none"), "quote": "other-user-record:fixture-only"}],
             "controls": [{"execution_id": tools[0].get("execution_id", "none"), "quote": "public-home"}]}
         return ChatResponse(cost_usd=0, latency_ms=0, content=json.dumps(raw), model="fixture", prompt_tokens=1, completion_tokens=1)
+
+    async def test_verifier_receives_complete_boundary_and_live_user_update(self) -> None:
+        rules = "规则原文\n" * 5000 + "尾部禁止生产环境"
+        self.policy.guard.scope.testing_rules = rules
+        project_rule = "该租户仅是演示，不满足收录标准。"
+        self.bb.write(BlackboardLayer.TOPOLOGY, "project-memory", {"description": project_rule})
+        first = {"kind": "message", "text": "仅在测试环境复测"}
+        second = {"kind": "answer", "question": "能扩大测试吗？", "answer": "不能。\n" * 2000}
+        world_state.record_user_statement(self.bb, first)
+        original = self.reply
+        seen = []
+
+        async def review(messages, **kwargs):
+            seen.append([dict(message) for message in messages])
+            if len(seen) == 1:
+                initial = json.loads(messages[1]["content"])["world_state"]
+                self.assertEqual(initial["authorization"]["testing_rules"], rules)
+                self.assertEqual(initial["project_rules"], project_rule)
+                world_state.record_user_statement(self.bb, second)
+                return await original(messages, **kwargs)
+            fragment = messages[-1]["content"]
+            update = json.loads(fragment.split("\n", 1)[1].rsplit("\n", 1)[0])
+            self.assertEqual(update["user_context"]["statements"], [first, second])
+            return ChatResponse(cost_usd=0, latency_ms=0, content=json.dumps({
+                "verdict": "out_of_rules", "reason": "用户项目规则不收录演示租户", "rule_quote": project_rule}),
+                model="fixture", prompt_tokens=1, completion_tokens=1)
+
+        self.gateway.chat.side_effect = review
+        result = await VerifierAgent(self.ctx).review(self.candidate(), dict(self.rules))
+        self.assertEqual(result["verdict"], "out_of_rules")
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(seen[0][0], seen[1][0], "系统前缀不随边界变化")
+        self.assertNotIn(rules, seen[0][0]["content"])
+
+    def test_rule_quote_requires_one_trusted_original_not_candidate_or_tool_text(self) -> None:
+        for source in ({"authorization": {"testing_rules": RULE}}, {"project_rules": RULE},
+                       {"user_context": {"statements": [{"kind": "answer", "answer": RULE}]}}):
+            result = VerifierAgent.validate({"verdict": "out_of_rules", "rule_quote": RULE}, {}, {"world_state": source})
+            self.assertEqual(result["verdict"], "out_of_rules")
+        for source in ({"user_context": {"statements": [{"question": RULE}]}},
+                       {"candidate": {"reason": RULE}}, {"observations": {"text": RULE}}):
+            result = VerifierAgent.validate({"verdict": "out_of_rules", "rule_quote": RULE}, {}, {"world_state": source})
+            self.assertEqual(result["verdict"], "inconclusive")
+        result = VerifierAgent.validate({"verdict": "out_of_rules", "rule_quote": "规则 A\n规则 B"}, {},
+                                        {"mission": "规则 A", "standing_rules": "规则 B"})
+        self.assertEqual(result["verdict"], "inconclusive")
+
+    async def test_shared_user_context_change_rechecks_previous_verification(self) -> None:
+        queue = VerificationQueue(self.ctx, lambda: dict(self.rules))
+        queue.start()
+        try:
+            candidate = self.candidate()
+            self.bb.write(BlackboardLayer.VULN, candidate.vuln_id, candidate.model_dump(mode="json"),
+                          agent_type=AgentType.WEB_VULN)
+            await queue.drain()
+            self.assertEqual(len(Fixture.hits), 2)
+            world_state.record_user_statement(self.bb, {"kind": "message", "text": "此租户是公开演示"})
+            self.verdict = "out_of_rules"
+            await queue.drain()
+            self.assertEqual(len(Fixture.hits), 4)
+            self.assertEqual(self.bb.read(BlackboardLayer.VULN, candidate.vuln_id)["status"], "rejected_compliance")
+        finally:
+            await queue.close()
 
     async def test_candidate_immediately_dispatched_with_independent_requests_and_report_gate(self) -> None:
         queue = VerificationQueue(self.ctx, lambda: dict(self.rules))

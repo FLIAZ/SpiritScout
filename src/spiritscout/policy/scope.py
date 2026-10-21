@@ -1,12 +1,8 @@
-"""授权范围守卫（设计书 9.3：目标范围、边界校验、动态扩围）。
+"""授权事实与范围标注：测试边界由模型在上下文中维护。
 
-边界语义（用户裁定）：
-- **禁打列表是唯一硬边界**——用户显式配置的拒绝目标，命中即拒；
-- 授权白名单是**初始范围**而非运行期围栏：范围外目标照常可达，后端
-  不做拦截，只在结果里标注「范围外」；是否扩大测试范围由模型向用户
-  提问（问题与选项由模型撰写），用户确认后目标写入会话批准集
-  （随守卫实例消亡，不落盘）——授权决定权始终在用户手里。
-合规自查 G1：未提供授权范围时系统拒绝启动。
+用户声明、项目规则与扩围答复交给模型理解，不在后端匹配禁打目标。
+白名单与会话批准集仅用于范围标注；危险动作仍由独立审批通道逐次确认。
+启动时仍要求提供目标或本地分析授权，不把空声明视为网络测试授权。
 """
 
 from __future__ import annotations
@@ -14,7 +10,6 @@ from __future__ import annotations
 import fnmatch
 import ipaddress
 import posixpath
-from collections.abc import Iterable
 from datetime import UTC, datetime
 from urllib.parse import unquote, urlparse
 
@@ -46,13 +41,11 @@ class ScopeGuard:
     # ------------------------------------------------------------ 目标校验
 
     def check_target(self, target: str) -> str:
-        """校验任意目标字符串（URL/域名/IP）：禁打 > 白名单/会话批准集。
+        """按初始范围/会话批准集分类，仅供标注与导入参考筛选。
 
-        通过返回规范化目标，否则抛 ScopeViolation。运行期工具门只调用
-        ensure_not_denied（禁打硬边界）；本方法供范围分类与导入过滤使用。
+        不读取排除声明、不参与工具执行门；测试边界由模型自行判断。
         """
         host, url = self._split(target)
-        self._check_denied(target, host)
         if url:
             # URL 授权必须命中 URL 前缀，或命中用户显式给出的域名范围。
             # allowed_urls 中出现某主机只代表允许解析该主机，不会把路径授权
@@ -63,23 +56,6 @@ class ScopeGuard:
         elif host and (self._match_host(host) or self._match_approved(target, host)):
             return target
         raise ScopeViolation(f"目标超出授权范围: {target}")
-
-    def ensure_not_denied(self, target: str) -> None:
-        """禁打列表硬校验（用户显式配置的拒绝边界）；白名单不在此拦。"""
-        host = self._split(target)[0]
-        self._check_denied(target, host)
-
-    def ensure_addrs_not_denied(self, addrs: Iterable[str]) -> None:
-        """DNS 解析出的连接地址同受禁打约束（以域名访问禁打 IP 不绕过）。
-
-        异步工具在自行解析主机后调用（多 A/AAAA 逐个校验）；本方法只做
-        确定性匹配，不发网络请求。调用方必须连接本次已校验的地址，
-        不能在检查后另行解析域名。
-        """
-        for addr in addrs:
-            addr = str(addr).strip()
-            if addr:
-                self._check_denied(addr, addr)
 
     def is_allowed(self, target: str) -> bool:
         """目标是否落在授权白名单/会话批准集内（信息标注用，不做拦截）。"""
@@ -134,7 +110,6 @@ class ScopeGuard:
         return self.check_target(url)
 
     def check_ip(self, ip: str) -> str:
-        self._check_denied(ip, ip)
         try:
             addr = ipaddress.ip_address(ip)
         except ValueError as exc:
@@ -164,46 +139,6 @@ class ScopeGuard:
         self._approved_sensitive.add(action)
 
     # ------------------------------------------------------------ 内部
-
-    def _check_denied(self, raw: str, host: str | None) -> None:
-        addr = self._as_address(host)
-        for pattern in self.scope.denied:
-            pattern_host, pattern_url = self._split(pattern)
-            url_denied = bool(
-                pattern_url and self._url_within(raw, pattern_url))
-            host_denied = bool(
-                host and not pattern_url and pattern_host
-                and fnmatch.fnmatchcase(
-                    self._normalize_host(host),
-                    self._normalize_host(pattern_host)))
-            # 禁打条目按网段解释（IPv4/IPv6 CIDR 或裸 IP）：裸 IP 命中 /32、/128
-            cidr_denied = bool(
-                addr is not None and self._addr_in_network(addr, pattern))
-            if url_denied or host_denied or cidr_denied:
-                raise ScopeViolation(f"目标命中禁打列表 {pattern}: {raw}")
-
-    @staticmethod
-    def _addr_in_network(
-        addr: ipaddress.IPv4Address | ipaddress.IPv6Address, pattern: str,
-    ) -> bool:
-        """禁打条目 → 网段（CIDR 或裸 IP）成员判断；非网段写法不参与。"""
-        try:
-            network = ipaddress.ip_network(pattern.strip(), strict=False)
-            # IPv4 映射的 IPv6 仍可能连接 IPv4 服务，不能绕过 IPv4 禁打项。
-            mapped = addr.ipv4_mapped if isinstance(addr, ipaddress.IPv6Address) else None
-            return addr in network or (mapped is not None and mapped in network)
-        except ValueError:
-            return False
-
-    @staticmethod
-    def _as_address(host: str | None) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
-        """主机字面量 → IP 地址对象；域名/空值返回 None（不做 DNS 解析）。"""
-        if not host:
-            return None
-        try:
-            return ipaddress.ip_address(str(host).strip().strip("[]"))
-        except ValueError:
-            return None
 
     def _match_host(self, host: str) -> bool:
         host = self._normalize_host(host)

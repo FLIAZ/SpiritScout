@@ -179,11 +179,11 @@ class McpServerConfig(ValidatedConfig):
         description="宿主可信配置的单工具风险映射，仅精确匹配远端工具名；不支持通配放行")
     scope_enforcement: Literal["required", "best_effort", "none"] = Field(
         default="required",
-        description="required=无法从参数提取目标时拒绝；best_effort=有目标才校验；none=纯本地分析")
+        description="旧配置兼容字段，仅影响目标元数据展示；测试边界统一由模型上下文判断")
     target_params: list[str] = Field(
         default_factory=lambda: [
             "url", "urls", "target", "targets", "host", "ip", "domain", "endpoint"],
-        description="若 MCP 工具 schema 含这些参数，调用前必须通过 ScopeGuard")
+        description="MCP 工具目标参数元数据，不用于后端授权拦截")
     allowed_agents: list[AgentType] = Field(
         default_factory=list, description="额外授权的执行角色；空列表沿用原有角色工具范围")
     enabled: bool = True

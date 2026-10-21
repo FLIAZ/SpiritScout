@@ -34,15 +34,14 @@ class LaunchRoutingTests(unittest.TestCase):
         self.assertTrue(plan.needs_mode_routing)
         self.assertEqual(len(plan.challenges), 1)
 
-    def test_competition_denied_hosts_reach_authorization_scope(self) -> None:
-        """赛制禁打列表是唯一硬边界：解析后必须并入授权 Scope 才真正生效。"""
+    def test_competition_raw_rules_reach_model_context_not_denied_gate(self) -> None:
+        """赛方规则全文保留，不编译成后端目标拦截表。"""
+        rules = ("contest_type: jeopardy\n"
+                 "denied_hosts: ['admin.contest.example', '10.9.9.9']\n")
         plan = prepare_launch(LaunchRequest(
-            mode=RunMode.COMPETITION,
-            mission=PLATFORM_DOC_MISSION,
-            rules_yaml=("contest_type: jeopardy\n"
-                        "denied_hosts: ['admin.contest.example', '10.9.9.9']\n")))
-        self.assertIn("admin.contest.example", plan.authorization.scope.denied)
-        self.assertIn("10.9.9.9", plan.authorization.scope.denied)
+            mode=RunMode.COMPETITION, mission=PLATFORM_DOC_MISSION, rules_yaml=rules))
+        self.assertEqual(plan.authorization.scope.denied, [])
+        self.assertEqual(plan.authorization.scope.testing_rules, rules)
 
     def test_ambiguous_web_mission_still_uses_semantic_router(self) -> None:
         plan = prepare_launch(LaunchRequest(

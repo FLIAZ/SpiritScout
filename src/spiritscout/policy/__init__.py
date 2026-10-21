@@ -1,7 +1,7 @@
 """合规与策略层：授权边界（ScopeGuard）、分模式策略、人工确认门。
 
-原则（合规自查 G1/G5）：默认 deny；任何出网行为先过 ScopeGuard；
-敏感操作需显式开启 + 人工确认。
+测试边界由模型结合用户上下文维护，ScopeGuard 只记录授权事实与范围标注；
+危险操作仍经 ApprovalBroker 对每次调用即时请示用户。
 """
 
 from spiritscout.policy.approvals import ApprovalBroker

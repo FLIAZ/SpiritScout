@@ -75,11 +75,11 @@ class BrowserActionPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.gate.assert_not_awaited()
         self.client.call.assert_not_awaited()
 
-    async def test_denied_target_and_explicitly_forbidden_tool_remain_blocked(self) -> None:
-        self.assertFalse((await self.call("browser_navigate", {"url": "https://denied.test", "_safety_action": "analysis"})).ok)
+    async def test_legacy_denied_target_executes_but_forbidden_tool_stays_blocked(self) -> None:
+        self.assertTrue((await self.call("browser_navigate", {"url": "https://denied.test", "_safety_action": "analysis"})).ok)
         self.assertFalse((await self.call("forbidden", {"_safety_action": "analysis"})).ok)
         self.gate.assert_not_awaited()
-        self.client.call.assert_not_awaited()
+        self.client.call.assert_awaited_once()
 
     async def test_failed_stateful_action_is_never_automatically_replayed(self) -> None:
         self.client.call.side_effect = TimeoutError("transport interrupted")

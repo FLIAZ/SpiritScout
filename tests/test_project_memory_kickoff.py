@@ -71,7 +71,7 @@ class _FakeGateway:
 
 
 class ProjectTargetCandidateTests(unittest.TestCase):
-    def test_candidates_are_origins_and_domains_denied_filtered(self) -> None:
+    def test_candidates_include_legacy_excluded_targets_for_user_decision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = _cfg(Path(tmp))
             store = ResourceStore(cfg.resources.root)
@@ -101,7 +101,7 @@ class ProjectTargetCandidateTests(unittest.TestCase):
             self.assertIn("api.example.com", targets)
             self.assertIn("api2.example.com", targets)
             self.assertNotIn("10.0.0.5", targets)       # IP 走网段，不塞域名表
-            self.assertFalse(any("blocked" in t for t in targets))
+            self.assertTrue(any("blocked" in t for t in targets))
             self.assertEqual(len(targets), len(set(targets)))
 
 
@@ -190,7 +190,7 @@ class ProjectScopeConfirmationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(added, [])
             self.assertIn("先不测", answer)
 
-    async def test_free_text_new_target_is_accepted_denied_is_not(self) -> None:
+    async def test_free_text_targets_are_preserved_even_with_legacy_exclusion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg, manager, session, plan, memory, audit = \
                 await self._context(Path(tmp))
@@ -205,8 +205,7 @@ class ProjectScopeConfirmationTests(unittest.IsolatedAsyncioTestCase):
 
             _, added, _ = await task
 
-            self.assertEqual(added, ["https://new.example.test"])
-            self.assertNotIn("https://blocked.test", added)
+            self.assertEqual(added, ["https://new.example.test", "https://blocked.test"])
 
 
 class ProjectMemoryKickoffTests(unittest.IsolatedAsyncioTestCase):

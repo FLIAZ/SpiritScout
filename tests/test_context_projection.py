@@ -9,7 +9,13 @@ from pathlib import Path
 
 from spiritscout.blackboard import Blackboard
 from spiritscout.core.models import BlackboardLayer
-from spiritscout.gateway.context import business_digest, compact_json, shared_context
+from spiritscout.ctf.agents import CTFBaseAgent
+from spiritscout.gateway.context import (
+    business_digest,
+    compact_history,
+    compact_json,
+    shared_context,
+)
 
 
 class ContextProjectionTests(unittest.TestCase):
@@ -28,6 +34,33 @@ class ContextProjectionTests(unittest.TestCase):
     def test_critical_instructions_use_soft_budget(self) -> None:
         payload = {"constraints": "不得丢弃" * 1000}
         self.assertEqual(json.loads(compact_json(payload, max_chars=100)), payload)
+
+    def test_boundary_rules_and_user_originals_are_protected_at_any_length(self) -> None:
+        rules = "授权规则\n" * 10000 + "末尾禁止生产数据"
+        statements = [{"kind": "answer", "answer": "后续用户原话\n" * 4000}]
+        protected = {"authorization": {"testing_rules": rules, "denied": ["legacy.test"]},
+                     "user_context": {"statements": statements}, "testing_rules": rules,
+                     "project_rules": rules, "user_replies": statements}
+        result = json.loads(compact_json({**protected, "observations": "响应" * 10000}, max_chars=500))
+        for key, value in protected.items():
+            self.assertEqual(result[key], value)
+        self.assertLess(len(result["observations"]), 20000)
+
+    def test_history_compaction_never_shortens_user_boundary_updates(self) -> None:
+        for compact in (lambda messages: compact_history(messages, max_chars=1000),
+                        CTFBaseAgent._compact_messages):
+            original = "<world_state>\n" + "完整边界原文" * 20000 + "\n</world_state>"
+            messages = [{"role": "system", "content": "稳定契约"},
+                        {"role": "user", "content": "原始任务"},
+                        {"role": "user", "content": original},
+                        {"role": "assistant", "content": "旧观察" * 10000},
+                        {"role": "tool", "tool_call_id": "call", "content": "工具结果" * 10000},
+                        {"role": "user", "content": "本轮问题"},
+                        {"role": "assistant", "content": "继续"}]
+            compact(messages)
+            self.assertEqual(messages[2]["content"], original)
+            self.assertEqual(messages[4]["tool_call_id"], "call")
+            self.assertLess(len(messages[3]["content"]), 30000)
 
     def test_nested_fact_projection_survives_large_situation(self) -> None:
         payload = {"situation": {"observations": ["响应" * 300] * 30,

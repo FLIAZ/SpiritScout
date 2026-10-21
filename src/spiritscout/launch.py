@@ -80,7 +80,7 @@ _SRC_DECLARATION_RE = re.compile(
 
 def extract_targets(mission: str) -> tuple[list[str], list[str]]:
     """从自然语言任务意图提取（URL 列表, 域名列表）——用户告诉主 Agent 的
-    合约范围经此落到确定性授权边界（规则引擎在网络层执行用户原话）。"""
+    用户提到的资产落成授权事实，测试边界仍由模型结合原文理解。"""
     urls = [u.rstrip("/").rstrip(".,;") for u in _URL_RE.findall(mission or "")]
     domains: list[str] = []
     for m in _DOMAIN_RE.findall(mission or ""):
@@ -282,12 +282,10 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
         if host and host not in allowed_domains:
             allowed_domains.append(host)
 
-    # 赛制禁打列表是唯一硬边界：规则里的 denied_hosts 并入授权 Scope，
-    # 由 ScopeGuard.ensure_not_denied 逐请求校验（此前解析了却无人消费）
-    denied_hosts = list(rules.denied_hosts) if rules is not None else []
+    # 赛方原始规则只传入模型上下文，不编译为后端禁打列表。
     scope = Scope(
         allowed_domains=allowed_domains, allowed_urls=allowed_urls,
-        denied=denied_hosts,
+        testing_rules=(req.rules_yaml or "") if rules is not None else "",
         max_requests_per_second=req.rps,
         allow_sensitive_actions=req.allow_sensitive,
         # 携带附件即已授权分析这些本地文件（离线题常态）——授权数据里

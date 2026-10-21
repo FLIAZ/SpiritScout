@@ -98,7 +98,7 @@ class SolverContextTests(unittest.TestCase):
         self.assertIn("尾结论", folded[-250:])
         self.assertIn("已折叠", folded)
 
-    def test_injected_user_messages_fold_but_last_two_survive(self) -> None:
+    def test_injected_user_messages_are_not_lossily_folded(self) -> None:
         msgs = [
             {"role": "system", "content": "S"},
             {"role": "user", "content": "题面"},
@@ -112,9 +112,8 @@ class SolverContextTests(unittest.TestCase):
 
         CTFBaseAgent._compact_messages(msgs, initialized=True)
 
-        folded = [m["content"] for m in msgs[2:7]]
-        self.assertTrue(all("已折叠" in c for c in folded[:3]),
-                        "最旧的注入消息应被折叠")
+        for index, message in enumerate(msgs[2:7]):
+            self.assertEqual(message["content"], f"同伴动态{index}" + "y" * 600)
         self.assertNotIn("已折叠", msgs[5]["content"])
         self.assertNotIn("已折叠", msgs[6]["content"])
         self.assertTrue(msgs[5]["content"].startswith("同伴动态3"))
@@ -134,7 +133,7 @@ class RecordReplayTests(unittest.IsolatedAsyncioTestCase):
         agent.cache = SimpleNamespace(get=Mock(return_value=None), put=Mock())
         agent.ctx = SimpleNamespace(
             audit=Mock(), ring=None, builtin_ctx={},
-            blackboard=SimpleNamespace(write=Mock()),
+            blackboard=SimpleNamespace(write=Mock(), read=Mock(return_value=None)),
             tools=SimpleNamespace(call=AsyncMock(return_value=SimpleNamespace(
                 ok=True, parsed={"status_code": 200, "headers": {}},
                 stdout="<html><title>fresh</title></html>", error=None))))
@@ -345,7 +344,7 @@ class CrossReplayDisclosureTests(unittest.IsolatedAsyncioTestCase):
         agent.cache = SimpleNamespace(get=Mock(side_effect=cache_get), put=Mock())
         agent.ctx = SimpleNamespace(
             audit=Mock(), ring=None, builtin_ctx={},
-            blackboard=SimpleNamespace(write=Mock()),
+            blackboard=SimpleNamespace(write=Mock(), read=Mock(return_value=None)),
             tools=SimpleNamespace(call=AsyncMock(return_value=SimpleNamespace(
                 ok=True, parsed={"status_code": 200, "headers": {}},
                 stdout="<html><title>fresh</title></html>", error=None))))
@@ -442,7 +441,7 @@ class EmptyReplyRepairTests(unittest.IsolatedAsyncioTestCase):
         agent.cache = SimpleNamespace(get=Mock(side_effect=cache_get), put=Mock())
         agent.ctx = SimpleNamespace(
             audit=Mock(), ring=None, journal=None, builtin_ctx={},
-            blackboard=SimpleNamespace(write=Mock()),
+            blackboard=SimpleNamespace(write=Mock(), read=Mock(return_value=None)),
             gateway=SimpleNamespace(chat=AsyncMock(side_effect=responses)))
         return agent
 

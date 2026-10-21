@@ -116,9 +116,11 @@ class Blackboard:
             self._backup_before_upgrade(f"pre-execution-v{version}")
 
     @contextmanager
-    def transaction(self) -> Iterator[sqlite3.Connection]:
-        """共用黑板连接与写锁；执行记录和事件可在同一次提交内落盘。"""
+    def transaction(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
+        """共用连接与写锁；读后写可先锁住跨连接事务，确保版本检查原子化。"""
         with self._lock, self._conn:
+            if immediate:
+                self._conn.execute("BEGIN IMMEDIATE")
             yield self._conn
 
     def write(
@@ -142,7 +144,8 @@ class Blackboard:
             raise PolicyViolation(f"{agent_type.value} 无黑板层 {layer.value} 写入权限")
         now = datetime.now(UTC).isoformat()
         payload = json.dumps(data, ensure_ascii=False)
-        with self.transaction():
+        # Web 入口短连接与运行态并发写：先取得数据库写锁，再读当前版本。
+        with self.transaction(immediate=True):
             if dedup_key:
                 # 同层同 dedup_key 只存一条：后续写入升级既有记录（版本
                 # 递增、历史留痕）而不是追加新条——「同一发现只存一条」

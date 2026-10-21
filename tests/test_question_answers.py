@@ -9,8 +9,10 @@ from pathlib import Path
 
 import httpx
 
+from spiritscout.blackboard import Blackboard
 from spiritscout.config.settings import SystemConfig, WorkspaceConfig
 from spiritscout.core.models import Scope
+from spiritscout.gateway import world_state
 from spiritscout.policy.scope import ScopeGuard
 from spiritscout.web.app import create_app
 from spiritscout.web.sessions import Session
@@ -29,6 +31,9 @@ class QuestionAnswerTests(unittest.IsolatedAsyncioTestCase):
         self.app.state.manager._sessions[self.session.session_id] = self.session
         self.guard = ScopeGuard(Scope(local_analysis=True))
         self.session.questions.bind_guard(self.guard)
+        self.bb = Blackboard(root / "bb.db")
+        self.addCleanup(self.bb.close)
+        self.session.questions.bind_context(self.bb)
         self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app),
                                        base_url="http://127.0.0.1")
         self.addAsyncCleanup(self.client.aclose)
@@ -50,6 +55,16 @@ class QuestionAnswerTests(unittest.IsolatedAsyncioTestCase):
 
     def url(self, qid: str) -> str:
         return f"/api/sessions/{self.session.session_id}/questions/{qid}"
+
+    async def test_answer_original_is_shared_before_waiting_agent_resumes(self) -> None:
+        qid, waiting = await self.ask([])
+        answer = "先看登录页\n" * 90 + "末尾不要访问生产环境"
+        response = await self.client.post(self.url(qid), json={"text": answer})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual((await waiting)["answer"], answer)
+        context = world_state.snapshot(blackboard=self.bb)["user_context"]
+        self.assertEqual(context["statements"], [{"kind": "answer", "question": "下一步如何验证？",
+                                                 "answer": answer, "scope_added": [], "statement_id": qid}])
 
     async def test_choice_resumes_branch_and_only_checked_targets_are_added(self) -> None:
         qid, waiting = await self.ask()

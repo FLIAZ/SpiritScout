@@ -58,7 +58,6 @@ from spiritscout.launch import LaunchRequest, prepare_launch
 from spiritscout.web import agentcfg, modelcfg, vault
 from spiritscout.web.events import stream_audit
 from spiritscout.web.sessions import (
-    DIALOGUE_HISTORY_MAX,
     TERMINAL_STATES,
     Session,
     SessionManager,
@@ -870,14 +869,13 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             raise HTTPException(422, "意见内容为空")
         if len(content) > 4000:
             raise HTTPException(422, "意见过长（≤4000 字）")
-        session.user_inbox.append({"kind": "message", "text": content})
+        session.user_inbox.append(session.remember_user_message(content))
         # 拓扑图/状态面展示用：历史意见（收件箱是消费语义，另一份不可变留档）
         session.opinions.append({"text": content, "ts": time.time()})
         del session.opinions[:-8]
         # 对话史随发随落：运行中被直达通道共读，终态后续传以史末尾为
         # 这一轮的输入——灵枢应答始终带着此前全部往来
-        session.dialogue_history.append({"role": "user", "content": content})
-        del session.dialogue_history[:-DIALOGUE_HISTORY_MAX]
+        manager._persist(session)
         AuditLogger(session.audit_path).log(
             "user.message", "user", {"content": content})
         resumed = False

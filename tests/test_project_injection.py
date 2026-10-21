@@ -110,6 +110,21 @@ class CTFProjectMemorySeedTests(unittest.TestCase):
         agent._solver_system_prompt = lambda: "system"
         return agent
 
+    def test_long_task_rules_survive_seed_observation_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            blackboard = Blackboard(Path(directory) / "bb.db")
+            self.addCleanup(blackboard.close)
+            agent = self._agent(blackboard)
+            rules = "用户既定边界\n" * 5000 + "完整规则尾部：不测第三方"
+            task = Task(task_id="t-long", task_type="ctf_solve", target="http://challenge.test/",
+                        agent_type=AgentType.CTF_WEB, payload={"rules": rules})
+            route = RoutePlan(name="web", strategy="先读现场")
+            state = {"seed": ["预感知响应" * 20000]}
+            agent._seed_messages(task, route, route, state)
+            self.assertIn(rules, state["messages"][1]["content"])
+            self.assertEqual(state["messages"][1]["content"].count(rules), 1)
+            self.assertIn("## 任务", state["messages"][1]["content"])
+
     def test_memory_appended_last_and_capped(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             blackboard = Blackboard(Path(directory) / "bb.db")
@@ -138,12 +153,9 @@ class CTFProjectMemorySeedTests(unittest.TestCase):
             self.assertIn("challenge.test", content)
             self.assertIn("## 所属项目的历史记忆", content)
             # 说明就是测试规则：全文注入且不参与正文截断
-            self.assertIn("## 所属项目的测试规则", content)
+            self.assertIn("project_rules", content)
             self.assertIn("长" * 8000, content)
-            self.assertLess(content.index("## 所属项目的历史记忆"),
-                            content.index("## 所属项目的测试规则"))
-            self.assertLess(content.index("## 所属项目的测试规则"),
-                            content.index("## 任务"))
+            self.assertLess(content.index("project_rules"), content.index("## 任务"))
             encoded = json.dumps(memory, ensure_ascii=False)
             self.assertNotIn(encoded, content)
             # 历史记忆块不含说明正文，规则只出现一次

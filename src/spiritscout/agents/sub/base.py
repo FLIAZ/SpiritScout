@@ -788,7 +788,7 @@ class SubAgent(abc.ABC):
         from spiritscout.gateway.world_state import snapshot
 
         guard = getattr(getattr(self.ctx, "policy", None), "guard", None)
-        return snapshot(guard=guard)
+        return snapshot(guard=guard, blackboard=getattr(self.ctx, "blackboard", None))
 
     @abc.abstractmethod
     async def execute_step(

@@ -2,7 +2,7 @@
 
 - 产出写入资产层（经汇聚引擎去重）与侦察线索层（供 Web 漏洞 Agent 消费）；
 - CTF 模式不生成服务发现路线（合规 G2：不启用端口扫描，硬约束 C7）；
-- 所有请求经 http_probe/dns_resolve → ScopeGuard + 全局限速。
+- 所有请求经 http_probe/dns_resolve → 范围标注 + 全局限速。
 """
 
 from __future__ import annotations
@@ -232,7 +232,7 @@ class ReconAgent(SubAgent):
 
         观察来自路线间共享缓存与黑板（首页指纹、技术栈线索）；建议路径经
         确定性校验（站内相对路径、无穿越、去重、封顶）后走同一 http_probe
-        通道（ScopeGuard/限速不动）。LLM 不可用 → 空步（字典即骨架兜底）。
+        通道（范围标注/限速不动）。LLM 不可用 → 空步（字典即骨架兜底）。
         """
         base = task.target.rstrip("/")
         fp = self.cache.get(self.route_namespace, f"fingerprint|{base}") or {}

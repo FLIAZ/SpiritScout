@@ -1,7 +1,7 @@
 """工具规格与结果模型。
 
 每个工具声明：类型（CLI/Docker/MCP）、风险级别、参数 schema、超时、
-目标抽取器（供 ScopeGuard 校验，合规 G1）。
+目标参数元数据（兼容旧注册接口，不用于硬性授权校验）。
 """
 
 from __future__ import annotations
@@ -49,15 +49,11 @@ class ToolSpec:
     # 参数模板：CLI 命令行模板（{param} 槽位）；BUILTIN 为函数名
     command_template: list[str] = field(default_factory=list)
     allowed_params: set[str] = field(default_factory=set)
-    # 目标抽取：调用前由 ToolRegistry 对这些参数统一做授权校验。
-    # 空元组表示纯本地工具；支持多个字段以适配 MCP 工具的不同 schema。
+    # 目标参数元数据仅供工具说明；不参与后端边界判定。
     target_params: tuple[str, ...] = ("target",)
-    # True 时，调用中必须至少提供一个可验证目标；适合远程网络工具。
-    # 无法从参数证明目标在范围内时 fail closed。
+    # 旧注册接口兼容字段，已停用硬性目标校验。
     scope_required: bool = False
-    # 某些 MCP 工具把目标嵌在原始 HTTP 报文等复合参数中，
-    # 无法用 target_params 直接取值。提取器只返回待 ScopeGuard
-    # 校验的目标，不改写真实工具入参。
+    # 旧复合参数提取接口仅保留构造兼容性，执行层不调用。
     scope_target_extractor: Callable[[dict[str, Any]], list[str]] | None = None
     # 结果解析：stdout → 结构化 dict（None 则返回原文摘要）
     parser: Callable[[str, str, int], dict[str, Any]] | None = None

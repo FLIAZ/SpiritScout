@@ -69,7 +69,7 @@ class BusinessContextAgent(SubAgent):
             {"type": "function", "function": {
                 "name": "http_probe",
                 "description": "HTTP 只读探测（结构化解析状态码/标题/响应头/指纹；"
-                               "走授权与限速门），适合裸接口与响应头层面的确认",
+                               "带范围标注并遵守限速），适合裸接口与响应头层面的确认",
                 "parameters": {"type": "object", "properties": {
                     "url": {"type": "string"},
                     "method": {"type": "string"},
@@ -89,7 +89,7 @@ class BusinessContextAgent(SubAgent):
                 "写成可独立成立的动作或结论。targets 只列当前授权范围外、"
                 "希望纳入本次测试的新目标，形如 "
                 "[{\"target\": \"主机或 URL\", \"why\": \"一句话说明它是什么、"
-                "为什么需要\"}]，用户勾选后系统才放行。"),
+                "为什么需要\"}]，用户勾选后记为本次授权事实。"),
             "parameters":{"type":"object","properties":{
                 "question":{"type":"string","description":"要问用户的问题（自己组织语言）"},
                 "options":{"type":"array","items":{"type":"string"},
@@ -124,7 +124,7 @@ class BusinessContextAgent(SubAgent):
         artifacts = workspace.rstrip("/") + "/artifacts" if workspace else ""
         payload: dict[str, Any] = {
             "target": task.target,
-            "world_state": snapshot(guard=guard, env=environment(
+            "world_state": snapshot(guard=guard, blackboard=self.ctx.blackboard, env=environment(
                 workspace=workspace, artifacts=artifacts)),
             "交付要求": (
                 "以真实用户视角走访该目标的业务流程。渲染后的页面、网络请求"
@@ -137,7 +137,7 @@ class BusinessContextAgent(SubAgent):
                   "node": str(task.payload.get("node_title", ""))[:120]}
         rules = str(task.payload.get("rules", "")).strip()
         if rules:
-            intent["rules"] = rules[:600]
+            intent["rules"] = rules
         cleaned = {k: v for k, v in intent.items() if v}
         if cleaned:
             payload["task_intent"] = cleaned
@@ -159,13 +159,21 @@ class BusinessContextAgent(SubAgent):
             "messages": [], "concluded": False, "pages": [], "turn": 0})
         if st["concluded"]:
             return StepResult(ok=True, value=0.9, note="走访已完成并建模")
+        from spiritscout.gateway import world_state
+
+        current_world = self._world_state()
         if not st["messages"]:
+            st["world_state"] = current_world
             st["messages"] = [
                 {"role": "system",
                  "content": self._system_prompt() + "\nROLE: business_explorer"},
                 {"role": "user", "content": self._explore_brief(task)},
             ]
         else:
+            fragment = world_state.update(st.get("world_state"), current_world)
+            if fragment:
+                st["messages"].append({"role": "user", "content": fragment})
+            st["world_state"] = current_world
             steering = (self.ctx.ring.steering_for(self.agent_type.value)
                         if self.ctx.ring is not None else None)
             if steering and steering.get("ts") != st.get("steer_seen"):

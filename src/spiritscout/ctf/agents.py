@@ -4,7 +4,7 @@
 - 工具目录：各方向可调用的确定性动作（含通用 HTTP 探测通道 http_request，
   与文件/文本/编码分析工具），以原生 function calling 的 schema 交给模型；
   参数由 LLM 按当前证据现场构造，不按固定模板出牌。
-- 结果流向：①网络请求走同一 http_probe 通道（ScopeGuard/RPS/审计/审批
+- 结果流向：①网络请求走同一 http_probe 通道（范围标注/RPS/审计/审批
   边界不变）；②Flag 只由 FlagManager 确定性正则提取（LLM 声明不作数）；
   ③工具结果以 tool 消息回灌模型并进本路线观察序列与题级共享结论（同伴
   路线与主 Agent 复盘都能读到）；④已尝试入口登记进环形台账（同伴路线
@@ -86,7 +86,7 @@ _SAND_MODEL_CAP = 3600
 _SOLVER_TIMEOUT = 420
 # 单回合路线进度增量（进度展示用；无固定回合顶，进度饱和于 1.0）
 _TURN_PROGRESS = 0.04
-# HTTP 动作参数上限（上下文保护，非行为限制；目标范围由 ScopeGuard 把关）
+# HTTP 动作参数上限（上下文保护，非行为限制；测试边界由模型结合用户上下文维护）
 _HTTP_METHODS = ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS")
 # 语义上无副作用的读取方法（其余方法须模型自报 action 行为类别才执行）
 _HTTP_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -1072,7 +1072,7 @@ class CTFBaseAgent(SubAgent):
         """解题环单回合：一次原生工具调用回合（可并发多个工具）。
 
         边界（与全系统同一原则）：LLM 只决定「试什么」，执行走同一
-        http_probe 通道（ScopeGuard/RPS/审计/审批不变）；Flag 只由
+        http_probe 通道（范围标注/RPS/审计/审批不变）；Flag 只由
         模型判定后经 FlagManager 提交；LLM 不可用 → 本路线诚实停摆（无模板兜底）。
         """
         state = self._inv_state(task, route)
@@ -1307,7 +1307,6 @@ class CTFBaseAgent(SubAgent):
                 out = await self._tool_analyze_attachments(task)
             elif name == "asset_memory_lookup":
                 host = str(args.get("host", "")).strip().lower()
-                self.ctx.policy.guard.ensure_not_denied(host)
                 resources = getattr(self.ctx.knowledge, "resources", None)
                 if not host or resources is None:
                     raise ValueError("需要主机名，且共享资产库必须已装配")
@@ -1352,7 +1351,7 @@ class CTFBaseAgent(SubAgent):
 
     async def _tool_probe_paths(self, task: Task, route, state,
                                 args: dict[str, Any]) -> _ToolOutcome:
-        """敏感路径批量探测：逐条复用 http_probe 通道（授权门/限速/审计不变）。"""
+        """敏感路径批量探测：逐条复用 http_probe 通道（范围标注/限速/审计不变）。"""
         ch = self.challenge_of(task)
         base = str(ch.get("url") or task.target or "").rstrip("/")
         if not base.startswith(("http://", "https://")):
@@ -1620,7 +1619,7 @@ class CTFBaseAgent(SubAgent):
 
     async def _tool_mcp(self, task: Task, name: str,
                         args: dict[str, Any]) -> _ToolOutcome:
-        """外部 MCP 工具调用：统一经过 ToolRegistry 的风险门与范围门。"""
+        """外部 MCP 工具调用：统一经过 ToolRegistry 的工具权限与危险动作审批。"""
         entry = (getattr(self.ctx, "mcp_tools", None) or {}).get(name)
         if entry is None:
             return _ToolOutcome(ok=False,
@@ -1673,7 +1672,7 @@ class CTFBaseAgent(SubAgent):
                          args: dict[str, Any]) -> _ToolOutcome:
         """通用 HTTP 动作：LLM 提议 → 确定性校验 → 环形避让 → 执行 → 观察。
 
-        目标范围由 ScopeGuard 把关（http_probe 内），参数上限仅防上下文污染。
+        测试边界由模型结合用户上下文维护（http_probe 内），参数上限仅防上下文污染。
         """
         resolved = self._resolve_http(task, args)
         if resolved is None:
@@ -2010,7 +2009,8 @@ class CTFBaseAgent(SubAgent):
 
     def _world_snapshot(self) -> dict[str, Any]:
         guard = getattr(getattr(self.ctx, "policy", None), "guard", None)
-        return world_state.snapshot(guard=guard, env=self._world_environment())
+        return world_state.snapshot(guard=guard, env=self._world_environment(),
+                                    blackboard=getattr(self.ctx, "blackboard", None))
 
     def _sync_world_state(self, state: dict[str, Any]) -> tuple[str, list[str]]:
         """授权扩围/环境变化时追加一条自包含片段；无变化不占上下文。"""
@@ -2039,7 +2039,7 @@ class CTFBaseAgent(SubAgent):
             "经验库里的检查清单与平台特性事实用 kb_search 检索——它们是"
             "参考资料，采纳与否由你基于现场证据判断。\n"
             "动手能力：要跑命令用 shell，要写代码用 python——它们在隔离沙箱里"
-            "执行（系统文件只读，网络操作须遵守用户授权与禁打边界）。工作目录在会话内持久："
+            "执行（系统文件只读，网络操作须遵守用户上下文中的测试边界）。工作目录在会话内持久："
             "脚本与产物放在那里，后续回合直接可用；/tmp 每次运行即焚，需要"
             "留存的文件不要写进 /tmp。WebSocket/socket 等协议交互、数据计算、"
             "脚本化构造请求，凡是 http_request 够不着的，一律用它们去完成。\n"
@@ -2117,9 +2117,8 @@ class CTFBaseAgent(SubAgent):
             "concl": len(self._shared_conclusions(task)),
             "flags": [self._flag_line(f) for f in peer_flags]})
         rules = str((task.payload or {}).get("rules") or "")
-        if rules:
-            parts.append("## 用户既定规则（全程遵守，含终止条件）\n"
-                         + rules[:1800])
+        task_rules_part = ("## 用户既定规则（全程遵守，含终止条件）\n" + rules
+                           if rules else "")
         exps = task.payload.get("recent_experience") or []
         if exps:
             parts.append("## 实战经验（同类场景的参考事实与信号，非步骤；"
@@ -2134,7 +2133,7 @@ class CTFBaseAgent(SubAgent):
         history = self.ctx.blackboard.read(BlackboardLayer.TOPOLOGY, "historical-assets")
         if history:
             parts.append("## 同一资产的历史参考（本次未复核，不能沿用旧授权）\n" + json.dumps(history, ensure_ascii=False)[:8000])
-        # 项目说明就是用户维护的测试规则：单独成块完整下发，不参与正文截断；
+        # 项目说明作为 world_state.project_rules 完整下发，不重复注入正文；
         # 历史记忆（资产/发现）仍放正文末尾，预算不够时先丢它。
         project_memory = self.ctx.blackboard.read(
             BlackboardLayer.TOPOLOGY, "project-memory")
@@ -2147,18 +2146,18 @@ class CTFBaseAgent(SubAgent):
                          "不构成授权范围）\n"
                          + json.dumps(history_view, ensure_ascii=False)[:3000])
         rules_part = ""
-        if project_rules:
+        if project_rules and not world.get("project_rules"):
             rules_part = ("## 所属项目的测试规则（用户写在项目说明里，全程遵守；"
                           "不扩大本次授权，与当前授权冲突时以当前授权为准）\n"
                           + project_rules)
         world_part = parts.pop(0) if world else ""
         body = "\n\n".join(parts)
-        fixed = len(world_part) + len(rules_part) + len(task_part) + 6
+        fixed = len(world_part) + len(rules_part) + len(task_rules_part) + len(task_part) + 8
         body_budget = max(4000, 24000 - fixed)
         state["messages"] = [
             {"role": "system", "content": self._solver_system_prompt()},
             {"role": "user", "content": "\n\n".join(
-                part for part in (world_part, body[:body_budget], rules_part,
+                part for part in (world_part, body[:body_budget], task_rules_part, rules_part,
                                   task_part) if part)},
         ]
 
@@ -2171,24 +2170,19 @@ class CTFBaseAgent(SubAgent):
         - 工具/助手长文折叠为「头 + 尾」摘录：头保方法与现场，尾常是结论
           与落点地址；HTTP GET 可记录回放、沙箱输出在工作区文件——折叠
           不等于丢失；
-        - 中途注入的 user 消息（同伴动态/督导）只保留最近 2 条，更旧的
-          压缩为摘录：其状态本体在共享缓存与水位里，不因折叠失真。
+        - user 消息完整保留：授权更新和用户答复不能按观察正文节选，
+          不通过关键字判断其是否涉及测试边界。
         """
         sent_view = _model_messages(messages, initialized=initialized)
         total = sum(len(str(m.get("content") or "")) for m in sent_view)
         if total <= _MSG_CHAR_BUDGET:
             return
-        user_idx = [i for i, m in enumerate(messages)
-                    if i >= 2 and m.get("role") == "user"]
-        foldable_user = set(user_idx[:-2])
         for i, msg in enumerate(messages[2:], start=2):
             if total <= _MSG_CHAR_BUDGET:
                 break
             content = str(msg.get("content") or "")
             role = msg.get("role")
-            if role == "user" and i not in foldable_user:
-                continue
-            if role not in ("tool", "assistant", "user") or len(content) <= 400:
+            if role not in ("tool", "assistant") or len(content) <= 400:
                 continue
             keep = (content[:200]
                     + "…（早前内容已折叠，头尾摘录；完整内容可按记录重取）"

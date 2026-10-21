@@ -11,7 +11,8 @@ from spiritscout.core.models import BlackboardLayer
 # 这些字段可以超过软预算，不能为了缩短输入而丢掉授权、任务或用户回答。
 _PROTECTED = {"constraints", "task_intent", "用户答复", "scope", "rules", "mission",
               "target", "available_tactics", "shared_context", "business_context",
-              "reference_skills", "world_state", "project_rules"}
+              "reference_skills", "world_state", "project_rules", "user_context",
+              "authorization", "testing_rules", "user_replies"}
 
 
 def compact_json(payload: dict[str, Any], max_chars: int = 8000) -> str:
@@ -172,7 +173,7 @@ def shared_context(blackboard: Any) -> dict[str, Any]:
 
 
 def compact_history(messages: list[dict[str, Any]], max_chars: int = 48000) -> None:
-    """按完整消息折叠旧观察；保留系统、任务、最新反馈及工具调用配对。"""
+    """只节选工具/助手旧观察；用户声明完整保留，维持工具调用配对。"""
     def size() -> int:
         return len(json.dumps(messages, ensure_ascii=False, default=str))
 
@@ -185,7 +186,8 @@ def compact_history(messages: list[dict[str, Any]], max_chars: int = 48000) -> N
         if i < 2 or i >= len(messages) - 2 or i in recent_users:
             continue
         content = message.get("content")
-        if message.get("role") == "system" or not isinstance(content, str) or len(content) < 800:
+        if (message.get("role") not in {"assistant", "tool"}
+                or not isinstance(content, str) or len(content) < 800):
             continue
         # 只压缩观察正文；函数名、调用 ID 和参数仍完整保留。
         message["content"] = content[:400] + "\n[早期观察已节选；需要细节时查对应执行记录]\n" + content[-250:]

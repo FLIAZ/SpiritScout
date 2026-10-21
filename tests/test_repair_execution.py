@@ -345,18 +345,34 @@ class ConnectionRegressionTests(unittest.IsolatedAsyncioTestCase):
                                 ("127.0.0.1", "b.test", "b.test")])
         self.assertEqual(len(transports), 2)
 
-    async def test_any_denied_dns_address_prevents_request(self) -> None:
+    async def test_legacy_denied_dns_address_does_not_prevent_transport(self) -> None:
         resolver = AsyncMock(return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "",
                                            ("127.0.0.1", 80)),
                                           (socket.AF_INET6, socket.SOCK_STREAM, 6, "",
                                            ("::1", 80, 0, 0))])
-        with patch.object(asyncio.get_running_loop(), "getaddrinfo", resolver):
-            result = await http_probe("http://audit.test/", guard=ScopeGuard(Scope(denied=["::1"])))
-        self.assertFalse(result.ok)
-        self.assertEqual(result.returncode, -3)
+        seen = []
+        def respond(request):
+            seen.append(request.url.host)
+            return httpx.Response(200, text="local fixture")
+        transport = ScopedHTTPTransport(ScopeGuard(Scope(denied=["::1"])),
+                                        lambda: httpx.MockTransport(respond))
+        try:
+            with patch.object(asyncio.get_running_loop(), "getaddrinfo", resolver):
+                async with httpx.AsyncClient(transport=transport) as client:
+                    response = await client.get("http://audit.test/")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(seen, ["127.0.0.1"])
+        finally:
+            await transport.aclose()
 
-    async def test_ipv4_mapped_ipv6_cannot_bypass_ipv4_denial(self) -> None:
-        result = await http_probe("http://[::ffff:127.0.0.1]/", guard=ScopeGuard(
-            Scope(denied=["127.0.0.0/8"])))
-        self.assertFalse(result.ok)
-        self.assertEqual(result.returncode, -3)
+    async def test_ipv4_mapped_ipv6_is_not_filtered_by_legacy_denial(self) -> None:
+        seen = []
+        def respond(request):
+            seen.append(request.url.host)
+            return httpx.Response(200)
+        transport = ScopedHTTPTransport(ScopeGuard(Scope(denied=["127.0.0.0/8"])),
+                                        lambda: httpx.MockTransport(respond))
+        async with httpx.AsyncClient(transport=transport) as client:
+            response = await client.get("http://[::ffff:127.0.0.1]/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(seen, ["::ffff:127.0.0.1"])
