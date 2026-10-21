@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
+from spiritscout.agents.master.agent import MasterAgent
+from spiritscout.agents.master.dag import TaskDAG
 from spiritscout.blackboard import Blackboard
 from spiritscout.config.settings import ModelEntry, SystemConfig, WorkspaceConfig
 from spiritscout.core.models import AgentType, BlackboardLayer, RunMode
@@ -48,6 +50,43 @@ class LaunchRoutingTests(unittest.TestCase):
 
         self.assertEqual(plan.authorization.mode, RunMode.SRC)
         self.assertTrue(plan.needs_mode_routing)
+
+    def test_src_target_falls_back_to_authorized_scope(self) -> None:
+        """续传合并进 extra_scope 的授权目标要成为工作入口，不能是 CTF 占位符。"""
+        plan = prepare_launch(LaunchRequest(
+            mission="测试 web 资产",
+            extra_scope=["https://mall.example.test", "hg.example.test"]))
+
+        self.assertEqual(plan.authorization.mode, RunMode.SRC)
+        self.assertEqual(plan.target, "https://mall.example.test")
+        self.assertEqual(plan.authorization.target_description,
+                         "https://mall.example.test")
+
+    def test_src_target_falls_back_to_authorized_domain(self) -> None:
+        plan = prepare_launch(LaunchRequest(
+            mission="测试 web 资产", extra_scope=["www.example.test"]))
+
+        self.assertEqual(plan.target, "https://www.example.test")
+
+    def test_plan_node_target_beats_session_target(self) -> None:
+        node = SimpleNamespace(meta={"target": "hg.example.test"})
+        self.assertEqual(
+            MasterAgent._task_target(node, None, "https://mall.example.test"),
+            "https://hg.example.test")
+        self.assertEqual(
+            MasterAgent._task_target(
+                node, {"url": "http://challenge.test/"},
+                "https://mall.example.test"),
+            "http://challenge.test/")
+
+    def test_plan_node_target_reaches_dag_meta(self) -> None:
+        dag = TaskDAG()
+        result = dag.upsert_from_plan(
+            [{"tactic": "TA0043", "title": "按域测绘",
+              "target": "https://hg.example.test"}], 0)
+
+        self.assertEqual(result.created[0].meta["target"],
+                         "https://hg.example.test")
 
 
 class SessionLifecycleTests(unittest.IsolatedAsyncioTestCase):

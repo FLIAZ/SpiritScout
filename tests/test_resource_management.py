@@ -345,7 +345,7 @@ class ResourceStoreTests(unittest.TestCase):
             self.assertEqual(reopened.assets(unclassified=True)["total"], 1)
 
     def test_project_memory_scope_bound_and_no_authorization(self) -> None:
-        """共享记忆只含 accepted 发现，硬限 4000 字符，不携带授权或凭据。"""
+        """共享记忆只含 accepted 发现，历史抽样限 4000 字符，说明不截断，不携带授权或凭据。"""
         with tempfile.TemporaryDirectory() as directory:
             store = ResourceStore(Path(directory) / "resources")
             project = store.create_project("BiliBili SRC", "用户提供的项目说明")
@@ -386,6 +386,14 @@ class ResourceStoreTests(unittest.TestCase):
             self.assertLessEqual(
                 len(json.dumps(bounded, ensure_ascii=False)), 4000)
             self.assertIn("note", bounded)
+
+            # 项目说明承载完整测试规则：超长也原样返回，历史抽样先让位
+            long_description = "项目规则：只测主站，禁止爆破。" * 800
+            long_project = store.create_project("规则项目", long_description)
+            long_memory = store.project_memory(long_project["project_id"])
+            self.assertEqual(long_memory["description"], long_description)
+            self.assertGreater(
+                len(json.dumps(long_memory, ensure_ascii=False)), 4000)
 
 
 class ResourceApiTests(unittest.TestCase):

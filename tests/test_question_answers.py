@@ -39,10 +39,11 @@ class QuestionAnswerTests(unittest.IsolatedAsyncioTestCase):
         self.session.questions.cancel_all()
         await asyncio.gather(*self.tasks, return_exceptions=True)
 
-    async def ask(self, options: list[str] | None = None) -> tuple[str, asyncio.Task]:
+    async def ask(self, options: list[str] | None = None, *,
+                  multiple: bool = False) -> tuple[str, asyncio.Task]:
         task = asyncio.create_task(self.session.questions.ask(
             "master", "下一步如何验证？", options if options is not None else ["只读验证", "等待补充"],
-            ["https://scope-test.invalid"]))
+            ["https://scope-test.invalid"], multiple=multiple))
         self.tasks.append(task)
         await asyncio.sleep(0)
         return self.session.questions.view()[0]["question_id"], task
@@ -61,6 +62,60 @@ class QuestionAnswerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.guard.is_allowed("https://scope-test.invalid"))
         self.assertFalse(self.guard.is_allowed("https://unoffered.invalid"))
         self.assertEqual(self.session.questions.view(), [])
+
+    async def test_checked_targets_alone_are_a_valid_answer(self) -> None:
+        """只勾选扩围目标（范围确认场景）也要能提交，不被当成空答复。"""
+        qid, waiting = await self.ask()
+        result = await self.client.post(self.url(qid), json={
+            "add_targets": ["https://scope-test.invalid"]})
+        self.assertEqual(result.status_code, 200, result.text)
+        answer = await waiting
+        self.assertEqual(answer["scope_added"], ["https://scope-test.invalid/"])
+        self.assertIn("已确认目标", answer["answer"])
+        self.assertTrue(self.guard.is_allowed("https://scope-test.invalid"))
+
+    async def test_multi_select_joins_picked_options_and_supplement(self) -> None:
+        qid, waiting = await self.ask(["复测登录", "检查上传", "先看接口"], multiple=True)
+        self.assertTrue(self.session.questions.view()[0]["multiple"])
+        response = await self.client.post(self.url(qid), json={
+            "choices": [0, 2], "text": "另外留意越权",
+            "add_targets": ["https://scope-test.invalid"]})
+        self.assertEqual(response.status_code, 200, response.text)
+        answer = await waiting
+        self.assertEqual(answer["answer"], "复测登录、先看接口；另外留意越权")
+        self.assertEqual(answer["scope_added"], ["https://scope-test.invalid/"])
+        self.assertTrue(self.guard.is_allowed("https://scope-test.invalid"))
+
+    async def test_multi_select_deduplicates_and_accepts_text_only(self) -> None:
+        qid, waiting = await self.ask(["甲", "乙"], multiple=True)
+        response = await self.client.post(self.url(qid), json={"choices": [1, 1]})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual((await waiting)["answer"], "乙")
+
+        qid, waiting = await self.ask(["甲", "乙"], multiple=True)
+        response = await self.client.post(self.url(qid), json={"text": "都不选，改看日志"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual((await waiting)["answer"], "都不选，改看日志")
+
+    async def test_multi_select_rejects_exclusive_and_invalid_payloads(self) -> None:
+        qid, waiting = await self.ask(["甲", "乙"], multiple=True)
+        for payload in [{"choice": 0, "choices": [1]}, {"choices": [2]},
+                        {"choices": [0, -1]}, {"choices": []},
+                        {"choices": [0], "text": "x" * 1001}]:
+            with self.subTest(payload=payload):
+                response = await self.client.post(self.url(qid), json=payload)
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertFalse(waiting.done())
+        self.assertEqual((await self.client.post(self.url(qid), json={"choices": [1]})).status_code, 200)
+        self.assertEqual((await waiting)["answer"], "乙")
+
+    async def test_single_select_question_rejects_multiple_choices(self) -> None:
+        qid, waiting = await self.ask()
+        response = await self.client.post(self.url(qid), json={"choices": [0, 1]})
+        self.assertEqual(response.status_code, 422)
+        self.assertFalse(waiting.done())
+        self.assertEqual((await self.client.post(self.url(qid), json={"choices": [0]})).status_code, 200)
+        self.assertEqual((await waiting)["answer"], "只读验证")
 
     async def test_typed_answer_takes_priority_without_implicit_scope_expansion(self) -> None:
         qid, waiting = await self.ask()

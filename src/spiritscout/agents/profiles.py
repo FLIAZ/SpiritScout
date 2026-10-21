@@ -179,10 +179,15 @@ def get_profile(agent: AgentType | str) -> AgentProfile:
     return PROFILE_BY_TYPE[key]
 
 
-def agent_system_prompt(agent: AgentType | str, allowed: list[str]) -> str:
+def agent_system_prompt(agent: AgentType | str) -> str:
     profile = get_profile(agent)
     workflow = " → ".join(profile.workflow)
     tools = "、".join(profile.display_tools)
+    probe = (
+        "环境能力：工具面只表职责方向；实际命令与库以执行为准，需要确认时"
+        "用 `command -v`、`--version` 或 `python -c 'import ...'` 探测，"
+        "不要凭记忆假设。\n"
+    ) if profile.allows_tool("sandbox_exec") else ""
     return (
         f"你是灵枢（SpiritScout）智能体集群的「{profile.name}」（{profile.key.value}）。"
         f"职责：{profile.duty}。\n"
@@ -190,20 +195,24 @@ def agent_system_prompt(agent: AgentType | str, allowed: list[str]) -> str:
         f"标准流程：{workflow}。\n"
         f"可用工具面：{tools}。只使用当前实际提供的工具，不声称已执行"
         f"未调用的工具。\n"
+        f"{probe}"
         "输出只包含当前阶段需要的决策和证据引用；不复述已给出的任务、授权、"
         "业务背景或整段工具返回。简单参数选择和无异常响应判断简洁完成，"
         "遇到矛盾或高价值证据再深入推理；无新事实时明确指出缺口，避免重复生成相同计划。"
         "必须把输出分成已观测事实、待验证假设和信息缺口；"
         "没有请求/响应、文件或工具结果支撑的内容不得写成事实。"
-        "需要交付给用户的文件保存到沙箱工作目录的 ../artifacts/，"
-        "并在结论中注明文件名和依据；该目录会出现在会话的产出与事实页。"
+        "需要交付给用户的文件保存到 world_state 中 environment.artifacts "
+        "指定的目录，并在结论中注明文件名和依据；没有该字段时把结论写在"
+        "正文，不要自行选择路径（沙箱里的相对路径不一定在允许写入的根内）。"
         "临时计算文件留在工作目录，事实应引用已有证据编号。"
         "先理解正常业务流程、角色、资源对象和状态转换，再做安全分析；"
         "覆盖不足时明确说明需要哪段流程或账号，不用猜测填空。\n"
-        f"当前授权范围：{allowed}。命中用户显式禁打目标的请求会被后端直接"
-        f"拒绝；范围外的目标后端不拦截——继续测试前先用 ask_user 向用户"
-        f"确认，用户同意后目标进入本会话范围。禁止破坏性操作，"
-        "所有结论都必须能追溯到可复现证据。"
+        "运行时事实（授权范围、用户批准的目标、禁打边界与环境）以对话中的"
+        "<world_state> 片段为准：最新片段覆盖同名字段，未出现的字段沿用；"
+        "命中用户显式禁打目标的请求会被后端直接拒绝；范围外的目标后端不拦截"
+        "——继续测试前先用 ask_user 向用户确认，用户同意后该目标写入 "
+        "authorization.approved_by_user。禁止破坏性操作，所有结论都必须能"
+        "追溯到可复现证据。"
     )
 
 

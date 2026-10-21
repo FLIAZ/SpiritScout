@@ -82,16 +82,23 @@ class ApprovalDecision(BaseModel):
 
 
 class QuestionAnswerPayload(BaseModel):
-    """回答及显式扩围目标；拒绝把空答复或错误类型吞成已作答。"""
+    """回答及显式扩围目标；拒绝把空答复或错误类型吞成已作答。
+
+    choice=单选下标；choices=多选下标；text 在多选问题里作为补充说明。
+    """
 
     model_config = ConfigDict(extra="forbid")
     choice: StrictInt | None = None
+    choices: list[StrictInt] | None = Field(default=None, max_length=6)
     text: str = Field(default="", max_length=1000)
     add_targets: list[str] = Field(default_factory=list, max_length=6)
 
     @model_validator(mode="after")
     def require_answer(self) -> QuestionAnswerPayload:
-        if self.choice is None and not self.text.strip():
+        if self.choice is not None and self.choices:
+            raise ValueError("choice 与 choices 只能二选一")
+        if self.choice is None and not self.choices and not self.text.strip() \
+                and not self.add_targets:
             raise ValueError("请选择选项或填写答复")
         return self
 
@@ -761,15 +768,16 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     @app.post("/api/sessions/{session_id}/questions/{question_id}")
     async def answer_question(session_id: str, question_id: str,
                               payload: QuestionAnswerPayload) -> dict[str, Any]:
-        """回答模型发起的提问：{"choice": 选项下标} 或 {"text": 自由输入}，
-        {"add_targets": [...]} 为用户勾选的扩围目标（写入会话批准集）。"""
+        """回答模型发起的提问：{"choice": 选项下标} 或 {"choices": [多选下标]}
+        或 {"text": 自由输入}，{"add_targets": [...]} 为用户勾选的扩围目标
+        （写入会话批准集）。"""
         session = manager.get(session_id)
         if session is None:
             raise HTTPException(404, f"会话不存在: {session_id}")
         try:
             ok = session.questions.answer(
-                question_id, choice=payload.choice, text=payload.text,
-                add_targets=payload.add_targets)
+                question_id, choice=payload.choice, choices=payload.choices,
+                text=payload.text, add_targets=payload.add_targets)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         if not ok:

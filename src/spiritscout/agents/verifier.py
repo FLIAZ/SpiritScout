@@ -58,6 +58,8 @@ class VerifierAgent:
             {"type": "function", "function": {"name": "ask_user", "description": "澄清危害规则、账号或授权",
                 "parameters": {"type": "object", "properties": {"question": {"type": "string"},
                     "options": {"type": "array", "items": {"type": "string"}},
+                    "multiple": {"type": "boolean",
+                        "description": "仅当选项彼此不互斥、用户可能同时选多项时设 true；允许/拒绝等互斥决策省略"},
                     "targets": {"type": "array", "items": {"type": "string"}}}, "required": ["question"]}}}]
         proof = {"type": "array", "items": {"type": "object", "properties": {
             "execution_id": {"type": "string", "description": "工具返回的实际执行 ID"},
@@ -114,8 +116,10 @@ class VerifierAgent:
                             "result": value["text"][:800]} for key, value in executions.items()]})
                 elif name == "ask_user":
                     question = str(args.get("question") or "").strip()
-                    answer = (await self.ctx.questions.ask("verifier", question,
-                              args.get("options") or [], args.get("targets") or [])
+                    answer = (await self.ctx.questions.ask(
+                              "verifier", question, args.get("options") or [],
+                              args.get("targets") or [],
+                              multiple=bool(args.get("multiple")))
                               if self.ctx.questions is not None and question else {"cancelled": True})
                     if answer.get("answer"):
                         rules.setdefault("answers", []).append({"question": question, "answer": answer["answer"]})

@@ -112,6 +112,10 @@ class ScopeGuard:
         self._approved_targets.add(entry)
         return entry
 
+    def approved_targets(self) -> frozenset[str]:
+        """用户经提问确认的会话扩围目标（随守卫实例消亡，不落盘）。"""
+        return frozenset(self._approved_targets)
+
     def _match_approved(self, target: str, host: str | None) -> bool:
         """会话批准集匹配：origin 前缀条目按 URL 匹配，域条目按主机匹配。"""
         for entry in self._approved_targets:

@@ -6,7 +6,6 @@
 .bar-left .selx { min-width: 128px; max-width: 220px; }
 .bar-left .selx-btn { height: 30px; padding: 4px 9px; font-size: 12px; }
 #c-project-new { white-space: nowrap; }
-.sess-proj { color: var(--accent-ink); }
 
 /* ---- 文件夹卡片 ---- */
 .projects-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
@@ -36,6 +35,8 @@
 .pd-title { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
 .pd-title h3 { font-size: 22px; margin: 6px 0; letter-spacing: -.02em; overflow-wrap: anywhere; }
 .pd-title p { font-size: 12.5px; line-height: 1.8; color: var(--ink-2); max-width: 760px; }
+.pd-title .pd-desc { white-space: pre-wrap; overflow-wrap: anywhere;
+  max-height: 220px; overflow-y: auto; }
 .pd-ops { display: flex; gap: 8px; flex-wrap: wrap; }
 .pd-stats { display: flex; gap: 18px; flex-wrap: wrap; padding: 12px 0; margin-top: 6px;
   border-top: 1px solid var(--line); font-size: 12px; color: var(--ink-2); }
@@ -75,8 +76,8 @@
   max-height: 280px; overflow: auto; margin-top: 8px; }
 
 /* ---- 对话框与会话头项目标签 ---- */
-.project-dlg { width: min(520px, 92vw); }
-.project-dlg textarea { width: 100%; }
+.project-dlg { width: min(720px, 94vw); }
+.project-dlg textarea { width: 100%; min-height: 210px; resize: vertical; }
 .pj-error { color: var(--bad); font-size: 12px; line-height: 1.7; white-space: pre-wrap; }
 .proj-chip { cursor: pointer; background: transparent; border-style: solid;
   font-family: inherit; padding: 2px 8px; }

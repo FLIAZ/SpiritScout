@@ -27,9 +27,10 @@ const ProjectsPage = (() => {
     const card = (p, id, extra) => {
       const selected = active !== null && active !== undefined && String(active) === String(id);
       const name = p.name || (id === "" ? "未分类" : "全部");
-      const desc = p.description || (id === ALL
+      const raw = p.description || (id === ALL
         ? "所有项目与未分类的汇总"
         : id === "" ? "未加入项目的会话与资产会自动归到这里" : "尚无说明");
+      const desc = raw.length > 140 ? raw.slice(0, 140).trimEnd() + "…" : raw;
       const badge = p.read_only
         ? `<span class="pf-ro">${id === ALL ? "只读总览" : "自动归档"}</span>` : "";
       const counts = `${Number(p.session_count || 0)} 会话 · `
@@ -107,14 +108,15 @@ const ProjectsPage = (() => {
     const desc = f.description || (current === ALL
       ? "跨项目的只读总览；每个项目只展示自己的最新观测，互不覆盖。"
       : current === "" ? "没有加入项目的会话与资产会自动归到这里。"
-      : "同项目的会话共享历史记忆；项目不是授权分区。");
+      : "尚无说明。点击「编辑」写入本项目的测试规则，后续同项目会话会直接读到。");
     box.innerHTML = `<div class="pd-head">
       <button class="btn sm" type="button" data-back>← 项目总览</button>
       <div class="pd-title">
         <div><span class="resource-eyebrow">${kicker}</span><h3>${esc(f.name || "未分类")}</h3>
-          <p>${esc(desc)}</p></div>
+          <p class="pd-desc">${esc(desc)}</p></div>
         <div class="pd-ops">${readonly ? "" :
           `<button class="btn sm" type="button" data-rename>重命名</button>
+           <button class="btn sm" type="button" data-edit-desc title="修改项目说明与测试规则">编辑说明</button>
            <button class="btn sm danger" type="button" data-delete>删除</button>`}</div>
       </div>
       <div class="pd-stats">${statsHtml(f)}</div>
@@ -160,6 +162,8 @@ const ProjectsPage = (() => {
     });
     const rename = box.querySelector("[data-rename]");
     if (rename) rename.onclick = () => editDialog(folder(current));
+    const editDesc = box.querySelector("[data-edit-desc]");
+    if (editDesc) editDesc.onclick = () => editDialog(folder(current), "desc");
     const remove = box.querySelector("[data-delete]");
     if (remove) remove.onclick = () => deleteDialog(folder(current));
   }
@@ -324,18 +328,21 @@ const ProjectsPage = (() => {
     if (select.closest(".selx")) { selxRebuild(select); selxSync(select); }
   }
 
-  function editDialog(project) {
+  function editDialog(project, focus = "name") {
     const creating = !project;
     const dlg = document.createElement("dialog");
     dlg.className = "project-dlg";
-    dlg.innerHTML = `<h3 style="margin:0">${creating ? "新建项目" : "重命名项目"}</h3>
+    dlg.innerHTML = `<h3 style="margin:0">${creating ? "新建项目" : "编辑项目"}</h3>
       <p class="muted" style="font-size:12px;margin:10px 0 0;line-height:1.75">
-        项目是会话与资产记忆的分区，不是授权边界；改名或删除都不会扩大任何任务的授权范围。</p>
+        项目是会话与资产记忆的分区，不是授权边界。说明可以写完整的测试规则
+        （平台限制、禁测项、提交要求、已知坑等），同项目的后续会话会直接读到；
+        规则不会扩大任何任务的授权范围。</p>
       <div class="dlg-grid">
         <label class="wide"><span>项目名 *</span>
           <input data-pj-name maxlength="80" placeholder="例如：bilibili SRC"></label>
-        <label class="wide"><span>说明（可选）</span>
-          <textarea data-pj-desc rows="3" maxlength="500" placeholder="目标范围、平台规则等背景，仅作参考"></textarea></label>
+        <label class="wide"><span>项目说明与测试规则（可选，不限长度）</span>
+          <textarea data-pj-desc rows="10" spellcheck="false"
+            placeholder="例：只测主站与直播域；RPS 不超过 5；禁止爆破与 DoS；发现仅提交可复现证据；账号使用测试号……"></textarea></label>
       </div>
       <div class="pj-error" role="alert"></div>
       <div class="dlg-ops"><button type="button" class="btn" data-cancel>取消</button>
@@ -372,7 +379,11 @@ const ProjectsPage = (() => {
       }
     };
     dlg.showModal();
-    dlg.querySelector("[data-pj-name]").focus();
+    const target = focus === "desc" && !creating
+      ? dlg.querySelector("[data-pj-desc]") : dlg.querySelector("[data-pj-name]");
+    target.focus();
+    if (focus === "desc" && !creating) target.setSelectionRange(target.value.length,
+                                                              target.value.length);
   }
 
   function deleteDialog(project) {

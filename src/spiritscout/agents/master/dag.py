@@ -107,10 +107,16 @@ class TaskDAG:
                                + f"，状态 {latest.status.value}）"),
                 })
                 continue
+            meta = dict(spec["meta"]) if isinstance(spec.get("meta"), dict) else {}
+            # 规划节点可指定本节点的测试目标（多域 SRC 按域拆节点）；
+            # 留空则派发时沿用会话目标。
+            target = str(spec.get("target") or "").strip()
+            if target:
+                meta.setdefault("target", target)
             node = self.add_node(
                 tactic, str(spec.get("title", tactic)),
                 technique=spec.get("technique"), depends_on=[],
-                round_created=round_no, meta=spec.get("meta"),
+                round_created=round_no, meta=meta,
             )
             created.append(node)
             pairs.append((spec, node))

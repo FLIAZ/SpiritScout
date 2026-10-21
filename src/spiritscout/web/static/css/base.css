@@ -139,6 +139,39 @@ code, .mono { font-family: var(--mono); font-size: .92em; }
   border: 1px solid var(--accent); border-radius: 6px; padding: 1px 6px;
   background: var(--surface); color: var(--ink);
 }
+/* 会话文件夹：项目级折叠，收起状态只留一行目录 */
+.sess-folder { display: flex; flex-direction: column; gap: 2px; }
+.sess-folder + .sess-folder { margin-top: 5px; }
+.sess-folder-head {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  padding: 5px 8px; border: 0; border-radius: 7px; background: none;
+  color: var(--ink-3); font-size: 11.5px; font-weight: 600; letter-spacing: .02em;
+  text-align: left; cursor: pointer;
+}
+.sess-folder-head:hover { background: var(--surface-2); color: var(--ink-2); }
+.sess-folder.has-on > .sess-folder-head { color: var(--accent-ink); }
+.sess-folder-head .chev {
+  width: 11px; height: 11px; flex: none; opacity: .75;
+  transform: rotate(90deg); transition: transform .16s ease;
+}
+.sess-folder.folded > .sess-folder-head .chev { transform: rotate(0deg); }
+.sess-folder-head .fico { width: 13px; height: 13px; flex: none; opacity: .8; }
+.sess-folder-head .fname {
+  flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sess-folder-head .fcount {
+  flex: none; font-family: var(--mono); font-size: 10px; font-weight: 500;
+  color: var(--ink-3); background: var(--surface-2); border-radius: 999px; padding: 1px 6px;
+}
+.sess-folder-head .frun {
+  width: 6px; height: 6px; flex: none; border-radius: 50%;
+  background: var(--accent); animation: blink 1.2s ease-in-out infinite;
+}
+.sess-folder-body {
+  display: flex; flex-direction: column; gap: 3px;
+  margin-left: 7px; padding-left: 5px; border-left: 1px solid var(--line);
+}
+.sess-folder.folded > .sess-folder-body { display: none; }
 .title-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .title-row h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #op-rename { border: 0; background: none; color: var(--ink-3); cursor: pointer;

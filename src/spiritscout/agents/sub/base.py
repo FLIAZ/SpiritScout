@@ -164,14 +164,17 @@ class _AgentMcpView(Mapping):
 _ASK_CHANNEL_NOTE = (
     "【可询问用户】仅当本决策必须依赖只有用户能提供的输入（测试账号/凭据、"
     "登录后操作的请求记录、授权范围裁定）时，在返回 JSON 里加 "
-    "\"ask_user\": {\"question\": str, \"options\": [str], "
-    "\"targets\": [{\"target\": str, \"why\": str}]}。targets 仅在需要访问"
-    "当前授权范围外的新目标时给出；why 用一句话说明它是什么、为什么需要"
-    "（面向普通用户）——控制台会渲染成「允许访问」勾选项，只有用户勾选"
-    "才会纳入本会话范围；不要在 targets 里罗列已在范围内的目标。"
-    "问题面向普通用户，用平实中文，不用 HAR、PoC 这类行话缩写（必要处一句话"
-    "解释）。后端会挂起等用户作答，答复回灌后你重新给出本决策；"
-    "没有这类需求就不要加该字段。")
+    "\"ask_user\": {\"question\": str, \"options\": [str], \"multiple\": bool, "
+    "\"targets\": [{\"target\": str, \"why\": str}]}。multiple 仅在选项彼此"
+    "不互斥、用户可能同时选多项时设 true（如「接下来优先做哪些独立检查」"
+    "「需要开通哪些账号/权限」）；「允许/拒绝」「方案 A/B」这类互斥决策"
+    "保持 false（默认单选，点选即提交），多选问题的选项要写成可独立成立的"
+    "动作或结论。targets 仅在需要访问当前授权范围外的新目标时给出；why 用"
+    "一句话说明它是什么、为什么需要（面向普通用户）——控制台会渲染成"
+    "「允许访问」勾选项，只有用户勾选才会纳入本会话范围；不要在 targets 里"
+    "罗列已在范围内的目标。问题面向普通用户，用平实中文，不用 HAR、PoC 这类"
+    "行话缩写（必要处一句话解释）。后端会挂起等用户作答，答复回灌后你重新"
+    "给出本决策；没有这类需求就不要加该字段。")
 
 
 class SubAgent(abc.ABC):
@@ -307,6 +310,7 @@ class SubAgent(abc.ABC):
                       + "\nROLE: route_planner"},
                     {"role": "user", "content": json.dumps({
                         "task": task.task_type, "target": task.target,
+                        "world_state": self._world_state(),
                         "existing_routes": [
                             {"name": p.name, "strategy": p.strategy} for p in plans],
                         "allowed_actions": {a: {"required_fields": f}
@@ -663,6 +667,9 @@ class SubAgent(abc.ABC):
             intent = {k: v for k, v in intent.items() if v}
             if intent:
                 user_obj = {**user_obj, "task_intent": intent}
+        world = self._world_state()
+        if world:
+            user_obj = {**user_obj, "world_state": world}
         # 灵枢督导：主 Agent 按全局实时进度给出的方向建议（上下文而非指令）。
         # 一条建议只注入一次（ts 水位）——同一条建议跟着每次决策重复出现
         # 只是花 Token 的脏上下文；换新建议（ts 更新）才再次注入
@@ -745,6 +752,7 @@ class SubAgent(abc.ABC):
                    if str(o).strip()]
         from spiritscout.policy.questions import normalize_targets
         targets = normalize_targets(ask.get("targets"))
+        multiple = bool(ask.get("multiple"))
         broker = self.ctx.questions
         if broker is None:
             self.ctx.audit.log("agent.ask_user", self.agent_id, {
@@ -753,8 +761,9 @@ class SubAgent(abc.ABC):
             return data
         self.ctx.audit.log("agent.ask_user", self.agent_id, {
             "role": role, "question": question[:500],
-            "options": options, "targets": targets})
-        result = await broker.ask(self.agent_type.value, question, options, targets)
+            "options": options, "multiple": multiple, "targets": targets})
+        result = await broker.ask(self.agent_type.value, question, options, targets,
+                                  multiple=multiple)
         answer = str(result.get("answer") or "").strip()
         added = result.get("scope_added") or []
         self.ctx.audit.log("agent.ask_answered", self.agent_id, {
@@ -770,12 +779,16 @@ class SubAgent(abc.ABC):
     # ------------------------------------------------------------ 提示词
 
     def _system_prompt(self) -> str:
-        """分模式 system prompt（显式授权边界，防拒答亦防越界）。"""
+        """稳定 system prompt：授权等运行时事实在 world_state 片段里更新。"""
         from spiritscout.agents.profiles import agent_system_prompt
 
-        scope = self.ctx.policy.guard.scope
-        allowed = scope.allowed_domains + scope.allowed_cidrs + scope.allowed_urls
-        return agent_system_prompt(self.agent_type, allowed)
+        return agent_system_prompt(self.agent_type)
+
+    def _world_state(self) -> dict[str, Any]:
+        from spiritscout.gateway.world_state import snapshot
+
+        guard = getattr(getattr(self.ctx, "policy", None), "guard", None)
+        return snapshot(guard=guard)
 
     @abc.abstractmethod
     async def execute_step(

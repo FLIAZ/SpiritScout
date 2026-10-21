@@ -802,26 +802,94 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
 .mbar .mv { text-align: right; font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
 
 /* ================= 提问卡（ask_user） ================= */
-.ask-targets { display: flex; flex-direction: column; gap: 5px; margin-top: 8px; }
-.ask-targets-hint { font-size: 11.5px; color: var(--ink-3); line-height: 1.5; }
-.ask-target { display: flex; gap: 7px; align-items: baseline; font-size: 12px;
-  color: var(--ink-2); word-break: break-all; }
-.ask-target-why { color: var(--ink-3); }
-.ask-ops { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
-.ask-free { display: flex; gap: 8px; margin-top: 10px; }
-.ask-free textarea { flex: 1; min-width: 0; resize: vertical; }
-.ask-ops .btn { white-space: normal; text-align: left; }
-.ask-status { margin-top: 6px; font-size: 12px; color: var(--ink-2); }
+/* 提问卡贴在输入坞上方：问题在上，候选答复纵向排列，授权勾选与自由答复同卡收束。 */
+.apv.ask {
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--accent) 5%, var(--surface)), var(--surface) 62%);
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line));
+  border-radius: 16px; padding: 14px 16px 12px; margin-bottom: 12px;
+  box-shadow: var(--shadow-raise);
+}
+.apv.ask[aria-busy="true"] { opacity: .82; }
+.apv.ask .apv-title { color: var(--accent-ink); }
+.ask-head { display: flex; align-items: center; gap: 9px; }
+.ask-badge { width: 24px; height: 24px; border-radius: 50%; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent); color: #fff; font-size: 12px; font-weight: 700; }
+.apv.ask .apv-detail { margin-top: 7px; font-size: 13px; line-height: 1.7; color: var(--ink); }
+.ask-block { margin-top: 13px; }
+.ask-label { display: flex; align-items: center; gap: 7px; margin-bottom: 7px;
+  font-size: 11.5px; font-weight: 600; letter-spacing: .04em; color: var(--ink-3); }
+.ask-label-tag { border-radius: 999px; padding: 1px 7px; letter-spacing: 0;
+  font-size: 10px; font-weight: 600; color: var(--accent-ink); background: var(--accent-soft); }
+.ask-ops { display: flex; flex-direction: column; gap: 8px; }
+.ask-opt { display: flex; align-items: flex-start; gap: 10px; width: 100%;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--surface);
+  color: var(--ink); padding: 10px 12px; text-align: left; font-size: 13px;
+  line-height: 1.55; white-space: normal; overflow-wrap: anywhere;
+  transition: border-color .15s, background .15s, transform .12s; }
+.ask-opt:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface)); }
+.ask-opt:active { transform: translateY(1px); }
+.ask-opt:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ask-opt:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+/* 多选：点选只切换选中态，统一提交；选中行与序号一起点亮，右侧打勾。 */
+.ask-opt.selected { border-color: color-mix(in srgb, var(--accent) 62%, var(--line));
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface)); }
+.ask-opt.selected .ask-opt-idx { background: var(--accent); color: #fff; }
+.ask-opt-check { flex: none; align-self: center; margin-left: 2px;
+  font-size: 12px; font-weight: 700; color: var(--accent-ink);
+  opacity: 0; transform: scale(.6);
+  transition: opacity .15s, transform .15s; }
+.ask-opt.selected .ask-opt-check { opacity: 1; transform: none; }
+.ask-opt-idx { flex: none; width: 21px; height: 21px; border-radius: 50%; margin-top: 1px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent-soft); color: var(--accent-ink);
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+  transition: background .15s, color .15s; }
+.ask-opt-text { flex: 1; min-width: 0; }
+.ask-targets { display: flex; flex-direction: column; gap: 8px; }
+.ask-target { display: flex; align-items: flex-start; gap: 10px; padding: 9px 12px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 38%, var(--line));
+  border-radius: 12px; background: color-mix(in srgb, var(--accent) 3%, var(--surface));
+  cursor: pointer; transition: border-color .15s, background .15s; }
+.ask-target:hover { border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); }
+.ask-target:has(input:checked) { border-style: solid;
+  border-color: color-mix(in srgb, var(--accent) 62%, var(--line));
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface)); }
+.ask-target input[type="checkbox"] { flex: none; width: 15px; height: 15px;
+  margin: 2px 0 0; padding: 0; border-radius: 4px; accent-color: var(--accent); }
+.ask-target-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ask-target-host { font-family: var(--mono); font-size: 12px; font-weight: 600;
+  color: var(--ink); overflow-wrap: anywhere; }
+.ask-target-why { font-size: 11.5px; line-height: 1.5; color: var(--ink-3); }
+.ask-targets-hint { margin-top: 7px; font-size: 11.5px; line-height: 1.55; color: var(--ink-3); }
+/* 答复输入与发送同排：卡片再高也不把主按钮挤到面板折叠线以下。 */
+.ask-free { display: flex; align-items: flex-end; gap: 8px; margin-top: 13px; }
+.ask-free textarea { flex: 1; min-width: 0; min-height: 56px; max-height: 180px; resize: vertical;
+  border-radius: 12px; padding: 9px 12px; font-size: 13px; line-height: 1.6;
+  background: var(--surface); }
+.ask-send { flex: none; border-radius: 999px; padding: 6px 18px; white-space: nowrap;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--line));
+  background: var(--accent-soft); color: var(--accent-ink);
+  font-size: 12.5px; font-weight: 600;
+  transition: background .15s, border-color .15s, transform .12s; }
+.ask-send:hover { background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+  border-color: var(--accent); }
+.ask-send:active { transform: translateY(1px); }
+.ask-send:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+.ask-status { margin-top: 8px; font-size: 12px; color: var(--ink-2); }
+.ask-status:empty { display: none; }
 .ask-status.error { color: var(--bad); }
 .apv-detail { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* 提问与审批独立于选项卡及画布，不参与图的拖拽/重绘。 */
-.session-actions { flex: none; max-height: min(42vh, 420px); overflow-y: auto;
-  margin-bottom: 10px; padding: 1px; }
+.session-actions { flex: none; max-height: min(60vh, 560px); overflow-y: auto;
+  padding: 4px 2px 0; }
 .session-actions > div:empty { display: none; }
-.session-actions .apv { background: var(--surface);
-  border: 1px solid var(--warn); box-shadow: var(--shadow-raise); }
-.session-actions .apv:last-child { margin-bottom: 4px; }
+.session-actions .apv { border-radius: 16px; box-shadow: var(--shadow-raise); }
+.session-actions .apv:not(.ask) { background: var(--surface); border: 1px solid var(--warn); }
+.session-actions .apv:last-child { margin-bottom: 2px; }
 /* 路由分支节点：进度 + 笔记 + 推理摘要 */
 .bnode { width: 260px; }
 .bnode .rt-note { font-size: 10.5px; color: var(--ink-3); line-height: 1.45;

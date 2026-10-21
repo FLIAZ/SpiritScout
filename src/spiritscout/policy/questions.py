@@ -71,15 +71,20 @@ class QuestionBroker:
     # ------------------------------------------------------------ 询问侧（agent 调用）
 
     async def ask(self, agent: str, question: str, options: list[str],
-                  targets: list[Any] | None = None) -> dict[str, Any]:
-        """提交一个用户问题；挂起直到作答/停止。返回 {"answer", "scope_added"}。"""
+                  targets: list[Any] | None = None, *,
+                  multiple: bool = False) -> dict[str, Any]:
+        """提交一个用户问题；挂起直到作答/停止。返回 {"answer", "scope_added"}。
+
+        multiple=True 表示选项可多选（前端勾选后统一提交），默认单选。
+        """
         question = str(question or "").strip()[:2000]
         fingerprint = f"{agent}|{question}"
         existing = self._by_question.get(fingerprint)
         if existing and existing in self._waiters:
             qid = existing                            # 同一问题已在询问：共用裁决
         else:
-            qid = self._create(agent, question, fingerprint, options, targets)
+            qid = self._create(agent, question, fingerprint, options, targets,
+                               multiple=multiple)
         fut = self._waiters[qid]
         self._consumers[qid] = self._consumers.get(qid, 0) + 1
         try:
@@ -89,7 +94,8 @@ class QuestionBroker:
             self._detach(qid, fingerprint)
 
     def _create(self, agent: str, question: str, fingerprint: str,
-                options: list[str], targets: list[Any] | None) -> str:
+                options: list[str], targets: list[Any] | None,
+                *, multiple: bool = False) -> str:
         qid = new_id("ask")
         fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._waiters[qid] = fut
@@ -99,12 +105,14 @@ class QuestionBroker:
             "question_id": qid, "agent": agent, "question": question,
             "options": [str(o).strip()[:200] for o in (options or [])[:6]
                         if str(o).strip()],
+            "multiple": bool(multiple),
             "targets": normalize_targets(targets),
             "requested_at": time.time(),
         }
         self._audit.log("user.question", agent, {
             "question_id": qid, "question": question[:500],
             "options": self._pending[qid]["options"],
+            "multiple": bool(multiple),
             "targets": self._pending[qid]["targets"]})
         return qid
 
@@ -140,18 +148,44 @@ class QuestionBroker:
     # ------------------------------------------------------------ 作答侧（Web 端点调用）
 
     def answer(self, question_id: str, *, choice: int | None = None,
-               text: str = "", add_targets: list[str] | None = None) -> bool:
-        """作答一条待答问题。choice=选项下标；text=自由输入（优先）；
+               choices: list[int] | None = None, text: str = "",
+               add_targets: list[str] | None = None) -> bool:
+        """作答一条待答问题。choice=单选下标；choices=多选下标（仅多选问题）；
+        text=自由输入（多选时作为补充说明与所选选项一并回传）；
         add_targets=用户勾选的扩围目标（必须是问句附带的 targets 子集）。"""
         rec = self._pending.get(question_id)
         fut = self._waiters.get(question_id)
         if rec is None or fut is None or fut.done():
             return False
-        answer = str(text or "").strip()[:1000]
-        if not answer:
-            if type(choice) is not int or not 0 <= choice < len(rec["options"]):
-                raise ValueError("请选择有效选项或填写答复")
-            answer = rec["options"][choice]
+        if choice is not None and choices:
+            raise ValueError("choice 与 choices 只能二选一")
+        multiple = bool(rec.get("multiple"))
+        raw = [choice] if choice is not None else list(choices or [])
+        picked: list[int] = []
+        if raw:
+            if not multiple and len(raw) > 1:
+                raise ValueError("这条问题只能选择一个选项")
+            for index in raw:
+                if type(index) is not int or not 0 <= index < len(rec["options"]):
+                    raise ValueError("请选择有效选项")
+                if index not in picked:
+                    picked.append(index)
+        answer_text = str(text or "").strip()[:1000]
+        if multiple:
+            parts: list[str] = []
+            if picked:
+                parts.append("、".join(rec["options"][i] for i in picked))
+            if answer_text:
+                parts.append(answer_text)
+            answer = "；".join(parts)[:1000]
+        elif answer_text:
+            answer = answer_text
+        elif picked:
+            answer = rec["options"][picked[0]]
+        else:
+            answer = ""
+        if not answer and not add_targets:
+            raise ValueError("请选择有效选项或填写答复")
         added: list[str] = []
         if add_targets and self._guard is not None:
             valid = {t["target"] for t in rec["targets"] if isinstance(t, dict)}
@@ -161,10 +195,15 @@ class QuestionBroker:
                         added.append(self._guard.approve_target(str(target)))
                     except (ScopeViolation, ValueError, TypeError):
                         continue    # 单条扩围失败不影响作答
-        payload = {"answer": answer, "scope_added": added}
+        if not answer and added:
+            # 只勾选扩围目标也是明确作答（如「这些目标本次要测」）
+            answer = "已确认目标：" + "、".join(added)
+        if not answer:
+            raise ValueError("请选择有效选项或填写答复")
+        payload = {"answer": answer, "choices": picked, "scope_added": added}
         self._audit.log("user.answered", "web", {
             "question_id": question_id, "answer": answer[:300],
-            "scope_added": added})
+            "choices": picked, "scope_added": added})
         self._resolve(question_id, payload)
         return True
 

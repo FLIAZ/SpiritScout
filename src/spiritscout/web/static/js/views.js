@@ -132,8 +132,12 @@ function renderApprovals() {
 
 function updateSessionActions() {
   const panel = $("#session-actions");
-  if (panel) panel.hidden = !$("#topo-ops-apv").children.length
+  if (!panel) return;
+  const wasHidden = panel.hidden;
+  panel.hidden = !$("#topo-ops-apv").children.length
     && !$("#topo-ops-ask").children.length;
+  // 面板贴在输入坞上方，出现/收起会改变时间线可视高度：原本跟底的保持跟底。
+  if (wasHidden !== panel.hidden && traceStick) traceScroll(true);
 }
 
 /* 卡片按问题 ID 复用：状态轮询/拓扑重绘不重建输入框、焦点或勾选。 */
@@ -158,35 +162,85 @@ function renderQuestions() {
       card.className = "apv ask";
       card.dataset.questionId = q.question_id;
     }
-    const signature = JSON.stringify([q.agent, q.question, q.options, q.targets]);
+    const signature = JSON.stringify([q.agent, q.question, q.options, q.multiple, q.targets]);
     if (card.dataset.signature !== signature) {
       card.dataset.signature = signature;
+      const options = q.options || [];
+      const targets = q.targets || [];
+      const multiple = Boolean(q.multiple);
       card.innerHTML = `
-        <div class="apv-title">${esc(agentName(q.agent) || q.agent || "智能体")} 向你提问</div>
+        <div class="ask-head">
+          <span class="ask-badge" aria-hidden="true">问</span>
+          <div class="apv-title">${esc(agentName(q.agent) || q.agent || "智能体")} 向你提问</div>
+        </div>
         <div class="apv-detail">${esc(q.question || "")}</div>
-        ${q.targets && q.targets.length ? `<div class="ask-targets">
-          <div class="ask-targets-hint">这次测试需要访问以下新目标（目前不在授权范围内）。勾选表示允许本次会话访问它，不勾选也不影响你上面的答复：</div>
-          ${q.targets.map(raw => {
-            const t = typeof raw === "string" ? { target: raw, why: "" } : raw;
-            return `<label class="ask-target"><input type="checkbox" data-qtarget value="${esc(t.target)}">允许访问 ${esc(t.target)}${t.why ? `<span class="ask-target-why">（${esc(t.why)}）</span>` : ""}</label>`;
-          }).join("")}</div>` : ""}
-        <div class="ask-ops">${(q.options || []).map((option, i) =>
-          `<button type="button" class="btn primary sm" data-qchoice="${i}">${esc(option)}</button>`).join("")}</div>
+        ${options.length ? `<div class="ask-block">
+          <div class="ask-label">选择你的答复${multiple ? `<span class="ask-label-tag">可多选</span>` : ""}</div>
+          <div class="ask-ops" role="group" aria-label="${multiple ? "候选回答，可选择多项" : "候选回答"}">
+            ${options.map((option, i) => `<button type="button" class="ask-opt" data-qchoice="${i}"${multiple ? ` aria-pressed="false"` : ""}>
+              <span class="ask-opt-idx" aria-hidden="true">${i + 1}</span>
+              <span class="ask-opt-text">${esc(option)}</span>
+              ${multiple ? `<span class="ask-opt-check" aria-hidden="true">✓</span>` : ""}
+            </button>`).join("")}
+          </div>
+        </div>` : ""}
+        ${targets.length ? `<div class="ask-block">
+          <div class="ask-label">同时授权新目标<span class="ask-label-tag">可选</span></div>
+          <div class="ask-targets">
+            ${targets.map(raw => {
+              const t = typeof raw === "string" ? { target: raw, why: "" } : raw;
+              return `<label class="ask-target">
+                <input type="checkbox" data-qtarget value="${esc(t.target)}">
+                <span class="ask-target-body">
+                  <span class="ask-target-host">${esc(t.target)}</span>
+                  <span class="ask-target-why">${t.why ? esc(t.why) : "本次测试需要使用该目标"}</span>
+                </span>
+              </label>`;
+            }).join("")}
+          </div>
+          <div class="ask-targets-hint">这些目标目前不在授权范围内。勾选后随本次答复一并加入本次会话的授权范围；不勾选不影响你选择的答复。</div>
+        </div>` : ""}
         <div class="ask-free">
-          <textarea rows="2" maxlength="1000" aria-label="你的答复" placeholder="输入你的答复…（Enter 发送，Shift+Enter 换行）" data-qfree></textarea>
-          <button type="button" class="btn sm" data-qsend>答复</button>
+          <textarea rows="2" maxlength="1000" aria-label="你的答复" placeholder="${multiple ? "可补充说明…（Enter 提交，Shift+Enter 换行）" : "或输入自定义答复…（Enter 发送，Shift+Enter 换行）"}" data-qfree></textarea>
+          <button type="button" class="ask-send" data-qsend>${multiple ? "提交答复" : "发送答复"}</button>
         </div>
         <div class="ask-status" role="status" aria-live="polite"></div>`;
       const input = card.querySelector("[data-qfree]");
+      const sendButton = card.querySelector("[data-qsend]");
+      const picked = () => [...card.querySelectorAll("[data-qchoice].selected")]
+        .map(button => Number(button.dataset.qchoice));
+      // 多选可点选多项后统一提交：按钮文案跟随已选数量，未选时也能只发文字。
+      const syncSend = () => {
+        if (!multiple) return;
+        const count = picked().length;
+        sendButton.textContent = count ? `提交所选（${count}）` : "提交答复";
+      };
       const sendText = () => {
         const text = input.value.trim();
-        if (!text) { input.focus(); toast("先填写答复内容", true); return; }
-        answerQuestion(q.question_id, { text, add_targets: collectTargets(card) }, card, sessionId);
+        const choices = multiple ? picked() : [];
+        const targets = collectTargets(card);
+        if (!choices.length && !text && !targets.length) {
+          input.focus();
+          toast(multiple ? "先选择至少一项，或填写答复" : "先填写答复内容", true);
+          return;
+        }
+        const body = choices.length
+          ? { choices, add_targets: targets }
+          : { text, add_targets: targets };
+        if (choices.length && text) body.text = text;
+        answerQuestion(q.question_id, body, card, sessionId);
       };
-      card.querySelectorAll("[data-qchoice]").forEach(button => button.onclick = () =>
+      card.querySelectorAll("[data-qchoice]").forEach(button => button.onclick = () => {
+        if (multiple) {
+          const on = button.classList.toggle("selected");
+          button.setAttribute("aria-pressed", String(on));
+          syncSend();
+          return;
+        }
         answerQuestion(q.question_id, { choice: Number(button.dataset.qchoice),
-          add_targets: collectTargets(card) }, card, sessionId));
-      card.querySelector("[data-qsend]").onclick = sendText;
+          add_targets: collectTargets(card) }, card, sessionId);
+      });
+      sendButton.onclick = sendText;
       input.onkeydown = event => {
         if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
           event.preventDefault();
@@ -383,6 +437,7 @@ function renderChips() {
                      entry_only: "仅入口", none: "无" }[bc.coverage];
   const phase = { queued: "等待调度", starting: "启动任务", mode_routing: "判断任务类型",
     model_preflight: "检查模型", platform_profile: "解析平台档案",
+    scope_confirmation: "确认测试范围",
     master_reply: "灵枢回复中", runtime_starting: "初始化工具与智能体",
     executing: "执行中", completed: "已完成", failed: "失败", stopped: "已停止",
     interrupted: "已中断" }[TERMINAL.has(st.session.status) ? st.session.status : st.session.phase] || st.session.phase || "等待启动";

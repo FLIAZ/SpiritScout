@@ -295,9 +295,21 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
         local_analysis=bool(req.has_uploads),
         notes="启动装配授权声明",
     )
+    # SRC 的工作目标必须落在真实资产上：显式 target 优先；没有时从装配后的
+    # 授权范围取第一个 URL/域名（续传合并 extra_scope 的常见场景）——否则
+    # 会落到 CTF 占位符 "ctf://challenges"，侦察/测绘把 "challenges" 当主机名。
+    # 多域目标由规划节点各自指定 target（见 MasterAgent._task_target）。
+    target = req.target or ""
+    if req.mode == RunMode.SRC and (
+            not target or target.startswith("ctf://")):
+        if allowed_urls:
+            target = allowed_urls[0]
+        elif allowed_domains:
+            target = "https://" + allowed_domains[0]
     authorization = Authorization(
         auth_id=new_id("auth"), mode=req.mode, scope=scope,
-        target_description=req.target or "ctf://challenges",
+        target_description=target or (
+            "ctf://challenges" if req.mode != RunMode.SRC else "按授权范围"),
         src_platform=req.platform, human_confirmed=True,
     )
     # Flag 格式边界：显式参数优先，其次任务描述中的赛方声明（确定性提取）
@@ -305,7 +317,7 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
         or (_mission_flag_patterns(mission) or None)
     return LaunchPlan(
         authorization=authorization,
-        target=req.target or "ctf://challenges",
+        target=target or ("ctf://challenges" if req.mode != RunMode.SRC else ""),
         challenges=challenges, rules=rules,
         flag_patterns=flag_patterns,
         mission=mission,

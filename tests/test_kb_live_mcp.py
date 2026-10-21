@@ -1,3 +1,5 @@
+"""kb_search 直接检索会话当前注册的 MCP 工具目录，无需预先入库。"""
+
 from __future__ import annotations
 
 import tempfile
@@ -7,38 +9,6 @@ from types import SimpleNamespace
 
 from spiritscout.ctf.agents import CTFBaseAgent
 from spiritscout.knowledge.store import KnowledgeStore
-
-
-class EnvCapabilitiesSeedTests(unittest.TestCase):
-    """环境能力事实入库可检：想到「外带/DNSLog」时 kb_search 能命中工具地图。"""
-
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.kb = KnowledgeStore(Path(self._tmp.name) / "kb.db", auto_seed=True)
-
-    def tearDown(self) -> None:
-        self.kb.close()
-        self._tmp.cleanup()
-
-    def test_env_capabilities_seeded(self) -> None:
-        stats = self.kb.stats()
-        self.assertEqual(stats.get("env_capabilities"), 4)
-
-    def test_search_by_exfil_terms_hits_dnslog_entry(self) -> None:
-        for query in ("数据外带 带外", "DNSLog 回调接收", "OOB"):
-            hits = self.kb.search(query, limit=6)
-            bases = {h["base"] for h in hits}
-            self.assertIn("env_capabilities", bases, f"「{query}」未命中环境能力条目")
-
-    def test_entry_roundtrip_and_digest(self) -> None:
-        hits = self.kb.search("带外数据接收", limit=6)
-        hit = next(h for h in hits if h["base"] == "env_capabilities")
-        entry = self.kb.get_entry("env_capabilities", hit["entry_key"])
-        assert entry is not None
-        self.assertEqual(entry["fact_id"], "ENV-DNSLOG-RECV")
-        digest = CTFBaseAgent._kb_entry_digest("env_capabilities", entry)
-        self.assertIn("mcp__yakit__require_dnslog_domain", digest)
-        self.assertIn("query_dnslog_by_token", digest)
 
 
 class McpLiveDirectorySearchTests(unittest.IsolatedAsyncioTestCase):

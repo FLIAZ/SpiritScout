@@ -100,15 +100,6 @@ CREATE TABLE IF NOT EXISTS base_competition_rules (
     deprecated    INTEGER NOT NULL DEFAULT 0
 );
 
--- 五库-6 运行环境能力事实（「地图」条目：只陈述存在什么，供 kb_search 命中）
-CREATE TABLE IF NOT EXISTS base_env_capabilities (
-    fact_id       TEXT PRIMARY KEY,
-    title         TEXT NOT NULL,
-    facts         TEXT NOT NULL,          -- JSON list
-    source        TEXT NOT NULL,
-    last_verified TEXT NOT NULL
-);
-
 -- 红队经验库：ATT&CK 战术-技术映射（附录B-三，27 行真实 ID）
 CREATE TABLE IF NOT EXISTS exp_attack_map (
     id             INTEGER PRIMARY KEY,
@@ -209,7 +200,6 @@ _JSON_COLUMNS: dict[str, frozenset[str]] = {
     "base_vuln_standards": frozenset({"level_mapping", "report_required"}),
     "base_poc_templates": frozenset({"request_spec"}),
     "base_competition_rules": frozenset({"rules"}),
-    "base_env_capabilities": frozenset({"facts"}),
     "exp_redteam_entries": frozenset(
         {"tactic_ids", "os_platform", "preconditions", "steps", "tools"}),
     "exp_attack_paths": frozenset({"step_sequence", "related_tactics"}),
@@ -225,7 +215,6 @@ BASES: dict[str, str] = {
     "fp_signatures": "base_fp_signatures",
     "poc_templates": "base_poc_templates",
     "competition_rules": "base_competition_rules",
-    "env_capabilities": "base_env_capabilities",
     "attack_map": "exp_attack_map",
     "redteam_entries": "exp_redteam_entries",
     "attack_paths": "exp_attack_paths",
@@ -550,9 +539,6 @@ class KnowledgeStore:
             add("attack_paths", r["path_id"], r["scenario"],
                 r["entry_conditions"], steps, r["decision_points"],
                 r["failure_handling"], r["prerequisite_knowledge"])
-        for r in self._rows("base_env_capabilities"):
-            add("env_capabilities", r["fact_id"], r["title"],
-                " ".join(r["facts"]), r["source"])
         for r in self._rows("base_vuln_standards"):
             add("vuln_standards", f"{r['platform']}:{r['id']}",
                 f"{r['platform']} {r['rule_type']}",
@@ -620,7 +606,6 @@ class KnowledgeStore:
             key_col = key_col or {
                 "assets": "pattern_id", "fp_signatures": "fp_id",
                 "poc_templates": "template_id", "competition_rules": "rule_id",
-                "env_capabilities": "fact_id",
                 "redteam_entries": "entry_id", "attack_paths": "path_id",
                 "hunt_templates": "template_id", "report_templates": "template_id",
             }[base]

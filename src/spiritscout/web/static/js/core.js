@@ -142,23 +142,85 @@ async function fetchSessions() {
     }
   }
 }
+/* 会话按项目文件夹分组：指向已删项目的会话归入未分类。
+   文件夹顺序跟随项目目录（最近活动优先），未分类殿后；只渲染有会话的文件夹。 */
+function sessionGroups(sessions, projects) {
+  const known = new Map((projects || []).map(p => [p.project_id, p]));
+  const groups = new Map();
+  for (const s of sessions || []) {
+    const id = s.project_id && known.has(s.project_id) ? s.project_id : "";
+    if (!groups.has(id)) {
+      groups.set(id, {id,
+        name: id ? (known.get(id).name || "未命名项目") : "未分类", items: []});
+    }
+    groups.get(id).items.push(s);
+  }
+  const order = new Map((projects || []).map((p, i) => [p.project_id, i]));
+  return [...groups.values()].sort((a, b) =>
+    (a.id ? order.get(a.id) : Number.MAX_SAFE_INTEGER)
+    - (b.id ? order.get(b.id) : Number.MAX_SAFE_INTEGER));
+}
+
+/* 折叠状态是浏览器本地偏好：按项目 ID 记一组收起的文件夹。 */
+const SESS_FOLD_KEY = "ss-sess-folded";
+function foldedFolders() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SESS_FOLD_KEY) || "[]");
+    return new Set(Array.isArray(raw) ? raw.map(String) : []);
+  } catch { return new Set(); }
+}
+function foldFolder(id, folded) {
+  const set = foldedFolders(), key = String(id || "");
+  if (folded) set.add(key); else set.delete(key);
+  try { localStorage.setItem(SESS_FOLD_KEY, JSON.stringify([...set])); } catch {}
+}
+
+function sessionItemHtml(s) {
+  return `
+    <div class="sess-item ${s.session_id === S.cur ? "on" : ""}" data-id="${s.session_id}">
+      <div class="t"><span class="pill ${s.status}" style="padding:1px 7px;font-size:10.5px">${STATUS_CN[s.status] || s.status}</span>
+        <span class="name" title="${esc(s.title)}">${esc(s.title)}</span></div>
+      <div class="s">${esc(s.target || s.session_id)} · <span class="mono">${esc(s.session_id.slice(5, 13))}</span></div>
+      <div class="ops">
+        <button data-act="rename" title="重命名">✎</button>
+        <button data-act="del" class="danger" title="删除会话">✕</button>
+      </div>
+    </div>`;
+}
+
 function renderSessions() {
   const box = $("#sess-list");
+  if (!box) return;
   if (box.querySelector("input.rename, [data-armed]")) return;   // 正在重命名：不打断输入
   if (!S.sessions.length) {
     box.innerHTML = `<div class="empty-note" style="padding:22px 8px">还没有会话</div>`;
     return;
   }
-  box.innerHTML = S.sessions.map(s => `
-    <div class="sess-item ${s.session_id === S.cur ? "on" : ""}" data-id="${s.session_id}">
-      <div class="t"><span class="pill ${s.status}" style="padding:1px 7px;font-size:10.5px">${STATUS_CN[s.status] || s.status}</span>
-        <span class="name" title="${esc(s.title)}">${esc(s.title)}</span></div>
-      <div class="s">${esc(s.target || s.session_id)} · <span class="mono">${esc(s.session_id.slice(5, 13))}</span>${s.project_id ? ` · <span class="sess-proj">${esc(projectName(s.project_id))}</span>` : ""}</div>
-      <div class="ops">
-        <button data-act="rename" title="重命名">✎</button>
-        <button data-act="del" class="danger" title="删除会话">✕</button>
-      </div>
-    </div>`).join("");
+  const folded = foldedFolders();
+  const chev = `<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>`;
+  const folder = `<svg class="fico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.4l2 2h7.6A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/></svg>`;
+  box.innerHTML = sessionGroups(S.sessions, S.projects).map(g => {
+    const isFolded = folded.has(g.id);
+    const hasCurrent = g.items.some(s => s.session_id === S.cur);
+    const running = g.items.some(s => !TERMINAL.has(s.status));
+    const action = isFolded ? "展开" : "折叠";
+    return `<section class="sess-folder${isFolded ? " folded" : ""}${hasCurrent ? " has-on" : ""}" data-folder="${esc(g.id)}">
+      <button class="sess-folder-head" type="button" aria-expanded="${isFolded ? "false" : "true"}" title="${action}项目：${esc(g.name)}">
+        ${chev}${folder}<span class="fname">${esc(g.name)}</span>${running ? `<span class="frun" title="有会话在运行"></span>` : ""}<span class="fcount">${g.items.length}</span>
+      </button>
+      <div class="sess-folder-body">${g.items.map(sessionItemHtml).join("")}</div>
+    </section>`;
+  }).join("");
+  box.querySelectorAll(".sess-folder-head").forEach(head => {
+    head.onclick = () => {
+      const section = head.closest(".sess-folder");
+      const next = !section.classList.contains("folded");
+      section.classList.toggle("folded", next);
+      head.setAttribute("aria-expanded", String(!next));
+      head.title = `${next ? "展开" : "折叠"}项目：${section.querySelector(".fname").textContent}`;
+      foldFolder(section.dataset.folder, next);
+    };
+  });
   box.querySelectorAll(".sess-item").forEach(el => {
     el.onclick = (ev) => {
       if (!ev.target.closest(".ops") && !ev.target.closest("input"))

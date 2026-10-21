@@ -20,14 +20,15 @@ class ProjectCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(max_length=80)
-    description: str = Field(default="", max_length=500)
+    # 说明可承载完整测试规则，不限长度（由用户按项目维护）
+    description: str = Field(default="")
 
 
 class ProjectPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = Field(default=None, max_length=80)
-    description: str | None = Field(default=None, max_length=500)
+    description: str | None = None
 
 
 def mount_projects(app: FastAPI, store: ResourceStore, manager: Any) -> None:

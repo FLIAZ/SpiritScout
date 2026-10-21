@@ -51,6 +51,7 @@ from spiritscout.agents.sub.base import RoutePlan, StepResult, SubAgent
 from spiritscout.core.ids import new_id
 from spiritscout.core.models import AgentType, BlackboardLayer, Task
 from spiritscout.ctf.flags import FlagManager
+from spiritscout.gateway import world_state
 from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
 from spiritscout.tools.spec import ActionCategory
 
@@ -524,9 +525,11 @@ class CTFBaseAgent(SubAgent):
             }),
         _fn("shell",
             "在隔离沙箱里执行一条 shell 命令（bash -c），拿到输出与退出码。"
-            "适合 curl/nc/jq/grep/文件操作等一切命令行动作；工作目录在会话内"
-            "持久（脚本与产物落那里，跨回合直接可用；/tmp 每次运行即焚），"
-            "系统文件只读，联网仅限授权目标。命令全文留痕于审计。每次调用"
+            "适合 HTTP 交互、socket 通信、文件检索与处理等命令行动作；"
+            "具体命令以实际执行为准，不确定时先 `command -v <name>` 探测；"
+            "工作目录在会话内持久（脚本与产物落那里，跨回合直接可用；"
+            "/tmp 每次运行即焚），系统文件只读，联网仅限授权目标。命令全文"
+            "留痕于审计。每次调用"
             "必须用 action 如实声明这条命令要做什么——审计与审批以它为准。",
             {
                 "command": {"type": "string", "description": "要执行的命令"},
@@ -544,8 +547,10 @@ class CTFBaseAgent(SubAgent):
             }, required=["command", "action"]),
         _fn("python",
             "在隔离沙箱里执行一段 Python 代码（python3），拿到输出与退出码。"
-            "已装 requests/httpx/websockets/pwntools 等常用库；适合 "
-            "WebSocket/socket 协议交互、数据计算与解码、脚本化构造请求。"
+            "适合 WebSocket/socket 协议交互、数据计算与解码、脚本化构造请求；"
+            "具体有哪些库以实际导入结果为准——不确定时先 `python3 -c "
+            "'import <模块>'` 或 `pip list | grep -i <关键词>` 查看，"
+            "不要凭记忆假设。"
             "工作目录会话内持久，产物跨回合直接可用（/tmp 每次运行即焚）；"
             "产物也可用附件分析工具继续研究。每次调用必须用 action 如实"
             "声明这段代码要做什么——审计与审批以它为准。",
@@ -601,6 +606,14 @@ class CTFBaseAgent(SubAgent):
                           "description": "要问用户的问题（自己组织语言）"},
              "options": {"type": "array", "items": {"type": "string"},
                          "description": "建议选项（2~4 个，用户可自由输入）"},
+             "multiple": {"type": "boolean",
+                          "description": ("选项可多选：仅当选项彼此不互斥、"
+                                          "用户可能同时选多项时设 true"
+                                          "（如「接下来优先看哪些方向」"
+                                          "「需要开通哪些账号/环境」）；"
+                                          "「允许/拒绝」这类互斥决策保持 "
+                                          "false。多选选项要写成可独立"
+                                          "成立的动作或结论")},
              "targets": {"type": "array",
                          "items": {"type": "object",
                                    "properties": {
@@ -1111,6 +1124,11 @@ class CTFBaseAgent(SubAgent):
                     f"灵枢督导（全局方向建议，结合现场自行权衡）：{steer['hint']}"})
                 state["steer_seen"] = steer["ts"]
 
+        fragment, changed = self._sync_world_state(state)
+        if fragment:
+            state["messages"].append({"role": "user", "content": fragment})
+            self.ctx.audit.log("world_state.update", self.agent_id, {
+                "route": route.name, "keys": changed})
         state["turn"] += 1
         turn = state["turn"]
         include_initial_system = not bool(state.get("system_initialized"))
@@ -1480,10 +1498,13 @@ class CTFBaseAgent(SubAgent):
             return _ToolOutcome(ok=False, text=(
                 "当前会话没有可用的用户询问通道——基于已有证据自行决策，"
                 "并在结论中说明该不确定点。"))
+        multiple = bool(args.get("multiple"))
         self.ctx.audit.log("agent.ask_user", self.agent_id, {
             "route": route.name, "challenge": self.challenge_id(task),
-            "question": question[:500], "options": options, "targets": targets})
-        result = await broker.ask(self.agent_type.value, question, options, targets)
+            "question": question[:500], "options": options,
+            "multiple": multiple, "targets": targets})
+        result = await broker.ask(self.agent_type.value, question, options, targets,
+                                  multiple=multiple)
         answer = str(result.get("answer") or "").strip()
         added = result.get("scope_added") or []
         if result.get("cancelled"):
@@ -1591,10 +1612,6 @@ class CTFBaseAgent(SubAgent):
                 f"【狩猎模板】{e.get('scene')}｜前置: {e.get('precondition')}",
                 "步骤: " + " → ".join(str(s) for s in e.get("step_sequence", [])[:8]),
                 f"常见坑: {e.get('common_pitfall')}"])
-        if base == "env_capabilities":
-            # 环境能力事实（地图）：纯陈述存在什么，供模型对上手牌
-            return "\n".join([f"【环境能力】{e.get('title')}"]
-                             + [f"- {f}" for f in e.get("facts", [])[:6]])
         parts = [f"【{e.get(k)}】" for k in
                  ("verify_method", "include_condition", "note", "operation",
                   "representative_scene", "rules", "name", "desc", "data")
@@ -1985,24 +2002,42 @@ class CTFBaseAgent(SubAgent):
 
     # ------------------------------------------------------------ 提示词与上下文
 
-    def _solver_system_prompt(self, task: Task) -> str:
+    def _world_environment(self) -> dict[str, Any]:
+        builtin = getattr(self.ctx, "builtin_ctx", None) or {}
+        workspace = str(builtin.get("workspace_root") or "")
+        artifacts = str(Path(workspace) / "artifacts") if workspace else ""
+        return world_state.environment(workspace=workspace, artifacts=artifacts)
+
+    def _world_snapshot(self) -> dict[str, Any]:
+        guard = getattr(getattr(self.ctx, "policy", None), "guard", None)
+        return world_state.snapshot(guard=guard, env=self._world_environment())
+
+    def _sync_world_state(self, state: dict[str, Any]) -> tuple[str, list[str]]:
+        """授权扩围/环境变化时追加一条自包含片段；无变化不占上下文。"""
+        current = self._world_snapshot()
+        previous = state.get("world_state")
+        fragment = world_state.update(previous, current)
+        changed = [] if fragment is None else [
+            key for key, value in current.items()
+            if not isinstance(previous, dict) or previous.get(key) != value]
+        state["world_state"] = current
+        return fragment or "", changed
+
+    def _solver_system_prompt(self) -> str:
         from spiritscout.agents.profiles import agent_system_prompt
 
-        scope = self.ctx.policy.guard.scope
-        allowed = scope.allowed_domains + scope.allowed_cidrs + scope.allowed_urls
         return (
-            agent_system_prompt(self.agent_type, allowed)
+            agent_system_prompt(self.agent_type)
             + "\n"
             "工作方式：工具就是你的手——需要看什么就用工具去拿，不要凭空猜测"
             "页面内容或响应。拿到页面先读懂它：可见文案、注释、表单与链接是"
             "出题人放在现场的第一手情报，往往比直接上手打接口更能说明这道题"
             "要什么。每一轮可以调用一个或多个工具：互不依赖的请求放在"
             "同一轮并发发出，省时间。\n"
-            "环境与知识：工具库封装在运行环境内（pwntools/pycryptodome/PIL/"
-            "sympy/z3/scapy/binwalk/sqlmap 等开箱即用），列表里的工具与"
-            "mcp__ 前缀的外部工具都是你的手；经验库里的检查清单与平台特性"
-            "事实用 kb_search 检索——它们是参考资料，采纳与否由你基于现场"
-            "证据判断。\n"
+            "环境与知识：工具列表里的工具与 mcp__ 前缀的外部工具都是你的手；"
+            "工具、解释器与库是否可用以实际执行结果为准，不确定时先探测；"
+            "经验库里的检查清单与平台特性事实用 kb_search 检索——它们是"
+            "参考资料，采纳与否由你基于现场证据判断。\n"
             "动手能力：要跑命令用 shell，要写代码用 python——它们在隔离沙箱里"
             "执行（系统文件只读，网络操作须遵守用户授权与禁打边界）。工作目录在会话内持久："
             "脚本与产物放在那里，后续回合直接可用；/tmp 每次运行即焚，需要"
@@ -2041,6 +2076,10 @@ class CTFBaseAgent(SubAgent):
         """首条用户消息：题面 + 入口预感知 + 同伴/前轮结论 + 目标。"""
         ch = self.challenge_of(task)
         parts: list[str] = []
+        world = self._world_snapshot()
+        if world:
+            parts.append(world_state.render(world))
+        state["world_state"] = world
         recovery = task.payload.get("execution_recovery")
         if recovery:
             parts.append("## 历史执行核对\n" + json.dumps(recovery, ensure_ascii=False))
@@ -2090,21 +2129,37 @@ class CTFBaseAgent(SubAgent):
         if angle:
             parts.append("## 本路线调查角度（与并行分支分工，不重复做功）\n"
                          + angle[:200])
-        parts.append("## 任务\n夺取本题 Flag；判定拿到后用 submit_flag 提交，"
+        task_part = ("## 任务\n夺取本题 Flag；判定拿到后用 submit_flag 提交，"
                      "拿到应答即收尾。")
         history = self.ctx.blackboard.read(BlackboardLayer.TOPOLOGY, "historical-assets")
         if history:
             parts.append("## 同一资产的历史参考（本次未复核，不能沿用旧授权）\n" + json.dumps(history, ensure_ascii=False)[:8000])
-        # 放在最后并单独限长：总截断时先丢共享记忆，不丢题目与任务
+        # 项目说明就是用户维护的测试规则：单独成块完整下发，不参与正文截断；
+        # 历史记忆（资产/发现）仍放正文末尾，预算不够时先丢它。
         project_memory = self.ctx.blackboard.read(
             BlackboardLayer.TOPOLOGY, "project-memory")
+        project_rules = ""
         if project_memory:
+            project_rules = str(project_memory.get("description") or "").strip()
+            history_view = {key: value for key, value in project_memory.items()
+                            if key != "description"}
             parts.append("## 所属项目的历史记忆（同项目跨会话参考，本次未复核，"
                          "不构成授权范围）\n"
-                         + json.dumps(project_memory, ensure_ascii=False)[:3000])
+                         + json.dumps(history_view, ensure_ascii=False)[:3000])
+        rules_part = ""
+        if project_rules:
+            rules_part = ("## 所属项目的测试规则（用户写在项目说明里，全程遵守；"
+                          "不扩大本次授权，与当前授权冲突时以当前授权为准）\n"
+                          + project_rules)
+        world_part = parts.pop(0) if world else ""
+        body = "\n\n".join(parts)
+        fixed = len(world_part) + len(rules_part) + len(task_part) + 6
+        body_budget = max(4000, 24000 - fixed)
         state["messages"] = [
-            {"role": "system", "content": self._solver_system_prompt(task)},
-            {"role": "user", "content": "\n\n".join(parts)[:24000]},
+            {"role": "system", "content": self._solver_system_prompt()},
+            {"role": "user", "content": "\n\n".join(
+                part for part in (world_part, body[:body_budget], rules_part,
+                                  task_part) if part)},
         ]
 
     @staticmethod

@@ -21,6 +21,7 @@ from spiritscout.core.models import (
 )
 from spiritscout.ctf.agents import CTFBaseAgent
 from spiritscout.gateway.context import shared_context
+from spiritscout.policy.scope import ScopeGuard
 from spiritscout.resources.store import ResourceStore
 from spiritscout.runtime import _build_infra
 
@@ -95,14 +96,18 @@ class RuntimeProjectMemoryTests(unittest.IsolatedAsyncioTestCase):
 class CTFProjectMemorySeedTests(unittest.TestCase):
     def _agent(self, blackboard: Blackboard) -> CTFBaseAgent:
         agent = object.__new__(CTFBaseAgent)
-        agent.ctx = SimpleNamespace(blackboard=blackboard)
+        agent.ctx = SimpleNamespace(
+            blackboard=blackboard,
+            policy=SimpleNamespace(
+                guard=ScopeGuard(Scope(allowed_urls=["http://challenge.test/"]))),
+            builtin_ctx={})
         agent.direction = "web"
         agent.challenge_of = lambda task: {"url": "http://challenge.test/"}
         agent._shared_conclusions = lambda task: []
         agent._shared_notes = lambda task: []
         agent._shared_site = lambda task: {}
         agent._peer_flags = lambda task, state: []
-        agent._solver_system_prompt = lambda task: "system"
+        agent._solver_system_prompt = lambda: "system"
         return agent
 
     def test_memory_appended_last_and_capped(self) -> None:
@@ -129,12 +134,20 @@ class CTFProjectMemorySeedTests(unittest.TestCase):
                 content = state["messages"][1]["content"]
             finally:
                 blackboard.close()
+            self.assertIn("<world_state>", content)
+            self.assertIn("challenge.test", content)
             self.assertIn("## 所属项目的历史记忆", content)
-            self.assertLess(content.index("## 任务"),
-                            content.index("## 所属项目的历史记忆"))
+            # 说明就是测试规则：全文注入且不参与正文截断
+            self.assertIn("## 所属项目的测试规则", content)
+            self.assertIn("长" * 8000, content)
+            self.assertLess(content.index("## 所属项目的历史记忆"),
+                            content.index("## 所属项目的测试规则"))
+            self.assertLess(content.index("## 所属项目的测试规则"),
+                            content.index("## 任务"))
             encoded = json.dumps(memory, ensure_ascii=False)
-            self.assertIn(encoded[:3000], content)
             self.assertNotIn(encoded, content)
+            # 历史记忆块不含说明正文，规则只出现一次
+            self.assertEqual(content.count("长" * 8000), 1)
 
 
 if __name__ == "__main__":

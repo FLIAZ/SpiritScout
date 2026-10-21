@@ -10,7 +10,8 @@ from spiritscout.core.models import BlackboardLayer
 
 # 这些字段可以超过软预算，不能为了缩短输入而丢掉授权、任务或用户回答。
 _PROTECTED = {"constraints", "task_intent", "用户答复", "scope", "rules", "mission",
-              "target", "available_tactics", "shared_context", "business_context", "reference_skills"}
+              "target", "available_tactics", "shared_context", "business_context",
+              "reference_skills", "world_state", "project_rules"}
 
 
 def compact_json(payload: dict[str, Any], max_chars: int = 8000) -> str:
@@ -196,8 +197,9 @@ def decision_messages(system: str, payload: dict[str, Any], max_chars: int = 800
     constraints = dynamic.pop("constraints", "")
     # 保留完整 JSON 以兼容决策解析；键顺序按稳定程度排列，不受调用方构造顺序影响。
     projected = json.loads(compact_json(dynamic, max_chars))
-    stable_keys = ("available_tactics", "task_intent", "mission", "rules", "target",
-                   "execution_recovery", "reference_skills", "business_context", "shared_context")
+    stable_keys = ("world_state", "available_tactics", "task_intent", "mission",
+                   "rules", "target", "execution_recovery", "reference_skills",
+                   "business_context", "shared_context")
     ordered = {key: projected.pop(key) for key in stable_keys if key in projected}
     situation = projected.pop("situation", None)
     if isinstance(situation, dict):

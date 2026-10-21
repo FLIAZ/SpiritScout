@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>灵枢 SpiritScout</title>
-<link rel="stylesheet" href="/static/css/base.css?v=20261020-projects">
-<link rel="stylesheet" href="/static/css/views.css?v=20261020-projects">
-<link rel="stylesheet" href="/static/css/deliverables.css?v=20261020-projects">
-<link rel="stylesheet" href="/static/css/resources.css?v=20261020-projects">
-<link rel="stylesheet" href="/static/css/projects.css?v=20261020-projects">
+<link rel="stylesheet" href="/static/css/base.css?v=20261021-scope-memory">
+<link rel="stylesheet" href="/static/css/views.css?v=20261021-scope-memory">
+<link rel="stylesheet" href="/static/css/deliverables.css?v=20261021-scope-memory">
+<link rel="stylesheet" href="/static/css/resources.css?v=20261021-scope-memory">
+<link rel="stylesheet" href="/static/css/projects.css?v=20261021-scope-memory">
 </head>
 <body>
 <div class="aurora" aria-hidden="true"></div>
@@ -108,10 +108,6 @@
         <button data-tab="deliverables">产出与事实</button>
         <button data-tab="report">报告</button>
       </div>
-      <section id="session-actions" class="session-actions" aria-label="待回答的问题与审批" hidden>
-        <div id="topo-ops-apv"></div>
-        <div id="topo-ops-ask"></div>
-      </section>
       <div id="tab-area">
         <div id="tab-chat"><aside id="session-observer" class="session-observer" aria-label="执行实况与消耗"></aside><div class="trace-wrap">
           <section id="agent-workbench" class="agent-workbench" aria-label="子 Agent 工作台">
@@ -150,6 +146,11 @@
         </div>
         <div id="tab-report" hidden></div>
       </div>
+      <!-- 待回答的问题与审批贴在输入坞上方：答复动作与输入框同处页底，不随内容滚走。 -->
+      <section id="session-actions" class="session-actions" aria-label="待回答的问题与审批" hidden>
+        <div id="topo-ops-apv"></div>
+        <div id="topo-ops-ask"></div>
+      </section>
       <div class="composer-dock">
         <div class="comp">
           <div class="comp-files" id="comp-files"></div>
@@ -321,22 +322,22 @@
 
 <div id="toasts"></div>
 
-<script src="/static/js/polling.js?v=20261020-projects"></script>
-<script src="/static/js/core.js?v=20261020-projects"></script>
-<script src="/static/js/observer.js?v=20261020-projects"></script>
-<script src="/static/js/deliverables.js?v=20261020-projects"></script>
-<script src="/static/js/tool-parameters.js?v=20261020-projects"></script>
-<script src="/static/js/markdown.js?v=20261020-projects"></script>
-<script src="/static/js/agent-workbench.js?v=20261020-projects"></script>
-<script src="/static/js/experience.js?v=20261020-projects"></script>
-<script src="/static/js/projects.js?v=20261020-projects"></script>
-<script src="/static/js/views.js?v=20261020-projects"></script>
-<script src="/static/js/console.js?v=20261020-projects"></script>
+<script src="/static/js/polling.js?v=20261021-scope-memory"></script>
+<script src="/static/js/core.js?v=20261021-scope-memory"></script>
+<script src="/static/js/observer.js?v=20261021-scope-memory"></script>
+<script src="/static/js/deliverables.js?v=20261021-scope-memory"></script>
+<script src="/static/js/tool-parameters.js?v=20261021-scope-memory"></script>
+<script src="/static/js/markdown.js?v=20261021-scope-memory"></script>
+<script src="/static/js/agent-workbench.js?v=20261021-scope-memory"></script>
+<script src="/static/js/experience.js?v=20261021-scope-memory"></script>
+<script src="/static/js/projects.js?v=20261021-scope-memory"></script>
+<script src="/static/js/views.js?v=20261021-scope-memory"></script>
+<script src="/static/js/console.js?v=20261021-scope-memory"></script>
 <dialog id="resource-editor"><form method="dialog"><div class="resource-editor-head"><h3 id="resource-editor-title">资源配置</h3><button class="btn sm" aria-label="关闭" value="cancel">关闭</button></div></form>
 <label>标识<input id="resource-key" autocomplete="off" placeholder="唯一名称"></label>
 <label>配置内容（JSON）<textarea id="resource-json" rows="15" spellcheck="false"></textarea></label>
 <div id="resource-secrets"><label>环境变量（JSON，可留空保持原值）<input id="resource-env" type="password" autocomplete="new-password" placeholder='{"API_KEY":"…"}'></label><label>请求头（JSON，可留空保持原值）<input id="resource-headers" type="password" autocomplete="new-password" placeholder='{"Authorization":"Bearer …"}'></label></div>
 <p class="muted">密钥只通过专用字段填写。聊天中不要粘贴密钥；保存的 MCP 接入对新会话生效。</p><div id="resource-save-error" role="alert"></div><button type="button" class="btn primary" id="resource-save">保存配置</button></dialog>
-<script src="/static/js/resources.js?v=20261020-projects"></script>
+<script src="/static/js/resources.js?v=20261021-scope-memory"></script>
 </body>
 </html>

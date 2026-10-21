@@ -41,6 +41,24 @@ class BusinessToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(nav["description"], "Navigate to a URL")
         self.assertEqual(schemas["mcp__playwright__browser_tabs"]["parameters"]["properties"]["action"]["enum"][0], "list")
 
+    def test_ask_user_is_exposed_to_explorer_tool_loop(self) -> None:
+        schemas = {s["function"]["name"]: s["function"] for s in self.agent._tool_schemas()}
+        self.assertIn("ask_user", schemas)
+        self.assertEqual(schemas["ask_user"]["parameters"]["required"], ["question"])
+
+    async def test_ask_user_answer_and_scope_flow_back_to_agent(self) -> None:
+        broker = SimpleNamespace(ask=AsyncMock(return_value={
+            "answer": "允许自行注册测试账号", "scope_added": ["hg-v1.imou.com"]}))
+        self.agent.ctx.questions = broker
+        text = await self.agent._run_tool_call(self.task, {
+            "id": "ask-1", "name": "ask_user",
+            "arguments": {"question": "请提供手机号与收到的验证码", "options": ["稍后提供"]}})
+        self.assertIn("允许自行注册测试账号", text)
+        self.assertIn("hg-v1.imou.com", text)
+        broker.ask.assert_awaited_once()
+        self.assertEqual(broker.ask.await_args.args[0], "business_context")
+        self.assertIn("手机号", broker.ask.await_args.args[1])
+
     async def test_remote_error_stdout_reaches_agent_and_failed_page_is_not_evidence(self) -> None:
         self.agent.ctx.tools.call.return_value = ToolResult(tool="browser_navigate", ok=False,
             stdout='Invalid arguments for tool "browser_navigate": url is required', returncode=1,

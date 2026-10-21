@@ -77,6 +77,30 @@ class BusinessContextAgent(SubAgent):
                     "headers": {"type": "object"},
                 }, "required": ["url"]}}},
         ]
+        schemas.append({"type":"function","function":{"name":"ask_user",
+            "description":(
+                "向用户提问并等待答复。遇到只有用户能提供的信息（测试账号、"
+                "手机号/邮箱与验证码、登录后才能看到的流程）或需要用户拍板的"
+                "取舍时用它：问题用平实中文写清看到了什么、为什么需要。"
+                "options 给 2~4 个建议选项，用户也可以自由输入；multiple 仅在"
+                "选项彼此不互斥、用户可能同时选多项时设 true（如「接下来"
+                "优先看哪些流程」「需要开通哪些账号/权限」），「允许/拒绝」"
+                "这类互斥决策保持 false（默认单选、点选即提交）；多选选项要"
+                "写成可独立成立的动作或结论。targets 只列当前授权范围外、"
+                "希望纳入本次测试的新目标，形如 "
+                "[{\"target\": \"主机或 URL\", \"why\": \"一句话说明它是什么、"
+                "为什么需要\"}]，用户勾选后系统才放行。"),
+            "parameters":{"type":"object","properties":{
+                "question":{"type":"string","description":"要问用户的问题（自己组织语言）"},
+                "options":{"type":"array","items":{"type":"string"},
+                           "description":"建议选项（2~4 个，用户可自由输入）"},
+                "multiple":{"type":"boolean",
+                            "description":"选项可多选：仅当选项不互斥、用户可能同时选多项时设 true；互斥决策省略或 false"},
+                "targets":{"type":"array","items":{"type":"object","properties":{
+                    "target":{"type":"string","description":"主机或 URL"},
+                    "why":{"type":"string","description":"面向普通用户的一句话说明"}},
+                    "required":["target"]}}},
+                "required":["question"]}}})
         schemas.append({"type":"function","function":{"name":"asset_memory_lookup",
             "description":"读取同一主机的历史资产，旧结果须按本次任务复核，不携带授权",
             "parameters":{"type":"object","properties":{"host":{"type":"string"},"query":{"type":"string"},"offset":{"type":"integer","minimum":0}},"required":["host"]}}})
@@ -93,8 +117,15 @@ class BusinessContextAgent(SubAgent):
 
     def _explore_brief(self, task: Task) -> str:
         """走访任务书：目标、任务意图与交付契约（怎么走由模型决定）。"""
+        from spiritscout.gateway.world_state import environment, snapshot
+
+        guard = getattr(getattr(self.ctx, "policy", None), "guard", None)
+        workspace = str(self.ctx.builtin_ctx.get("workspace_root") or "")
+        artifacts = workspace.rstrip("/") + "/artifacts" if workspace else ""
         payload: dict[str, Any] = {
             "target": task.target,
+            "world_state": snapshot(guard=guard, env=environment(
+                workspace=workspace, artifacts=artifacts)),
             "交付要求": (
                 "以真实用户视角走访该目标的业务流程。渲染后的页面、网络请求"
                 "（XHR/fetch）都是证据；把实际观测到的接口交易用 record_endpoint "
@@ -205,6 +236,8 @@ class BusinessContextAgent(SubAgent):
                 ok, text = False, f"工具参数解析失败: {call['parse_error']}。请修正 JSON 后重新调用。"
             elif name == "record_endpoint":
                 ok, text = await self._tool_record_endpoint(task, args)
+            elif name == "ask_user":
+                ok, text = await self._tool_ask_user(task, args)
             else:
                 res = await self.ctx.tools.call(name, args, **self.ctx.builtin_ctx)
                 ok = res.ok
@@ -221,6 +254,42 @@ class BusinessContextAgent(SubAgent):
         self.ctx.audit.log("agent.tool_result", self.agent_id, {
             "id": call.get("id") or "", "ok": ok, "note": text[:300], **result_meta})
         return text
+
+    async def _tool_ask_user(self, task: Task,
+                             args: dict[str, Any]) -> tuple[bool, str]:
+        """向用户提问并挂起等待作答（问题与选项由模型撰写，后端只送达回收）。
+
+        答复与勾选扩围的目标原样回灌模型，走访在拿到外部输入（账号、验证码、
+        授权裁定）后继续；会话停止时按「无答复」唤醒，模型自行决定收尾。"""
+        question = str((args or {}).get("question") or "").strip()
+        if not question:
+            return False, "ask_user 需要 question 参数。"
+        options = [str(option).strip()[:200]
+                   for option in ((args or {}).get("options") or [])[:6]
+                   if isinstance(option, (str, int, float)) and str(option).strip()]
+        from spiritscout.policy.questions import normalize_targets
+        targets = normalize_targets((args or {}).get("targets"))
+        broker = getattr(self.ctx, "questions", None)
+        if broker is None:
+            return False, ("当前会话没有可用的用户询问通道——基于已有证据自行"
+                           "决策，并在结论中说明该不确定点。")
+        self.ctx.audit.log("agent.ask_user", self.agent_id, {
+            "task_id": task.task_id, "question": question[:500],
+            "options": options, "multiple": bool((args or {}).get("multiple")),
+            "targets": targets})
+        result = await broker.ask(self.agent_type.value, question, options, targets,
+                                  multiple=bool((args or {}).get("multiple")))
+        answer = str(result.get("answer") or "").strip()
+        added = result.get("scope_added") or []
+        if result.get("cancelled"):
+            return True, "用户尚未作答（会话已停止）。基于已有证据自行决策。"
+        self.ctx.audit.log("agent.ask_answered", self.agent_id, {
+            "task_id": task.task_id, "answer": answer[:300], "scope_added": added})
+        lines = [f"用户已答复：{answer or '（未给出明确选择，请基于现有证据继续）'}"]
+        if added:
+            lines.append("以下目标已由用户确认加入本会话授权范围，可继续访问: "
+                         + ", ".join(added))
+        return True, "\n".join(lines)
 
     def _track_page(self, task: Task, url: str) -> None:
         """导航页记账：URL 脱敏后作为页面证据入黑板（dedup 由黑板处理）。"""
@@ -308,6 +377,9 @@ class BusinessContextAgent(SubAgent):
                 "source": source,
             })
         valid_ids = {item["id"] for item in evidence}
+        # 终局建模只归纳已有证据：这里问来的答复无法再触发走访动作，需要
+        # 用户输入的点写进 unknowns，由灵枢据此再派任务（走访环里模型可用
+        # ask_user 当场向用户要账号/验证码并继续）。
         model_context = await self._llm_chat_json("business_analyst", {
             "evidence": evidence,
             "constraints": (
@@ -317,7 +389,8 @@ class BusinessContextAgent(SubAgent):
                 "evidence_refs}], unknowns:[str]}。每条结论必须引用 evidence 中的 id；"
                 "证据不能支持时放到 unknowns，不得猜账号角色、权限或隐藏接口。"
             ),
-        }, max_user_chars=12000, reasoning_effort=self.task_effort(task), task=task)
+        }, max_user_chars=12000, reasoning_effort=self.task_effort(task), task=task,
+            _allow_ask=False)
         context = self._validated_context(model_context or {}, valid_ids)
         har_count = sum(
             1 for endpoint in endpoint_records
