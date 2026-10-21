@@ -329,10 +329,13 @@ function renderSessionHead() {
     `<span class="pill ${s.status}">${STATUS_CN[s.status] || s.status}</span>`,
     running && s.paused ? `<span class="pill paused">已暂停</span>` : "",
     `<span class="tag blue">${MODE_CN[s.mode] || s.mode}</span>`,
+    `<button type="button" class="tag proj-chip" data-move-project title="项目分区 · 点击移动会话">${esc(projectName(s.project_id))}</button>`,
     // 用时扣除暂停与执行间隙区间（门内累计，实时随轮询刷新）
     s.started_at ? `<span class="tag">用时 ${fmtDur(s.started_at + (s.excluded_seconds || 0), s.finished_at)}</span>` : "",
     `<span class="tag mono">${esc(s.session_id)}</span>`,
   ].join("");
+  const moveProject = $("#s-meta [data-move-project]");
+  if (moveProject) moveProject.onclick = () => ProjectsPage.moveSession(S.cur);
   $("#s-err").innerHTML = [
     S.state?.recovery?.unresolved_count > 0
       ? `<div class="pause-banner">有 ${Number(S.state.recovery.unresolved_count)} 次操作的结果尚待核对。继续任务时，灵枢会收到这些记录；请先核实效果，避免重复操作。</div>` : "",

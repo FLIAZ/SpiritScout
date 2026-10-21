@@ -625,6 +625,10 @@ async function stageFiles(files) {
 async function launchMission(payload, files = []) {
   $("#c-go").disabled = true;
   try {
+    if (!payload.project_id) {
+      const project = $("#c-project")?.value || "";
+      if (project) payload = { ...payload, project_id: project };
+    }
     if (files.length) payload = { ...payload, upload_ids: await stageFiles(files) };
     const s = await api("/api/sessions", { method: "POST", body: JSON.stringify(payload) });
     toast(files.length ? "任务已下达，附件已交给灵枢" : "任务已下达，灵枢开始规划");
@@ -660,6 +664,8 @@ $("#rc-confirm").onclick = async () => {
   AgentWorkbench.init();
   try { S.agents = await api("/api/agents"); } catch {}
   fetch("/openapi.json").then(r => r.json()).then(j => { $("#ver").textContent = "v" + (j.info?.version || ""); }).catch(() => {});
+  // 项目目录先于会话列表：列表里的项目标签与会话创建下拉都依赖它
+  try { await ProjectsPage.loadCatalog(); } catch {}
   await refreshSessions();
   S.polling = ConsolePolling.create({refreshList: refreshSessions, refreshState,
     isSession: () => S.view === "session" && !!S.cur,

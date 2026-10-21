@@ -112,12 +112,22 @@ class SessionCreatePayload(BaseModel):
     platform_yaml: str | None = None
     rules_yaml: str | None = None
     title: str = Field(default="", max_length=80)
+    project_id: str = Field(default="", max_length=64)
     no_llm: StrictBool = False
     authorized: StrictBool = True
     budget_tokens: StrictInt | None = None
     rps: float = Field(default=10.0, gt=0, allow_inf_nan=False)
     allow_sensitive: StrictBool = False
     accept_rule_conflicts: StrictBool = False
+
+
+class SessionPatchPayload(BaseModel):
+    """会话局部更新：用字段集合区分「未传」与「传空串」。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, max_length=80)
+    project_id: str | None = Field(default=None, max_length=64)
 
 
 def _read_state(session: Session) -> dict[str, Any]:
@@ -291,13 +301,16 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             f"Web 控制台绑定 {cfg.web.host} 时必须通过环境变量 "
             f"{cfg.web.password_env} 设置管理密码")
     vault.configure(cfg.workspace.root)   # 密钥库落在工作区（vault.db/vault.key）
-    manager = SessionManager(cfg, models, max_concurrent=max_concurrent)
     from spiritscout.resources.assistant import ResourceAssistant
     from spiritscout.resources.store import ResourceStore, resource_root
+    from spiritscout.web.projects import mount_projects
     from spiritscout.web.resources import mount_resources
 
-    resource_store = ResourceStore(resource_root(cfg),cfg.resources.freshness_hours)
-    resource_assistant = ResourceAssistant(cfg,resource_store)
+    # 先建 store 再建 manager：两者共用同一迁移实例，避免并发跑一次性迁移
+    resource_store = ResourceStore(resource_root(cfg), cfg.resources.freshness_hours)
+    manager = SessionManager(cfg, models, max_concurrent=max_concurrent,
+                             resources=resource_store)
+    resource_assistant = ResourceAssistant(cfg, resource_store)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -311,15 +324,6 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                 resource_store.import_session(path)
             except (OSError,ValueError,sqlite3.Error):
                 pass
-        # 历史会话缺项目分类的，后台用轻量模型补名（旁路增强，失败静默；
-        # 密钥从本机密钥库热取，未配置密钥时自动跳过）
-        from spiritscout.config import load_model_config
-        try:
-            naming_models = vault.apply_keys(load_model_config(cfg.models_config_path))
-        except (OSError, ValueError, SpiritScoutError):
-            naming_models = models
-        from spiritscout.web.sessions import schedule_campaign_backfill
-        schedule_campaign_backfill(cfg, naming_models)
         yield
         await resource_assistant.close()
         await manager.aclose()
@@ -327,7 +331,8 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     app = FastAPI(title="灵枢 SpiritScout 控制台", version=__version__,
                   lifespan=lifespan)
     app.state.manager = manager
-    mount_resources(app,cfg,resource_store,resource_assistant,models=models)
+    mount_resources(app, cfg, resource_store, resource_assistant)
+    mount_projects(app, resource_store, manager)
     app.state.resources = resource_store
 
     @app.middleware("http")
@@ -486,14 +491,24 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         return detail
 
     @app.patch("/api/sessions/{session_id}")
-    async def rename_session(session_id: str,
-                             payload: dict[str, Any]) -> dict[str, Any]:
-        """重命名会话（空标题 = 恢复自动摘要名）。"""
+    async def patch_session(session_id: str,
+                            payload: SessionPatchPayload) -> dict[str, Any]:
+        """局部更新会话：只处理请求里显式出现的字段。
+
+        空标题 = 恢复自动摘要名；空 project_id = 移入未分类。两个字段
+        互不牵连——只移动项目不会顺手清掉用户自定义标题。
+        """
         session = _require(session_id)
-        title = str(payload.get("title") or "")
-        if len(title.strip()) > 80:
-            raise HTTPException(422, "会话名过长（≤80 字）")
-        manager.rename(session_id, title)
+        fields = payload.model_fields_set
+        if not fields:
+            raise HTTPException(422, "未提供要修改的字段")
+        if "title" in fields:
+            manager.rename(session_id, str(payload.title or ""))
+        if "project_id" in fields:
+            try:
+                manager.set_project(session_id, str(payload.project_id or ""))
+            except SpiritScoutError as exc:
+                raise HTTPException(422, str(exc)) from exc
         return session.brief(include_summary=False)
 
     @app.get("/api/sessions/{session_id}/state")

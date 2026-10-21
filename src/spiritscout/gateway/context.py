@@ -155,6 +155,9 @@ def shared_context(blackboard: Any) -> dict[str, Any]:
     historical = blackboard.read(BlackboardLayer.TOPOLOGY, "historical-assets")
     if historical:
         out["historical_assets"] = historical
+    project_memory = blackboard.read(BlackboardLayer.TOPOLOGY, "project-memory")
+    if project_memory:
+        out["project_memory"] = project_memory
     if replies:
         out["user_replies"] = [{"record_id": rec["record_id"], "version": rec["version"],
                                 "question": rec["data"].get("detail", ""),

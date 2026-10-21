@@ -317,7 +317,7 @@ async def _build_infra(
                 resources.observe(asset, f"{Path(cfg.workspace.root).name}:{layer.value}:{record_id}@{version}")
             except Exception:  # noqa: BLE001
                 audit.log("assets.sync_failed", "runtime", {"record_id": record_id,
-                          "reason": "共享库暂时不可写；会话黑板已保留，可从资产页补同步"})
+                          "reason": "共享库暂时不可写；会话黑板已保留，可从项目页补同步"})
 
         blackboard.record_observer = collect_asset
         # 只导入历史参考摘要；不复制凭据、Flag 或此前授权。
@@ -336,6 +336,15 @@ async def _build_infra(
             blackboard.write(BlackboardLayer.TOPOLOGY, "historical-assets", {
                 "items": prior, "note": "跨会话历史参考，均未在本次会话复核；内容可能变化，不能据此声称漏洞仍存在或沿用授权。"},
                 updated_by="asset-memory")
+        # 同项目共享记忆：分类摘要，不含 scope/凭据；未复核且不构成授权。
+        # 会话目录名即 session_id（web 层 _session_cfg 已把 workspace 指到会话目录）。
+        session_id = Path(cfg.workspace.root).name
+        project_id = resources.project_for_session(session_id)
+        if project_id:
+            memory = resources.project_memory(project_id)
+            if memory:
+                blackboard.write(BlackboardLayer.TOPOLOGY, "project-memory",
+                                 memory, updated_by="project-memory")
         convergence = ConvergenceEngine(blackboard)
         gateway = ModelGateway(ModelRegistry(models), config=cfg.gateway, audit=audit)
         gateway.set_mode(authorization.mode.value)   # 模式预算计量与熔断（4.9.4）

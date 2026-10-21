@@ -8,11 +8,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from fastapi.testclient import TestClient
+
 from spiritscout.blackboard import Blackboard
 from spiritscout.config.settings import ModelEntry, SystemConfig, WorkspaceConfig
 from spiritscout.core.models import AgentType, BlackboardLayer, RunMode
 from spiritscout.launch import LaunchRequest, prepare_launch
-from spiritscout.web.app import _read_state
+from spiritscout.web.app import _read_state, create_app
 from spiritscout.web.sessions import Session, SessionManager
 
 CTF_MISSION = (
@@ -327,7 +329,7 @@ class SessionUsageTests(unittest.IsolatedAsyncioTestCase):
 
         def fake_gateway(cfg, models, audit):
             seen["usage_root"] = str(Path(cfg.workspace.root))
-            return _FakeChatGateway(json.dumps({"name": "问候", "campaign": ""}))
+            return _FakeChatGateway(json.dumps({"name": "问候"}))
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -394,7 +396,7 @@ class SessionUsageTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
-    """小模型自动命名与资产分类补名：解析收敛、失败静默、按任务去重。"""
+    """小模型自动命名：解析、失败静默、按用户候选链降级。"""
 
     def _cfg(self, root: Path) -> SystemConfig:
         # 配置路径显式指向临时目录：模型注册表只能写进 tmp，
@@ -407,7 +409,7 @@ class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
         )
         return cfg
 
-    async def test_llm_name_converges_to_existing_campaign(self) -> None:
+    async def test_llm_name_returns_single_name(self) -> None:
         from spiritscout.core.audit import AuditLogger
         from spiritscout.web import agentcfg
         from spiritscout.web import sessions as web_sessions
@@ -424,11 +426,9 @@ class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
                 result = await web_sessions._llm_name(
                     cfg, models, AuditLogger(cfg.audit_log_path),
                     mission="对 bilibili 做登录越权测试",
-                    target="https://bilibili.com", mode="src",
-                    campaigns=["BiliBili SRC"])
-            # 大小写变体收敛到既有分类名（分类不因拼写漂移裂开）
-            self.assertEqual(result, {"name": "BiliBili 越权测试",
-                                      "campaign": "BiliBili SRC"})
+                    target="https://bilibili.com", mode="src")
+            # 归属由用户创建/选择项目决定；命名只产出短名，不猜测分类
+            self.assertEqual(result, {"name": "BiliBili 越权测试"})
             call = gateway.calls[0]
             self.assertEqual(call["task_type"], "classification")
             self.assertEqual(call["reasoning_effort"], "low")
@@ -449,8 +449,7 @@ class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
                 if kwargs.get("model") == "mini":
                     raise TimeoutError("首选模型不可用")
                 return SimpleNamespace(
-                    content=json.dumps(
-                        {"name": "备份命名", "campaign": "BiliBili SRC"}),
+                    content=json.dumps({"name": "备份命名"}),
                     finish_reason="stop")
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -469,8 +468,7 @@ class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
             # 严格按用户排的顺序尝试：mini 失败后是 backup，而不是注册表首项
             self.assertEqual([c["model"] for c in gateway.calls],
                              ["mini", "backup"])
-            self.assertEqual(result, {"name": "备份命名",
-                                      "campaign": "BiliBili SRC"})
+            self.assertEqual(result, {"name": "备份命名"})
 
     async def test_llm_name_retries_when_thinking_eats_output_budget(self) -> None:
         """思考型模型把小额输出额度耗在思考上：加大余量重试，而非弃案。"""
@@ -489,8 +487,7 @@ class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
                 if len(self.calls) == 1:
                     return SimpleNamespace(content="", finish_reason="length")
                 return SimpleNamespace(
-                    content=json.dumps({"name": "PKW 学院教务 CTF",
-                                        "campaign": "PKW CTF"}),
+                    content=json.dumps({"name": "PKW 学院教务 CTF"}),
                     finish_reason="stop")
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -504,8 +501,7 @@ class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
                     AuditLogger(cfg.audit_log_path),
                     mission="ctf题目，http://8080-x.challenge.ctfplus.cn/",
                     target="http://8080-x.challenge.ctfplus.cn/", mode="ctf")
-            self.assertEqual(result, {"name": "PKW 学院教务 CTF",
-                                      "campaign": "PKW CTF"})
+            self.assertEqual(result, {"name": "PKW 学院教务 CTF"})
             # 同一候选加大余量重试，而不是把空正文当成应答失败换链
             self.assertEqual([c["model"] for c in gateway.calls],
                              ["mini", "mini"])
@@ -521,8 +517,7 @@ class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self._cfg(Path(tmp))
             agentcfg.set_assignment(cfg.agent_models_path, "master", "big", {"big"})
-            gateway = _FakeChatGateway(json.dumps(
-                {"name": "跟随指派", "campaign": "某 SRC"}))
+            gateway = _FakeChatGateway(json.dumps({"name": "跟随指派"}))
             with patch("spiritscout.web.sessions._conversation_gateway",
                        lambda *args: gateway):
                 await web_sessions._llm_name(
@@ -553,54 +548,121 @@ class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
                      Path(cfg.audit_log_path).read_text(encoding="utf-8").splitlines()]
             self.assertEqual(lines[-1]["detail"]["action"], "failed")
 
-    async def test_backfill_groups_identical_missions(self) -> None:
-        from spiritscout.resources.store import ResourceStore
-        from spiritscout.web import sessions as web_sessions
+    async def test_create_registers_project_membership(self) -> None:
+        """创建时项目归属写入 catalog；未加入项目也留显式未分类行。"""
+        from spiritscout.resources.store import ResourceStore, resource_root
+        from spiritscout.web import modelcfg, vault
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             cfg = self._cfg(root)
-            store = ResourceStore(root / "resources")
-            sessions_dir = root / "sessions"
-            for sid, mission in (("sess-a", "对 bilibili 做越权测试"),
-                                 ("sess-b", "对 bilibili 做越权测试"),
-                                 ("sess-c", "打一道 CTF 反序列化题")):
-                workspace = sessions_dir / sid
-                workspace.mkdir(parents=True)
-                (workspace / "meta.json").write_text(json.dumps({
-                    "session_id": sid, "mode": "src",
-                    "target": "https://bilibili.com",
-                    "request": {"mission": mission},
-                    "launch_request": {"mission": mission}}), encoding="utf-8")
-                store.observe({"asset_type": "app",
-                               "value": f"https://{sid}.example.com"},
-                              f"{sid}:asset:one@1")
-            self.assertEqual(len(store.sessions_without_campaign()), 3)
-            gateway = _FakeChatGateway(
-                json.dumps({"name": "越权测试", "campaign": "BiliBili SRC"}),
-                json.dumps({"name": "反序列化", "campaign": "某 CTF 平台"}))
-            models = [ModelEntry(model="mini", api_key="k")]
-            with patch("spiritscout.web.sessions._conversation_gateway",
-                       lambda *args: gateway):
-                await web_sessions._campaign_backfill(
-                    cfg, models, store, ["sess-a", "sess-b", "sess-c"])
-            self.assertEqual(len(gateway.calls), 2)   # 同任务原文只调一次模型
-            self.assertEqual(store.session_campaign("sess-b"), "BiliBili SRC")
-            self.assertEqual(store.session_campaign("sess-c"), "某 CTF 平台")
-            self.assertEqual(store.assets(campaign="BiliBili SRC")["total"], 2)
-            self.assertEqual(store.sessions_without_campaign(), [])
+            modelcfg.write_config(cfg.models_config_path, [],
+                                  [{"model": "mini", "provider": "mock"}])
+            vault.configure(str(root))
+            store = ResourceStore(resource_root(cfg))
+            project = store.create_project("BiliBili SRC")
+            manager = SessionManager(cfg, [])
+            manager._run = AsyncMock()
+            plan = prepare_launch(LaunchRequest(
+                mode=RunMode.SRC, mission="对 bilibili 做登录越权测试",
+                target="https://bilibili.com"))
+            session = await manager.create({
+                "mode": "src", "mission": "对 bilibili 做登录越权测试",
+                "target": "https://bilibili.com", "no_llm": True,
+                "project_id": project["project_id"]}, plan)
+            self.assertEqual(session.project_id, project["project_id"])
+            self.assertNotIn("project_id", session.request)
+            self.assertNotIn("project_id", session.launch_request)
+            self.assertEqual(
+                store.project_for_session(session.session_id),
+                project["project_id"])
+            store.observe({"asset_type": "app", "value": "https://bili.test"},
+                          f"{session.session_id}:asset:1@1")
+            self.assertEqual(
+                store.assets(project=project["project_id"])["total"], 1)
 
-    async def test_schedule_skips_when_nothing_to_do(self) -> None:
-        from spiritscout.resources.store import ResourceStore
-        from spiritscout.web import sessions as web_sessions
+            other = await manager.create({
+                "mode": "src", "mission": "未分类任务",
+                "target": "https://bilibili.com", "no_llm": True}, plan)
+            self.assertEqual(other.project_id, "")
+            self.assertEqual(
+                store.project_for_session(other.session_id), "")
+            await manager.aclose()
+
+    async def test_create_rejects_missing_project_before_workspace(self) -> None:
+        from spiritscout.web import modelcfg, vault
 
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = self._cfg(Path(tmp))
-            ResourceStore(Path(tmp) / "resources")     # 空目录：无待补名会话
-            self.assertEqual(web_sessions.schedule_campaign_backfill(
-                cfg, [ModelEntry(model="mini", api_key="k")]), 0)
-            self.assertEqual(web_sessions.schedule_campaign_backfill(
-                cfg, []), 0)                            # 无模型：不可执行
+            root = Path(tmp)
+            cfg = self._cfg(root)
+            modelcfg.write_config(cfg.models_config_path, [],
+                                  [{"model": "mini", "provider": "mock"}])
+            vault.configure(str(root))
+            manager = SessionManager(cfg, [])
+            manager._run = AsyncMock()
+            plan = prepare_launch(LaunchRequest(
+                mode=RunMode.SRC, mission="任务", target="https://t.example.com"))
+            with self.assertRaisesRegex(Exception, "项目不存在"):
+                await manager.create({
+                    "mode": "src", "mission": "任务",
+                    "target": "https://t.example.com",
+                    "project_id": "prj-missing"}, plan)
+            self.assertEqual(list(manager.root.iterdir()), [])
+
+    def test_set_project_moves_observations_and_reconciles_on_scan(self) -> None:
+        from spiritscout.resources.store import ResourceStore, resource_root
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = self._cfg(root)
+            store = ResourceStore(resource_root(cfg))
+            alpha = store.create_project("A")
+            beta = store.create_project("B")
+            alpha_id, beta_id = alpha["project_id"], beta["project_id"]
+            manager = SessionManager(cfg, [], resources=store)
+            workspace = manager.root / "sess-move"
+            workspace.mkdir()
+            session = Session(session_id="sess-move", mode="src",
+                              target="https://move.test", workspace=workspace,
+                              project_id=alpha_id)
+            manager._sessions["sess-move"] = session
+            store.set_session_project("sess-move", alpha_id)
+            store.observe({"asset_type": "app", "value": "https://move.test"},
+                          "sess-move:asset:1@1")
+            manager._persist(session)
+
+            moved = manager.set_project("sess-move", beta_id)
+            self.assertEqual(moved.project_id, beta_id)
+            self.assertEqual(store.project_for_session("sess-move"), beta_id)
+            row = store.assets(project=beta_id)["items"][0]
+            self.assertEqual(store.history(row["id"])["items"][0]["project_id"],
+                             beta_id)
+            self.assertEqual(
+                json.loads((workspace / "meta.json").read_text())[
+                    "project_id"], beta_id)
+
+            manager.set_project("sess-move", "")
+            self.assertEqual(store.project_for_session("sess-move"), "")
+            self.assertEqual(
+                json.loads((workspace / "meta.json").read_text())["project_id"],
+                "")
+            self.assertEqual(moved.brief()["project_id"], "")
+
+            # DB 为事实源：meta 残留旧项目也不能把显式未分类复活
+            session.project_id = beta_id
+            manager._persist(session)
+            reloaded = SessionManager(cfg, [], resources=store)
+            self.assertEqual(reloaded.get("sess-move").project_id, "")
+            self.assertEqual(
+                json.loads((workspace / "meta.json").read_text())["project_id"],
+                "")
+            # 无成员行的旧会话才按 meta 补登记
+            store.remove_session("sess-move")
+            session.project_id = beta_id
+            reloaded._persist(session)
+            upgraded = SessionManager(cfg, [], resources=store)
+            self.assertEqual(upgraded.get("sess-move").project_id, beta_id)
+            self.assertEqual(store.project_for_session("sess-move"), beta_id)
 
     def test_display_title_priority(self) -> None:
         session = Session(
@@ -629,7 +691,7 @@ class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
                 mode=RunMode.SRC, mission="对 bilibili 做登录越权测试",
                 target="https://bilibili.com"))
             gateway = _FakeChatGateway(json.dumps({
-                "name": "BiliBili 越权测试", "campaign": "BiliBili SRC"}))
+                "name": "BiliBili 越权测试"}))
             with patch("spiritscout.web.sessions._conversation_gateway",
                        lambda *args: gateway):
                 session = await manager.create({
@@ -641,10 +703,9 @@ class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.sleep(0.01)
             self.assertEqual(session.auto_title, "BiliBili 越权测试")
             self.assertEqual(session.display_title(), "BiliBili 越权测试")
-            # 分类随会话落地：同一会话的资产观测将自动继承
+            # 未选择项目也要留显式未分类成员行，启动对账才有事实依据
             store = ResourceStore(resource_root(manager._cfg))
-            self.assertEqual(store.session_campaign(session.session_id),
-                             "BiliBili SRC")
+            self.assertEqual(store.project_for_session(session.session_id), "")
 
     async def test_naming_does_not_gate_execution_start(self) -> None:
         """命名与执行并行：命名模型悬着不应答，任务照样即刻开工。"""
@@ -659,8 +720,7 @@ class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
                 self.calls.append({"messages": messages, **kwargs})
                 await self.gate.wait()      # 模拟命名模型迟迟不应答
                 return SimpleNamespace(
-                    content=json.dumps(
-                        {"name": "迟到命名", "campaign": "BiliBili SRC"}),
+                    content=json.dumps({"name": "迟到命名"}),
                     finish_reason="stop")
 
         run_started = asyncio.Event()
@@ -711,6 +771,66 @@ class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
             reloaded = SessionManager(cfg, []).get("sess-meta")
             self.assertEqual(reloaded.auto_title, "自动短名")
             self.assertEqual(reloaded.display_title(), "自动短名")
+
+
+class SessionProjectApiTests(unittest.TestCase):
+    def test_patch_project_only_preserves_title(self) -> None:
+        from spiritscout.web import modelcfg
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = SystemConfig(
+                workspace=WorkspaceConfig(root=str(root)),
+                models_config_path=str(root / "models.yaml"),
+                agent_models_path=str(root / "agents.yaml"),
+                audit_log_path=str(root / "audit.jsonl"))
+            modelcfg.write_config(cfg.models_config_path, [],
+                                  [{"model": "mini", "provider": "mock"}])
+            app = create_app(cfg, [])
+            with TestClient(app, base_url="http://127.0.0.1") as client:
+                store = app.state.resources
+                project = store.create_project("BiliBili SRC")
+                manager = app.state.manager
+                workspace = manager.root / "sess-patch"
+                workspace.mkdir()
+                session = Session(
+                    session_id="sess-patch", mode="src",
+                    target="https://patch.test", workspace=workspace,
+                    title="用户标题")
+                manager._sessions["sess-patch"] = session
+                manager._persist(session)
+                store.set_session_project("sess-patch", "")
+
+                response = client.patch(
+                    "/api/sessions/sess-patch",
+                    json={"project_id": project["project_id"]})
+                self.assertEqual(response.status_code, 200)
+                body = response.json()
+                self.assertEqual(body["title"], "用户标题")
+                self.assertEqual(body["project_id"], project["project_id"])
+                state = client.get("/api/sessions/sess-patch/state").json()
+                self.assertEqual(state["session"]["project_id"],
+                                 project["project_id"])
+
+                # 只传 project_id 不会把标题清空；空串 = 移入未分类
+                response = client.patch(
+                    "/api/sessions/sess-patch", json={"project_id": ""})
+                self.assertEqual(response.json()["title"], "用户标题")
+                self.assertEqual(response.json()["project_id"], "")
+                # 空 patch 与未知项目明确拒绝，且不改变现状
+                self.assertEqual(
+                    client.patch("/api/sessions/sess-patch", json={}).status_code,
+                    422)
+                self.assertEqual(
+                    client.patch("/api/sessions/sess-patch",
+                                 json={"project_id": "prj-missing"}).status_code,
+                    422)
+                self.assertEqual(
+                    client.patch("/api/sessions/sess-missing",
+                                 json={"title": "x"}).status_code, 404)
+                self.assertEqual(
+                    client.get("/api/sessions/sess-patch").json()["project_id"],
+                    "")
 
 
 class CreateFailureTests(unittest.IsolatedAsyncioTestCase):

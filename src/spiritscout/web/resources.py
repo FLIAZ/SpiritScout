@@ -43,7 +43,6 @@ def public_mcp(config: Any, version: int = 0, origin: str = "config") -> dict[st
 
 def mount_resources(
     app: FastAPI, cfg: Any, store: ResourceStore, assistant: ResourceAssistant,
-    *, models: list[Any] | None = None,
 ) -> None:
     def fail(exc: Exception) -> HTTPException:
         if isinstance(exc, ValidationError):
@@ -161,15 +160,18 @@ def mount_resources(
     def assets(
         q: str = Query("", max_length=200),
         host: str = Query("", max_length=300),
-        campaign: str = Query("", max_length=120),
-        unnamed: int = Query(0, ge=0, le=1),
+        project: str = Query("", max_length=64),
+        unclassified: int = Query(0, ge=0, le=1),
+        kind: str = Query("", max_length=16),
         offset: int = Query(0, ge=0),
         limit: int = Query(40, ge=1, le=100),
     ) -> dict[str, Any]:
-        result = store.assets(q, offset, limit, host=host, campaign=campaign,
-                              unnamed=bool(unnamed))
-        result["campaigns"] = store.campaigns()
-        return result
+        if project and unclassified:
+            raise HTTPException(422, "project 与 unclassified 互斥")
+        if kind not in {"", "asset", "finding"}:
+            raise HTTPException(422, "kind 只能是空、asset 或 finding")
+        return store.assets(q, offset, limit, host=host, project=project,
+                            unclassified=bool(unclassified), kind=kind)
 
     @app.get("/api/assets/{key}/history")
     def asset_history(key: str, offset: int = Query(0, ge=0)) -> dict[str, Any]:
@@ -177,6 +179,7 @@ def mount_resources(
 
     @app.post("/api/assets/sync")
     async def asset_sync() -> dict[str, Any]:
+        """只导入历史会话的黑板资产；不触发命名/归类（归属由用户决定）。"""
         def scan() -> tuple[int, int]:
             count, errors = 0, 0
             for path in (Path(cfg.workspace.root) / "sessions").glob("sess-*"):
@@ -187,14 +190,7 @@ def mount_resources(
             return count, errors
 
         count, errors = await run_in_threadpool(scan)
-        renaming = 0
-        if models:
-            # 历史会话缺项目分类的，后台用轻量模型补名（旁路，不阻塞响应）
-            from spiritscout.web.sessions import schedule_campaign_backfill
-
-            renaming = schedule_campaign_backfill(cfg, models)
-        return {"scanned_records": count, "failed_sessions": errors,
-                "renaming": renaming}
+        return {"scanned_records": count, "failed_sessions": errors}
 
     @app.get("/api/resources/{kind}/chat")
     def chat_view(kind: Literal["mcp", "skill"]) -> dict[str, Any]:

@@ -5,7 +5,8 @@ const $ = s => document.querySelector(s);
 const S = { view: "home", cur: null, tab: "chat", sessions: [], state: null,
             agents: null, models: null, evSeen: 0, es: null, poll: null, medit: null,
             providers: null, pedit: null, fprov: "", presets: null, effSel: [],
-            topoView: null, compFiles: [], homeFiles: [], think: new Map() };
+            topoView: null, compFiles: [], homeFiles: [], think: new Map(),
+            projects: [] };
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
 async function api(path, opt = {}) {
@@ -52,6 +53,12 @@ function actorName(actor) {
   const a = S.agents.roster.find(x => x.key === base || x.key === actor);
   return a ? a.name : (actor || "—");
 }
+/* 项目名缓存由项目页加载；取不到（未分类/项目已删）按未分类显示 */
+function projectName(id) {
+  if (!id) return "未分类";
+  const hit = (S.projects || []).find(x => x.project_id === id);
+  return hit ? hit.name : "未分类";
+}
 function fmtElapsed(sec) {
   sec = Math.max(0, Math.round(sec));
   const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), ss = sec % 60;
@@ -89,7 +96,7 @@ try { applyTheme(localStorage.getItem("ss-theme") || "system"); } catch {}
 
 /* ================= 视图切换 ================= */
 const VIEWS = { home: "#view-home", session: "#view-session", dash: "#view-dash",
-                agents: "#view-agents", models: "#view-models", mcp:"#view-mcp", skill:"#view-skill", assets:"#view-assets", exp:"#view-exp" };
+                agents: "#view-agents", models: "#view-models", mcp:"#view-mcp", skill:"#view-skill", projects:"#view-projects", exp:"#view-exp" };
 function show(view) {
   S.view = view;
   for (const [k, sel] of Object.entries(VIEWS)) $(sel).hidden = k !== view;
@@ -98,7 +105,9 @@ function show(view) {
   if (view === "agents") loadAgents();
   if (view === "models") loadModels();
   if (view === "dash") renderDash();
-  if (["mcp","skill","assets"].includes(view) && typeof ResourceConsole !== "undefined") ResourceConsole.open(view);
+  if (view === "projects" && typeof ProjectsPage !== "undefined") ProjectsPage.open();
+  else if (typeof ProjectsPage !== "undefined") ProjectsPage.close();
+  if (["mcp","skill"].includes(view) && typeof ResourceConsole !== "undefined") ResourceConsole.open(view);
   if (view === "exp" && typeof ExperiencePage !== "undefined") ExperiencePage.open();
   if (view !== "session") stopStreams();
 }
@@ -144,7 +153,7 @@ function renderSessions() {
     <div class="sess-item ${s.session_id === S.cur ? "on" : ""}" data-id="${s.session_id}">
       <div class="t"><span class="pill ${s.status}" style="padding:1px 7px;font-size:10.5px">${STATUS_CN[s.status] || s.status}</span>
         <span class="name" title="${esc(s.title)}">${esc(s.title)}</span></div>
-      <div class="s">${esc(s.target || s.session_id)} · <span class="mono">${esc(s.session_id.slice(5, 13))}</span></div>
+      <div class="s">${esc(s.target || s.session_id)} · <span class="mono">${esc(s.session_id.slice(5, 13))}</span>${s.project_id ? ` · <span class="sess-proj">${esc(projectName(s.project_id))}</span>` : ""}</div>
       <div class="ops">
         <button data-act="rename" title="重命名">✎</button>
         <button data-act="del" class="danger" title="删除会话">✕</button>

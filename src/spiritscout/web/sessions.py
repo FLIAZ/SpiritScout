@@ -21,7 +21,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import yaml
@@ -39,6 +39,9 @@ from spiritscout.launch import LaunchPlan, LaunchRequest, prepare_launch
 from spiritscout.policy.approvals import ApprovalBroker
 from spiritscout.policy.questions import QuestionBroker
 from spiritscout.web import agentcfg, vault
+
+if TYPE_CHECKING:
+    from spiritscout.resources.store import ResourceStore
 
 
 def _bound_model(cfg: SystemConfig, models: list[ModelEntry],
@@ -243,20 +246,16 @@ async def _llm_extract_platform(cfg: SystemConfig, models: list[ModelEntry],
 # ---------------------------------------------------------------- 会话自动命名
 # 与 ChatGPT 用 mini 级模型给会话起标题同一套路：旁路小调用、低思考档、
 # 短输出短超时、失败静默降级（展示回退 mission 首行）；命名失败绝不影响
-# 会话开工与执行。资产的「来源项目」分类与会话名共用这一次调用产出。
+# 会话开工与执行。资产归属由用户创建/选择项目决定，模型不参与归类。
 
 _NAMING_SYSTEM = (
-    "你是安全测试平台的登记员，负责给测试会话归档。只输出 JSON。"
+    "你是安全测试平台的登记员，负责给测试会话起短名。只输出 JSON。"
     "name：会话短名（4~16 个字，中文，概括测试对象与目的，如"
     "「BiliBili 登录越权测试」「某靶场 SQL 注入」）；"
     "mission 也可能根本不是测试任务（如问候、闲聊、提问咨询）：这时"
     "name 如实概括对话主题（如「问候」「系统用法咨询」），不得照着"
-    "示例编造不存在的测试对象或比赛，campaign 给空串；"
-    "campaign：本次测试归属的项目名称——厂商 SRC、比赛或漏洞平台"
-    "（如「BiliBili SRC」「2026 某CTF」）——同一次调用顺便确定资产归类。"
-    "existing_campaigns 是平台上已有的项目清单：本次任务若属于其中某个"
-    "项目，campaign 必须原样复用该名称（一字不改）；确实判断不了归属时"
-    "campaign 给空串。answer: {\"name\": \"...\", \"campaign\": \"...\"}。"
+    "示例编造不存在的测试对象或比赛。"
+    "answer: {\"name\": \"...\"}。"
     "ROLE: namer")
 
 _NAMING_MAX_TOKENS = 1024    # 思考型模型的思考额度也从这里扣：给足余量，
@@ -285,17 +284,11 @@ def _naming_model_candidates(cfg: SystemConfig, models: list[ModelEntry]) -> lis
 
 
 async def _llm_name(cfg: SystemConfig, models: list[ModelEntry], audit: AuditLogger,
-                    *, mission: str, target: str, mode: str,
-                    campaigns: list[str] | None = None) -> dict[str, str] | None:
-    """按用户排的候选链调用：前面的调不动/应答不成 JSON 就换下一个。
-
-    campaign 携带已有项目清单让分类自然收敛：模型能对应上就复用既名
-    （大小写/空格变体归一到既有名称），对应不上才提出新名。
-    """
+                    *, mission: str, target: str, mode: str) -> dict[str, str] | None:
+    """按用户排的候选链调用：前面的调不动/应答不成 JSON 就换下一个。"""
     from spiritscout.gateway.backends import extract_json
     from spiritscout.gateway.gateway import output_lost
 
-    known = [str(name) for name in (campaigns or []) if str(name).strip()][:40]
     candidates = _naming_model_candidates(cfg, models)
     if not candidates:
         return None
@@ -303,7 +296,6 @@ async def _llm_name(cfg: SystemConfig, models: list[ModelEntry], audit: AuditLog
         {"role": "system", "content": _NAMING_SYSTEM},
         {"role": "user", "content": json.dumps({
             "mission": mission[:2000], "target": target, "mode": mode,
-            "existing_campaigns": known,
         }, ensure_ascii=False)}]
     try:
         gateway = _conversation_gateway(cfg, models, audit)
@@ -350,96 +342,13 @@ async def _llm_name(cfg: SystemConfig, models: list[ModelEntry], audit: AuditLog
         if not isinstance(data, dict):
             data = {}
         name = str(data.get("name") or "").strip().strip("\"'。").replace("\n", " ")[:40]
-        campaign = str(data.get("campaign") or "").strip().strip("\"'。")[:80]
-        if campaign:
-            folded = campaign.casefold().replace(" ", "")
-            for existing in known:
-                if existing.casefold().replace(" ", "") == folded:
-                    campaign = existing
-                    break
         audit.log("session.naming", "namer", {
-            "action": "named", "mode": mode, "name": name, "campaign": campaign,
+            "action": "named", "mode": mode, "name": name,
             "model": candidate})
-        return {"name": name, "campaign": campaign}
+        return {"name": name}
     audit.log("session.naming", "namer", {
         "action": "failed", "mode": mode, "models": candidates})
     return None
-
-
-_BACKFILL_TASK: asyncio.Task | None = None
-_BACKFILL_BATCH = 60     # 单次触发处理的会话数上限（按最早观测先来先办）
-
-
-def schedule_campaign_backfill(cfg: SystemConfig, models: list[ModelEntry]) -> int:
-    """为「已产出资产但尚无项目分类」的历史会话后台补名。
-
-    返回本次纳入的会话数（0 = 无需处理/已在运行/不可执行）。补名全程
-    旁路：按任务原文分组去重（同文本只调一次模型），结果复用到组内全部
-    会话；任何失败都不影响响应，判不了归属的会话下次触发再试。
-    """
-    global _BACKFILL_TASK
-    if _BACKFILL_TASK is not None and not _BACKFILL_TASK.done():
-        return 0
-    if not models:
-        return 0
-    from spiritscout.resources.store import ResourceStore, resource_root
-
-    try:
-        store = ResourceStore(resource_root(cfg), cfg.resources.freshness_hours)
-        pending = store.sessions_without_campaign(limit=_BACKFILL_BATCH)
-    except (OSError, sqlite3.Error, SpiritScoutError):
-        return 0
-    if not pending:
-        return 0
-    _BACKFILL_TASK = asyncio.create_task(
-        _campaign_backfill(cfg, models, store, pending),
-        name="spiritscout-campaign-backfill")
-    return len(pending)
-
-
-async def _campaign_backfill(cfg: SystemConfig, models: list[ModelEntry],
-                             store: Any, session_ids: list[str]) -> None:
-    """逐组补名：同任务原文只调一次模型，结果复用到组内全部会话。"""
-    audit = AuditLogger(cfg.audit_log_path)
-    sessions_dir = Path(cfg.workspace.root) / "sessions"
-    groups: dict[str, dict[str, Any]] = {}
-    for sid in session_ids:
-        try:
-            meta = json.loads(
-                (sessions_dir / sid / "meta.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            store.set_session_campaign(sid, "")     # 元数据不可读：不再重复尝试
-            continue
-        launch = meta.get("launch_request") if isinstance(meta.get("launch_request"), dict) else {}
-        request = meta.get("request") if isinstance(meta.get("request"), dict) else {}
-        mission = str(launch.get("mission") or request.get("mission") or "").strip()
-        target = str(meta.get("target") or "")
-        if not mission and not target:
-            store.set_session_campaign(sid, "")     # 无任务信息：没有可命名的内容
-            continue
-        group = groups.setdefault(mission or f"target:{target}", {
-            "mission": mission, "target": target,
-            "mode": str(meta.get("mode") or ""), "ids": []})
-        group["ids"].append(sid)
-    named_sessions = attached = 0
-    try:
-        for group in groups.values():
-            campaigns = [row["name"] for row in store.campaigns()["items"]]
-            result = await _llm_name(
-                cfg, models, audit, mission=group["mission"],
-                target=group["target"], mode=group["mode"], campaigns=campaigns)
-            if not result or not result.get("campaign"):
-                continue        # 调用失败/判不了归属：不落库，下次触发再补
-            for sid in group["ids"]:
-                attached += store.set_session_campaign(sid, result["campaign"])
-            named_sessions += len(group["ids"])
-    except (OSError, sqlite3.Error) as exc:
-        audit.log("session.naming", "namer", {
-            "action": "backfill_failed", "error": str(exc)[:300]})
-    audit.log("session.naming", "namer", {
-        "action": "backfill_done", "scanned": len(session_ids),
-        "groups": len(groups), "named_sessions": named_sessions,
-        "updated_observations": attached})
 
 
 TERMINAL_STATES = frozenset({"completed", "failed", "stopped", "interrupted"})
@@ -574,6 +483,7 @@ def _coerce_meta(data: dict[str, Any]) -> dict[str, Any]:
         "target": _str(data.get("target")),
         "title": _str(data.get("title")),
         "auto_title": _str(data.get("auto_title")),
+        "project_id": _str(data.get("project_id"))[:64],
         "request": _dict(data.get("request")),
         "launch_request": _dict(data.get("launch_request")),
         "standing_rules": _str(data.get("standing_rules")),
@@ -603,6 +513,8 @@ class Session:
     target: str
     workspace: Path
     title: str = ""                                          # 会话名（可重命名；空 = 自动摘要）
+    # 所属项目分区（'' = 未分类）；catalog 的成员行是事实源，meta 只做展示缓存
+    project_id: str = ""
     # 小模型自动命名（创建后台生成；展示优先级：用户重命名 > auto_title > mission 首行）
     auto_title: str = ""
     request: dict[str, Any] = field(default_factory=dict)   # 启动参数（展示用）
@@ -711,6 +623,7 @@ class Session:
         out: dict[str, Any] = {
             "session_id": self.session_id, "mode": self.mode,
             "title": self.display_title(), "renamed": bool(self.title),
+            "project_id": self.project_id,
             "target": self.target, "status": self.status,
             "phase": self.phase,
             "created_at": self.created_at, "started_at": self.started_at,
@@ -748,7 +661,8 @@ class SessionManager:
     """
 
     def __init__(self, cfg: SystemConfig, models: list[ModelEntry],
-                 *, max_concurrent: int = 4):
+                 *, max_concurrent: int = 4,
+                 resources: ResourceStore | None = None):
         self._cfg = cfg
         self._models = models
         self._sem = asyncio.Semaphore(max_concurrent)
@@ -758,9 +672,50 @@ class SessionManager:
             asyncio.Queue()
         self._supervisor: asyncio.Task | None = None
         self._naming_tasks: set[asyncio.Task] = set()   # 会话自动命名（后台旁路）
+        # 项目目录由 app 注入（与项目 API 共用同一实例，避免并发迁移）；
+        # 独立使用时惰性创建，保持 SessionManager(cfg, []) 的测试兼容
+        self._store = resources
         self.root = Path(cfg.workspace.root) / "sessions"
         self.root.mkdir(parents=True, exist_ok=True)
         self._scan()
+        if resources is not None:
+            self._sync_projects()
+
+    def _resources(self) -> ResourceStore:
+        if self._store is None:
+            from spiritscout.resources.store import ResourceStore, resource_root
+
+            self._store = ResourceStore(
+                resource_root(self._cfg), self._cfg.resources.freshness_hours)
+        return self._store
+
+    def _sync_projects(self) -> None:
+        """启动对账：catalog 成员行是事实源，meta 跟随（含清空）。
+
+        无成员行的旧会话才按 meta 补登记；已显式未分类的会话绝不因 meta
+        残留旧项目而被重新归类。逐个 best-effort，不阻断控制台启动。
+        """
+        store = self._store
+        if store is None:
+            return
+        for session in list(self._sessions.values()):
+            try:
+                current = store.project_for_session(session.session_id)
+                if current is None:
+                    project_id = session.project_id
+                    if project_id and store.project(project_id) is not None:
+                        store.set_session_project(session.session_id, project_id)
+                    else:
+                        project_id = ""
+                        store.set_session_project(session.session_id, "")
+                else:
+                    project_id = current
+                if session.project_id != project_id:
+                    session.project_id = project_id
+                    self._persist(session)
+            except (OSError, sqlite3.Error, SpiritScoutError, ValueError) as exc:
+                print(f"[spiritscout] 会话项目对账失败（{session.session_id}）:"
+                      f" {exc}", file=sys.stderr)
 
     # ------------------------------------------------------------ 注册表
 
@@ -787,6 +742,7 @@ class SessionManager:
                     target=data["target"], workspace=meta.parent,
                     title=data["title"],
                     auto_title=data["auto_title"],
+                    project_id=data["project_id"],
                     request=data["request"],
                     launch_request=data["launch_request"],
                     opinions=data["opinions"],
@@ -833,6 +789,7 @@ class SessionManager:
             "session_id": session.session_id, "mode": session.mode,
             "target": session.target, "title": session.title,
             "auto_title": session.auto_title,
+            "project_id": session.project_id,
             "request": session.request,
             "launch_request": session.launch_request,
             "standing_rules": session.standing_rules,
@@ -987,20 +944,27 @@ class SessionManager:
             raise SpiritScoutError(
                 f"模型注册表为空: {self._cfg.models_config_path}（"
                 "请在 Web「模型」面板或配置文件中至少注册一个云端模型）")
+        project_id = str(payload.get("project_id") or "").strip()[:64]
+        store = self._resources()
+        if project_id and store.project(project_id) is None:
+            # 建工作区之前拒绝：不存在半成品目录
+            raise SpiritScoutError(f"项目不存在: {project_id}")
         session_id = f"sess-{uuid.uuid4().hex[:8]}"
         session = Session(
             session_id=session_id,
             mode=str(payload["mode"]), target=plan.target,
             workspace=self.root / session_id,
             title=str(payload.get("title") or "").strip()[:80],
+            project_id=project_id,
             request={k: v for k, v in payload.items()
-                     if k not in ("challenges_yaml", "rules_yaml", "upload_ids")},
+                     if k not in ("challenges_yaml", "rules_yaml",
+                                  "upload_ids", "project_id")},
             created_at=time.time(),
         )
         session.workspace.mkdir(parents=True, exist_ok=False)
         session.plan = plan
         session.launch_request = {k: v for k, v in payload.items()
-                                  if k != "upload_ids"}
+                                  if k not in ("upload_ids", "project_id")}
         # 对话史首条：用户的任务原文即这段会话的第一句话（与会话页首颗
         # 气泡同源），此后的续传对话从这里接着长
         if plan.mission:
@@ -1010,6 +974,8 @@ class SessionManager:
         self._persist(session)
 
         try:
+            # 成员行无论是否加入项目都写：空串 = 明确未分类（启动对账事实源）
+            store.set_session_project(session.session_id, session.project_id)
             cfg = self._session_cfg(session, payload.get("budget_tokens"))
             session.approvals = ApprovalBroker(AuditLogger(cfg.audit_log_path))
             session.questions = QuestionBroker(AuditLogger(cfg.audit_log_path))
@@ -1063,7 +1029,7 @@ class SessionManager:
 
     def _schedule_naming(self, session: Session,
                          models: list[ModelEntry], plan: LaunchPlan) -> None:
-        """创建后立刻后台命名：小模型给「会话短名 + 归属项目」，不阻塞开工。"""
+        """创建后立刻后台命名：小模型给会话起短名，不阻塞开工。"""
         if not (plan.mission or plan.target):
             return
         if not models:
@@ -1076,34 +1042,20 @@ class SessionManager:
 
     async def _name_session(self, session: Session,
                             models: list[ModelEntry], plan: LaunchPlan) -> None:
-        from spiritscout.resources.store import ResourceStore, resource_root
-
-        # 命名是平台旁路调用：计量与审计都走全局台账（与开工前路由预检、
-        # 历史补名同一口径），不混入该会话——否则会话页的「模型消耗」背上
-        # 命名开销（一句问候也被记几百 token），时间线还多出一条莫名的
+        # 命名是平台旁路调用：计量与审计都走全局台账（与开工前路由预检
+        # 同一口径），不混入该会话——否则会话页的「模型消耗」背上命名
+        # 开销（一句问候也被记几百 token），时间线还多出一条莫名的
         # classification 调用
         audit = AuditLogger(self._cfg.audit_log_path)
         try:
-            try:
-                store: ResourceStore | None = ResourceStore(
-                    resource_root(self._cfg), self._cfg.resources.freshness_hours)
-                campaigns = [row["name"] for row in store.campaigns()["items"]]
-            except (OSError, sqlite3.Error):
-                store, campaigns = None, []
             result = await _llm_name(
                 self._cfg, models, audit, mission=plan.mission or "",
-                target=plan.target, mode=session.mode, campaigns=campaigns)
+                target=plan.target, mode=session.mode)
             if not result or self._sessions.get(session.session_id) is not session:
                 return          # 调用失败，或会话已被删除/替换：不落库不回写
             if result.get("name"):
                 session.auto_title = result["name"]
                 self._persist(session)
-            if result.get("campaign") and store is not None:
-                updated = store.set_session_campaign(
-                    session.session_id, result["campaign"])
-                audit.log("session.naming", "namer", {
-                    "action": "campaign_attached",
-                    "campaign": result["campaign"], "observations": updated})
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 —— 命名旁路绝不影响会话主流程
@@ -1618,6 +1570,32 @@ class SessionManager:
         self._persist(session)
         return session
 
+    def set_project(self, session_id: str, project_id: str) -> Session | None:
+        """移动会话到项目（空串 = 未分类）：catalog 先写、meta 后写。
+
+        运行中允许移动；旧项目记忆已注入本轮上下文，作为历史参考保留到
+        本轮结束（提示词已声明未复核）。移动回填该会话全部历史观测。
+        """
+        session = self._sessions.get(session_id)
+        if session is None:
+            return None
+        project_id = str(project_id or "").strip()[:64]
+        store = self._resources()
+        try:
+            store.set_session_project(session_id, project_id)
+        except ValueError as exc:
+            raise SpiritScoutError(str(exc)) from exc
+        session.project_id = project_id
+        self._persist(session)
+        project = store.project(project_id) if project_id else None
+        try:
+            AuditLogger(session.audit_path).log("session.project", "user", {
+                "action": "moved", "project_id": project_id,
+                "project": str((project or {}).get("name") or "")})
+        except (OSError, SpiritScoutError):
+            pass        # 审计失败不遮蔽移动结果：catalog 已是事实源
+        return session
+
     async def delete(self, session_id: str, *, confirm: bool = False) -> Session | None:
         """删除会话：仅终态可删且需 confirm；连工作区目录一并移除。"""
         session = self._sessions.get(session_id)
@@ -1629,5 +1607,10 @@ class SessionManager:
         if not confirm:
             raise SpiritScoutError("删除会话需显式 confirm=true（连工作区一并移除）")
         self._sessions.pop(session_id, None)
+        try:
+            self._resources().remove_session(session_id)
+        except (OSError, sqlite3.Error, SpiritScoutError) as exc:
+            print(f"[spiritscout] 删除会话成员行失败（{session_id}）: {exc}",
+                  file=sys.stderr)
         shutil.rmtree(session.workspace, ignore_errors=True)
         return session

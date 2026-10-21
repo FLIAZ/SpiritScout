@@ -2095,6 +2095,13 @@ class CTFBaseAgent(SubAgent):
         history = self.ctx.blackboard.read(BlackboardLayer.TOPOLOGY, "historical-assets")
         if history:
             parts.append("## 同一资产的历史参考（本次未复核，不能沿用旧授权）\n" + json.dumps(history, ensure_ascii=False)[:8000])
+        # 放在最后并单独限长：总截断时先丢共享记忆，不丢题目与任务
+        project_memory = self.ctx.blackboard.read(
+            BlackboardLayer.TOPOLOGY, "project-memory")
+        if project_memory:
+            parts.append("## 所属项目的历史记忆（同项目跨会话参考，本次未复核，"
+                         "不构成授权范围）\n"
+                         + json.dumps(project_memory, ensure_ascii=False)[:3000])
         state["messages"] = [
             {"role": "system", "content": self._solver_system_prompt(task)},
             {"role": "user", "content": "\n\n".join(parts)[:24000]},

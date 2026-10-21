@@ -4,10 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>灵枢 SpiritScout</title>
-<link rel="stylesheet" href="/static/css/base.css?v=20261016-live">
-<link rel="stylesheet" href="/static/css/views.css?v=20261018-topo2">
-<link rel="stylesheet" href="/static/css/deliverables.css?v=20261016-review2">
-<link rel="stylesheet" href="/static/css/resources.css?v=20261019-expdel">
+<link rel="stylesheet" href="/static/css/base.css?v=20261020-projects">
+<link rel="stylesheet" href="/static/css/views.css?v=20261020-projects">
+<link rel="stylesheet" href="/static/css/deliverables.css?v=20261020-projects">
+<link rel="stylesheet" href="/static/css/resources.css?v=20261020-projects">
+<link rel="stylesheet" href="/static/css/projects.css?v=20261020-projects">
 </head>
 <body>
 <div class="aurora" aria-hidden="true"></div>
@@ -37,7 +38,7 @@
       </button>
       <button data-nav="mcp"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="7" cy="7" r="2.5"/><circle cx="17" cy="7" r="2.5"/><circle cx="7" cy="17" r="2.5"/><circle cx="17" cy="17" r="2.5"/><path d="M9.5 7h5M9.5 17h5M7 9.5v5M17 9.5v5"/></svg> MCP 管理</button>
       <button data-nav="skill"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4l8 8-8 8-8-8z"/></svg> Skill 管理</button>
-      <button data-nav="assets"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="4" y="5" width="3.6" height="3.6" rx="1"/><rect x="4" y="10.2" width="3.6" height="3.6" rx="1"/><rect x="4" y="15.4" width="3.6" height="3.6" rx="1"/><path d="M10.8 6.8h9M10.8 12h9M10.8 17.2h9"/></svg> 资产收集</button>
+      <button data-nav="projects"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.4l2 2h7.6A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/></svg> 项目</button>
       <button data-nav="exp"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5l7 7.5-7 7.5-7-7.5z"/></svg> 经验提炼</button>
     </nav>
     <div class="side-label">会话 <button id="btn-new" title="新建任务">+ 新任务</button></div>
@@ -59,10 +60,14 @@
         <textarea id="c-mission" placeholder="描述目标与授权范围。例如：评估 https://example.com 的商品浏览与搜索流程"></textarea>
         <div class="comp-files" id="home-files"></div>
         <div class="bar">
-          <button class="icon-btn" id="home-attach" type="button" title="上传题目附件（随任务一起交给灵枢）" aria-label="上传附件">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-          </button>
-          <input type="file" id="home-file" multiple hidden>
+          <div class="bar-left">
+            <button class="icon-btn" id="home-attach" type="button" title="上传题目附件（随任务一起交给灵枢）" aria-label="上传附件">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+            </button>
+            <input type="file" id="home-file" multiple hidden>
+            <select id="c-project" aria-label="项目分区"><option value="">未分类</option></select>
+            <button class="btn sm" id="c-project-new" type="button" title="新建项目分区">+ 项目</button>
+          </div>
           <button class="send-btn" id="c-go" type="button" title="开始执行" aria-label="开始执行"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
         </div>
         <div class="suggestions">
@@ -78,7 +83,7 @@
       <div class="resource-shortcuts" aria-label="共享资源入口">
         <button type="button" data-resource="mcp"><b>MCP 接入</b><span>用自然语言安装与配置工具 ↗</span></button>
         <button type="button" data-resource="skill"><b>Skill 技能</b><span>管理参考知识与适用条件 ↗</span></button>
-        <button type="button" data-resource="assets"><b>资产记忆</b><span>跨会话积累，沿时间复核 ↗</span></button>
+        <button type="button" data-project><b>项目分区</b><span>按项目归档资产与发现，跨会话共享记忆 ↗</span></button>
       </div>
     </section>
 
@@ -190,7 +195,7 @@
     <!-- 模型 -->
     <section id="view-mcp" class="resource-page" hidden></section>
     <section id="view-skill" class="resource-page" hidden></section>
-    <section id="view-assets" class="resource-page" hidden></section>
+    <section id="view-projects" class="resource-page" hidden></section>
     <section id="view-exp" class="resource-page" hidden></section>
     <section id="view-models" hidden>
       <div class="models-head">
@@ -203,7 +208,7 @@
       </div>
       <section class="naming-box" aria-label="会话自动命名候选链">
         <div class="nb-text"><b>会话自动命名</b>
-          <span>新会话标题与资产项目分类的候选链：按序尝试，前面的调不动自动换下一个。留空则跟随编队页灵枢指派。</span></div>
+          <span>新会话标题的候选链：按序尝试，前面的调不动自动换下一个。留空则跟随编队页灵枢指派。</span></div>
         <ol class="nb-chain" id="naming-chain"></ol>
         <div class="nb-pool" id="naming-pool"
              aria-label="候选模型池：按点击先后顺序加入候选链"></div>
@@ -303,23 +308,35 @@
   </div>
 </dialog>
 
+<dialog id="mv-dlg">
+  <h3 style="margin:0">移动会话到项目</h3>
+  <p class="muted" style="font-size:12px;margin:10px 0 0;line-height:1.75">
+    项目只是记忆分区，不改变本次任务的授权范围。移动后，已经注入本会话的历史项目记忆不会即时重载；后续观测会归入新项目。</p>
+  <div class="dlg-grid"><label class="wide"><span>目标项目</span><select id="mv-project"></select></label></div>
+  <div class="dlg-ops">
+    <button class="btn" id="mv-cancel">取消</button>
+    <button class="btn primary" id="mv-save">移动</button>
+  </div>
+</dialog>
+
 <div id="toasts"></div>
 
-<script src="/static/js/polling.js?v=20261017-perf"></script>
-<script src="/static/js/core.js?v=20261019-expdel"></script>
-<script src="/static/js/observer.js?v=20261016-review2"></script>
-<script src="/static/js/deliverables.js?v=20261016-review2"></script>
-<script src="/static/js/tool-parameters.js?v=20261016-review2"></script>
-<script src="/static/js/markdown.js?v=20261017-perf"></script>
-<script src="/static/js/agent-workbench.js?v=20261017-workers3"></script>
-<script src="/static/js/experience.js?v=20261019-expdel"></script>
-<script src="/static/js/views.js?v=20261019-topo3"></script>
-<script src="/static/js/console.js?v=20261019-launch"></script>
+<script src="/static/js/polling.js?v=20261020-projects"></script>
+<script src="/static/js/core.js?v=20261020-projects"></script>
+<script src="/static/js/observer.js?v=20261020-projects"></script>
+<script src="/static/js/deliverables.js?v=20261020-projects"></script>
+<script src="/static/js/tool-parameters.js?v=20261020-projects"></script>
+<script src="/static/js/markdown.js?v=20261020-projects"></script>
+<script src="/static/js/agent-workbench.js?v=20261020-projects"></script>
+<script src="/static/js/experience.js?v=20261020-projects"></script>
+<script src="/static/js/projects.js?v=20261020-projects"></script>
+<script src="/static/js/views.js?v=20261020-projects"></script>
+<script src="/static/js/console.js?v=20261020-projects"></script>
 <dialog id="resource-editor"><form method="dialog"><div class="resource-editor-head"><h3 id="resource-editor-title">资源配置</h3><button class="btn sm" aria-label="关闭" value="cancel">关闭</button></div></form>
 <label>标识<input id="resource-key" autocomplete="off" placeholder="唯一名称"></label>
 <label>配置内容（JSON）<textarea id="resource-json" rows="15" spellcheck="false"></textarea></label>
 <div id="resource-secrets"><label>环境变量（JSON，可留空保持原值）<input id="resource-env" type="password" autocomplete="new-password" placeholder='{"API_KEY":"…"}'></label><label>请求头（JSON，可留空保持原值）<input id="resource-headers" type="password" autocomplete="new-password" placeholder='{"Authorization":"Bearer …"}'></label></div>
 <p class="muted">密钥只通过专用字段填写。聊天中不要粘贴密钥；保存的 MCP 接入对新会话生效。</p><div id="resource-save-error" role="alert"></div><button type="button" class="btn primary" id="resource-save">保存配置</button></dialog>
-<script src="/static/js/resources.js?v=20261017-campaigns"></script>
+<script src="/static/js/resources.js?v=20261020-projects"></script>
 </body>
 </html>
