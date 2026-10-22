@@ -65,10 +65,12 @@ const AgentWorkbench = (() => {
   let store=create(), timer=null;
   function render() {
     timer=null;
+    if (S.view !== "session" || S.tab !== "chat") return;
     const root=$("#agent-workbench"); if (!root) return;
     const agents=[...store.agents.values()], selected=store.agents.get(store.selected);
     const nav=root.querySelector(".aw-agents"), pane=root.querySelector(".aw-pane");
     root.querySelector(".aw-count").textContent=`${agents.length} 个实例`;
+    if (root.querySelector(".aw-content").hidden) return;
     const navSignature=JSON.stringify(agents.map(a=>[a.actor,a.status,a.turn,store.selected]));
     if(nav.dataset.signature !== navSignature) {
       const focus=document.activeElement?.dataset.awActor, offset=nav.scrollLeft;
@@ -98,6 +100,7 @@ const AgentWorkbench = (() => {
     toggle.onclick=()=>{
       content.hidden=!content.hidden;
       toggle.setAttribute("aria-expanded",String(!content.hidden));
+      if (!content.hidden) render();
     };
     root.addEventListener("click",event=>{const b=event.target.closest("[data-aw-actor]");if(!b)return;store.selected=b.dataset.awActor;render();});
     render();

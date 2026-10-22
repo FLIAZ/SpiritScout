@@ -21,9 +21,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -270,11 +272,18 @@ class PlatformAdapter:
     def __init__(self, profile: PlatformProfile, *,
                  audit: AuditLogger | None = None,
                  facts: list[dict[str, Any]] | None = None,
-                 timeout: float = 30.0) -> None:
+                 timeout: float = 30.0,
+                 progress_path: str | Path | None = None,
+                 continuous: bool = False) -> None:
         self.profile = profile
         self.audit = audit or NullAuditLogger()
         self.facts: list[dict[str, Any]] = facts if facts is not None else []
         self.timeout = timeout
+        self.progress_path = Path(progress_path) if progress_path else None
+        self.continuous = continuous
+        self.completion_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._progress: dict[str, Any] = {
+            "total_challenges": 0, "solved_ids": [], "unsolved_ids": []}
         self._client: httpx.AsyncClient | None = None
         self._instances: dict[str, str] = {}          # 题 id → 容器地址
         self._listed: dict[str, dict[str, Any]] = {}  # 题 id → 映射后的挑战
@@ -289,6 +298,35 @@ class PlatformAdapter:
         self.facts.append(fact)
         del self.facts[:-40]
         self.audit.log("platform.fact", "platform_adapter", dict(fact))
+
+    def _update_progress(self, challenges: list[dict[str, Any]]) -> None:
+        """平台完成态 → 会话进度快照；有路径时原子落盘。"""
+        solved = sorted(str(ch.get("id") or "") for ch in challenges
+                        if ch.get("id") and bool(ch.get("is_completed")))
+        solved_set = set(solved)
+        unsolved = sorted(str(ch.get("id") or "") for ch in challenges
+                          if ch.get("id") and str(ch.get("id")) not in solved_set)
+        self._progress = {
+            "total_challenges": len(challenges),
+            "solved_ids": solved,
+            "unsolved_ids": unsolved,
+            "updated_at": time.time(),
+        }
+        if self.progress_path is not None:
+            try:
+                self.progress_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self.progress_path.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(
+                    self._progress, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+                tmp.replace(self.progress_path)
+            except OSError as exc:
+                self._record("progress_persist_failed", error=str(exc)[:200])
+
+    def progress(self) -> dict[str, Any]:
+        return {**self._progress,
+                "solved_ids": list(self._progress.get("solved_ids") or []),
+                "unsolved_ids": list(self._progress.get("unsolved_ids") or [])}
 
     def _ensure_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -411,7 +449,10 @@ class PlatformAdapter:
             if mapped is not None:
                 fresh[mapped["id"]] = mapped
         self._listed = fresh
-        self._record("list_refreshed", count=len(fresh))
+        self._update_progress(list(fresh.values()))
+        self._record("list_refreshed", count=len(fresh),
+                     total_challenges=self._progress["total_challenges"],
+                     solved=len(self._progress["solved_ids"]))
         return list(fresh.values())
 
     async def list_challenges(self) -> list[dict[str, Any]]:
@@ -576,6 +617,14 @@ class PlatformAdapter:
 
     # -------------------------------------------------- Flag 提交
 
+    async def _after_accepted(self, cid: str) -> None:
+        """通关后立即归还容器名额，并通知主调度补位。"""
+        if self.has_completion_signal() and (self.progress_path or self.continuous):
+            await self.refresh(force=True)
+        if self.continuous and self.is_completed(cid):
+            await self.close_instance(cid, reason="提交确认通关，立即切题")
+            self.completion_queue.put_nowait(cid)
+
     async def submit(self, flag_value: str, challenge_id: str) -> SubmitResult:
         """提交 Flag（FlagManager 的 SubmitFn 形态）。
 
@@ -595,6 +644,7 @@ class PlatformAdapter:
         lower = resp.text[:300].lower()
         if self._is_duplicate(op, code, resp.status, lower):
             self._record("submit_duplicate", challenge=challenge_id, status=resp.status)
+            await self._after_accepted(challenge_id)
             return SubmitResult(True, f"平台回报重复提交（该 Flag 已计分）: {resp.text[:200]}")
         if 200 <= resp.status < 300:
             accepted: bool | None = None
@@ -604,6 +654,9 @@ class PlatformAdapter:
                     accepted = bool(value)
             self._record("submitted", challenge=challenge_id, status=resp.status,
                          accepted=accepted, detail=resp.text[:160])
+            # 提交确认即刷新平台完成态并落盘，多 Flag 题仍以整题通关为准。
+            if accepted is True:
+                await self._after_accepted(challenge_id)
             return SubmitResult(accepted, resp.text[:500])
         if resp.status >= 500:
             self._record("submit_error", challenge=challenge_id, status=resp.status,
@@ -623,10 +676,14 @@ class PlatformAdapter:
     # -------------------------------------------------- 摘要
 
     def summary(self) -> dict[str, Any]:
+        progress = self.progress()
         return {
             "platform": self.profile.name, "base_url": self.profile.base_url,
             "listed": len(self._listed), "active_instances": len(self._instances),
             "limits": dict(self.profile.limits),
+            "total_challenges": progress["total_challenges"],
+            "solved_ids": progress["solved_ids"],
+            "unsolved_ids": progress["unsolved_ids"],
         }
 
 

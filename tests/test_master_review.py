@@ -10,6 +10,63 @@ from spiritscout.core.models import AgentType, TaskStatus
 
 
 class MasterReviewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_competition_with_pending_unsolved_skips_review_llm(self) -> None:
+        dag = TaskDAG()
+        dag.add_node(
+            "CTF-WEB", "[web] next", meta={
+                "challenge": {"id": "c2", "title": "next"}})
+        audit = Mock()
+        platform = SimpleNamespace(progress=Mock(return_value={
+            "total_challenges": 2, "solved_ids": ["c1"],
+            "unsolved_ids": ["c2"]}))
+        master = object.__new__(MasterAgent)
+        master.agent_id = "master-test"
+        master.ctx = SimpleNamespace(
+            audit=audit, enable_llm_planning=True,
+            extra={"mode_prompt": "竞赛策略", "platform": platform},
+            plan_override=lambda state: {"dag_nodes": []},
+            tactic_map={"CTF-WEB": (AgentType.CTF_WEB, "ctf_solve")},
+            pause_gate=None)
+        master._final_verdicts = Mock(return_value=[])
+        master._llm_review = AsyncMock()
+        state = {
+            "target": "https://bench.example", "round_no": 0,
+            "dag": dag.to_dict(), "tasks_dispatched": [{"node_id": "finished"}],
+            "round_views": [{"vuln_in_pipeline": 0,
+                             "flags": {"extracted": 1, "accepted": 1}}],
+            "continue_iteration": True, "stop_reason": "",
+            "plan_source": "mode_assembly",
+        }
+
+        result = await master._review(state)
+
+        master._llm_review.assert_not_awaited()
+        self.assertTrue(result["continue_iteration"])
+        review = [c.args[2] for c in audit.log.call_args_list
+                  if c.args[2].get("action") == "review"][-1]
+        self.assertTrue(review["auto_continue"])
+
+        # 资源持续不可用而整轮无任务时，仍让模型判断平台错误和后续处置。
+        master._llm_review.return_value = {
+            "continue_iteration": False, "reason": "平台资源持续不可用"}
+        state["tasks_dispatched"] = []
+        stopped = await master._review(state)
+        master._llm_review.assert_awaited_once()
+        self.assertFalse(stopped["continue_iteration"])
+
+    def test_failed_dependency_does_not_trigger_auto_continue(self) -> None:
+        dag = TaskDAG()
+        blocker = dag.add_node("CTF-WEB", "failed")
+        dag.mark(blocker.node_id, TaskStatus.FAILED)
+        dag.add_node("CTF-WEB", "blocked", depends_on=[blocker.node_id],
+                     meta={"challenge": {"id": "c2"}})
+        master = object.__new__(MasterAgent)
+        master.ctx = SimpleNamespace(extra={
+            "mode_prompt": "竞赛策略", "platform": SimpleNamespace(
+                progress=lambda: {"unsolved_ids": ["c2"]})})
+
+        self.assertFalse(master._competition_auto_continue(dag))
+
     async def test_deferred_challenge_cancels_nodes_and_closes_instance(self) -> None:
         dag = TaskDAG()
         dag.add_node(

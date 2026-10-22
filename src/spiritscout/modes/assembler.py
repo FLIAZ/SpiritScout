@@ -3,7 +3,7 @@
 硬约束落地：
 - C7：CTF 模式不装配任何端口扫描能力（ReconAgent 在 CTF 下自动剔除
   服务发现路线；CTF 五方向直接面向赛题入口）；
-- 4.5.2：AWD 攻击线允许端口扫描（赛方授权 IP 段内），靶场渗透赛同常规渗透；
+- 智能体模式不按赛制标签裁剪角色，规划依赖赛方规则与平台事实；
 - 5.2.1：CTF 赛题未标注方向时按入口特征自动归类（URL/附件类型/二进制）。
 """
 
@@ -21,7 +21,6 @@ from spiritscout.agents.webvuln import WebVulnAgent
 from spiritscout.competition import (
     CompetitionEngine,
     CompetitionRules,
-    ContestType,
     competition_strategy_prompt,
 )
 from spiritscout.core.models import AgentType, RunMode, TaskStatus
@@ -57,6 +56,7 @@ class ModeAssembly:
     competition_engine: CompetitionEngine | None = None
     notes: list[str] = field(default_factory=list)
     strategy_prompt: str = ""
+    competition_context: dict[str, Any] = field(default_factory=dict)
 
 
 def classify_challenge(challenge: dict[str, Any]) -> str:
@@ -310,32 +310,25 @@ class ModeAssembler:
         if conflicts:
             notes.extend(f"规则冲突待人工确认: {c}" for c in conflicts)
 
-        if rules.contest_type == ContestType.JEOPARDY:
-            # Jeopardy=CTF 池：平台完成态过滤、开容器等语义与 CTF 模式同源
-            assembly = self._assemble_ctf(challenges, flag_manager, platform=platform)
-            assembly.mode = RunMode.COMPETITION
-            assembly.notes.append("Jeopardy 赛制：按 6.7 公式动态排题（Jeopardy=CTF 池）")
-        elif rules.contest_type == ContestType.RANGE:
-            assembly = self._assemble_src()
-            assembly.mode = RunMode.COMPETITION
-            assembly.notes.append("靶场渗透赛：常规渗透链路，提交切换为赛方接口（5.3.4）")
-        else:  # AWD：攻击线（含端口扫描，赛方授权段内）+ 防守线骨架
-            agents: dict[AgentType, SubAgent] = {
-                AgentType.BUSINESS_CONTEXT: BusinessContextAgent(self.ctx, **self.kw),
-                AgentType.RECON: ReconAgent(self.ctx, **self.kw),
-                AgentType.PORT_SCAN: PortScanAgent(self.ctx, **self.kw),
-                AgentType.WEB_VULN: WebVulnAgent(self.ctx, **self.kw),
-                AgentType.HOST_VULN: HostVulnAgent(self.ctx, **self.kw),
-                AgentType.POST_EXPLOIT: PostExploitAgent(self.ctx, **self.kw),
-            }
-            assembly = ModeAssembly(
-                mode=RunMode.COMPETITION, agents=agents,
-                tactic_map=None,
-                notes=[("AWD 赛制：攻击线允许端口扫描（仅限赛方授权 IP 段）；"
-                        "防守线（自查/加固）为骨架，动态换防由 CompetitionEngine 驱动")],
-            )
+        from spiritscout.agents.master.agent import TACTIC_AGENT_MAP
+
+        # 赛制名称不裁剪能力、不绑定执行模板；角色与任务依赖由模型选择。
+        assembly = self._assemble_src()
+        ctf = self._assemble_ctf(challenges, flag_manager, platform=platform)
+        assembly.agents.update(ctf.agents)
+        assembly.mode = RunMode.COMPETITION
+        assembly.tactic_map = {**TACTIC_AGENT_MAP, **CTF_TACTIC_MAP}
+        assembly.notes = ["开放赛制：按用户规则、平台事实和实时得分反馈动态规划"]
+        # 无模型的离线演练仅处理已提供的题目，不凭赛制标签发明攻击流程。
+        if not self.kw["enable_llm_planning"] and challenges:
+            assembly.plan_provider = ctf.plan_provider
         assembly.flag_manager = flag_manager
         assembly.competition_engine = engine
         assembly.strategy_prompt = competition_strategy_prompt(rules.contest_type)
+        assembly.competition_context = {
+            "contest_label": rules.contest_type.value,
+            "rules": dict(rules.raw),
+            "challenges": [dict(ch) for ch in challenges],
+        }
         assembly.notes.extend(notes)
         return assembly

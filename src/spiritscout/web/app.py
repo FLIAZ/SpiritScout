@@ -56,7 +56,7 @@ from spiritscout.core.exceptions import (
 from spiritscout.core.models import BlackboardLayer, RunMode
 from spiritscout.launch import LaunchRequest, prepare_launch
 from spiritscout.web import agentcfg, modelcfg, vault
-from spiritscout.web.events import stream_audit
+from spiritscout.web.events import read_audit_page, stream_audit
 from spiritscout.web.sessions import (
     TERMINAL_STATES,
     Session,
@@ -117,6 +117,7 @@ class SessionCreatePayload(BaseModel):
     challenges_yaml: str | None = None
     platform_yaml: str | None = None
     rules_yaml: str | None = None
+    contest_type: str | None = None
     title: str = Field(default="", max_length=80)
     project_id: str = Field(default="", max_length=64)
     no_llm: StrictBool = False
@@ -136,6 +137,28 @@ class SessionPatchPayload(BaseModel):
     project_id: str | None = Field(default=None, max_length=64)
 
 
+def _read_challenge_progress(session: Session) -> dict[str, Any] | None:
+    """只读平台进度快照，刷新页面和重开历史会话沿用同一份完成标记。"""
+    if session.mode != "competition":
+        return None
+    try:
+        progress = json.loads((session.workspace / "competition_progress.json").read_text(
+            encoding="utf-8"))
+    except (OSError, ValueError):
+        progress = (session.summary.get("run") or {}).get("platform")
+    if not isinstance(progress, dict) or "solved_ids" not in progress:
+        return None
+    solved, unsolved = progress.get("solved_ids"), progress.get("unsolved_ids")
+    if not isinstance(solved, list) or not isinstance(unsolved, list):
+        return None
+    solved_ids = sorted({str(cid) for cid in solved if isinstance(cid, (str, int))})
+    unsolved_ids = sorted({str(cid) for cid in unsolved
+                           if isinstance(cid, (str, int))} - set(solved_ids))
+    return {"total_challenges": len(solved_ids) + len(unsolved_ids),
+            "solved_ids": solved_ids, "unsolved_ids": unsolved_ids,
+            "updated_at": progress.get("updated_at")}
+
+
 def _read_state(session: Session) -> dict[str, Any]:
     """数据面快照：短连接只读打开会话黑板（WAL 下与写入侧不互堵）。
 
@@ -153,6 +176,7 @@ def _read_state(session: Session) -> dict[str, Any]:
         "layers": {}, "tasks": [],
         "vulns": {"by_status": {}, "items": []},
         "flags": None,
+        "challenge_progress": _read_challenge_progress(session),
         "pending_approvals": session.approvals.view(),
         "pending_questions": session.questions.view(),
         "ring": session.ring.snapshot(),
@@ -421,6 +445,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                 challenges_yaml=payload.get("challenges_yaml") or None,
                 platform_yaml=payload.get("platform_yaml") or None,
                 rules_yaml=payload.get("rules_yaml") or None,
+                contest_type=payload.get("contest_type"),
                 accept_rule_conflicts=bool(
                     payload.get("accept_rule_conflicts", False)),
                 mission=payload.get("mission") or None,
@@ -603,6 +628,11 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                                    after=after, limit=limit)
         return {"cursor_version": "execution-v1", **page}
 
+    @app.get("/api/sessions/{session_id}/audit-page")
+    def session_audit_page(session_id: str, before: int | None = Query(None, ge=0),
+                           limit: int = Query(160, ge=1, le=250)) -> dict[str, Any]:
+        return read_audit_page(_require(session_id).audit_path, before=before, limit=limit)
+
     @app.get("/api/sessions/{session_id}/events")
     async def session_events(session_id: str, request: Request) -> StreamingResponse:
         session = _require(session_id)
@@ -612,8 +642,15 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                        or request.headers.get("last-event-id", "0") or 0)
         except ValueError:
             last = 0
+        byte_mode = request.query_params.get("cursor") == "bytes"
+        try:
+            offset = int(request.headers.get("last-event-id")
+                         or request.query_params.get("offset", "0")) if byte_mode else None
+        except ValueError:
+            offset = 0
         return StreamingResponse(
             stream_audit(session.audit_path, last,
+                         byte_offset=offset,
                          is_terminal=lambda: session.status in TERMINAL_STATES),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

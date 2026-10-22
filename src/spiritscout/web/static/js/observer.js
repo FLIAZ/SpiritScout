@@ -62,6 +62,7 @@ const SessionObserver = (() => {
   }
   function render() {
     scheduled = false;
+    if (S.view !== "session" || S.tab !== "chat") return;
     const box = $("#session-observer"), state = S.state;
     if (!box || !state || state.session?.session_id !== S.cur) return;
     const v = derive(state), paused = state.session.paused, terminal = TERMINAL.has(state.session.status);

@@ -582,15 +582,26 @@ const autogrow = (el, min, max) => {
   el.style.height = Math.min(max, Math.max(min, el.scrollHeight)) + "px";
 };
 const homeSync = () => {
-  $("#c-go").classList.toggle("ready", !!$("#c-mission").value.trim());
+  $("#c-go").classList.toggle("ready", !!$("#c-mission").value.trim() && !!$("#c-mode").value);
   autogrow($("#c-mission"), 52, 300);
+};
+const missionModeHints = {
+  src: "评估已授权的网站或资产，验证漏洞并生成报告。",
+  ctf: "解答题目入口或附件，获取并提交答案。",
+  competition: "粘贴赛方规则、目标与平台说明，灵枢按实际规则规划，支持自定义赛制。",
+};
+$("#c-mode").onchange = () => {
+  $("#c-mode-hint").textContent = missionModeHints[$("#c-mode").value] || "先选择任务类型，再填写目标与要求。";
+  selxSync($("#c-mode"));
+  homeSync();
 };
 $("#c-mission").addEventListener("input", homeSync);
 homeSync();
 document.querySelectorAll(".chip-s").forEach(b => b.onclick = () => {
+  if (b.dataset.mode) { $("#c-mode").value = b.dataset.mode; $("#c-mode").onchange(); }
   const t = b.textContent.trim();
   $("#c-mission").value = t.includes("example.com")
-    ? t : `${t}：题目入口 `;
+    ? t : `${t}：`;
   homeSync();
   $("#c-mission").focus();
 });
@@ -623,6 +634,15 @@ async function stageFiles(files) {
 }
 
 async function launchMission(payload, files = []) {
+  if (!payload.mode) {
+    const mode = $("#c-mode").value;
+    if (!mode) {
+      toast("请先选择任务类型", true);
+      ($("#c-mode").closest(".selx")?.querySelector(".selx-btn") || $("#c-mode")).focus();
+      return;
+    }
+    payload = { ...payload, mode };
+  }
   $("#c-go").disabled = true;
   try {
     if (!payload.project_id) {

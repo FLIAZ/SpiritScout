@@ -209,7 +209,8 @@ class MasterAgent:
         if self.ctx.pause_gate is not None:
             await self.ctx.pause_gate.wait()
 
-    async def _meta_plan(self, state: MasterState) -> dict[str, Any]:
+    async def _meta_plan(self, state: MasterState, *,
+                         dispatch_only: bool = False) -> dict[str, Any]:
         ctx = self.ctx
         assert ctx.audit is not None
         await self._gate_wait()
@@ -217,15 +218,19 @@ class MasterAgent:
         round_no = state["round_no"]
         plan_source = "llm"
 
-        if round_no == 0 or self._needs_replan(dag, state):
+        if not dispatch_only and (round_no == 0 or self._needs_replan(dag, state)):
             if ctx.plan_override is not None:
                 plan = ctx.plan_override(state)
                 plan_source = "mode_assembly"
             else:
                 plan = await self._llm_plan(state) if ctx.enable_llm_planning else None
                 if plan is None:
-                    plan = self._rule_plan(state)
-                    plan_source = "rule"
+                    if ctx.extra.get("mode_prompt"):
+                        plan = {"dag_nodes": [], "analysis": "模型规划不可用，不套用预设赛制流程"}
+                        plan_source = "unavailable"
+                    else:
+                        plan = self._rule_plan(state)
+                        plan_source = "rule"
             plan["dag_nodes"] = self._ensure_business_gate(
                 plan.get("dag_nodes", []))
             try:
@@ -239,8 +244,12 @@ class MasterAgent:
                 self._record_plan_result(round_no, [], [], rejected=str(exc))
                 if plan_source != "llm":
                     raise
-                plan = self._rule_plan(state)
-                plan_source = "rule"
+                if ctx.extra.get("mode_prompt"):
+                    plan = {"dag_nodes": [], "analysis": "规划被拒绝，等待模型修正，不套用赛制模板"}
+                    plan_source = "unavailable"
+                else:
+                    plan = self._rule_plan(state)
+                    plan_source = "rule"
                 plan["dag_nodes"] = self._ensure_business_gate(
                     plan.get("dag_nodes", []))
                 result = dag.upsert_from_plan(plan.get("dag_nodes", []), round_no)
@@ -276,6 +285,11 @@ class MasterAgent:
             # 保证 CTF 任务永远带着赛题载荷下发（载荷为空的节点无题可解）
             challenge = node.meta.get("challenge") or self._bind_challenge(dag, node)
             if challenge and platform is not None:
+                if (getattr(platform, "continuous", False)
+                        and platform.is_completed(str(challenge.get("id") or ""))):
+                    dag.mark(node.node_id, TaskStatus.CANCELLED)
+                    node.meta["cancel_reason"] = "平台已确认整题完成"
+                    continue
                 try:
                     provisioned = (await platform.ensure_instance(challenge)
                                    if platform.owns(str(challenge.get("id") or ""))
@@ -427,6 +441,26 @@ class MasterAgent:
                 "tactic": node.tactic, "status": node.status.value,
                 "title": node.title[:100]})
         return states
+
+    def _competition_auto_continue(self, dag: TaskDAG) -> bool:
+        """竞赛列表保留未完成题且有待发节点时，跳过“要不要继续”的复盘。"""
+        if not str(self.ctx.extra.get("mode_prompt") or "").strip():
+            return False
+        platform = self.ctx.extra.get("platform")
+        if platform is None or not hasattr(platform, "progress"):
+            return False
+        try:
+            progress = platform.progress()
+        except Exception:  # noqa: BLE001 —— 进度读取失败回退模型复盘
+            return False
+        unsolved = {str(cid) for cid in progress.get("unsolved_ids") or []}
+        if not unsolved:
+            return False
+        for node in dag.ready_nodes():
+            challenge = (node.meta or {}).get("challenge") or {}
+            if str(challenge.get("id") or "") in unsolved:
+                return True
+        return False
 
     async def _apply_competition_decisions(
             self, dag: TaskDAG, decision: dict[str, Any]) -> None:
@@ -689,8 +723,43 @@ class MasterAgent:
             watch = asyncio.create_task(
                 self._steering_watch([t.task_id for t in round_tasks]))
         try:
-            results = await asyncio.gather(
-                *(_run_one(s, t) for s, t in zip(round_specs, round_tasks)))
+            platform = (getattr(ctx, "extra", None) or {}).get("platform")
+            refill_specs: list[dict[str, Any]] = []
+            if platform is not None and getattr(platform, "continuous", False):
+                # 平台提交线程归还名额即唤醒，不等同批任务或同题并行路线收尾。
+                running = {asyncio.create_task(_run_one(s, t))
+                           for s, t in zip(round_specs, round_tasks)}
+                completed = asyncio.create_task(platform.completion_queue.get())
+                try:
+                    while running:
+                        done, _ = await asyncio.wait(
+                            running | {completed}, return_when=asyncio.FIRST_COMPLETED)
+                        for job in done & running:
+                            node_id, status = job.result()
+                            dag.mark(node_id, status)
+                            running.remove(job)
+                        if completed in done:
+                            completed.result()
+                            completed = asyncio.create_task(platform.completion_queue.get())
+                        if dag.ready_nodes():
+                            # 只派发已规划的待做题，不触发新一轮重攻或模型复盘。
+                            refill = await self._meta_plan(
+                                {**state, "dag": dag.to_dict()}, dispatch_only=True)
+                            dag = TaskDAG.from_dict(refill["dag"])
+                            for spec in refill["tasks_dispatched"]:
+                                task = Task.model_validate(spec["task"])
+                                refill_specs.append(spec)
+                                running.add(asyncio.create_task(_run_one(spec, task)))
+                        self._write_dag_snapshot(dag, state["round_no"])
+                finally:
+                    completed.cancel()
+                    for job in running:
+                        job.cancel()
+                    await asyncio.gather(completed, *running, return_exceptions=True)
+                results = []
+            else:
+                results = await asyncio.gather(
+                    *(_run_one(s, t) for s, t in zip(round_specs, round_tasks)))
         finally:
             if watch is not None:
                 watch.cancel()
@@ -705,7 +774,7 @@ class MasterAgent:
             dag.mark(node_id, status)
         await self._platform_release()
         self._write_dag_snapshot(dag, state["round_no"])
-        return {"dag": dag.to_dict()}
+        return {"dag": dag.to_dict(), "tasks_dispatched": refill_specs}
 
     # ------------------------------------------------------------ 用户直达通道
 
@@ -1030,8 +1099,12 @@ class MasterAgent:
         flags_pending = self._ctf_flags_pending(view)
         if self._flag_hard_stop(view, dag):
             stop_reason = "核心目标已达成，全部节点完成"
+        # 本轮完全没派出任务时保留模型复盘，避免平台持续拒绝启动却空转。
+        auto_continue = bool(not stop_reason and state.get("tasks_dispatched")
+                             and self._competition_auto_continue(dag))
         llm_decision = (await self._llm_review(state, view)
-                        if ctx.enable_llm_planning and not stop_reason else None)
+                        if (ctx.enable_llm_planning and not stop_reason
+                            and not auto_continue) else None)
         if llm_decision is not None and (
                 not isinstance(llm_decision, dict)
                 or type(llm_decision.get("continue_iteration")) is not bool):
@@ -1106,6 +1179,7 @@ class MasterAgent:
             "action": "review", "round": state["round_no"],
             "continue": continue_iteration, "stop_reason": stop_reason,
             "deferred_replan": deferred_replan,
+            "auto_continue": auto_continue,
             "llm_reason": str((llm_decision or {}).get("reason", ""))[:400],
             "view": view, "verdicts": verdicts})
         return {"dag": dag.to_dict(), "round_no": next_round,
@@ -1184,6 +1258,7 @@ class MasterAgent:
                 decision_messages(self._system_prompt() + "\nROLE: meta_planner", {
                         "target": state["target"], "round": state["round_no"],
                         "mission": self._mission()[:2000],
+                        "competition_context": self.ctx.extra.get("competition_context", {}),
                         "world_state": self._world_state(),
                         "project_rules": self._project_rules(),
                         "execution_recovery": self.ctx.extra.get("execution_recovery", {}),
@@ -1202,7 +1277,11 @@ class MasterAgent:
                             "返回 JSON：{\"analysis\": str, \"dag_nodes\": [{\"tactic\": "
                             "仅可用战术之一, \"title\": str, \"technique\": str, "
                             "\"target\": str（可选）, \"depends_on\": [依赖战术名，可空；"
-                            "填已有或本计划内节点的 tactic，不要填标题]}]}。"
+                            "填已有或本计划内节点的 tactic，不要填标题], "
+                            "\"meta\": {\"challenge\": 完整赛题对象（赛题节点必填）}}]}。"
+                            "competition_context 提供赛方规则原文与实际题目清单；"
+                            "不得按赛制名称假定计分、轮次、提交或完成条件。"
+                            "赛题节点的 meta.challenge 从清单取对应对象，保留题目 id。"
                             "target 填该节点针对的授权目标（URL/主机名/CIDR，从 "
                             "world_state 的授权范围里挑）；多个域名需要分别测绘或测试"
                             "时，按「战术@序号」拆成多个节点并各填 target，留空则沿用"
@@ -1215,8 +1294,8 @@ class MasterAgent:
                             "如 BUSINESS-CONTEXT@2）。last_plan_result 是最近一次"
                             "规划落图的真实回执：skipped 里的战术已有节点、"
                             "rejected 非空表示整批被拒——按原因修正，不要原样重发。"
-                            "有 BUSINESS-CONTEXT 时必须先建立业务上下文，其他"
-                            "安全测试节点依赖它。"),
+                            "SRC 模式先建立业务上下文；智能体模式的阶段、依赖与"
+                            "任务顺序按赛方规则和当前现场自行决定。"),
                     }, 8000),
                 audit=self.ctx.audit, actor=self.agent_id, memory=decision_memory(self, "plan"),
                 task_type="meta_planning", response_format="json",
@@ -1399,6 +1478,7 @@ class MasterAgent:
             payload: dict[str, Any] = {
                 "action": "review", "view": view,
                 "mission": self._mission()[:2000],
+                "competition_context": self.ctx.extra.get("competition_context", {}),
                 "world_state": self._world_state(),
                 "project_rules": self._project_rules(),
                 "execution_recovery": self.ctx.extra.get("execution_recovery", {}),
@@ -1423,7 +1503,8 @@ class MasterAgent:
                             "返回 JSON：{\"continue_iteration\": bool, \"reason\": str, "
                             "\"dag_nodes\": [{\"tactic\": 仅可用战术之一, \"title\": str, "
                             "\"target\": str（可选）, \"depends_on\": [依赖战术名，可空；"
-                            "填 tactic 不要填标题]}], "
+                            "填 tactic 不要填标题], \"meta\": {\"challenge\": "
+                            "完整赛题对象（赛题节点必填）}}], "
                             "\"defer_challenges\": [{\"id\": str, \"reason\": str}], "
                             "\"retry_challenges\": [{\"id\": str, \"reason\": str}]}。"
                             "target 填新节点针对的授权目标（URL/主机名/CIDR，从 "
@@ -1555,6 +1636,8 @@ class MasterAgent:
 
     def _ensure_business_gate(self, plan_nodes: list[Any]) -> list[dict[str, Any]]:
         """SRC 编队强制先体验业务；CTF 等未装配该角色的模式保持原计划。"""
+        if (getattr(self.ctx, "extra", None) or {}).get("mode_prompt"):
+            return [node for node in plan_nodes if isinstance(node, dict)]
         tactic_map = self.ctx.tactic_map or TACTIC_AGENT_MAP
         if (AgentType.BUSINESS_CONTEXT not in self.ctx.agents
                 or "BUSINESS-CONTEXT" not in tactic_map):
@@ -1594,7 +1677,10 @@ class MasterAgent:
 
     def _rules(self) -> str:
         """用户既定执行规则（随任务持久化，全程遵守）。"""
-        return str(self.ctx.extra.get("standing_rules", "") or "")
+        standing = str(self.ctx.extra.get("standing_rules", "") or "")
+        rules = (self.ctx.extra.get("competition_context") or {}).get("rules")
+        return "\n".join(part for part in (
+            standing, json.dumps(rules, ensure_ascii=False) if rules else "") if part)
 
     def _project_rules(self) -> str:
         """项目说明即用户维护的项目级测试规则，供同项目后续会话直接复用。"""

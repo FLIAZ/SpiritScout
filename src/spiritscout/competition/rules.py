@@ -16,9 +16,20 @@ from typing import Any
 
 
 class ContestType(str, enum.Enum):
+    ADAPTIVE = "adaptive"      # 开放赛制：按用户规则与现场由模型规划
     JEOPARDY = "jeopardy"      # 解题赛
     AWD = "awd"                # 攻防对抗赛
     RANGE = "range"            # 靶场渗透赛
+
+    @classmethod
+    def _missing_(cls, value: object) -> ContestType | None:
+        """旧标签继续兼容；新赛制名称原样承载，不作为校验白名单。"""
+        if not isinstance(value, str) or not value.strip():
+            return None
+        member = str.__new__(cls, value)
+        member._name_ = None
+        member._value_ = value
+        return member
 
 
 def extract_flag_patterns_from_text(doc: str) -> list[str]:
@@ -56,7 +67,7 @@ class SubmitInterface:
 class CompetitionRules:
     """赛制规则的结构化视图。"""
 
-    contest_type: ContestType = ContestType.JEOPARDY
+    contest_type: ContestType = ContestType.ADAPTIVE
     flag_patterns: list[str] = field(default_factory=list)   # 空则用默认 flag{...}
     submit: SubmitInterface = field(default_factory=SubmitInterface)
     dynamic_scoring: bool = False        # 动态分值（血条/时间衰减）
@@ -76,7 +87,7 @@ class CompetitionRules:
         submit = SubmitInterface(**{k: v for k, v in data.get("submit", {}).items()
                                     if k in SubmitInterface.__dataclass_fields__})
         return cls(
-            contest_type=ContestType(data.get("contest_type", "jeopardy")),
+            contest_type=ContestType(data.get("contest_type") or "adaptive"),
             flag_patterns=list(data.get("flag_patterns", [])),
             submit=submit,
             dynamic_scoring=bool(data.get("dynamic_scoring", False)),
@@ -90,15 +101,10 @@ class CompetitionRules:
 
     @classmethod
     def from_text(cls, doc: str) -> CompetitionRules:
-        """规则文档文本抽取（正则关键字段； 升级 LLM 文档解析）。"""
+        """提取显式格式/限速/网段事实；原文交模型理解，不做赛制分类。"""
         data: dict[str, Any] = {}
-        lower = doc.lower()
-        if "awd" in lower or "攻防" in doc:
-            data["contest_type"] = "awd"
-        elif "靶场" in doc or "range" in lower:
-            data["contest_type"] = "range"
-        else:
-            data["contest_type"] = "jeopardy"
+        # 不从关键词推断赛制，原文与未知规则字段交由模型理解。
+        data["rules_text"] = doc
         # Flag 格式声明（确定性提取，与任务启动装配同源）
         patterns = extract_flag_patterns_from_text(doc)
         if patterns:

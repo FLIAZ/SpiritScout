@@ -83,12 +83,16 @@ class PlatformAdapterTests(unittest.IsolatedAsyncioTestCase):
 
     def adapter(self, profile: dict[str, Any] | None = None,
                 platform: FakePlatform | None = None,
-                *, max_active: int | None = None) -> tuple[PlatformAdapter, FakePlatform]:
+                *, max_active: int | None = None,
+                progress_path: Path | None = None,
+                ) -> tuple[PlatformAdapter, FakePlatform]:
         raw = json.loads(json.dumps(profile or PROFILE))
         if max_active is not None:
             raw.setdefault("limits", {})["max_active"] = max_active
         fake = platform or FakePlatform()
-        adapter = PlatformAdapter(parse_platform_profile(raw), audit=self.audit)
+        adapter = PlatformAdapter(
+            parse_platform_profile(raw), audit=self.audit,
+            progress_path=progress_path)
         real = httpx.AsyncClient
 
         def factory(**kw: Any) -> httpx.AsyncClient:
@@ -177,7 +181,60 @@ class PlatformAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([c["id"] for c in kept], ["c1"])  # 保留上次快照
         self.assertIn("list_error", [f["action"] for f in adapter.facts])
 
+    async def test_progress_snapshot_persists_solved_and_total_ids(self) -> None:
+        progress_path = self.root / "competition_progress.json"
+        adapter, fake = self.adapter(progress_path=progress_path)
+        fake.challenges = [_challenge("c1", done=True), _challenge("c2")]
+        fake.route("/api/v1/challenges",
+                   lambda req: httpx.Response(
+                       200, json={"data": {"challenges": fake.challenges}}))
+
+        await adapter.list_challenges()
+        progress = adapter.progress()
+        stored = json.loads(progress_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(progress["total_challenges"], 2)
+        self.assertEqual(progress["solved_ids"], ["c1"])
+        self.assertEqual(progress["unsolved_ids"], ["c2"])
+        self.assertEqual(stored["solved_ids"], ["c1"])
+        self.assertEqual(adapter.summary()["total_challenges"], 2)
+
     # ------------------------------------------------------------ 实例生命周期
+
+    async def test_accepted_submission_persists_fresh_platform_progress(self) -> None:
+        path = self.root / "competition_progress.json"
+        adapter, fake = self.adapter(progress_path=path)
+        fake.challenges = [_challenge("c1"), _challenge("c2")]
+        fake.route("/api/v1/challenges", lambda req: httpx.Response(
+            200, json={"data": {"challenges": fake.challenges}}))
+        await adapter.list_challenges()
+
+        def submit(req: httpx.Request) -> httpx.Response:
+            fake.challenges[0]["is_completed"] = True
+            return httpx.Response(200, json={"correct": True})
+
+        fake.route("/api/v1/challenge/submit", submit)
+        result = await adapter.submit("flag{demo}", "c1")
+        stored = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(stored["solved_ids"], ["c1"])
+        self.assertEqual(stored["unsolved_ids"], ["c2"])
+        self.assertEqual(stored["total_challenges"], 2)
+
+    async def test_partial_submission_does_not_mark_challenge_solved(self) -> None:
+        path = self.root / "competition_progress.json"
+        adapter, fake = self.adapter(progress_path=path)
+        fake.route("/api/v1/challenges", lambda req: httpx.Response(
+            200, json={"data": {"challenges": [_challenge("c1")]}}))
+        fake.route("/api/v1/challenge/submit", lambda req: httpx.Response(
+            200, json={"correct": True}))
+        await adapter.list_challenges()
+
+        await adapter.submit("flag{partial}", "c1")
+
+        self.assertEqual(adapter.progress()["solved_ids"], [])
+        self.assertEqual(adapter.progress()["unsolved_ids"], ["c1"])
 
     async def test_ensure_instance_idempotent_and_capped(self) -> None:
         adapter, fake = self.adapter(max_active=1)

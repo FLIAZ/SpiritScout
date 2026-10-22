@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,12 +10,13 @@ from unittest.mock import AsyncMock, Mock
 from spiritscout.agents.ring import attempt_key
 from spiritscout.agents.sub.base import RoutePlan
 from spiritscout.core.audit import NullAuditLogger
-from spiritscout.core.models import AgentType, Task
+from spiritscout.core.models import AgentType, RunMode, Task
 from spiritscout.ctf.agents import (
     CTFBaseAgent,
     _challenge_instance_blocker,
     _model_messages,
 )
+from spiritscout.ctf.flags import FlagManager, SubmitResult
 from spiritscout.runtime import _write_competition_summary
 
 
@@ -35,6 +37,123 @@ class CompetitionSummaryTests(unittest.TestCase):
         self.assertIn("题一（c1）：平台确认完成", body)
         self.assertNotIn("WriteUp", body)
         self.assertNotIn("复现步骤", body)
+
+    def test_partial_flag_does_not_override_empty_platform_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            flags = SimpleNamespace(
+                stats=lambda: {"accepted": 1},
+                accepted_flags=lambda: [SimpleNamespace(challenge_id="c1")])
+            out = _write_competition_summary(
+                Path(tmp) / "summary.md", contest="jeopardy",
+                run_summary={"platform": {
+                    "listed": 2, "total_challenges": 2, "solved_ids": []}},
+                flag_manager=flags, challenges=[{"id": "c1"}])
+            body = out.read_text(encoding="utf-8")
+
+        self.assertIn("平台完成：0 / 2", body)
+        self.assertIn("c1（c1）：未确认完成", body)
+
+
+class AcceptedFlagTerminationTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _agent(response: str) -> CTFBaseAgent:
+        async def submit(flag: str, challenge: str) -> SubmitResult:
+            return SubmitResult(True, response)
+
+        agent = object.__new__(CTFBaseAgent)
+        agent.agent_id = "ctf-web-test"
+        agent.agent_type = AgentType.CTF_WEB
+        agent.flag_manager = FlagManager(
+            submit_fn=submit, audit=NullAuditLogger())
+        agent.ctx = SimpleNamespace(audit=NullAuditLogger(), mode=RunMode.COMPETITION)
+        agent._record_flag = Mock()
+        return agent
+
+    @staticmethod
+    def _task(total: int) -> Task:
+        return Task(
+            task_id="t1", task_type="ctf_solve", target="http://x",
+            agent_type=AgentType.CTF_WEB, round_no=0,
+            payload={"challenge": {"id": "e1-03", "flag_count": total}})
+
+    async def test_completed_single_flag_stops_without_writeup(self) -> None:
+        agent = self._agent(json.dumps({
+            "correct": True, "awarded": 250, "cumulative_score": 250,
+            "correct_flag_count": 1, "total_flag_count": 1}))
+
+        out = await agent._tool_submit_flag(
+            self._task(1), SimpleNamespace(name="solve"), {},
+            {"flag": "flag{demo}"})
+
+        self.assertTrue(out.stop)
+        self.assertIn("e1-03", out.final_text)
+        self.assertIn("250", out.final_text)
+        self.assertNotIn("WAF", out.final_text)
+        self.assertNotIn("解题", out.final_text)
+
+    async def test_multi_flag_partial_progress_keeps_solving(self) -> None:
+        agent = self._agent(json.dumps({
+            "correct": True, "awarded": 100, "cumulative_score": 100,
+            "correct_flag_count": 1, "total_flag_count": 2}))
+
+        out = await agent._tool_submit_flag(
+            self._task(2), SimpleNamespace(name="solve"), {},
+            {"flag": "flag{demo}"})
+
+        self.assertFalse(out.stop)
+        self.assertIn("本题尚未完成", out.text)
+        self.assertNotIn("本题完成", out.text)
+
+    async def test_normal_ctf_keeps_model_conclusion(self) -> None:
+        agent = self._agent(json.dumps({
+            "correct_flag_count": 1, "total_flag_count": 1}))
+        agent.ctx.mode = RunMode.CTF
+
+        out = await agent._tool_submit_flag(
+            self._task(1), SimpleNamespace(name="solve"), {},
+            {"flag": "flag{demo}"})
+
+        self.assertFalse(out.stop)
+
+    async def test_duplicate_accepted_flag_still_finishes_competition(self) -> None:
+        agent = self._agent(json.dumps({
+            "correct_flag_count": 1, "total_flag_count": 1}))
+        for _ in range(2):
+            out = await agent._tool_submit_flag(
+                self._task(1), SimpleNamespace(name="solve"), {},
+                {"flag": "flag{demo}"})
+            self.assertTrue(out.stop)
+
+    async def test_unknown_completion_keeps_solving(self) -> None:
+        agent = self._agent("平台确认正确，但未提供整题完成态")
+
+        out = await agent._tool_submit_flag(
+            self._task(0), SimpleNamespace(name="solve"), {},
+            {"flag": "flag{demo}"})
+
+        self.assertFalse(out.stop)
+
+    async def test_completed_peer_route_skips_gateway_and_bootstrap(self) -> None:
+        agent = self._agent(json.dumps({
+            "correct_flag_count": 1, "total_flag_count": 1}))
+        task = self._task(1)
+        await agent._tool_submit_flag(
+            task, SimpleNamespace(name="winner"), {}, {"flag": "flag{demo}"})
+        state = {"concluded": False, "stall": "", "messages": [], "turn": 0}
+        agent._inv_state = Mock(return_value=state)
+        agent._save_inv_state = Mock()
+        agent._record_conclusion = Mock()
+        agent._inv_bootstrap = AsyncMock()
+        agent.ctx.gateway = SimpleNamespace(chat=AsyncMock())
+        route = SimpleNamespace(name="peer", conclusion_published=False)
+
+        result = await agent._solve_turn_inner(task, route, None)
+
+        self.assertTrue(result.final_note)
+        self.assertTrue(state["concluded"])
+        self.assertTrue(route.conclusion_published)
+        agent._inv_bootstrap.assert_not_awaited()
+        agent.ctx.gateway.chat.assert_not_awaited()
 
 
 class ChallengeAvailabilityTests(unittest.TestCase):

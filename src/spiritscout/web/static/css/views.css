@@ -1054,3 +1054,49 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
 .nb-prov {font-size:10.5px;color:var(--ink-2);}
 .nb-ops {display:flex;align-items:center;gap:8px;justify-content:flex-end;}
 .nb-note {font-size:11px;color:var(--ink-2);margin-right:auto;}
+
+/* 竞赛题目台账：完成信号与题号保持同一行，长 ID 可换行。 */
+.challenge-counter { margin-top: 8px; color: var(--ok); font: 12px var(--mono); }
+.challenge-board { padding: 24px; }
+.challenge-heading { display: flex; justify-content: space-between; align-items: center; gap: 20px; }
+.challenge-heading h3 { margin: 0 0 6px; font-size: 18px; }
+.challenge-heading p, .challenge-empty { color: var(--ink-3); font-size: 13px; }
+.challenge-heading p { margin: 0; }
+.challenge-score { text-align: right; flex-shrink: 0; }
+.challenge-score strong { font: 32px var(--mono); color: var(--ok); }
+.challenge-score strong span { font-size: 20px; color: var(--ink-3); }
+.challenge-score small { display: block; color: var(--ink-2); font-size: 11px; margin-top: 4px; }
+.challenge-meter { display: block; width: 100%; height: 6px; margin: 24px 0 30px; border: 0; border-radius: 3px; background: var(--surface-2); accent-color: var(--ok); }
+.challenge-meter::-webkit-progress-bar { background: var(--surface-2); border-radius: 3px; }
+.challenge-meter::-webkit-progress-value { background: var(--ok); border-radius: 3px; }
+.challenge-meter::-moz-progress-bar { background: var(--ok); border-radius: 3px; }
+.challenge-group + .challenge-group { margin-top: 28px; }
+.challenge-group h4 { display: flex; align-items: center; gap: 10px; font-size: 13px; margin: 0 0 12px; }
+.challenge-group h4 span { color: var(--ink-3); font: 12px var(--mono); }
+.challenge-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 160px), 1fr)); gap: 8px; list-style: none; margin: 0; padding: 0; }
+.challenge-id { display: flex; align-items: baseline; gap: 10px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius); color: var(--ink-2); }
+.challenge-id code { font: 13px var(--mono); overflow-wrap: anywhere; }
+.challenge-id.solved { color: var(--ok); background: var(--ok-soft); border-color: var(--ok); }
+.challenge-id.pending > span { color: var(--ink-3); }
+@media (max-width: 540px) {
+  .challenge-board { padding: 16px; }
+  .challenge-heading { gap: 12px; align-items: flex-start; }
+  .challenge-score strong { font-size: 26px; }
+}
+
+/* 新任务先由用户明确选择需求，沿用控制台表单与信号色。 */
+.mission-settings { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 18px; padding: 16px 18px; border-bottom: 1px solid var(--line); }
+.mission-settings label { display: flex; flex-direction: column; gap: 6px; color: var(--ink-2); font-size: 12px; }
+.mission-settings label[hidden] { display: none; }
+.mission-settings select { min-width: 210px; max-width: 100%; padding: 8px 10px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius); color: var(--ink); font: inherit; }
+.mission-settings p { flex-basis: 100%; margin: 0; color: var(--ink-3); font-size: 12px; line-height: 1.6; }
+@media (max-width: 540px) {
+  .mission-settings { padding: 14px; }
+  .mission-settings label { flex: 1 1 100%; }
+  .mission-settings select { width: 100%; }
+}
+
+/* 历史窗口独立翻页，打开长会话无需从第一条事件重放。 */
+.trace-history { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); color: var(--ink-3); font-size: 11px; flex: none; }
+.trace-history > div { display: flex; gap: 6px; }
+.trace > .tl { content-visibility: auto; contain-intrinsic-size: auto 80px; }

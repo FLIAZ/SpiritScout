@@ -109,7 +109,7 @@ function show(view) {
   else if (typeof ProjectsPage !== "undefined") ProjectsPage.close();
   if (["mcp","skill"].includes(view) && typeof ResourceConsole !== "undefined") ResourceConsole.open(view);
   if (view === "exp" && typeof ExperiencePage !== "undefined") ExperiencePage.open();
-  if (view !== "session") stopStreams();
+  if (view !== "session") { SessionHistory.cancel(); stopStreams(); }
 }
 document.querySelectorAll(".side > nav button").forEach(b =>
   b.onclick = () => { S.cur = null; show(b.dataset.nav); renderSessions(); });

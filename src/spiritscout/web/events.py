@@ -1,10 +1,8 @@
 """SSE 事件流：会话审计日志跟随 + 心跳保活。
 
-数据源是 append-only 的 audit.jsonl（同进程写入）。游标 = (行号, 字节偏移)：
-文件按二进制读——tell/seek 是真字节偏移，续传跳行与输出 ID 共用同一套
-字节计量（行号即 SSE 事件 ID，只数完整行，中文等多字节行一致）；
-未写完的尾部行本轮不发、下轮从行首重读。客户端断线重连以 Last-Event-ID
-续传（按行重扫，一次性成本），事件 ID 与跳过行数严格对齐。
+数据源是 append-only 的 audit.jsonl。新页面使用完整行结尾的字节偏移
+作为分页与 SSE 游标，断线后直接 seek；旧客户端保留行号续传兼容。
+未写完的尾部行本轮不发，下轮从行首重读，中文等多字节文本不影响对齐。
 """
 
 from __future__ import annotations
@@ -13,11 +11,53 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
+from typing import Any
 
 from spiritscout.core.audit import sanitize_record
 
 _HEARTBEAT = ": hb\n\n"
 _DONE = "event: done\ndata: {}\n\n"
+
+
+def read_audit_page(path: Path, *, before: int | None = None,
+                    limit: int = 160) -> dict[str, Any]:
+    """从字节游标向前读取一页，不为最近历史扫描整个长日志。"""
+    try:
+        fh = path.open("rb")
+    except FileNotFoundError:
+        return {"items": [], "older_cursor": 0, "cursor": 0, "has_more": False}
+    with fh:
+        size = fh.seek(0, 2)
+        end = min(max(before, 0), size) if before is not None else size
+        start, data = end, b""
+        while start > 0 and data.count(b"\n") < limit + 2:
+            block_start = max(0, start - 65536)
+            fh.seek(block_start)
+            data = fh.read(start - block_start) + data
+            start = block_start
+        if start:
+            # 块首可能落在一行中间；该行留给上一页完整读取。
+            first = data.find(b"\n") + 1
+            start += first
+            data = data[first:]
+        rows = data.splitlines(keepends=True)
+        complete = rows if not rows or rows[-1].endswith(b"\n") else rows[:-1]
+        offset = start + sum(len(row) for row in complete[:-limit])
+        older = offset
+        items = []
+        for row in complete[-limit:]:
+            offset += len(row)
+            if not row.strip():
+                continue
+            try:
+                event = sanitize_record(json.loads(row))
+                if not isinstance(event, dict):
+                    raise ValueError("审计记录不是对象")
+            except (ValueError, TypeError, AttributeError):
+                event = {"type": "audit.invalid", "detail": {"error": "日志行无效"}}
+            items.append({"id": offset, "event": event})
+        return {"items": items, "older_cursor": older,
+                "cursor": offset, "has_more": older > 0}
 
 
 def _frame(event_id: int, line: str) -> str:
@@ -30,6 +70,7 @@ def _frame(event_id: int, line: str) -> str:
 
 
 async def stream_audit(path: Path, last_event_id: int = 0, *,
+                       byte_offset: int | None = None,
                        poll: float = 0.5, heartbeat: float = 15.0,
                        max_frames: int | None = None,
                        is_terminal: Callable[[], bool] | None = None,
@@ -54,6 +95,10 @@ async def stream_audit(path: Path, last_event_id: int = 0, *,
             fh = None
             return
         skipped = 0
+        if byte_offset is not None:
+            fh.seek(max(0, byte_offset))
+            offset = fh.tell()
+            return
         while skipped < last_event_id:
             line = fh.readline()
             if not line:
@@ -89,12 +134,16 @@ async def stream_audit(path: Path, last_event_id: int = 0, *,
                     tail = lines.pop()           # 半行：本轮不发，下轮从行首重读
                 for line in lines:
                     cursor += 1
+                    if byte_offset is not None:
+                        offset += len(line) + 1
                     text = line.decode("utf-8", errors="replace").strip()
                     if text:
-                        yield _frame(cursor, text)
+                        yield _frame(offset if byte_offset is not None else cursor, text)
                         emitted += 1
                         if max_frames is not None and emitted >= max_frames:
                             return
+                        if emitted % 64 == 0:
+                            await asyncio.sleep(0)  # 大量追帧时让出事件循环
                 offset = fh.tell() - len(tail)   # 回退未消费的半行字节
                 idle = 0.0
             else:

@@ -640,6 +640,7 @@ async def _run_master(
     master_extra: dict[str, Any] = {
         "mode_notes": assembly.notes, "mission": mission,
         "mode_prompt": getattr(assembly, "strategy_prompt", ""),
+        "competition_context": getattr(assembly, "competition_context", {}),
         "execution_recovery": recovery_context,
         "secretary_enabled": infra.cfg.secretary.enabled,
         "secretary_gateway": AgentBoundGateway(infra.gateway, infra.agent_models.get("secretary", "")),
@@ -740,6 +741,9 @@ def _write_competition_summary(
     flags = flag_manager.stats()
     platform = run_summary.get("platform") or {}
     accepted_ids = {str(f.challenge_id) for f in flag_manager.accepted_flags()}
+    solved_ids = {str(cid) for cid in platform.get("solved_ids") or []}
+    # 平台明确给出空完成列表时，不能把多 Flag 题的部分提交算成通关。
+    completed_ids = solved_ids if "solved_ids" in platform else accepted_ids
     lines = [
         "# 智能渗透赛结果摘要",
         "",
@@ -757,6 +761,8 @@ def _write_competition_summary(
         lines.extend([
             f"- 平台：{platform.get('platform', '未命名')}",
             f"- 平台列题：{platform.get('listed', '未知')}",
+            f"- 平台完成：{len(completed_ids)} / "
+            f"{platform.get('total_challenges', platform.get('listed', '未知'))}",
             f"- 活跃容器：{platform.get('active_instances', '未知')}",
         ])
     lines.extend(["", "## 赛题状态", ""])
@@ -767,7 +773,7 @@ def _write_competition_summary(
             continue
         seen.add(cid)
         title = str(challenge.get("title") or cid)
-        status = "平台确认完成" if cid in accepted_ids else "未确认完成"
+        status = "平台确认完成" if cid in completed_ids else "未确认完成"
         lines.append(f"- {title}（{cid}）：{status}")
     if not seen:
         lines.append("- 本次没有可汇报的赛题状态。")
@@ -1294,7 +1300,9 @@ async def run_ctf_engagement(
                 infra.audit.log("platform.fact", "runtime", {
                     "action": "profile_invalid", "error": str(exc)[:200]})
             else:
-                adapter = PlatformAdapter(profile, audit=infra.audit)
+                adapter = PlatformAdapter(
+                    profile, audit=infra.audit,
+                    progress_path=infra.workspace / "ctf_progress.json")
                 infra.audit.log("platform.fact", "runtime", {
                     "action": "profile_loaded", "profile": profile.redacted()})
                 await adapter.precheck()
@@ -1404,14 +1412,13 @@ async def run_competition_engagement(
 ) -> EngagementResult:
     """智能渗透赛任务入口（4.5/5.3）：赛制自适应调度。
 
-    - Jeopardy：6.7 优先级公式排序后按 CTF 池分发；
-    - AWD：攻击线允许端口扫描（仅限赛方授权 CIDR，已并入 scope）；
-    - 靶场：SRC 链路 + 全链路核验，产出轻量结果摘要。
+    用户选择智能体模式后，模型按原始规则和平台反馈动态规划；不按赛制
+    标签排序、裁剪角色或选择固定流程，结束时产出轻量结果摘要。
 
     platform_profile：平台档案（托管题/跑分平台）——列题/开容器/完成回收/
     提交全部经适配器执行（与 CTF 模式同一套语义）；不提供时行为与原来一致。
     """
-    from spiritscout.competition import ChallengeCard, CompetitionEngine, ContestType
+    from spiritscout.competition import CompetitionEngine
 
     if authorization.mode != RunMode.COMPETITION:
         raise SpiritScoutError("run_competition_engagement 要求授权模式为 COMPETITION")
@@ -1444,7 +1451,10 @@ async def run_competition_engagement(
                 infra.audit.log("platform.fact", "runtime", {
                     "action": "profile_invalid", "error": str(exc)[:200]})
             else:
-                adapter = PlatformAdapter(profile, audit=infra.audit)
+                adapter = PlatformAdapter(
+                    profile, audit=infra.audit,
+                    progress_path=infra.workspace / "competition_progress.json",
+                    continuous=True)
                 infra.audit.log("platform.fact", "runtime", {
                     "action": "profile_loaded", "profile": profile.redacted()})
                 await adapter.precheck()
@@ -1472,22 +1482,8 @@ async def run_competition_engagement(
             store_path=infra.workspace / "flags.json",
         )
 
-        # Jeopardy：按 6.7 优先级公式排题（高分 × 成功率 × 时间衰减 ÷ 成本）
+        # 保留赛方列表与分值事实，排题策略由模型按实际规则裁决。
         ordered = list(challenges)
-        if rules.contest_type == ContestType.JEOPARDY and ordered:
-            cards = [
-                ChallengeCard(
-                    challenge_id=str(c.get("id", f"ch{i}")),
-                    title=str(c.get("title", "")),
-                    points=float(c.get("points", 100.0)),
-                    estimated_cost=float(c.get("estimated_cost", 1.0)),
-                )
-                for i, c in enumerate(ordered)
-            ]
-            engine.schedule_jeopardy(cards)   # 审计留痕本轮选择
-            rank = {c.challenge_id: engine.priority(c) for c in cards}
-            ordered.sort(key=lambda c: rank.get(str(c.get("id", "")), 0.0),
-                         reverse=True)
 
         assembly = _make_assembler(infra, enable_llm_planning).assemble(
             RunMode.COMPETITION, challenges=ordered, rules=rules,

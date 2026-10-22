@@ -1,6 +1,6 @@
 /* ================= 视图：会话详情/拓扑/报告 ================= */
 /* ================= 会话详情 ================= */
-const TABS = ["chat", "topo", "vulns", "flags", "events", "deliverables", "report"];
+const TABS = ["chat", "topo", "challenges", "vulns", "flags", "events", "deliverables", "report"];
 $("#mobile-sessions-toggle").onclick = () => {
   const open = document.querySelector(".side").classList.toggle("mobile-sessions-open");
   $("#mobile-sessions-toggle").setAttribute("aria-expanded", String(open));
@@ -8,6 +8,7 @@ $("#mobile-sessions-toggle").onclick = () => {
 function openSession(id) {
   if (S.cur !== id) {
     S.state = null;
+    renderChallenges();
     $("#topo-ops-apv").replaceChildren();
     delete $("#topo-ops-apv").dataset.signature;
     $("#topo-ops-ask").replaceChildren();
@@ -50,12 +51,16 @@ document.querySelectorAll("#s-tabs button").forEach(b => {
     for (const t of TABS) $("#tab-" + t).hidden = t !== S.tab;
     b.scrollIntoView({block:"nearest", inline:"nearest"});
     if (S.tab === "topo") drawTopo();
+    if (S.tab === "challenges") renderChallenges();
+    if (S.tab === "vulns") renderVulns();
+    if (S.tab === "flags") renderFlags();
+    if (S.tab === "chat") { SessionObserver.render(); AgentWorkbench.render(); }
     if (S.tab === "report") loadReport();
     if (S.tab === "deliverables") SessionArchive.load();
   };
 });
 $("#s-tabs").addEventListener("keydown", event => {
-  const buttons = [...document.querySelectorAll("#s-tabs button")];
+  const buttons = [...document.querySelectorAll("#s-tabs button")].filter(b => !b.hidden);
   const index = buttons.indexOf(document.activeElement);
   if (index < 0) return;
   let next;
@@ -85,9 +90,10 @@ async function refreshState() {
     if (S.cur !== sessionId || version !== stateRequestVersion) return;
     S.state = state;
     renderSessionHead(); renderChips(); renderApprovals(); renderQuestions();
-    renderDash();
     if (S.tab === "topo") drawTopo();
-    renderVulns(); renderFlags();
+    if (S.tab === "vulns") renderVulns();
+    if (S.tab === "flags") renderFlags();
+    renderChallenges();
     SessionObserver.render();
     ToolParameters.refresh();
     if (S.tab === "deliverables") SessionArchive.refreshIfStale();
@@ -98,6 +104,38 @@ async function refreshState() {
       if (stateQueued) { stateQueued = false; scheduleStateRefresh(); }
     }
   }
+}
+
+/* 题目面板直接展示平台完成标记，不按 Flag 数量猜测已解题数。 */
+function renderChallenges() {
+  const competition = S.state?.session?.mode === "competition";
+  const button = document.querySelector('[data-tab="challenges"]');
+  const counter = $("#s-challenge-progress"), box = $("#tab-challenges");
+  button.hidden = !competition;
+  counter.hidden = !competition;
+  const progress = S.state?.challenge_progress;
+  const solved = progress?.solved_ids || [], unsolved = progress?.unsolved_ids || [];
+  const total = progress?.total_challenges;
+  counter.textContent = progress ? `已解出 ${solved.length} / ${total} 题` : "等待读取题目列表";
+  if (competition && S.tab !== "challenges") return;
+  const signature = JSON.stringify([S.cur, competition, progress]);
+  if (box.dataset.signature === signature) return;
+  box.dataset.signature = signature;
+  if (!competition) { box.replaceChildren(); return; }
+  if (!progress) {
+    box.innerHTML = '<div class="card empty-note">等待读取赛方题目列表，获取后会在这里实时显示完成进度。</div>';
+    return;
+  }
+  const group = (ids, done) => `<section class="challenge-group">
+    <h4>${done ? "已解出" : "未完成"}<span>${ids.length}</span></h4>
+    ${ids.length ? `<ul class="challenge-grid">${ids.map(id => `<li class="challenge-id ${done ? "solved" : "pending"}" aria-label="${esc(id)}，${done ? "已解出" : "未完成"}"><span aria-hidden="true">${done ? "✓" : "○"}</span><code>${esc(id)}</code></li>`).join("")}</ul>` : `<p class="challenge-empty">${done ? "暂无已解出的题目" : "没有未完成题目"}</p>`}
+    </section>`;
+  box.innerHTML = `<section class="card challenge-board" aria-label="题目完成进度">
+    <header class="challenge-heading"><div><h3>题目列表</h3><p>平台确认通关后实时标记</p></div>
+      <div class="challenge-score"><strong>${solved.length}<span> / ${total}</span></strong><small>已解出 / 全部题目</small></div></header>
+    <progress class="challenge-meter" value="${solved.length}" max="${Math.max(total, 1)}" aria-label="已解出题目进度"></progress>
+    ${total ? group(solved, true) + group(unsolved, false) : '<p class="challenge-empty">赛方暂未提供题目。</p>'}
+    </section>`;
 }
 
 /* 高风险动作即时确认：撞见高风险入口的分支挂起待裁决（G5 交互形态） */
@@ -435,7 +473,7 @@ function renderChips() {
   const bc = st.business_context || {};
   const coverage = { observed_transaction_flow: "交易流", public_flow: "公开流程",
                      entry_only: "仅入口", none: "无" }[bc.coverage];
-  const phase = { queued: "等待调度", starting: "启动任务", mode_routing: "判断任务类型",
+  const phase = { queued: "等待调度", starting: "启动任务", mode_routing: "判断任务类型", intent_routing: "理解续聊意图",
     model_preflight: "检查模型", platform_profile: "解析平台档案",
     scope_confirmation: "确认测试范围",
     master_reply: "灵枢回复中", runtime_starting: "初始化工具与智能体",
@@ -1061,11 +1099,15 @@ function renderFlags() {
 /* ---- 解题轨迹：按真实发生顺序还原成一条可读时间线 ---- */
 let traceStick = true;
 const TRACE_AGENT_SLOTS = new Map();
+const TRACE_TURNS = new Map();
 function traceReset() {
+  if (traceScrollFrame !== null) cancelAnimationFrame(traceScrollFrame);
+  traceScrollFrame = null; traceForceScroll = false;
   SessionObserver.reset();
   AgentWorkbench.reset();
   $("#trace-box").innerHTML = '<div class="empty-note">等待灵枢开工——过程将按真实时间顺序在此展开</div>';
   TRACE_AGENT_SLOTS.clear();
+  TRACE_TURNS.clear();
   S.think.clear();
   traceStick = true;
   $("#trace-jump").hidden = true;
@@ -1094,10 +1136,22 @@ function traceAppend(e, body, cls = "") {
   box.insertAdjacentHTML("beforeend", traceRow(e, body, cls));
   traceScroll();
   const row = box.lastElementChild;
+  if (row.classList.contains("tl-turn")) TRACE_TURNS.set(String(e.actor || ""), row);
   row.dataset.eventTs = e.ts || "";
   return row;
 }
+let traceScrollFrame = null, traceForceScroll = false;
 function traceScroll(force = false) {
+  traceForceScroll ||= force;
+  if (traceScrollFrame !== null) return;
+  traceScrollFrame = requestAnimationFrame(() => {
+    traceScrollFrame = null;
+    const mustScroll = traceForceScroll;
+    traceForceScroll = false;
+    traceScrollNow(mustScroll);
+  });
+}
+function traceScrollNow(force = false) {
   const box = $("#trace-box");
   if (!box) return;
   if (force || traceStick) {
@@ -1107,10 +1161,8 @@ function traceScroll(force = false) {
   $("#trace-jump").hidden = traceStick || box.scrollHeight <= box.clientHeight + 2;
 }
 function traceTurn(actor) {
-  const rows = $("#trace-box").querySelectorAll(".tl-turn");
-  for (let i = rows.length - 1; i >= 0; i--)
-    if (rows[i].dataset.agent === String(actor || "")) return rows[i];
-  return null;
+  const row = TRACE_TURNS.get(String(actor || ""));
+  return row?.isConnected ? row : null;
 }
 function traceCloseThinking(turn) {
   turn?.querySelectorAll(".tl-think.live").forEach(el => {
@@ -1202,8 +1254,9 @@ function tracePush(e) {
     }
     case "agent.delta": {
       const kind = d.kind || "text";
-      const turn = traceTurn(actor);
-      if (!turn) break;
+      if (kind === "tool_call") break;
+      const turn = traceTurn(actor) || traceAppend(e,
+        `<div class="hd"><span class="who">${esc(actorName(actor))}</span><span class="k">本页回合片段</span></div><div class="flow"></div>`, "tl-turn");
       if (kind === "reset") {
         turn.querySelectorAll(".tl-say,.tl-think,.tl-thinkchip").forEach(el => el.remove());
         const rec = S.think.get(actor);
@@ -1283,7 +1336,10 @@ function tracePush(e) {
         const acts = turn?.querySelectorAll(".tl-act") || [];
         el = acts[acts.length - 1];
       }
-      if (!el) break;
+      if (!el) {
+        traceAppend(e, `<details><summary>${esc(SessionObserver.toolName(d.name || "工具"))} · ${d.ok ? "已返回" : "失败"}（调用见更早记录）</summary><pre>${esc(SessionObserver.cleanText(d.result || d.note || "未记录原始响应"))}</pre></details>`, "tl-sys");
+        break;
+      }
       const st = el.querySelector(".st");
       st.textContent = d.ok ? "已返回" : "失败";
       st.className = "st " + (d.ok ? "y" : "n");
@@ -1363,7 +1419,7 @@ function tracePush(e) {
       break;
     case "system.lifecycle":
       if (d.action === "session_kickoff")
-        traceAppend(e, `<div class="m">灵枢开工准备中——检查模型链路并判定任务模式…</div>`, "tl-sys");
+        traceAppend(e, `<div class="m">灵枢开工准备中——加载任务配置…</div>`, "tl-sys");
       break;
     case "engagement.paused":
       traceAppend(e, `<div class="m">⏸ 已暂停——在途步骤跑完即停，对话与审批照常</div>`, "tl-sys");
@@ -1463,39 +1519,44 @@ traceBox.addEventListener("scroll", () => {
   $("#trace-jump").hidden = traceStick || traceBox.scrollHeight <= traceBox.clientHeight + 2;
 }, {passive: true});
 $("#trace-jump").onclick = () => traceScroll(true);
+function renderAuditEvent(e) {
+  tracePush(e);
+  if (e.type !== "agent.delta") {
+    const box = $("#events");
+    box.insertAdjacentHTML("afterbegin", evLine(e));
+    while (box.children.length > 250) box.lastChild.remove();
+  }
+}
 function startStreams(rebuild = true) {
   stopStreams();
   if (!S.cur) return;
-  if (rebuild) { S.evSeen = 0; traceReset(); }
+  if (rebuild) { S.evSeen = 0; SessionHistory.open(); return; }
   S.esTick = Date.now();
-  // 断点续传：看门狗重连带 ?last=已收行号，只补缺口不做全量回放
+  // 分页与 SSE 共用字节游标，重连直接 seek，不从文件头重扫。
   const sessionId = S.cur;
   const es = new EventSource(`/api/sessions/${sessionId}/events`
-    + (S.evSeen ? `?last=${S.evSeen}` : ""));
+    + `?cursor=bytes&offset=${S.evSeen || 0}`);
   S.es = es;
+  let received = S.evSeen;
   // 审计帧是具名事件（event: audit），onmessage 收不到——必须按事件名监听
   es.addEventListener("audit", m => {
     if (S.cur !== sessionId || S.es !== es) return;
     S.esTick = Date.now();
     try {
       const e = JSON.parse(m.data);
-      // 去重游标用 SSE 事件 id（审计文件行号，跨写入者单调）；
+      // 去重游标用 SSE 事件 id（完整日志行的结尾字节偏移）；
       // 载荷 seq 是各写入实例各自计数，多写入者会撞车回退，不能用于去重
       const lid = Number(m.lastEventId) || 0;
       if (lid) {
-        if (lid <= S.evSeen) return;
-        S.evSeen = lid;
+        if (lid <= received) return;
+        received = lid;
       }
-      tracePush(e);
-      if (e.type !== "agent.delta") {       // 流式文本进轨迹，原始事件面板不刷屏
-        const box = $("#events");
-        box.insertAdjacentHTML("afterbegin", evLine(e));
-        while (box.children.length > 250) box.lastChild.remove();
-      }
-      if (/task\.|decision\.|vuln\.|flag\.|system\.|model\.call/.test(e.type || "")) scheduleStateRefresh();
+      SessionHistory.enqueue(e, lid, sessionId);
+      if (/task\.|decision\.|vuln\.|flag\.|platform\.|system\.|model\.call/.test(e.type || "")) scheduleStateRefresh();
     } catch {}
   });
-  es.addEventListener("done", () => {
+  es.addEventListener("done", async () => {
+    await SessionHistory.drain();
     if (S.cur !== sessionId || S.es !== es) return;
     // 终态排空后主动关闭，防止 EventSource 每隔数秒重连并重复刷新状态。
     stopStreams();
@@ -1505,7 +1566,7 @@ function startStreams(rebuild = true) {
   // 断流看门狗：合盖休眠/网络切换后 EventSource 会静默僵死（readyState 不可信），
   // 会话仍在运行却长时间无帧即判死，增量重连补齐缺口（已渲染行保留）
   S.esDog = setInterval(() => {
-    if (S.view !== "session" || !S.cur) return;
+    if (S.view !== "session" || !S.cur || SessionHistory.isPast()) return;
     if (TERMINAL.has(S.state?.session?.status)) return;
     // 暂停态无帧是正常态（智能体已挂起），豁免看门狗避免空转重连
     if (S.state?.session?.paused) return;
@@ -1515,6 +1576,7 @@ function startStreams(rebuild = true) {
   }, 15000);
 }
 function stopStreams() {
+  SessionHistory.clearLiveQueue();
   if (S.es) { S.es.close(); S.es = null; }
   if (S.esDog) { clearInterval(S.esDog); S.esDog = null; }
 }
@@ -1522,7 +1584,7 @@ function stopStreams() {
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible") return;
   S.polling?.wake();
-  if (S.view !== "session" || !S.cur) return;
+  if (S.view !== "session" || !S.cur || SessionHistory.isPast()) return;
   if (TERMINAL.has(S.state?.session?.status)) return;
   // 暂停态同样豁免：连接不再也要刷新，但不为无帧空转重连
   if (S.state?.session?.paused) return;

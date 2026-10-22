@@ -84,8 +84,9 @@ async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
                           audit: AuditLogger,
                           history: list[dict[str, str]] | None = None,
                           declared: RunMode | None = None,
-                          ) -> tuple[RunMode | None, str]:
-    """LLM 语义路由（兼任开工预检）：一次调用裁决「模式 + 意图」。
+                          project_context: str = "",
+                          ) -> tuple[RunMode | None, str, str]:
+    """LLM 语义路由（兼任开工预检）：一次调用裁决「模式 + 意图 + 赛制」。
 
     意图四分类（判断完全在提示词内，后端不写死规则）：
     - task：明确的可执行任务（有具体目标/题目/清晰的行动指令）→ 开工派工；
@@ -97,7 +98,7 @@ async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
     history 为此前的对话往来（续传轮传入）：指代性输入（「继续」「按你
     说的办」）要结合上文才能判准是接着聊还是接着干。
     - 网关调用失败 → 抛出：等同模型预检失败，会话不开工并明示原因；
-    - 应答解析失败 → 返回 (None, "task")：按装配层结构化兜底走。
+    - 应答解析失败 → 返回 (None, "task", "")：按装配层结构化兜底走。
     低思考档提示：分类是小判断，不值得重推理（模型未声明低档时忽略）。
     """
     from spiritscout.gateway.backends import extract_json
@@ -106,14 +107,16 @@ async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
     try:
         resp = await gateway.chat(
             [{"role": "system", "content": (
-                "你是灵枢的任务路由与意图判读。通读用户输入，判断两件事："
-                "属于哪类安全测试分支、用户此刻的意图类型，只输出 JSON。"
+                "你是灵枢的任务路由与意图判读。通读用户输入，判断三件事："
+                "属于哪类安全测试分支、用户此刻的意图类型、若是竞赛则属于"
+                "哪种赛制，只输出 JSON。"
                 "recent_chat 是此前的对话记录（可能为空）——输入是「继续」"
                 "「按你说的办」这类指代性说法时，先看上文再判：接着当前话题"
                 "聊是 dialogue，上文是未竟任务且输入是推进指令则是 task。"
                 "ROLE: mode_router")},
              {"role": "user", "content": json.dumps({
                  "mission": mission[:3000],
+                 "project_context": project_context[:4000],
                  "recent_chat": [
                      {"role": str(e.get("role")),
                       "content": str(e.get("content"))[:300]}
@@ -133,6 +136,12 @@ async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
                      "declared_branch 是用户原话中的直接模式声明。除非用户在当前"
                      "输入中明确要求切换，否则 mode 应与它一致；不能把竞赛多题"
                      "任务降判为普通 ctf。"),
+                 "contest_type_note": (
+                     "赛制标签可自由描述，允许创新或混合赛制；不明确时留空。"
+                     "不要把新赛制强行归入已有类型，流程仍以用户原始规则为准。"),
+                 "project_context_note": (
+                     "project_context 是所属项目的名称与项目说明，只作稳定背景，"
+                     "不扩大授权；若它明确说明项目类型，应与当前任务输入结合判断。"),
                  "intent_types": {
                      "task": "明确的可执行任务：有具体目标/题目/清晰的行动指令",
                      "task_with_rules": "任务与规则同时下发：既有目标或行动指令，"
@@ -144,6 +153,7 @@ async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
                  "fallback_guess": heuristic.value,
                  "answer": '{"mode": "src|ctf|competition", '
                            '"intent": "task|task_with_rules|rules|dialogue", '
+                           '"contest_type": "可选的自由赛制标签", '
                            '"rationale": "一句话"}',
              }, ensure_ascii=False)}],
             task_type="classification", response_format="json",
@@ -162,16 +172,71 @@ async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
         audit.log("decision.change", "mode_router", {
             "action": "llm_mode_route_fallback",
             "heuristic": heuristic.value, "reason": f"应答不可解析: {exc}"[:160]})
-        return None, "task"
+        return None, "task", ""
     intent = str((data or {}).get("intent", "task")).strip().lower()
     if intent not in ("task", "task_with_rules", "rules", "dialogue"):
         intent = "task"
+    contest_type = str((data or {}).get("contest_type") or "").strip()
     audit.log("decision.change", "mode_router", {
         "action": "llm_mode_route", "llm_mode": mode.value,
         "intent": intent, "heuristic": heuristic.value,
         "declared": declared.value if declared else "",
+        "contest_type": contest_type,
         "rationale": str((data or {}).get("rationale", ""))[:200]})
-    return mode, intent
+    return mode, intent, contest_type
+
+
+async def _llm_route_intent(cfg: SystemConfig, models: list[ModelEntry],
+                            mission: str, audit: AuditLogger, *,
+                            history: list[dict[str, str]] | None = None) -> str:
+    """续聊仅判意图，不请求或接受模式/赛制改判。"""
+    from spiritscout.gateway.backends import extract_json
+
+    gateway = _conversation_gateway(cfg, models, audit)
+    resp = await gateway.chat([
+        {"role": "system", "content": (
+            "用户已选定任务模式，你只判断本条消息的意图，只输出 JSON。"
+            "task：执行或继续任务；task_with_rules：任务与规则同时给出；"
+            "rules：仅补充执行规则；dialogue：提问、解释或闲聊，无需派工。"
+            "结合 recent_chat 判断指代；不要重新选择任务模式或赛制。"
+            'answer: {"intent":"task|task_with_rules|rules|dialogue"}。'
+            "ROLE: intent_router")},
+        {"role": "user", "content": json.dumps({
+            "message": mission,
+            "recent_chat": [{"role": str(e.get("role")),
+                             "content": str(e.get("content"))[:1000]}
+                            for e in (history or [])[-8:]],
+        }, ensure_ascii=False)}],
+        task_type="classification", response_format="json",
+        reasoning_effort="low", model=_bound_model(cfg, models),
+        timeout_seconds=min(45, cfg.gateway.request_timeout_seconds))
+    try:
+        data = extract_json(resp.content)
+        intent = str(data.get("intent", "")) if isinstance(data, dict) else ""
+    except (TypeError, ValueError):
+        intent = ""
+    if intent not in ("task", "task_with_rules", "rules", "dialogue"):
+        raise SpiritScoutError("续聊意图应答无效，本轮未派工，请重试")
+    audit.log("decision.change", "intent_router", {
+        "action": "llm_intent_route", "intent": intent})
+    return intent
+
+
+def _routed_competition_rules_yaml(contest_type: str, mission: str) -> str:
+    """把模型裁决的赛制落成最小规则 YAML；能力事实仍由平台档案提供。"""
+    from spiritscout.competition.rules import CompetitionRules
+
+    inferred = CompetitionRules.from_text(mission)
+    data: dict[str, Any] = {
+        "contest_type": contest_type or "adaptive",
+        "rules_text": mission,
+        "flag_patterns": inferred.flag_patterns,
+        "allowed_cidrs": inferred.allowed_cidrs,
+        "submit": {
+            "rate_limit_per_minute": inferred.submit.rate_limit_per_minute,
+        },
+    }
+    return yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
 
 
 async def _llm_extract_platform(cfg: SystemConfig, models: list[ModelEntry],
@@ -1454,11 +1519,22 @@ class SessionManager:
             # 用户意图重新判定，而不是把当时的临时兜底模式永久钉死。
             untouched_auto = bool(req.get("mode_auto")) and not session.has_runtime_state()
             try:
-                mode_override = RunMode(session.mode)
+                # 对话/规则是展示态；用户显式选定的业务模式从启动参数恢复。
+                selected = req.get("mode") if not req.get("mode_auto") else session.mode
+                mode_override = RunMode(selected or session.mode)
             except ValueError:
                 # 对话/规则等展示态不是业务分支：交回语义路由重新裁决
                 # （对话会话重启后续传此前会在此摔成「缺少启动信息」）
                 mode_override = None
+            challenges_yaml = req.get("challenges_yaml") or None
+            # 指代性续作没有新题面 URL 时沿用已绑定赛题，不能丢题后落回 SRC。
+            from spiritscout.launch import extract_targets
+
+            if (mode_override == RunMode.CTF and mission is not None
+                    and not extract_targets(mission)[0] and not challenges_yaml
+                    and session.plan is not None and session.plan.challenges):
+                challenges_yaml = yaml.safe_dump(
+                    session.plan.challenges, allow_unicode=True)
             plan = prepare_launch(LaunchRequest(
                 mode=None if untouched_auto else mode_override,
                 target=req.get("target") or None,
@@ -1467,9 +1543,10 @@ class SessionManager:
                 allow_sensitive=bool(req.get("allow_sensitive", False)),
                 rps=float(req.get("rps", 10.0)),
                 flag_format=req.get("flag_format") or None,
-                challenges_yaml=req.get("challenges_yaml") or None,
+                challenges_yaml=challenges_yaml,
                 platform_yaml=req.get("platform_yaml") or None,
                 rules_yaml=req.get("rules_yaml") or None,
+                contest_type=req.get("contest_type"),
                 accept_rule_conflicts=bool(req.get("accept_rule_conflicts", False)),
                 mission=mission if mission is not None
                         else (req.get("mission") or None),
@@ -1642,6 +1719,7 @@ class SessionManager:
                     "action": "session_kickoff", "resume": resume})
                 routed = None
                 intent = "task"
+                routed_contest = ""
                 # 路由对象消息：续传轮取对话史末尾的用户消息——大厂网页
                 # 对话形态，会话从上次结束的地方接着说，新消息就是这一轮
                 # 的输入，不再把原任务整跑一遍；无对话史（旧会话/接口直调
@@ -1657,8 +1735,19 @@ class SessionManager:
                 # 要结合上文才能判准是接着聊还是接着干
                 route_history = session.dialogue_history[:-1] \
                     if resume_turn else None
+                auto_mode = bool(plan.mode_auto or
+                                 (session.launch_request or {}).get("mode_auto"))
+                if not auto_mode:
+                    audit.log("decision.change", "runtime", {
+                        "action": "user_selected_mode", "mode": mode.value,
+                        "contest_type": str((session.launch_request or {}).get(
+                            "contest_type") or "")})
                 if not no_llm and models:
-                    if route_mission and (
+                    if resume_turn and not auto_mode:
+                        self._set_phase(session, "intent_routing", audit)
+                        intent = await _llm_route_intent(
+                            cfg, models, route_mission, audit, history=route_history)
+                    elif route_mission and (
                             (not resume and plan.needs_mode_routing)
                             or resume_turn):
                         # 语义路由兼任开工预检（开工前唯一模型调用，调用成功
@@ -1670,9 +1759,14 @@ class SessionManager:
                             rules_yaml=(source.rules_yaml if source else None),
                             challenges_yaml=(
                                 source.challenges_yaml if source else None)))
-                        routed, intent = await _llm_route_mode(
+                        project_context = "\n".join(
+                            str(project_memory.get(key) or "").strip()
+                            for key in ("name", "description")
+                        ).strip() if project_memory else ""
+                        routed, intent, routed_contest = await _llm_route_mode(
                             cfg, models, route_mission, mode, audit,
-                            history=route_history, declared=route_declared)
+                            history=route_history, declared=route_declared,
+                            project_context=project_context)
                     else:
                         self._set_phase(session, "model_preflight", audit)
                         _preflight_models(cfg, models, audit)
@@ -1730,6 +1824,12 @@ class SessionManager:
                         if new_plan is None:
                             # 旧版本会话无持久化启动参数：退回进程内原始请求
                             base = plan.source_request or LaunchRequest(
+                                mode=None if auto_mode else mode,
+                                target=plan.target if mode == RunMode.SRC else None,
+                                challenges_yaml=(yaml.safe_dump(plan.challenges)
+                                                 if plan.challenges else None),
+                                contest_type=str((session.launch_request or {}).get(
+                                    "contest_type") or "adaptive"),
                                 mission=route_mission)
                             new_plan = prepare_launch(LaunchRequest(
                                 **{**base.__dict__, "mission": route_mission,
@@ -1766,18 +1866,31 @@ class SessionManager:
                     self._persist(session)
                 if routed is not None and routed != mode and plan.source_request:
                     try:
-                        plan = prepare_launch(LaunchRequest(**{
-                            **plan.source_request.__dict__, "mode": routed}))
+                        overrides = {
+                            **plan.source_request.__dict__, "mode": routed}
+                        if routed == RunMode.COMPETITION \
+                                and not overrides.get("rules_yaml"):
+                            # 模式已由模型从任务语义判为竞赛；赛制类型也是
+                            # 同一次模型裁决，平台能力事实继续由平台抽取补齐。
+                            overrides["rules_yaml"] = _routed_competition_rules_yaml(
+                                routed_contest, route_mission)
+                        plan = prepare_launch(LaunchRequest(**overrides))
                         mode = routed
                         session.mode = routed.value
                         session.target = plan.target
                         cfg.mode = routed
+                        if isinstance(session.launch_request, dict):
+                            session.launch_request["mode"] = routed.value
+                            session.launch_request["rules_yaml"] = \
+                                overrides.get("rules_yaml") or ""
+                            self._persist(session)
                     except SpiritScoutError as exc:
                         # 改判缺必需输入（如判渗透赛但无赛制 YAML）：
                         # 不静默跟随——留痕并按兜底执行
                         audit.log("decision.change", "mode_router", {
                             "action": "llm_mode_route_rejected",
                             "llm_mode": routed.value, "kept": mode.value,
+                            "contest_type": routed_contest,
                             "reason": str(exc)[:300]})
                 # CTF/渗透赛无显式平台档案时做一次抽取：任务文本若描述了托管
                 # 平台的 API 文档（跑分/CTF 平台），把档案落进本次运行并按平台

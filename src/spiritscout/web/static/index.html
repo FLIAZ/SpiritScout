@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>灵枢 SpiritScout</title>
 <link rel="stylesheet" href="/static/css/base.css?v=20261021-scope-memory">
-<link rel="stylesheet" href="/static/css/views.css?v=20261021-scope-memory">
+<link rel="stylesheet" href="/static/css/views.css?v=20261022-history-window">
 <link rel="stylesheet" href="/static/css/deliverables.css?v=20261021-scope-memory">
 <link rel="stylesheet" href="/static/css/resources.css?v=20261021-scope-memory">
 <link rel="stylesheet" href="/static/css/projects.css?v=20261021-scope-memory">
@@ -57,6 +57,15 @@
         <p class="lead">下达任务，剩下的交给<span class="lead-em">灵枢</span></p>
       </div>
       <div class="card composer">
+        <div class="mission-settings">
+          <label for="c-mode">任务需求<select id="c-mode" required>
+            <option value="" selected disabled>请选择任务类型</option>
+            <option value="src">SRC 渗透测试</option>
+            <option value="ctf">CTF 解题</option>
+            <option value="competition">智能渗透赛 / 智能体靶场</option>
+          </select></label>
+          <p id="c-mode-hint">先选择任务类型，再填写目标与要求。</p>
+        </div>
         <textarea id="c-mission" placeholder="描述目标与授权范围。例如：评估 https://example.com 的商品浏览与搜索流程"></textarea>
         <div class="comp-files" id="home-files"></div>
         <div class="bar">
@@ -71,9 +80,9 @@
           <button class="send-btn" id="c-go" type="button" title="开始执行" aria-label="开始执行"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
         </div>
         <div class="suggestions">
-          <button class="chip-s" type="button">对 https://example.com 做一次完整的渗透测试评估</button>
-          <button class="chip-s" type="button">解一道 CTF 题目</button>
-          <button class="chip-s" type="button">测试 https://example.com 的登录与下单流程</button>
+          <button class="chip-s" type="button" data-mode="src">对 https://example.com 做一次完整的渗透测试评估</button>
+          <button class="chip-s" type="button" data-mode="ctf">解一道 CTF 题目</button>
+          <button class="chip-s" type="button" data-mode="competition">在智能体靶场中连续解题拿分</button>
         </div>
       </div>
       <p class="notice">
@@ -94,6 +103,7 @@
           <div class="title-row"><h2 id="s-title"></h2>
             <button id="op-rename" title="重命名会话">✎</button></div>
           <div class="meta" id="s-meta"></div>
+          <div id="s-challenge-progress" class="challenge-counter" role="status" hidden></div>
         </div>
         <div class="ops" id="s-ops"></div>
       </div>
@@ -102,6 +112,7 @@
       <div class="tabs" id="s-tabs" role="tablist" aria-label="会话页面">
         <button data-tab="chat" class="on">会话</button>
         <button data-tab="topo">拓扑</button>
+        <button data-tab="challenges" hidden>题目列表</button>
         <button data-tab="vulns">漏洞</button>
         <button data-tab="flags">Flag</button>
         <button data-tab="events">事件</button>
@@ -117,10 +128,17 @@
             <div class="aw-pane" role="region" aria-label="子 Agent 分析与反馈" tabindex="0"></div>
             </div>
           </section>
+          <div id="trace-history" class="trace-history" aria-label="会话历史记录">
+            <span data-history-status role="status">正在读取记录…</span>
+            <div><button class="btn sm" type="button" data-history="older" disabled>更早记录</button>
+              <button class="btn sm" type="button" data-history="newer" disabled>较新记录</button>
+              <button class="btn sm" type="button" data-history="latest">最近记录</button></div>
+          </div>
           <div class="trace" id="trace-box"></div>
           <button id="trace-jump" type="button" hidden aria-label="回到最新轨迹" title="回到最新轨迹">↓ 回到最新</button>
         </div></div>
         <div id="tab-topo" hidden><div class="card topo" id="topo"></div></div>
+        <div id="tab-challenges" hidden></div>
         <div id="tab-vulns" hidden></div>
         <div id="tab-flags" hidden></div>
         <div id="tab-events" hidden><div class="events" id="events"></div></div>
@@ -323,16 +341,17 @@
 <div id="toasts"></div>
 
 <script src="/static/js/polling.js?v=20261021-scope-memory"></script>
-<script src="/static/js/core.js?v=20261021-scope-memory"></script>
-<script src="/static/js/observer.js?v=20261021-scope-memory"></script>
+<script src="/static/js/core.js?v=20261022-history-window"></script>
+<script src="/static/js/observer.js?v=20261022-history-window"></script>
 <script src="/static/js/deliverables.js?v=20261021-scope-memory"></script>
 <script src="/static/js/tool-parameters.js?v=20261021-scope-memory"></script>
 <script src="/static/js/markdown.js?v=20261021-scope-memory"></script>
-<script src="/static/js/agent-workbench.js?v=20261021-scope-memory"></script>
+<script src="/static/js/agent-workbench.js?v=20261022-history-window"></script>
 <script src="/static/js/experience.js?v=20261021-scope-memory"></script>
 <script src="/static/js/projects.js?v=20261021-scope-memory"></script>
-<script src="/static/js/views.js?v=20261021-scope-memory"></script>
-<script src="/static/js/console.js?v=20261021-scope-memory"></script>
+<script src="/static/js/session-history.js?v=20261022-history-window"></script>
+<script src="/static/js/views.js?v=20261022-history-window"></script>
+<script src="/static/js/console.js?v=20261022-open-contest"></script>
 <dialog id="resource-editor"><form method="dialog"><div class="resource-editor-head"><h3 id="resource-editor-title">资源配置</h3><button class="btn sm" aria-label="关闭" value="cancel">关闭</button></div></form>
 <label>标识<input id="resource-key" autocomplete="off" placeholder="唯一名称"></label>
 <label>配置内容（JSON）<textarea id="resource-json" rows="15" spellcheck="false"></textarea></label>

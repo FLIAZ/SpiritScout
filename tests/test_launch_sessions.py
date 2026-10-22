@@ -18,7 +18,12 @@ from spiritscout.core.audit import AuditLogger
 from spiritscout.core.models import AgentType, BlackboardLayer, RunMode
 from spiritscout.launch import LaunchRequest, prepare_launch
 from spiritscout.web.app import _read_state, create_app
-from spiritscout.web.sessions import Session, SessionManager, _llm_route_mode
+from spiritscout.web.sessions import (
+    Session,
+    SessionManager,
+    _llm_route_mode,
+    _routed_competition_rules_yaml,
+)
 
 CTF_MISSION = (
     "一道ctf题目，拿flag："
@@ -64,6 +69,16 @@ class LaunchRoutingTests(unittest.TestCase):
             mission="智能渗透赛，多道题按难度计分，尽快拿 flag"))
 
         self.assertEqual(plan.authorization.mode, RunMode.COMPETITION)
+
+    def test_model_routed_competition_can_rebuild_without_user_rules_yaml(self) -> None:
+        mission = ("TSec Benchmark 多题计分。提交 flag，平台同时最多 3 个容器。"
+                   "通关后关闭容器。")
+        rules_yaml = _routed_competition_rules_yaml("jeopardy", mission)
+        plan = prepare_launch(LaunchRequest(
+            mode=RunMode.COMPETITION, mission=mission, rules_yaml=rules_yaml))
+
+        self.assertEqual(plan.authorization.mode, RunMode.COMPETITION)
+        self.assertEqual(plan.rules.contest_type.value, "jeopardy")
 
     def test_src_target_falls_back_to_authorized_scope(self) -> None:
         """续传合并进 extra_scope 的授权目标要成为工作入口，不能是 CTF 占位符。"""
@@ -112,19 +127,23 @@ class ModeRouterPromptTests(unittest.IsolatedAsyncioTestCase):
             models = [ModelEntry(model="test-model")]
             gateway = _FakeChatGateway(json.dumps({
                 "mode": "competition", "intent": "task",
+                "contest_type": "jeopardy",
                 "rationale": "智能体靶场测试是多题竞赛"},
                 ensure_ascii=False))
             with patch("spiritscout.web.sessions._conversation_gateway",
                        return_value=gateway):
-                mode, intent = await _llm_route_mode(
+                mode, intent, contest_type = await _llm_route_mode(
                     cfg, models, "智能体靶场测试，多题拿分",
                     RunMode.COMPETITION, AuditLogger(cfg.audit_log_path),
-                    declared=RunMode.COMPETITION)
+                    declared=RunMode.COMPETITION,
+                    project_context="项目说明：这是智能体靶场，按多题计分")
 
         self.assertEqual(mode, RunMode.COMPETITION)
         self.assertEqual(intent, "task")
+        self.assertEqual(contest_type, "jeopardy")
         payload = json.loads(gateway.calls[0]["messages"][1]["content"])
         self.assertEqual(payload["declared_branch"], "competition")
+        self.assertIn("智能体靶场", payload["project_context"])
 
 
 class SessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -388,6 +407,44 @@ class PlatformExtractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(profile["base_url"], "http://10.0.100.58")
             # 平台宿主并入授权域（纯托管题任务也能通过启动门）
             self.assertIn("10.0.100.58", plan.authorization.scope.allowed_domains)
+
+    async def test_model_routed_competition_rebuild_does_not_fall_back_to_ctf(self) -> None:
+        """回归 sess-289f9346：模型已判竞赛，不能因缺用户规则 YAML 留在 CTF。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = SystemConfig(workspace=WorkspaceConfig(root=str(root)))
+            models = [ModelEntry(model="test-model")]
+            manager = SessionManager(cfg, models)
+            workspace = root / "sessions" / "sess-competition-route"
+            workspace.mkdir(parents=True)
+            mission = ("TSec Benchmark 多题计分任务，尽快获取并提交 flag。"
+                       "平台地址 https://tsec.example，最多同时启动 3 个容器。")
+            session = Session(
+                session_id="sess-competition-route", mode="ctf",
+                target="https://tsec.example", workspace=workspace)
+            session.launch_request = {
+                "mode": "ctf", "mode_auto": True, "mission": mission,
+                "target": None}
+            plan = prepare_launch(LaunchRequest(mission=mission))
+            cfg.audit_log_path = str(session.audit_path)
+            gateway = _FakeChatGateway(
+                json.dumps({"mode": "competition", "intent": "task_with_rules",
+                            "contest_type": "jeopardy",
+                            "rationale": "多题计分评测"}, ensure_ascii=False),
+                json.dumps({"platform": None}))
+            with patch("spiritscout.web.sessions._conversation_gateway",
+                       return_value=gateway), patch(
+                    "spiritscout.runtime.run_competition_engagement",
+                    new=AsyncMock(return_value=SimpleNamespace(
+                        run_summary={}, verify_stats={}, flag_stats={},
+                        report_path=str(workspace / "summary.md")))) as run_mock:
+                await manager._run(session, cfg, plan, False, models)
+
+        kwargs = run_mock.call_args.kwargs
+        self.assertEqual(session.mode, "competition")
+        self.assertEqual(kwargs["rules"].contest_type.value, "jeopardy")
+        self.assertEqual(session.launch_request["mode"], "competition")
+        self.assertIn("contest_type: jeopardy", session.launch_request["rules_yaml"])
 
 
 class SessionUsageTests(unittest.IsolatedAsyncioTestCase):

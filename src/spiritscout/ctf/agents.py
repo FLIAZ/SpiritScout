@@ -49,7 +49,7 @@ from typing import Any, ClassVar
 from spiritscout.agents.ring import attempt_key
 from spiritscout.agents.sub.base import RoutePlan, StepResult, SubAgent
 from spiritscout.core.ids import new_id
-from spiritscout.core.models import AgentType, BlackboardLayer, Task
+from spiritscout.core.models import AgentType, BlackboardLayer, RunMode, Task
 from spiritscout.ctf.flags import FlagManager
 from spiritscout.gateway import world_state
 from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
@@ -401,6 +401,8 @@ class _ToolOutcome:
     note: str = ""
     observation: dict[str, Any] | None = None
     empty: bool = False        # 成功执行但无有效输出（喂空转感知，不做拦截）
+    stop: bool = False         # 平台已确认该得分目标完成：不再请求模型写收尾
+    final_text: str = ""       # stop=True 时的确定性短回执
 
 
 def _fn(name: str, description: str, properties: dict[str, Any],
@@ -1080,6 +1082,16 @@ class CTFBaseAgent(SubAgent):
             return StepResult(ok=True, value=0.0,
                               final_note=True,
                               note=state["stall"] or "本路线已收尾")
+        # 竞赛同题并行路线共享平台判定：整题完成后不再调用模型生成题解。
+        if (getattr(self.ctx, "mode", None) == RunMode.COMPETITION
+                and self.flag_manager is not None):
+            for flag in self.flag_manager.accepted_flags():
+                if (flag.challenge_id == self.challenge_id(task)
+                        and self._submission_complete(task, flag.submit_response)):
+                    receipt = self._accepted_receipt(task, flag.submit_response)
+                    self._finish_accepted(task, route, state, receipt)
+                    return StepResult(ok=True, value=0.0,
+                                      final_note=True, note=receipt)
         # 并行同伴夺旗 → 事实通报（不再由后端下令收尾）：本轮并行同伴的
         # Flag 获平台判定正确，每枚只通报一次；继续深挖（多 Flag 题/未竟面）
         # 还是收尾，由模型依现场决定。候选/未判定不算战果；判错的进提示词
@@ -1256,6 +1268,14 @@ class CTFBaseAgent(SubAgent):
             o.ok and o.empty for o in outcomes) else 0
         head = f"第 {turn} 回合"
         note = f"{head}：" + "；".join(notes) if notes else head
+        terminal = next((o for o in outcomes if o.stop and o.final_text), None)
+        if terminal is not None:
+            summary = terminal.final_text[:600]
+            self._finish_accepted(task, route, state, summary)
+            return StepResult(
+                ok=True, value=min(boot_value + total_value, 1.0),
+                progress_delta=_TURN_PROGRESS, findings=findings,
+                final_note=True, note=self._merge_note(boot_note, summary))
         note = self._extend_or_finish(plan, state, note)
         self._save_inv_state(task, route, state)
         return StepResult(
@@ -1402,6 +1422,18 @@ class CTFBaseAgent(SubAgent):
         cand = self.flag_manager.register(
             value, challenge_id=self.challenge_id(task), found_by=self.agent_id)
         if cand is None:
+            existing = self.flag_manager.get(value)
+            if (getattr(self.ctx, "mode", None) == RunMode.COMPETITION
+                    and existing is not None and existing.accepted is True
+                    and existing.challenge_id == self.challenge_id(task)):
+                complete = self._submission_complete(task, existing.submit_response)
+                receipt = self._accepted_receipt(task, existing.submit_response,
+                                                 complete=complete)
+                return _ToolOutcome(
+                    ok=True, value=0.0, note=receipt, stop=complete,
+                    final_text=receipt if complete else "",
+                    text=(receipt if complete else
+                          "该 Flag 已由平台确认过；若还有未完成 Flag，继续本题。"))
             return _ToolOutcome(ok=True, value=0.0, note=f"Flag 重复: {value[:40]}",
                                 text="该 Flag 值此前已登记过，无需重复提交。")
         self._record_flag(task, cand.value,
@@ -1420,12 +1452,89 @@ class CTFBaseAgent(SubAgent):
             "note": str(args.get("note", ""))[:200]})
         text = (f"已登记并提交：{cand.value}\n平台应答：{verdict}"
                 + (f"（{result.submit_response[:200]}）" if result.submit_response else ""))
+        if (result.accepted is True
+                and getattr(self.ctx, "mode", None) == RunMode.COMPETITION):
+            complete = self._submission_complete(task, result.submit_response)
+            receipt = self._accepted_receipt(task, result.submit_response,
+                                             complete=complete)
+            if complete:
+                return _ToolOutcome(
+                    ok=True, value=0.9,
+                    findings=[{"type": "flag", "value": cand.value}],
+                    note=receipt, text=receipt, stop=True, final_text=receipt)
+            text += f"\n{receipt}\n仍有未完成 Flag，继续本题。"
         return _ToolOutcome(
             ok=True,
             value=0.9 if result.accepted is True else (
                 0.2 if result.accepted is False else 0.6),
             findings=[{"type": "flag", "value": cand.value}],
             note=f"Flag 提交 {cand.value} → {verdict}", text=text)
+
+    def _finish_accepted(self, task: Task, route, state: dict[str, Any],
+                         receipt: str) -> None:
+        """平台确认通关后的统一收尾，不再向模型索取结论。"""
+        state["conclusion_text"] = receipt[:600]
+        state["concluded"] = True
+        self._record_conclusion(task, route, state["conclusion_text"])
+        self.ctx.audit.log("agent.conclude", self.agent_id, {
+            "route": route.name, "challenge": self.challenge_id(task),
+            "turn": state.get("turn", 0), "kind": "platform_accepted",
+            "summary": state["conclusion_text"]})
+        route.conclusion_published = True
+        self._save_inv_state(task, route, state)
+
+    def _submission_complete(self, task: Task, response: str) -> bool:
+        """平台应答优先判完成；缺字段时按本题已知 flag 总数核对。"""
+        data: dict[str, Any] = {}
+        try:
+            parsed = json.loads(response)
+            if isinstance(parsed, dict):
+                data = parsed
+        except (TypeError, ValueError):
+            pass
+        try:
+            correct = int(data.get("correct_flag_count"))
+            total = int(data.get("total_flag_count"))
+            if total > 0:
+                return correct >= total
+        except (TypeError, ValueError):
+            pass
+        challenge = self.challenge_of(task)
+        try:
+            expected = int(challenge.get("flag_count") or 0)
+        except (TypeError, ValueError):
+            expected = 0
+        cid = self.challenge_id(task)
+        accepted = 0
+        if self.flag_manager is not None:
+            accepted = sum(
+                1 for flag in self.flag_manager.accepted_flags()
+                if flag.challenge_id == cid)
+        return bool(expected and accepted >= expected)
+
+    def _accepted_receipt(self, task: Task, response: str, *,
+                          complete: bool = True) -> str:
+        """平台确认后的单行回执：不带 Flag、题解或操作过程。"""
+        data: dict[str, Any] = {}
+        try:
+            parsed = json.loads(response)
+            if isinstance(parsed, dict):
+                data = parsed
+        except (TypeError, ValueError):
+            pass
+        parts = [f"{self.challenge_id(task)} 平台确认正确"]
+        awarded = data.get("awarded")
+        cumulative = data.get("cumulative_score")
+        correct = data.get("correct_flag_count")
+        total = data.get("total_flag_count")
+        if awarded is not None:
+            parts.append(f"本次得分 {awarded}")
+        if cumulative is not None:
+            parts.append(f"累计 {cumulative}")
+        if correct is not None and total is not None:
+            parts.append(f"进度 {correct}/{total}")
+        parts.append("本题完成" if complete else "本题尚未完成")
+        return "；".join(parts) + "。"
 
     async def _tool_spawn(self, task: Task, route, state: dict[str, Any],
                           args: dict[str, Any]) -> _ToolOutcome:
@@ -2025,7 +2134,6 @@ class CTFBaseAgent(SubAgent):
 
     def _solver_system_prompt(self) -> str:
         from spiritscout.agents.profiles import agent_system_prompt
-        from spiritscout.core.models import RunMode
 
         prompt = (
             agent_system_prompt(self.agent_type)

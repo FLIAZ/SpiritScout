@@ -21,9 +21,9 @@ from spiritscout.core.models import Authorization, RunMode, Scope
 class LaunchRequest:
     """启动参数（Web 请求体映射至此）。
 
-    mode=None 即「智能模式」：模式不由用户选择——装配层先按结构化
-    输入兜底判定（见 fallback_mode），运行期由主 Agent 的 LLM 路由按任务
-    描述语义亲自裁决，必要时重建启动计划（模型是决策者，脚本是兜底）。
+    新任务由前端明确传入用户选择的 mode；智能体赛制由模型结合规则理解。
+    mode=None 仅兼容旧自动入口：先按结构化输入兜底，运行期再由模型
+    按任务语义裁决，必要时重建启动计划。
     """
 
     mode: RunMode | None = None
@@ -36,6 +36,7 @@ class LaunchRequest:
     challenges_yaml: str | None = None      # CTF/渗透赛赛题 YAML 文本
     platform_yaml: str | None = None        # 平台档案 YAML 文本（托管题/跑分平台）
     rules_yaml: str | None = None           # 渗透赛赛制规则 YAML 文本
+    contest_type: str | None = None         # 兼容已有 API 的自由赛制标签，不作白名单
     accept_rule_conflicts: bool = False
     mission: str | None = None              # 自然语言任务意图（任务式启动）
     has_uploads: bool = False               # 任务下达时携带了上传附件
@@ -218,10 +219,6 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
         raise SpiritScoutError(
             "CTF 模式需要赛题清单——粘贴赛题 YAML，写明赛题 URL，上传题目附件，"
             "或提供平台档案（托管题由平台列题）")
-    if req.mode == RunMode.COMPETITION and not req.rules_yaml and not mode_auto:
-        raise SpiritScoutError(
-            "渗透赛模式需要赛制规则 YAML（contest_type/flag_patterns/submit 等"
-            "结构化裁决输入），暂不支持从任务描述推导")
 
     challenges = (parse_challenges_yaml(req.challenges_yaml)
                   if req.challenges_yaml else [])
@@ -241,7 +238,19 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
 
     rules = None
     if req.mode == RunMode.COMPETITION:
-        rules = parse_rules_yaml(req.rules_yaml or "")
+        from spiritscout.competition.rules import CompetitionRules, ContestType
+
+        if req.rules_yaml:
+            rules = parse_rules_yaml(req.rules_yaml)
+            rules.raw = {**rules.raw, "rules_text": req.rules_yaml}
+        else:
+            # 显式选竞赛时直接装配；规则正文留在模型上下文，不再要求手写 YAML。
+            rules = CompetitionRules.from_text(mission)
+        if req.contest_type is not None:
+            try:
+                rules.contest_type = ContestType(req.contest_type)
+            except ValueError as exc:
+                raise SpiritScoutError(f"未知赛制: {req.contest_type}") from exc
         conflicts = rules.conflicts_with_baseline()
         if conflicts and not req.accept_rule_conflicts:
             listing = "\n".join(f"  - {c}" for c in conflicts)
@@ -290,9 +299,9 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
         testing_rules=(req.rules_yaml or "") if rules is not None else "",
         max_requests_per_second=req.rps,
         allow_sensitive_actions=req.allow_sensitive,
-        # 携带附件即已授权分析这些本地文件（离线题常态）——授权数据里
-        # 如实表达本地分析，不伪造域名/URL、不扩大网络范围
-        local_analysis=bool(req.has_uploads),
+        # 按需允许本地附件分析，不依赖启动时是否已有附件；网络目标仍按
+        # 用户声明维护，危险操作仍走即时审批。
+        local_analysis=True,
         notes="启动装配授权声明",
     )
     # SRC 的工作目标必须落在真实资产上：显式 target 优先；没有时从装配后的
