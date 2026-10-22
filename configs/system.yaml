@@ -91,6 +91,7 @@ mcp_servers:
     default_risk: intrusive       # 网络探测类能力：调用时逐次声明本次行为，仅危险语义即时审批
     scope_enforcement: required   # 旧字段仅兼容目标元数据，不做硬性禁打匹配
   - name: playwright              # 浏览器自动化：JS 渲染页面真实 DOM / 点击 / 表单 / 截图
+    enabled: false                 # 可选无头浏览器；可见浏览器使用下方 chrome
     transport: stdio
     command: npx
     args: ["@playwright/mcp@0.0.83", "--headless", "--snapshot-boxes"]  # 钉版本：@latest 迫使 npx 每次联网解析，网络抖动可挂满 60s 握手超时连累开工
@@ -98,6 +99,14 @@ mcp_servers:
     default_risk: readonly        # 普通浏览器操作不按工具能力判危险
     risk_by_action: true          # 模型声明本次实际行为，危险操作执行前逐次审批
     scope_enforcement: required   # 模型结合用户上下文判断导航边界
+  - name: chrome                  # chrome-mcp-kit：复用 Windows 浏览器及登录态
+    transport: stdio
+    command: python
+    args: ["-m", "spiritscout.tools.chrome_mcp"]
+    timeout: 120
+    default_risk: readonly
+    risk_by_action: true
+    allowed_agents: [business_context, ctf_web]
 
 # —— idalib 装配（一次性，项目根执行；<IDA> 为 IDA Pro 安装目录）：
 #   .venv/bin/pip install <IDA>/idalib/python/idapro-*.whl
