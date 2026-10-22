@@ -151,7 +151,13 @@ class WebConfig(ValidatedConfig):
         default=True, description="非回环绑定必须配置管理密码，否则拒绝启动")
     password_env: str = Field(
         default="SPIRITSCOUT_SERVER_PASSWORD",
-        description="管理密码所在环境变量；配置后本机访问也要求 Basic Auth")
+        description="旧版管理密码环境变量；启动时导入管理员库（用户名默认 spiritscout）")
+    admin_username_env: str = Field(
+        default="SPIRITSCOUT_ADMIN_USERNAME",
+        description="管理员用户名所在环境变量；用于启动时导入/恢复凭据")
+    admin_password_env: str = Field(
+        default="SPIRITSCOUT_ADMIN_PASSWORD",
+        description="管理员密码所在环境变量；优先级高于旧版 password_env")
 
 
 class McpServerConfig(ValidatedConfig):

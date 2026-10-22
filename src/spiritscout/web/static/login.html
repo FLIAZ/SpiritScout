@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>登录 · 灵枢 SpiritScout</title>
+<script>
+try {
+  const t = localStorage.getItem("ss-theme");
+  if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+} catch {}
+</script>
+<link rel="stylesheet" href="/static/css/base.css?v=20261022-login-clean">
+<link rel="stylesheet" href="/static/css/views.css?v=20261022-login-clean">
+<link rel="stylesheet" href="/static/css/login.css?v=20261022-login-clean">
+</head>
+<body class="login-body">
+<div class="aurora" aria-hidden="true"></div>
+<main class="login-wrap">
+  <section class="card login-card" aria-labelledby="login-title">
+    <p class="login-eyebrow">SpiritScout · Access Control</p>
+    <h1 id="login-title" class="login-title">灵枢<em>·</em>SpiritScout</h1>
+    <p class="login-sub">渗透测试智能体集群 · 管理控制台</p>
+
+    <form id="login-form" novalidate>
+      <label class="login-field">
+        <span>管理员</span>
+        <input id="login-user" name="username" type="text" autocomplete="username"
+               spellcheck="false" required autofocus>
+      </label>
+      <label class="login-field">
+        <span>密码</span>
+        <span class="login-pw">
+          <input id="login-pass" name="password" type="password"
+                 autocomplete="current-password" required>
+          <button id="login-pw-toggle" class="login-pw-toggle" type="button"
+                  aria-label="显示密码" aria-pressed="false">显示</button>
+        </span>
+      </label>
+      <p id="login-error" class="login-error" role="alert" aria-live="polite" hidden></p>
+      <button id="login-submit" class="login-submit" type="submit">进入控制台</button>
+    </form>
+  </section>
+</main>
+<script src="/static/js/login.js?v=20261022-login-clean"></script>
+</body>
+</html>

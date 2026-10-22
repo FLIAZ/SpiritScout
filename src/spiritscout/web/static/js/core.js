@@ -11,6 +11,10 @@ const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;
 
 async function api(path, opt = {}) {
   const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opt });
+  if (r.status === 401 && !String(path).startsWith("/api/auth/")) {
+    location.assign("/login");           // 会话过期：回登录页而不是持续报错
+    throw new Error("需要重新登录");
+  }
   if (!r.ok) {
     let detail = null, msg = r.statusText;
     try { detail = (await r.json()).detail; } catch {}
@@ -93,6 +97,12 @@ $("#btn-theme").onclick = () => {
   toast({ system: "跟随系统", light: "浅色", dark: "深色" }[next] + "主题");
 };
 try { applyTheme(localStorage.getItem("ss-theme") || "system"); } catch {}
+
+/* 退出登录：清 Cookie 后回登录页；未启用登录时 /login 会自动跳回控制台 */
+$("#btn-logout").onclick = async () => {
+  try { await fetch("/api/auth/logout", { method: "POST" }); } catch {}
+  location.assign("/login");
+};
 
 /* ================= 视图切换 ================= */
 const VIEWS = { home: "#view-home", session: "#view-session", dash: "#view-dash",

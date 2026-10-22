@@ -51,6 +51,7 @@ RUN if [ "$INSTALL_TOOLKIT" = "1" ]; then \
     fi
 
 EXPOSE 10010
-# 容器内必须绑定非回环地址才能被端口映射访问；程序此时强制要求管理密码
-# （SPIRITSCOUT_SERVER_PASSWORD），由 docker-compose 从 .env 注入
+# 容器内必须绑定非回环地址才能被端口映射访问；程序此时强制要求管理员凭据
+# （SPIRITSCOUT_ADMIN_USERNAME / SPIRITSCOUT_ADMIN_PASSWORD，旧版
+#   SPIRITSCOUT_SERVER_PASSWORD 仍兼容），由 docker-compose 从 .env 注入
 CMD ["python", "-m", "spiritscout", "--config", "configs/system.yaml", "--host", "0.0.0.0", "--port", "10010"]

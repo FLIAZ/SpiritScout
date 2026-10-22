@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 # litellm 导入期会同步联网拉模型价格表（3 次重试+退避，慢网实测 22s+，
 # 且跑在事件循环上会把整个控制台冻住）；官方开关改用内置表。本网络下
@@ -23,6 +24,33 @@ os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 from spiritscout import __version__
 from spiritscout.config import load_model_config, load_system_config
 from spiritscout.core.exceptions import SpiritScoutError
+
+
+def _load_dotenv(path: Path) -> None:
+    """读取 .env 补全缺失变量（真实环境变量优先，兼容 CRLF 与引号）。"""
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key.startswith("export "):
+            key = key[7:].strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key:
+            os.environ.setdefault(key, value)
+
+
+def _find_dotenv() -> Path | None:
+    candidates = (Path.cwd() / ".env",
+                  Path(__file__).resolve().parents[2] / ".env")
+    return next((path for path in candidates if path.is_file()), None)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -42,6 +70,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    dotenv = _find_dotenv()
+    if dotenv:
+        _load_dotenv(dotenv)      # 忘记管理员凭据时改 .env 重启即可恢复
     try:
         cfg = load_system_config(args.config)
         models = load_model_config(cfg.models_config_path)
@@ -55,19 +86,16 @@ def main(argv: list[str] | None = None) -> int:
 
     host = args.host or cfg.web.host
     port = args.port or cfg.web.port
-    if host not in ("127.0.0.1", "localhost", "::1"):
-        password = os.environ.get(cfg.web.password_env, "")
-        if cfg.web.remote_auth_required and not password:
-            print("[错误] Web 控制台绑定非回环地址时必须设置管理密码："
-                  f"export {cfg.web.password_env}='强密码'", file=sys.stderr)
-            return 2
-        print(f"[安全] 非回环控制台已启用 Basic Auth（用户 spiritscout）: {host}:{port}")
     # 命令行覆盖不只传给 uvicorn；应用内部的认证策略和生成的
     # 同源边界也必须看到最终绑定值。
     cfg.web.host = host
     cfg.web.port = port
-    app = create_app(cfg, models,
-                     max_concurrent=cfg.web.max_concurrent_sessions)
+    try:
+        app = create_app(cfg, models,
+                         max_concurrent=cfg.web.max_concurrent_sessions)
+    except SpiritScoutError as exc:
+        print(f"[错误] {exc}", file=sys.stderr)
+        return 2
     # 预热 litellm：把 ~2s 的库导入成本从「首次调用途中」挪到启动时
     # （调用在事件循环上，冷导入曾把控制台冻 22s+）；失败留待调用路径
     # 原生报错，不阻断启动
@@ -75,8 +103,11 @@ def main(argv: list[str] | None = None) -> int:
         import litellm  # noqa: F401
     except Exception as exc:  # noqa: BLE001
         print(f"[警告] litellm 预热失败（首次调用时重试）：{exc}", file=sys.stderr)
+    auth_note = ("管理员登录已启用" if app.state.auth_enabled
+                 else "未配置管理员，仅回环地址可访问")
     print(f"灵枢 Web 控制台: http://{host}:{port}  "
-          f"(并发上限 {cfg.web.max_concurrent_sessions}，Ctrl+C 停止)")
+          f"({auth_note}，并发上限 {cfg.web.max_concurrent_sessions}，"
+          "Ctrl+C 停止)")
     uvicorn.run(app, host=host, port=port, log_level="warning")
     return 0
 
