@@ -21,6 +21,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -273,6 +275,15 @@ def build_client(spec: Any) -> McpClient:
                             headers=dict(spec.headers or {}), timeout=timeout)
     if not spec.command:
         raise McpError(f"MCP[{spec.name}] stdio 传输缺少 command")
-    return McpStdioClient(spec.name, command=spec.command,
+    command = spec.command
+    env = dict(spec.env or {})
+    if command in {"python", "python3"} and list(spec.args[:2]) == ["-m", "spiritscout.tools.chrome_mcp"]:
+        # launch.sh 直接调用 venv 解释器、不激活 PATH；本项目模块沿用当前解释器。
+        command = sys.executable
+    if list(spec.args[:2]) == ["-m", "spiritscout.tools.chrome_mcp"]:
+        # SDK 的子进程环境默认仅继承基础键；只显式转交该适配器的连接配置。
+        env = {**{key: os.environ[key] for key in (
+            "SPIRITSCOUT_CHROME_CDP_URL", "SPIRITSCOUT_CHROME_MCP_CLI") if key in os.environ}, **env}
+    return McpStdioClient(spec.name, command=command,
                           args=list(spec.args or []),
-                          env=dict(spec.env or {}), timeout=timeout)
+                          env=env, timeout=timeout)

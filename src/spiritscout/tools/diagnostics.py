@@ -48,3 +48,16 @@ def browser_tool_guidance(tool: str) -> str:
                 "轮播非当前项可能在视口外。失败诊断是本次观察结果，需据当前页面重新判断；"
                 "不要把超时当作成功，不要无变化地重复相同引用。")
     return ""
+
+
+def chrome_tool_guidance(tool: str) -> str:
+    """可见共享浏览器的协作说明，是否请用户接手由模型按当前页面决定。"""
+    if tool == "browser_close":
+        return " 此连接复用用户的可见浏览器；结束测试时保留浏览器及配置档案，只关闭本次新建的测试标签。"
+    if tool in {"browser_navigate", "browser_cookie_list", "browser_cookie_get"}:
+        return (" 此连接操作用户可见的现有浏览器，与用户共享页面和登录态。"
+                "若需要用户登录、输入验证码或拖动滑块，使用 ask_user 说明具体页面和操作，"
+                "等待用户答复期间不要继续操作该页面；答复后重新读取页面或 Cookie 验证结果，"
+                "不要假定登录成功，不代替用户破解验证码。多条路线不要同时操作同一标签。"
+                "Cookie（包括 HttpOnly）只在本次任务需要时读取，不写入共享项目记忆或报告。")
+    return ""

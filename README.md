@@ -150,6 +150,59 @@ Docker 方式由 compose 从 `.env` 注入该变量。
 
 ## 使用指南
 
+### 使用现有 Chrome / 指纹浏览器 MCP
+
+已接入 `chrome-mcp-kit` 的 CDP 链路：`chrome` MCP 通过 Playwright 连接 Windows
+现有浏览器，用户在那个浏览器窗口里完成登录、验证码或滑块，Agent 收到答复后继续。
+复用原有浏览器的配置档案与登录态；不需要在灵枢页面中另造浏览器窗口。
+
+- `configs/system.yaml` 已启用 `chrome`，原来的无头 `playwright` 改为可选关闭。
+  默认授权给业务体验 Agent 与 CTF Web Agent，其他支持动态 MCP 的角色可在
+  `allowed_agents` 中显式加入；危险操作继续逐次审批。
+- 先确保原有 kit 的 Windows 浏览器及 `9223 → 9222` 转发器正在运行。无需重新执行
+  `artex-add-chrome-mcp.py`，也无需修改 ARTEX 或其他 Agent 的配置。
+- Docker 会自动解析 `host.docker.internal` 为 IP；WSL 使用自己的默认网关。
+  若现有链路地址不同，设置 `SPIRITSCOUT_CHROME_CDP_URL=http://实际可达IP:9223`；
+  Docker Compose 可在项目 `.env` 中设置此项。不能把 WSL 网关直接当成 Docker 网关。
+- Docker 镜像内置 Node.js 22 和固定版本的 MCP，无需在运行时下载浏览器。源码部署
+  需安装 Node.js 22+；默认通过 npx 安装固定版本，已有 MCP CLI 时可设置
+  `SPIRITSCOUT_CHROME_MCP_CLI` 为其 `cli.js` 路径。
+- `--caps storage` 提供 `mcp__chrome__browser_cookie_list` 等 Cookie 工具，能读取
+  HttpOnly Cookie；不要用 `document.cookie` 代替完整登录态读取。手动完成验证后，
+  在会话提问处回复 Agent，由它重新检查页面与 Cookie。
+
+该接入使用的是共享的浏览器配置档案，登录态会随原浏览器保存；它不提供会话之间的
+自动隔离。同一浏览器应由一个任务操作，避免与其他 Agent 同时控制同一页面。
+指纹配置由原浏览器提供，灵枢不改写浏览器指纹、代理或已有配置。
+
+#### 启动与人工接管
+
+1. 启动已有 kit 的 Windows 浏览器和 CDP 转发器，保留浏览器窗口供用户操作。
+2. 在项目根目录执行 `docker compose up -d --build spiritscout`，打开
+   `http://127.0.0.1:10010`。源码部署按上文启动，另需准备 Node.js 22+。
+3. 向业务体验 Agent 或 CTF Web Agent 下达浏览器任务，例如：
+   「打开已授权站点，遇到登录或验证码时提问等我操作，完成后重新读取登录态再继续。」
+4. 收到 Agent 提问后，在 Windows 浏览器中完成登录、验证码或滑块，再在会话中
+   回复「已完成」。Agent 会重新检查页面和 Cookie，确认成功后继续；浏览器中的变化
+   在下一次工具读取时可见，不会自动推送 Cookie。
+
+截图等浏览器产物写入当前会话的 `workspace/browser-output/`。Cookie 属于登录凭据，
+只在当前任务需要时读取，避免复制到项目记忆、报告或聊天分享中。
+
+#### 连接排查与升级说明
+
+- 若 Chrome MCP 不可达，先在实际运行灵枢的环境中访问
+  `http://实际可达IP:9223/json/version`，确认返回浏览器版本与
+  `webSocketDebuggerUrl`；Windows 本机连通不代表 WSL 或 Docker 内也能连通。
+  修正转发器或 `SPIRITSCOUT_CHROME_CDP_URL` 后重新启动服务。
+- 源码首次使用需通过 npx 下载固定的 `@playwright/mcp@0.0.83`；离线环境可预装
+  并用 `SPIRITSCOUT_CHROME_MCP_CLI` 指向运行环境内可访问的 `cli.js`。
+- 升级已有部署时需重建 Docker 镜像以加入 Node.js 与 MCP。使用自定义配置的用户
+  请参考 `configs/system.example.yaml` 添加并启用 `chrome`；原无头 `playwright`
+  可按需保留，但它不共享这个 Windows 浏览器的登录态。
+
+### 会话操作
+
 - **下达任务**：一段自然语言描述目标与意图；系统自动判定模式（SRC/CTF/
   渗透赛）并装配编队，开工前校验模型链路。
 - **会话协作**：底部输入坞随时发消息、传附件——消息直达灵枢，回执即时
