@@ -2,7 +2,10 @@
 
 ## 2026-10-22
 
-- 接入已有 chrome-mcp-kit：通过 stdio Playwright MCP 与 Windows 可见浏览器的 CDP 链路共享页面和登录态；Docker/WSL 分别探测可达网关，支持显式 CDP 地址。启用 Cookie 存储工具并配置业务体验/CTF Web 角色权限，复用 ask_user 等待人工登录和验证码操作；Docker 内置固定版本 MCP 和 Node.js，不新增嵌入式浏览器前端。
+- 接入已有 chrome-mcp-kit：通过 stdio Playwright MCP 连接 Windows 可见浏览器的 CDP 链路，复用浏览器配置档案和登录态。默认向业务体验与 CTF Web Agent 开放，保留危险操作逐次审批。
+- 支持人工处理登录、验证码与滑块：Agent 通过 `ask_user` 等待用户在浏览器窗口操作，收到回复后重新检查页面与 Cookie；启用 storage 工具，可按需读取含 HttpOnly 在内的最新 Cookie。
+- Docker 镜像内置 Node.js 22 与固定版本 `@playwright/mcp@0.0.83`；Docker/WSL 分别解析 Windows 网关，支持 `SPIRITSCOUT_CHROME_CDP_URL` 覆盖地址，浏览器产物保存到当前会话目录。
+- README 补充接入条件、启动步骤、人工接管流程、连接排查和升级说明。该功能共享现有浏览器配置档案，不自动隔离不同会话；指纹和代理仍由原浏览器管理。
 
 ## 2026-10-21
 
