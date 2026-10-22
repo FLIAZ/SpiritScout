@@ -36,6 +36,7 @@ const flowEl = {
   insertAdjacentHTML(_pos, html) { children.push(html.includes("tl-thinkchip") ? { kind: "chip", textContent: "" } : mkSay()); },
 };
 const turnEl = {
+  isConnected: true,
   dataset: { agent: ACTOR },
   querySelector: sel => sel === ".flow" ? flowEl : null,
   querySelectorAll: sel => {
@@ -45,6 +46,7 @@ const turnEl = {
 };
 const box = { querySelectorAll: sel => sel === ".tl-turn" ? [turnEl] : [], querySelector: () => null };
 Object.assign(context, {
+  TRACE_TURNS: new Map([[ACTOR, turnEl]]),
   $: () => box, esc: v => String(v ?? ""), actorName: a => String(a), fmtK: n => String(n),
   fmtElapsed: n => String(n), fmtSize: n => String(n), TERMINAL: new Set(),
   S: { state: null, think: new Map() },

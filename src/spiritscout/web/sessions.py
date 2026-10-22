@@ -1913,12 +1913,25 @@ class SessionManager:
                         host = urlparse(str(found.get("base_url") or "")).hostname or ""
                         if host and host not in plan.authorization.scope.allowed_domains:
                             plan.authorization.scope.allowed_domains.append(host)
-                # 真任务缺任何授权对象（范围空）：记忆不是授权，不能自动
+                # 本地分析许可不代表已有网络目标；无附件的 SRC 续作仍须
+                # 确认本次目标，纯附件任务则沿用本地分析授权。
+                scope = plan.authorization.scope
+                has_network_target = bool(
+                    scope.allowed_domains or scope.allowed_cidrs or scope.allowed_urls)
+                has_attachments = bool(
+                    plan.source_request and plan.source_request.has_uploads)
+                attachment_dir = session.workspace / "attachments"
+                if attachment_dir.is_dir():
+                    has_attachments = has_attachments or any(
+                        path.is_file() for path in attachment_dir.iterdir())
+                # 真任务缺任何授权对象：记忆不是授权，不能自动
                 # 沿用。SRC 会话把项目记忆里的候选资产摆给用户勾选确认，
                 # 确认后重建本次范围再开工；其余情况或用户未确认时，灵枢
                 # 说明缺口，补齐后发送即自动开工。
-                if intent in ("task", "task_with_rules") \
-                        and plan.authorization.scope.is_empty():
+                if intent in ("task", "task_with_rules") and (
+                        scope.is_empty() or (mode == RunMode.SRC
+                                            and not has_network_target
+                                            and not has_attachments)):
                     added: list[str] = []
                     asked, scope_answer = False, ""
                     if mode == RunMode.SRC:

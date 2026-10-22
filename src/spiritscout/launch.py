@@ -210,7 +210,9 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
     # 不在创建时拦——「你好」这类普通对话、纯规则说明都不该被目标
     # 校验挡在门外；意图（对话/规则/任务）由运行期 LLM 路由裁决，
     # 真任务缺目标时灵枢会主动向用户询问。
-    if req.mode == RunMode.SRC and not req.target and not mode_auto:
+    # 用户显式选择 SRC 的纯附件分析无需网络目标，也不改判成 CTF。
+    if (req.mode == RunMode.SRC and not req.target
+            and not req.has_uploads and not mode_auto):
         hint = ("；任务描述中未识别到目标 URL——请写明 http(s):// 地址"
                 if mission else "——或在任务描述中写明目标")
         raise SpiritScoutError(f"SRC 模式需要目标 URL{hint}")

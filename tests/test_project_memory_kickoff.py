@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 from spiritscout.config.settings import ModelEntry, SystemConfig, WorkspaceConfig
 from spiritscout.core.audit import AuditLogger
+from spiritscout.core.models import RunMode
 from spiritscout.launch import LaunchRequest, prepare_launch
 from spiritscout.resources.store import ResourceStore
 from spiritscout.web.sessions import (
@@ -136,7 +137,9 @@ class ProjectScopeConfirmationTests(unittest.IsolatedAsyncioTestCase):
             {"asset_type": "url", "value": "https://hg-v1.imou.com/login"},
         ])
         plan = prepare_launch(LaunchRequest(mission="继续测试"))
-        self.assertTrue(plan.authorization.scope.is_empty())
+        scope = plan.authorization.scope
+        self.assertTrue(scope.local_analysis)
+        self.assertFalse(scope.allowed_urls or scope.allowed_domains or scope.allowed_cidrs)
         memory = store.project_memory(session.project_id)
         audit = AuditLogger(cfg.audit_log_path)
         return cfg, manager, session, plan, memory, audit
@@ -209,6 +212,33 @@ class ProjectScopeConfirmationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ProjectMemoryKickoffTests(unittest.IsolatedAsyncioTestCase):
+    async def test_attachment_only_task_does_not_require_network_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, _, manager, session = _fixture(Path(tmp), [
+                {"asset_type": "url", "value": "https://hg-v1.imou.com/login"},
+            ])
+            attachments = session.workspace / "attachments"
+            attachments.mkdir()
+            (attachments / "sample.txt").write_text("待分析附件", encoding="utf-8")
+            session.launch_request["mission"] = "分析本次上传的附件"
+            plan = prepare_launch(LaunchRequest(
+                mode=RunMode.SRC, mission="分析本次上传的附件", has_uploads=True))
+            run_cfg = manager._session_cfg(session, None)
+            result = SimpleNamespace(
+                run_summary={}, verify_stats={}, flag_stats={},
+                report_path=str(session.workspace / "report.md"))
+            with patch("spiritscout.runtime.run_engagement",
+                       new=AsyncMock(return_value=result)) as run_mock, patch.object(
+                           manager, "_confirm_project_scope", new=AsyncMock()) as confirm:
+                await manager._run(session, run_cfg, plan, True, [])
+
+            confirm.assert_not_awaited()
+            run_mock.assert_awaited_once()
+            scope = run_mock.call_args.kwargs["authorization"].scope
+            self.assertTrue(scope.local_analysis)
+            self.assertFalse(scope.allowed_urls or scope.allowed_domains or scope.allowed_cidrs)
+            self.assertEqual(session.status, "completed")
+
     async def test_master_reply_carries_project_memory_as_data(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
