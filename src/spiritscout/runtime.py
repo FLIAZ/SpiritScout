@@ -404,6 +404,7 @@ async def _build_infra(
             from spiritscout.tools.diagnostics import (
                 browser_failure,
                 browser_tool_guidance,
+                chrome_tool_guidance,
                 clean_tool_text,
             )
             from spiritscout.tools.mcp_client import build_client, resolve_mcp_risk
@@ -411,6 +412,9 @@ async def _build_infra(
             async def _start_mcp(spec: Any) -> tuple[Any, Any, list[dict[str, Any]], str]:
                 client = None
                 try:
+                    if list(spec.args[:2]) == ["-m", "spiritscout.tools.chrome_mcp"]:
+                        spec = spec.model_copy(update={"env": {
+                            **spec.env, "SPIRITSCOUT_CHROME_OUTPUT_DIR": str(workspace / "browser-output")}})
                     client = build_client(spec)
                     # 启动前登记所有权；gather 尚未完成时取消也能完整回收。
                     mcp_clients.append(client)
@@ -432,7 +436,8 @@ async def _build_infra(
                     return
                 for t in tools:
                     t = {**t, "description": (t.get("description") or t["name"])
-                         + browser_tool_guidance(t["name"])}
+                         + browser_tool_guidance(t["name"])
+                         + (chrome_tool_guidance(t["name"]) if spec.name == "chrome" else "")}
                     exposed_name = f"mcp__{spec.name}__{t['name']}"
                     risk = resolve_mcp_risk(spec, t)
                     properties = (t.get("inputSchema") or {}).get("properties") or {}

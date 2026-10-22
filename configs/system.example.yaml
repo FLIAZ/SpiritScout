@@ -83,6 +83,13 @@ mcp_servers:
     default_risk: readonly
     risk_by_action: true
     scope_enforcement: required
+  - name: chrome                 # 可见 Chrome / 指纹浏览器：复用已有 CDP 链路
+    enabled: false               # 已有 chrome-mcp-kit 时启用；普通无头浏览器与它择一
+    command: python
+    args: ["-m", "spiritscout.tools.chrome_mcp"]
+    default_risk: readonly
+    risk_by_action: true
+    allowed_agents: [business_context, ctf_web]
 
 max_routes_per_agent: 8        # 分支数硬上限（防分支爆炸）
 default_routes_per_agent: 3    # 默认 3 条差异化路线（硬约束 C2）

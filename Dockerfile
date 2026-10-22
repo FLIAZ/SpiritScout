@@ -7,7 +7,12 @@
 #     宿主机源码挂到 /app，因此改代码无需重建镜像；
 #   - CTF 工具箱（pwntools/pycryptodome/z3/scapy/binwalk/sqlmap 等）体积大、
 #     构建慢，默认不装，需要时 --build-arg INSTALL_TOOLKIT=1。
+FROM node:22-bookworm-slim AS chrome-mcp
+RUN npm install --prefix /opt/chrome-mcp --ignore-scripts @playwright/mcp@0.0.83
+
 FROM python:3.11-slim
+COPY --from=chrome-mcp /usr/local/bin/node /usr/local/bin/node
+COPY --from=chrome-mcp /opt/chrome-mcp /opt/chrome-mcp
 
 # 依赖源：默认官方 PyPI；国内可覆盖为镜像源，例如
 #   docker compose build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
@@ -25,7 +30,7 @@ ENV PYTHONUNBUFFERED=1 \
 # bubblewrap：沙箱运行时；git/curl/procps：MCP 接入与排障常用
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      bubblewrap ca-certificates curl git procps \
+      bubblewrap ca-certificates curl git procps libstdc++6 \
  && rm -rf /var/lib/apt/lists/*
 
 RUN python -m venv /opt/venv \
