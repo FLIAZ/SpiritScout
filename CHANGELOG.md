@@ -10,6 +10,7 @@
 
 - 智能渗透赛改为滚动补位：提交确认整题通关后立即关闭容器并通知主调度启动已规划的下一题，不再等同批任务或同题其他路线全部结束。会话顶部实时显示已解出/总题数，拓扑旁新增「题目列表」页签，按题目 ID 展示已解出与未完成；SSE 推动刷新，进度快照支持刷新页面与重开历史会话。
 
+- Docker Compose 默认附带可操作的 Chromium 浏览器、虚拟桌面与 noVNC，无需单独安装浏览器或 MCP kit。Agent 自动连接内网 CDP；用户访问本机 10011 端口完成登录和验证码，使用与控制台相同的认证。浏览器配置档案持久化到 Docker 卷，仍可通过环境变量切换现有 Chrome/指纹浏览器。
 - 接入已有 chrome-mcp-kit：通过 stdio Playwright MCP 连接 Windows 可见浏览器的 CDP 链路，复用浏览器配置档案和登录态。默认向业务体验与 CTF Web Agent 开放，保留危险操作逐次审批。
 - 支持人工处理登录、验证码与滑块：Agent 通过 `ask_user` 等待用户在浏览器窗口操作，收到回复后重新检查页面与 Cookie；启用 storage 工具，可按需读取含 HttpOnly 在内的最新 Cookie。
 - Docker 镜像内置 Node.js 22 与固定版本 `@playwright/mcp@0.0.83`；Docker/WSL 分别解析 Windows 网关，支持 `SPIRITSCOUT_CHROME_CDP_URL` 覆盖地址，浏览器产物保存到当前会话目录。

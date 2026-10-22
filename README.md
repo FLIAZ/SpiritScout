@@ -150,20 +150,45 @@ Docker 方式由 compose 从 `.env` 注入该变量。
 
 ## 使用指南
 
-### 使用现有 Chrome / 指纹浏览器 MCP
+### 可操作浏览器与 Chrome MCP
+
+#### 默认：随 Docker 一起部署
+
+项目已包含 Chromium、虚拟桌面、noVNC 和 Chrome MCP，使用 Docker Compose 时
+会一并启动，无需另外安装 Windows Chrome、MCP kit 或配置端口转发：
+
+```bash
+cp .env.example .env
+# 编辑 .env，设置 SPIRITSCOUT_SERVER_PASSWORD
+docker compose up -d --build
+```
+
+- 控制台：`http://127.0.0.1:10010`。
+- 浏览器操作页：`http://127.0.0.1:10011`，用户名同为 `spiritscout`，密码与控制台一致。
+  收到登录、验证码或滑块提问时，打开此页操作，再回会话回复「已完成」。
+- Agent 默认连接 Compose 内网的浏览器，CDP 端口不发布到宿主机。
+- 浏览器配置档案和持久 Cookie 保存在 Docker 卷 `browser-profile`，重启与重建容器后保留；
+  `docker compose down -v` 会删除它。不同灵枢会话共享这个浏览器，避免同时操作。
+- 默认浏览器是标准 Chromium，提供可见页面和持久登录态；不含商业指纹浏览器的
+  指纹管理、多配置档案或代理服务。首次构建会下载浏览器依赖，需联网。
+- 两个网页端口都只绑定本机回环。部署到远程服务器时，可通过 SSH 转发
+  `10010` 和 `10011` 到本机，或为两个入口配置 HTTPS 反向代理并支持 WebSocket。
+
+#### 可选：使用现有 Chrome / 指纹浏览器
 
 已接入 `chrome-mcp-kit` 的 CDP 链路：`chrome` MCP 通过 Playwright 连接 Windows
 现有浏览器，用户在那个浏览器窗口里完成登录、验证码或滑块，Agent 收到答复后继续。
-复用原有浏览器的配置档案与登录态；不需要在灵枢页面中另造浏览器窗口。
+复用原有浏览器的配置档案与登录态；选择此模式时，人工操作在原浏览器窗口完成。
 
 - `configs/system.yaml` 已启用 `chrome`，原来的无头 `playwright` 改为可选关闭。
   默认授权给业务体验 Agent 与 CTF Web Agent，其他支持动态 MCP 的角色可在
   `allowed_agents` 中显式加入；危险操作继续逐次审批。
 - 先确保原有 kit 的 Windows 浏览器及 `9223 → 9222` 转发器正在运行。无需重新执行
   `artex-add-chrome-mcp.py`，也无需修改 ARTEX 或其他 Agent 的配置。
-- Docker 会自动解析 `host.docker.internal` 为 IP；WSL 使用自己的默认网关。
-  若现有链路地址不同，设置 `SPIRITSCOUT_CHROME_CDP_URL=http://实际可达IP:9223`；
-  Docker Compose 可在项目 `.env` 中设置此项。不能把 WSL 网关直接当成 Docker 网关。
+- Docker Compose 默认连接内置浏览器；要改用外部浏览器，在项目 `.env` 中设置
+  `SPIRITSCOUT_CHROME_CDP_URL=http://实际可达IP:9223`，Windows 宿主可用
+  `http://host.docker.internal:9223`，适配器会将主机名解析为 IP。
+  源码部署默认使用 WSL 网关或本机回环。不能把 WSL 网关直接当成 Docker 网关。
 - Docker 镜像内置 Node.js 22 和固定版本的 MCP，无需在运行时下载浏览器。源码部署
   需安装 Node.js 22+；默认通过 npx 安装固定版本，已有 MCP CLI 时可设置
   `SPIRITSCOUT_CHROME_MCP_CLI` 为其 `cli.js` 路径。
@@ -175,7 +200,7 @@ Docker 方式由 compose 从 `.env` 注入该变量。
 自动隔离。同一浏览器应由一个任务操作，避免与其他 Agent 同时控制同一页面。
 指纹配置由原浏览器提供，灵枢不改写浏览器指纹、代理或已有配置。
 
-#### 启动与人工接管
+#### 外部浏览器的启动与人工接管
 
 1. 启动已有 kit 的 Windows 浏览器和 CDP 转发器，保留浏览器窗口供用户操作。
 2. 在项目根目录执行 `docker compose up -d --build spiritscout`，打开
@@ -197,8 +222,8 @@ Docker 方式由 compose 从 `.env` 注入该变量。
   修正转发器或 `SPIRITSCOUT_CHROME_CDP_URL` 后重新启动服务。
 - 源码首次使用需通过 npx 下载固定的 `@playwright/mcp@0.0.83`；离线环境可预装
   并用 `SPIRITSCOUT_CHROME_MCP_CLI` 指向运行环境内可访问的 `cli.js`。
-- 升级已有部署时需重建 Docker 镜像以加入 Node.js 与 MCP。使用自定义配置的用户
-  请参考 `configs/system.example.yaml` 添加并启用 `chrome`；原无头 `playwright`
+- 升级已有部署时执行 `docker compose up -d --build`，加入浏览器服务并重建 MCP 镜像。
+  使用自定义配置的用户请参考 `configs/system.example.yaml` 添加并启用 `chrome`；原无头 `playwright`
   可按需保留，但它不共享这个 Windows 浏览器的登录态。
 
 ### 会话操作

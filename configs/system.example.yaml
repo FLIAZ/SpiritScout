@@ -83,8 +83,8 @@ mcp_servers:
     default_risk: readonly
     risk_by_action: true
     scope_enforcement: required
-  - name: chrome                 # 可见 Chrome / 指纹浏览器：复用已有 CDP 链路
-    enabled: false               # 已有 chrome-mcp-kit 时启用；普通无头浏览器与它择一
+  - name: chrome                 # 可见浏览器：Compose 内置 Chromium 或已有 CDP 链路
+    enabled: false               # 按需启用；项目主配置已默认启用，普通无头浏览器与它择一
     command: python
     args: ["-m", "spiritscout.tools.chrome_mcp"]
     default_risk: readonly

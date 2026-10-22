@@ -1,0 +1,2 @@
+# Docker 启动脚本在 Windows 检出时也必须使用 LF。
+deploy/browser/*.sh text eol=lf

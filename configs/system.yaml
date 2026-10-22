@@ -99,7 +99,7 @@ mcp_servers:
     default_risk: readonly        # 普通浏览器操作不按工具能力判危险
     risk_by_action: true          # 模型声明本次实际行为，危险操作执行前逐次审批
     scope_enforcement: required   # 模型结合用户上下文判断导航边界
-  - name: chrome                  # chrome-mcp-kit：复用 Windows 浏览器及登录态
+  - name: chrome                  # 可见浏览器：Compose 内置 Chromium，或外部 Chrome/指纹浏览器
     transport: stdio
     command: python
     args: ["-m", "spiritscout.tools.chrome_mcp"]

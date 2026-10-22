@@ -8,7 +8,32 @@
 # 与本地 Python 部署并存：共用同一份源码与 .spiritscout/ 数据目录，
 # 同一时间只启动一个实例监听同一端口。
 services:
+  browser:
+    build: ./deploy/browser
+    image: spiritscout-browser:local
+    restart: unless-stopped
+    stop_grace_period: 30s
+    shm_size: "1gb"
+    environment:
+      SPIRITSCOUT_SERVER_PASSWORD: "${SPIRITSCOUT_SERVER_PASSWORD:?请先 cp .env.example .env 并填入管理密码}"
+    ports:
+      - "127.0.0.1:10011:6080"
+    volumes:
+      - browser-profile:/profile
+    # Chromium 以普通用户运行，允许创建其内部沙箱所需的命名空间。
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:9223/json/version"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
   spiritscout:
+    depends_on:
+      browser:
+        condition: service_healthy
     build:
       context: .
       dockerfile: Dockerfile
@@ -28,8 +53,8 @@ services:
       SPIRITSCOUT_SERVER_PASSWORD: "${SPIRITSCOUT_SERVER_PASSWORD:?请先 cp .env.example .env 并填入管理密码}"
       SPIRITSCOUT_WEB__PORT: "10010"
       SPIRITSCOUT_WEB__HOST: "0.0.0.0"
-      # 留空自动解析 Windows 网关；指定时填该运行环境可达的 CDP 地址。
-      SPIRITSCOUT_CHROME_CDP_URL: "${SPIRITSCOUT_CHROME_CDP_URL:-}"
+      # 默认使用随项目部署的浏览器；也可覆盖为现有 Windows/指纹浏览器地址。
+      SPIRITSCOUT_CHROME_CDP_URL: "${SPIRITSCOUT_CHROME_CDP_URL:-http://browser:9223}"
     volumes:
       # 源码与运行数据（.spiritscout/ 会话、审计、报告）都留在宿主机
       - ./:/app
@@ -50,3 +75,5 @@ services:
       - 0.0.0.0
       - --port
       - "10010"
+volumes:
+  browser-profile:
