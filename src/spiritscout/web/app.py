@@ -12,10 +12,7 @@ Web 不另设前置副本，避免两套门槛漂移。
 
 from __future__ import annotations
 
-import base64
 import json
-import os
-import secrets
 import shutil
 import sqlite3
 import time
@@ -32,6 +29,8 @@ from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
     PlainTextResponse,
+    RedirectResponse,
+    Response,
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
@@ -56,6 +55,7 @@ from spiritscout.core.exceptions import (
 from spiritscout.core.models import BlackboardLayer, RunMode
 from spiritscout.launch import LaunchRequest, prepare_launch
 from spiritscout.web import agentcfg, modelcfg, vault
+from spiritscout.web import auth as web_auth
 from spiritscout.web.events import read_audit_page, stream_audit
 from spiritscout.web.sessions import (
     TERMINAL_STATES,
@@ -65,12 +65,24 @@ from spiritscout.web.sessions import (
 
 _STATIC = Path(__file__).parent / "static" / "index.html"
 _STATIC_DIR = Path(__file__).parent / "static"
+_LOGIN = _STATIC_DIR / "login.html"
 
 # 读 API 只回规范公开字段（不回吐 YAML 原始键——历史污染字段不再扩散，
 # 密钥字段永不出现）。模型条目的公开字段 = 注册表声明的全部字段去掉 api_key。
 _MODEL_PUBLIC_FIELDS = tuple(
     k for k in ModelEntry.model_fields if k != "api_key")
 _PROVIDER_PUBLIC_FIELDS = ("name", "provider", "base_url", "api_format")
+
+
+class LoginPayload(BaseModel):
+    """登录请求体。
+
+    不在这里声明长度上限：Pydantic 的 422 会把原始输入回显给客户端，
+    超长密码不该出现在响应里；长度在路由内手工校验。
+    """
+
+    username: str
+    password: str
 
 
 class ApprovalDecision(BaseModel):
@@ -318,18 +330,35 @@ def _read_state(session: Session) -> dict[str, Any]:
     return state
 
 
-# 无密码本机模式允许的 Host（DNS 重绑定防护）：正规本机访问只会用回环名
+# 无管理员本机模式允许的 Host（DNS 重绑定防护）：正规本机访问只会用回环名
 _LOCAL_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
+
+# 未登录也可访问：登录页、登录/登出接口、前端静态资源
+_PUBLIC_PATHS = frozenset({"/login", "/api/auth/login", "/api/auth/logout"})
+
+
+def _is_public_path(path: str) -> bool:
+    return (path in _PUBLIC_PATHS or path == "/static"
+            or path.startswith("/static/"))
 
 
 def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                max_concurrent: int = 4) -> FastAPI:
-    password = os.environ.get(cfg.web.password_env, "")
     loopback = cfg.web.host in ("127.0.0.1", "localhost", "::1")
-    if cfg.web.remote_auth_required and not loopback and not password:
+    # 先把环境变量凭据导入管理员库，再判断是否启用登录——首次带 .env
+    # 启动的非回环部署才不会误报“没有管理员”。
+    admin_store = web_auth.AdminStore(cfg.workspace.root)
+    admin_store.sync_from_env(cfg.web.password_env,
+                              cfg.web.admin_username_env,
+                              cfg.web.admin_password_env)
+    auth_enabled = admin_store.has_admins()
+    if cfg.web.remote_auth_required and not loopback and not auth_enabled:
         raise ConfigurationError(
-            f"Web 控制台绑定 {cfg.web.host} 时必须通过环境变量 "
-            f"{cfg.web.password_env} 设置管理密码")
+            f"Web 控制台绑定 {cfg.web.host} 时必须配置管理员凭据：在 .env 中"
+            f"设置 {cfg.web.admin_username_env} 与 "
+            f"{cfg.web.admin_password_env}（旧版 {cfg.web.password_env} 也兼容）"
+            "后重启")
+    limiter = web_auth.LoginRateLimiter()
     vault.configure(cfg.workspace.root)   # 密钥库落在工作区（vault.db/vault.key）
     from spiritscout.resources.assistant import ResourceAssistant
     from spiritscout.resources.store import ResourceStore, resource_root
@@ -361,50 +390,104 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     app = FastAPI(title="灵枢 SpiritScout 控制台", version=__version__,
                   lifespan=lifespan)
     app.state.manager = manager
+    app.state.auth = admin_store
+    app.state.auth_enabled = auth_enabled
     mount_resources(app, cfg, resource_store, resource_assistant)
     mount_projects(app, resource_store, manager)
     app.state.resources = resource_store
+
+    def _secure(response: Response) -> Response:
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        return response
 
     @app.middleware("http")
     async def console_security(request: Request, call_next):
         """统一的控制台安全边界。
 
-        Basic Auth 只在配置密码时启用；跨站写防护始终启用，
-        因为恶意网页同样可以向本机回环地址提交普通表单。
+        管理员登录启用后，浏览器走签名 Cookie，API 客户端仍可用 Basic；
+        服务端永不下发 WWW-Authenticate，避免浏览器弹原生认证框。
+        跨站写防护始终启用——恶意网页同样能向本机回环地址提交表单。
         """
-        if password:
-            supplied_user = supplied_password = ""
-            value = request.headers.get("authorization", "")
-            if value.lower().startswith("basic "):
-                try:
-                    decoded = base64.b64decode(value.split(None, 1)[1],
-                                               validate=True).decode("utf-8")
-                    supplied_user, supplied_password = decoded.split(":", 1)
-                except (ValueError, UnicodeDecodeError):
-                    pass
-            if not (secrets.compare_digest(supplied_user, "spiritscout")
-                    and secrets.compare_digest(supplied_password, password)):
-                return PlainTextResponse(
-                    "需要管理认证", status_code=401,
-                    headers={"WWW-Authenticate": 'Basic realm="SpiritScout"'})
-        # DNS 重绑定防护：无密码的本机模式只接受回环 Host——恶意网页把
+        path = request.url.path
+        # DNS 重绑定防护：无管理员的本机模式只接受回环 Host——恶意网页把
         # 自有域名解析到 127.0.0.1 后，Host 与 Origin 都是攻击者域名，
-        # 下面的同源自洽检查分辨不出；远程访问应设置管理密码。
-        if loopback and not password:
+        # 下面的同源自洽检查分辨不出；远程访问应配置管理员凭据。
+        if loopback and not auth_enabled:
             if (request.url.hostname or "").lower() not in _LOCAL_HOSTNAMES:
-                return PlainTextResponse(
+                return _secure(PlainTextResponse(
                     "拒绝非同源主机访问（本机控制台仅响应回环地址）",
-                    status_code=403)
+                    status_code=403))
+        username = ""
+        if auth_enabled:
+            username = admin_store.verify_session(
+                request.cookies.get(web_auth.SESSION_COOKIE, "")) or ""
+            if not username:
+                supplied = web_auth.parse_basic_header(
+                    request.headers.get("authorization", ""))
+                if supplied and admin_store.verify(*supplied):
+                    username = supplied[0]
+            if not username and not _is_public_path(path):
+                if path == "/api" or path.startswith("/api/"):
+                    return _secure(JSONResponse(
+                        {"detail": "需要管理员登录"}, status_code=401))
+                return _secure(RedirectResponse("/login", status_code=302))
+        request.state.authenticated = bool(username)
+        request.state.username = username
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             fetch_site = request.headers.get("sec-fetch-site", "").lower()
             origin = request.headers.get("origin", "").rstrip("/")
             expected = str(request.base_url).rstrip("/")
             if fetch_site == "cross-site" or (origin and origin != expected):
-                return PlainTextResponse("拒绝跨站写请求", status_code=403)
-        response = await call_next(request)
-        response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault("X-Frame-Options", "DENY")
-        response.headers.setdefault("Referrer-Policy", "same-origin")
+                return _secure(PlainTextResponse(
+                    "拒绝跨站写请求", status_code=403))
+        return _secure(await call_next(request))
+
+    # ------------------------------------------------------------ 登录
+
+    @app.get("/login", response_class=HTMLResponse)
+    async def login_page(request: Request) -> Response:
+        if not auth_enabled or request.state.authenticated:
+            return RedirectResponse("/", status_code=302)
+        return HTMLResponse(
+            _LOGIN.read_text(encoding="utf-8"),
+            headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/auth/login")
+    def login(payload: LoginPayload, request: Request) -> Response:
+        if not auth_enabled:
+            return JSONResponse({"detail": "未配置管理员凭据"},
+                                status_code=400)
+        client = request.client.host if request.client else "unknown"
+        retry = limiter.retry_after(client)
+        if retry is not None:
+            return JSONResponse(
+                {"detail": "登录尝试过于频繁，请稍后再试"},
+                status_code=429, headers={"Retry-After": str(retry)})
+        username = payload.username.strip()
+        if (not username or len(username) > web_auth.MAX_USERNAME_LENGTH
+                or len(payload.password) > web_auth.MAX_PASSWORD_LENGTH
+                or not admin_store.verify(username, payload.password)):
+            limiter.failure(client)
+            return JSONResponse({"detail": "用户名或密码错误"},
+                                status_code=401)
+        limiter.reset(client)
+        forwarded = request.headers.get("x-forwarded-proto", "")
+        secure = (request.url.scheme == "https"
+                  or forwarded.split(",")[0].strip().lower() == "https")
+        response = JSONResponse({"ok": True, "username": username})
+        response.set_cookie(
+            web_auth.SESSION_COOKIE, admin_store.issue_session(username),
+            max_age=web_auth.SESSION_TTL_SECONDS, httponly=True,
+            samesite="lax", secure=secure, path="/")
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.post("/api/auth/logout", status_code=204)
+    async def logout() -> Response:
+        response = Response(status_code=204)
+        response.delete_cookie(web_auth.SESSION_COOKIE, path="/")
         return response
 
     # ------------------------------------------------------------ 前端

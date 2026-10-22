@@ -10,6 +10,8 @@
 
 - 智能渗透赛改为滚动补位：提交确认整题通关后立即关闭容器并通知主调度启动已规划的下一题，不再等同批任务或同题其他路线全部结束。会话顶部实时显示已解出/总题数，拓扑旁新增「题目列表」页签，按题目 ID 展示已解出与未完成；SSE 推动刷新，进度快照支持刷新页面与重开历史会话。
 
+- 控制台登录改为与主界面同主题的自定义登录面板：管理员用户名/密码保存到工作区 `admin.db`，密码使用 scrypt 加盐哈希；登录后签发 HttpOnly 签名 Cookie（7 天，密码变更即失效），Basic Auth 保留给 API/脚本客户端但不再触发浏览器原生弹窗。未认证页面跳转 `/login`、API 返回 401，保留 DNS 重绑定与跨站写防护，登录失败按 IP 限速。
+- 管理员凭据支持 `.env` 恢复：启动时读取 `SPIRITSCOUT_ADMIN_USERNAME` / `SPIRITSCOUT_ADMIN_PASSWORD`（旧版 `SPIRITSCOUT_SERVER_PASSWORD` 兼容）并导入数据库；忘记凭据时改 `.env` 重启即可覆盖，移除变量后数据库凭据继续有效。
 - 接入已有 chrome-mcp-kit：通过 stdio Playwright MCP 连接 Windows 可见浏览器的 CDP 链路，复用浏览器配置档案和登录态。默认向业务体验与 CTF Web Agent 开放，保留危险操作逐次审批。
 - 支持人工处理登录、验证码与滑块：Agent 通过 `ask_user` 等待用户在浏览器窗口操作，收到回复后重新检查页面与 Cookie；启用 storage 工具，可按需读取含 HttpOnly 在内的最新 Cookie。
 - Docker 镜像内置 Node.js 22 与固定版本 `@playwright/mcp@0.0.83`；Docker/WSL 分别解析 Windows 网关，支持 `SPIRITSCOUT_CHROME_CDP_URL` 覆盖地址，浏览器产物保存到当前会话目录。

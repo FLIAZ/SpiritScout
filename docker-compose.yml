@@ -24,12 +24,19 @@ services:
       # 只发布到宿主机回环，不对外暴露
       - "127.0.0.1:10010:10010"
     environment:
-      # 容器内绑定非回环地址，程序要求必须设置管理密码（用户名 spiritscout）
-      SPIRITSCOUT_SERVER_PASSWORD: "${SPIRITSCOUT_SERVER_PASSWORD:?请先 cp .env.example .env 并填入管理密码}"
+      # 容器内绑定非回环地址，程序要求至少配置一个管理员凭据：
+      # 优先 ADMIN_USERNAME/ADMIN_PASSWORD，旧版 SERVER_PASSWORD 仍兼容。
+      SPIRITSCOUT_ADMIN_USERNAME: "${SPIRITSCOUT_ADMIN_USERNAME:-spiritscout}"
+      SPIRITSCOUT_ADMIN_PASSWORD: "${SPIRITSCOUT_ADMIN_PASSWORD:-}"
+      SPIRITSCOUT_SERVER_PASSWORD: "${SPIRITSCOUT_SERVER_PASSWORD:-}"
       SPIRITSCOUT_WEB__PORT: "10010"
       SPIRITSCOUT_WEB__HOST: "0.0.0.0"
       # 留空自动解析 Windows 网关；指定时填该运行环境可达的 CDP 地址。
       SPIRITSCOUT_CHROME_CDP_URL: "${SPIRITSCOUT_CHROME_CDP_URL:-}"
+    # 绕过本机代理 TUN 的 fake-ip DNS，直连国内公网真实 IP
+    dns:
+      - 223.5.5.5
+      - 119.29.29.29
     volumes:
       # 源码与运行数据（.spiritscout/ 会话、审计、报告）都留在宿主机
       - ./:/app

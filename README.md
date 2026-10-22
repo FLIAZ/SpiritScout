@@ -115,7 +115,7 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[toolkit]'
 镜像内已装好 bubblewrap，主机不必安装：
 
 ```bash
-cp .env.example .env        # 填入控制台管理密码
+cp .env.example .env        # 填入管理员用户名与密码
 docker compose up -d --build
 docker compose logs -f      # 看日志
 docker compose down         # 停止
@@ -144,9 +144,15 @@ docker compose down         # 停止
 MCP 服务器（ida/yakit 等）在 `configs/system.yaml` 配置，开工时握手，
 不可达只留痕不阻断。
 
-两种方式监听非回环地址时都必须设置 `SPIRITSCOUT_SERVER_PASSWORD`
-（Basic Auth，用户名 `spiritscout`），并在前端配置 HTTPS 反向代理；
-Docker 方式由 compose 从 `.env` 注入该变量。
+两种方式监听非回环地址时都必须配置管理员凭据。启动时会把 `.env` 中的
+`SPIRITSCOUT_ADMIN_USERNAME` / `SPIRITSCOUT_ADMIN_PASSWORD`（旧版
+`SPIRITSCOUT_SERVER_PASSWORD` 仍兼容）导入工作区 `admin.db`，密码只保存
+scrypt 加盐哈希。控制台使用与主界面同主题的登录面板；未认证的 API 请求
+返回 401，浏览器页面跳到 `/login`。
+
+**忘记用户名或密码**：修改 `.env` 中的两个变量并重启服务即可覆盖恢复；
+恢复后可移除变量，数据库中的凭据继续有效。本地回环且数据库与环境变量都
+没有管理员时保持免登录（与旧版一致）。远程访问请在反向代理上配置 HTTPS。
 
 ## 使用指南
 
@@ -245,8 +251,8 @@ Docker 方式由 compose 从 `.env` 注入该变量。
 | `configs/agent_models.yaml` | 角色到模型的指派（「编队」页维护） |
 | `configs/system.example.yaml` | 带注释的配置示例 |
 | `Dockerfile` | Docker 部署：镜像构建（Python 3.11 + bubblewrap 沙箱） |
-| `docker-compose.yml` | Docker 部署：端口发布、密码注入、源码与数据挂载 |
-| `.env` / `.env.example` | 本地管理密码与构建参数（`.env` 不入库，模板见 `.env.example`） |
+| `docker-compose.yml` | Docker 部署：端口发布、管理员凭据注入、源码与数据挂载 |
+| `.env` / `.env.example` | 管理员用户名/密码与构建参数（启动时导入 `admin.db`；`.env` 不入库） |
 
 共享资源默认保存于 `<workspace>/resources/`，可用 `resources.root` 指定持久目录。
 `resources.freshness_hours` 控制“近期观测”提示（默认 24 小时），不会把历史标记为本次已验证。

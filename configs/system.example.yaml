@@ -68,8 +68,11 @@ web:
   host: 127.0.0.1
   port: 8000
   max_concurrent_sessions: 4
-  remote_auth_required: true     # 非回环绑定无密码时拒绝启动
-  password_env: SPIRITSCOUT_SERVER_PASSWORD
+  remote_auth_required: true     # 非回环绑定无管理员凭据时拒绝启动
+  # 启动时把环境变量凭据导入工作区 admin.db（密码只存 scrypt 哈希）
+  admin_username_env: SPIRITSCOUT_ADMIN_USERNAME
+  admin_password_env: SPIRITSCOUT_ADMIN_PASSWORD
+  password_env: SPIRITSCOUT_SERVER_PASSWORD   # 旧版变量，仍兼容
 
 models_config_path: configs/models.yaml
 audit_log_path: .spiritscout/audit.jsonl
