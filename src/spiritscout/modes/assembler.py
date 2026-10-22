@@ -18,7 +18,12 @@ from spiritscout.agents.hostops import HostVulnAgent, PortScanAgent, PostExploit
 from spiritscout.agents.recon import ReconAgent
 from spiritscout.agents.sub.base import SubAgent, SubAgentContext
 from spiritscout.agents.webvuln import WebVulnAgent
-from spiritscout.competition import CompetitionEngine, CompetitionRules, ContestType
+from spiritscout.competition import (
+    CompetitionEngine,
+    CompetitionRules,
+    ContestType,
+    competition_strategy_prompt,
+)
 from spiritscout.core.models import AgentType, RunMode, TaskStatus
 from spiritscout.ctf.agents import (
     CTFCryptoAgent,
@@ -51,6 +56,7 @@ class ModeAssembly:
     flag_manager: FlagManager | None = None
     competition_engine: CompetitionEngine | None = None
     notes: list[str] = field(default_factory=list)
+    strategy_prompt: str = ""
 
 
 def classify_challenge(challenge: dict[str, Any]) -> str:
@@ -131,6 +137,7 @@ def ctf_plan_provider(challenges: list[dict[str, Any]], *,
                       solved: set[str] | None = None,
                       pending: set[str] | None = None,
                       tried: dict[str, set[str]] | None = None,
+                      deferred: set[str] | None = None,
                       skip_solved: bool = False) -> dict[str, Any]:
     """CTF 元规划（规则化，5.2.1）：跳过侦察，按方向生成 DAG 节点。
 
@@ -140,13 +147,18 @@ def ctf_plan_provider(challenges: list[dict[str, Any]], *,
     @轮次 后缀，绕开「同战术不重建」的去重）；方向试尽则回主方向重开新
     对话换角度——跨轮不重复做功由环形台账与题级共享结论保证。
     skip_solved（续传首轮）：已破题的赛题不再重解，只派未破题的。
+    deferred：模型已明确暂缓的赛题。只有复盘模型解除暂缓后才重新派发，
+    后端不按固定次数把暂缓题自动塞回队列。
     """
     solved = solved or set()
     pending = pending or set()
     tried = tried or {}
+    deferred = deferred or set()
     nodes: list[dict[str, Any]] = []
     for ch in challenges:
         cid = str(ch.get("id") or ch.get("title") or "?")
+        if cid in deferred:
+            continue
         if (round_no > 0 or skip_solved) and (cid in solved or cid in pending):
             continue
         if round_no == 0:
@@ -251,10 +263,13 @@ class ModeAssembler:
                           (str(ch.get("id") or "") for ch in challenges)
                           if cid and platform.is_completed(cid)}
             pending: set[str] = set()
+            deferred: set[str] = set()
             tried: dict[str, set[str]] = {}
             for node in (state.get("dag") or {}).values():
                 meta_ch = (node.get("meta") or {}).get("challenge") or {}
                 cid = str(meta_ch.get("id") or "")
+                if cid and (node.get("meta") or {}).get("deferred"):
+                    deferred.add(cid)
                 if cid and meta_ch.get("direction"):
                     tried.setdefault(cid, set()).add(str(meta_ch["direction"]))
                 if str(node.get("status")) == TaskStatus.PENDING.value and cid:
@@ -262,6 +277,7 @@ class ModeAssembler:
             return ctf_plan_provider(
                 challenges, round_no=int(state.get("round_no", 0) or 0),
                 solved=solved, pending=pending, tried=tried,
+                deferred=deferred,
                 skip_solved=resume and int(state.get("round_no", 0) or 0) == 0)
 
         notes = [("CTF 模式：五方向专项，不启用端口扫描（C7）；"
@@ -320,5 +336,6 @@ class ModeAssembler:
             )
         assembly.flag_manager = flag_manager
         assembly.competition_engine = engine
+        assembly.strategy_prompt = competition_strategy_prompt(rules.contest_type)
         assembly.notes.extend(notes)
         return assembly

@@ -1,6 +1,8 @@
 """经验库跨会话闭环：共享路径、去重、只读快照、终态提炼与审计留痕。"""
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import sqlite3
 import tempfile
@@ -36,6 +38,7 @@ from spiritscout.runtime import (
     _distill_experience,
     _schedule_background_distill,
     _worth_distilling,
+    pending_distill_snapshots,
 )
 from spiritscout.web.sessions import Session, SessionManager
 
@@ -200,6 +203,41 @@ class SharedExperienceRootTests(unittest.TestCase):
 
 
 class DistillTests(unittest.IsolatedAsyncioTestCase):
+    async def test_competition_distill_returns_before_background_finishes(self) -> None:
+        """主任务拿到后台任务句柄即返回，不为总结模型等待。"""
+        import spiritscout.runtime as runtime
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime._BACKGROUND_COOLDOWN_UNTIL = 0.0
+            workspace = Path(tmp) / "sess-fast"
+            audit = NullAuditLogger()
+            store = ExperienceStore(Path(tmp) / "experience.db", audit=audit)
+            infra = SimpleNamespace(audit=audit, workspace=workspace,
+                                    experience_deferred=False)
+
+            async def slow_distill(*args, **kwargs):
+                await asyncio.sleep(3600)
+                return {"result": "empty", "insights": 0}
+
+            with patch("spiritscout.runtime._prepare_distill",
+                       return_value={"target": "https://a.example"}), patch(
+                    "spiritscout.runtime._distill_run",
+                    new=slow_distill):
+                task = _schedule_background_distill(
+                    infra, SimpleNamespace(), store, True, {},
+                    mission="", outcome="completed")
+                self.assertIsNotNone(task)
+                await asyncio.sleep(0)
+                self.assertFalse(task.done())
+                self.assertTrue(infra.experience_deferred)
+                snapshots = pending_distill_snapshots(workspace)
+                self.assertEqual(len(snapshots), 1)
+                payload = json.loads(snapshots[0].read_text(encoding="utf-8"))
+                self.assertNotEqual(payload["status"], "done")
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
     async def test_cancelled_path_hands_distill_to_background(self) -> None:
         """停止不再干等：退场提炼转后台，没人等就不再收紧超时。"""
         with tempfile.TemporaryDirectory() as tmp:

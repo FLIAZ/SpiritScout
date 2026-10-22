@@ -2025,8 +2025,9 @@ class CTFBaseAgent(SubAgent):
 
     def _solver_system_prompt(self) -> str:
         from spiritscout.agents.profiles import agent_system_prompt
+        from spiritscout.core.models import RunMode
 
-        return (
+        prompt = (
             agent_system_prompt(self.agent_type)
             + "\n"
             "工作方式：工具就是你的手——需要看什么就用工具去拿，不要凭空猜测"
@@ -2070,6 +2071,11 @@ class CTFBaseAgent(SubAgent):
             "多个入口、批量看响应），不要拆成多轮一次做一件——每多一轮就多付"
             "一次完整的思考时间。"
         )
+        if getattr(self.ctx, "mode", None) == RunMode.COMPETITION:
+            from spiritscout.competition import competition_solver_prompt
+
+            prompt += "\n" + competition_solver_prompt()
+        return prompt
 
     def _seed_messages(self, task: Task, route, plan: RoutePlan,
                        state: dict[str, Any]) -> None:

@@ -72,7 +72,8 @@ _CTF_DECLARATION_RE = re.compile(
     r"(?:一道|这道|解|破解)\s*(?:ctf\s*)?(?:题|赛题)")
 _COMPETITION_DECLARATION_RE = re.compile(
     r"(?i)(?<![a-z0-9_])awd(?:-[a-z]+)?(?![a-z0-9_])|"
-    r"渗透赛|攻防赛|攻防对抗|红蓝对抗")
+    r"智能(?:体)?渗透赛|渗透赛|智能体靶场|靶场渗透赛|靶场测试|"
+    r"攻防赛|攻防对抗|红蓝对抗")
 _SRC_DECLARATION_RE = re.compile(
     r"(?i)(?<![a-z0-9_])src(?![a-z0-9_])|"
     r"漏洞赏金|漏洞挖掘|授权渗透(?:测试)?|安全评估")
@@ -148,7 +149,8 @@ def declared_mode(req: LaunchRequest) -> RunMode | None:
     """读取用户已经明确给出的模式声明。
 
     结构化赛制/赛题优先；自然语言只接受 ``CTF``、``拿 flag``、``AWD``、
-    ``授权渗透`` 这类强声明。返回 ``None`` 表示确实需要 LLM 理解上下文，
+    ``智能渗透赛``、``智能体靶场``、``授权渗透`` 这类强声明。返回 ``None``
+    表示确实需要 LLM 理解上下文，
     避免把可确定的任务交给模型再猜一次。
     """
     if req.rules_yaml:

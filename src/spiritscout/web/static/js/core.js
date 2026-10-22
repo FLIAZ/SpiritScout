@@ -33,7 +33,7 @@ function toast(msg, err = false) {
 const TERMINAL = new Set(["completed", "failed", "stopped", "interrupted"]);
 const STATUS_CN = { created: "排队中", running: "运行中", completed: "已完成",
                     failed: "失败", stopped: "已停止", interrupted: "已中断" };
-const MODE_CN = { src: "SRC 渗透", ctf: "CTF 解题", competition: "渗透赛",
+const MODE_CN = { src: "SRC 渗透", ctf: "CTF 解题", competition: "智能渗透赛",
                   dialogue: "对话", rules: "规则" };
 const TASK_CN = { business_context: "业务体验与上下文", recon: "侦察测绘", port_scan: "端口扫描", web_probe: "Web 探测",
                   host_probe: "主机探测", post_exploit: "后渗透", report: "报告生成",

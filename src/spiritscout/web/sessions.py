@@ -12,6 +12,7 @@ SystemConfig 副本（黑板 DB / 知识库 / 审计 / 报告路径全部重定�
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
 import json
 import math
@@ -39,6 +40,7 @@ from spiritscout.gateway.usage import read_usage
 from spiritscout.launch import (
     LaunchPlan,
     LaunchRequest,
+    declared_mode,
     extract_targets,
     prepare_launch,
 )
@@ -80,7 +82,8 @@ def _conversation_gateway(cfg: SystemConfig, models: list[ModelEntry], audit: Au
 async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
                           mission: str, heuristic: RunMode,
                           audit: AuditLogger,
-                          history: list[dict[str, str]] | None = None
+                          history: list[dict[str, str]] | None = None,
+                          declared: RunMode | None = None,
                           ) -> tuple[RunMode | None, str]:
     """LLM 语义路由（兼任开工预检）：一次调用裁决「模式 + 意图」。
 
@@ -118,8 +121,18 @@ async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
                  "branches": {
                      "src": "授权安全测试/渗透：对站点、系统或业务做侦察→漏洞"
                             "探测→核验→报告（含 SRC 漏洞挖掘场景）",
-                     "ctf": "CTF 解题：目标是具体赛题、以夺取 flag 为目的",
-                     "competition": "渗透赛/攻防对抗：有赛制、排名、AWD 等规则"},
+                     "ctf": "CTF 专项：独立赛题、离线题或单题解题，以夺取 "
+                            "flag 为目的；任务没有竞赛/靶场赛制语义时不要因为"
+                            "出现 flag 就自动归入比赛模式",
+                     "competition": "智能渗透赛/智能体靶场/竞赛：多题计分、"
+                                    "赛制、排名、托管平台、靶场测试或 AWD；"
+                                    "即使题型表现为 CTF，也应优先按竞赛目标"
+                                    "与得分策略处理"},
+                 "declared_branch": declared.value if declared else "",
+                 "declared_branch_contract": (
+                     "declared_branch 是用户原话中的直接模式声明。除非用户在当前"
+                     "输入中明确要求切换，否则 mode 应与它一致；不能把竞赛多题"
+                     "任务降判为普通 ctf。"),
                  "intent_types": {
                      "task": "明确的可执行任务：有具体目标/题目/清晰的行动指令",
                      "task_with_rules": "任务与规则同时下发：既有目标或行动指令，"
@@ -156,6 +169,7 @@ async def _llm_route_mode(cfg: SystemConfig, models: list[ModelEntry],
     audit.log("decision.change", "mode_router", {
         "action": "llm_mode_route", "llm_mode": mode.value,
         "intent": intent, "heuristic": heuristic.value,
+        "declared": declared.value if declared else "",
         "rationale": str((data or {}).get("rationale", ""))[:200]})
     return mode, intent
 
@@ -887,6 +901,7 @@ class SessionManager:
             tuple[Session, SystemConfig, LaunchPlan, bool, list[ModelEntry], bool]] = \
             asyncio.Queue()
         self._supervisor: asyncio.Task | None = None
+        self._distill_resume_task: asyncio.Task | None = None
         self._naming_tasks: set[asyncio.Task] = set()   # 会话自动命名（后台旁路）
         # 项目目录由 app 注入（与项目 API 共用同一实例，避免并发迁移）；
         # 独立使用时惰性创建，保持 SessionManager(cfg, []) 的测试兼容
@@ -1083,6 +1098,36 @@ class SessionManager:
         if self._supervisor is None or self._supervisor.done():
             self._supervisor = asyncio.create_task(
                 self._supervise(), name="spiritscout-supervisor")
+        # 每进程只扫描一次遗留快照。start() 也会在每次新建会话时调用；
+        # 若任务结束后重扫，会把当前进程仍在跑的 snapshot 重复提炼。
+        if self._distill_resume_task is None:
+            self._distill_resume_task = asyncio.create_task(
+                self._resume_pending_distills(),
+                name="spiritscout-distill-resume")
+
+    async def _resume_pending_distills(self) -> None:
+        """恢复进程中止时遗留的提炼快照；失败只留痕，不影响会话控制台。"""
+        from spiritscout.runtime import (
+            pending_distill_snapshots,
+            resume_pending_distills,
+        )
+
+        if not self._models:
+            return
+        for session in list(self._sessions.values()):
+            if not pending_distill_snapshots(session.workspace):
+                continue
+            try:
+                cfg = self._session_cfg(session, None)
+                assignments = agentcfg.read_assignments(cfg.agent_models_path)
+                await resume_pending_distills(
+                    workspace=session.workspace, cfg=cfg,
+                    models=self._models, agent_models=assignments)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 —— 后台恢复不拖垮控制台
+                print(f"[spiritscout] 提炼快照恢复失败（{session.session_id}）:"
+                      f" {type(exc).__name__}: {exc}", file=sys.stderr)
 
     async def _supervise(self) -> None:
         """从创建队列取会话并 spawn 执行任务（不隶属任何请求作用域）。"""
@@ -1140,6 +1185,11 @@ class SessionManager:
                 await self._supervisor
             except asyncio.CancelledError:
                 pass
+        if (self._distill_resume_task is not None
+                and not self._distill_resume_task.done()):
+            self._distill_resume_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._distill_resume_task
         for session in list(self._sessions.values()):
             if session.status not in TERMINAL_STATES:
                 await self.stop(session.session_id)
@@ -1614,9 +1664,15 @@ class SessionManager:
                         # 语义路由兼任开工预检（开工前唯一模型调用，调用成功
                         # 即模型全链可用），不为预检单付一次串行等待
                         self._set_phase(session, "mode_routing", audit)
+                        source = plan.source_request
+                        route_declared = declared_mode(LaunchRequest(
+                            mission=route_mission,
+                            rules_yaml=(source.rules_yaml if source else None),
+                            challenges_yaml=(
+                                source.challenges_yaml if source else None)))
                         routed, intent = await _llm_route_mode(
                             cfg, models, route_mission, mode, audit,
-                            history=route_history)
+                            history=route_history, declared=route_declared)
                     else:
                         self._set_phase(session, "model_preflight", audit)
                         _preflight_models(cfg, models, audit)
@@ -1864,7 +1920,8 @@ class SessionManager:
                         standing_rules=session.standing_rules,
                         pause_gate=session.pause_gate,
                         dialogue_history=session.dialogue_history,
-                        platform_profile=plan.platform_profile)
+                        platform_profile=plan.platform_profile,
+                        mission=plan.mission)
                 else:
                     result = await run_engagement(
                         cfg=cfg, models=models,

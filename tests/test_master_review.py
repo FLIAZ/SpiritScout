@@ -10,6 +10,45 @@ from spiritscout.core.models import AgentType, TaskStatus
 
 
 class MasterReviewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_deferred_challenge_cancels_nodes_and_closes_instance(self) -> None:
+        dag = TaskDAG()
+        dag.add_node(
+            "CTF-WEB", "[web] stuck", meta={"challenge": {
+                "id": "c1", "title": "stuck"}})
+        platform = SimpleNamespace(close_instance=AsyncMock(return_value=True))
+        master = object.__new__(MasterAgent)
+        master.agent_id = "master-test"
+        master.ctx = SimpleNamespace(
+            audit=Mock(), extra={"mode_prompt": "竞赛策略", "platform": platform})
+
+        await master._apply_competition_decisions(dag, {
+            "defer_challenges": [{"id": "c1", "reason": "连续无新增信息"}],
+        })
+
+        updated = dag.all_nodes()[0]
+        self.assertEqual(updated.status, TaskStatus.CANCELLED)
+        self.assertTrue(updated.meta["deferred"])
+        self.assertEqual(updated.meta["defer_reason"], "连续无新增信息")
+        platform.close_instance.assert_awaited_once()
+
+    async def test_retry_challenge_clears_deferred_marker(self) -> None:
+        dag = TaskDAG()
+        dag.add_node(
+            "CTF-WEB", "[web] retry", meta={
+                "challenge": {"id": "c1", "title": "retry"},
+                "deferred": True, "defer_reason": "旧阻塞"})
+        master = object.__new__(MasterAgent)
+        master.agent_id = "master-test"
+        master.ctx = SimpleNamespace(
+            audit=Mock(), extra={"mode_prompt": "竞赛策略"})
+
+        await master._apply_competition_decisions(dag, {
+            "retry_challenges": [{"id": "c1", "reason": "出现新线索"}],
+        })
+
+        self.assertFalse(dag.all_nodes()[0].meta["deferred"])
+        self.assertNotIn("defer_reason", dag.all_nodes()[0].meta)
+
     async def test_deferred_mode_replan_continues_to_next_round(self) -> None:
         dag = TaskDAG()
         finished = dag.add_node("FIRST", "finished direction")

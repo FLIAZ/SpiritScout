@@ -404,6 +404,94 @@ class MasterAgent:
             self.ctx.audit.log("platform.fact", self.agent_id, {
                 "action": "instances_released", "challenges": list(released)})
 
+    def _challenge_states(self, dag: TaskDAG) -> dict[str, dict[str, Any]]:
+        """复盘视图：按赛题聚合节点状态与模型已登记的暂缓原因。"""
+        states: dict[str, dict[str, Any]] = {}
+        for node in dag.all_nodes():
+            meta = node.meta or {}
+            challenge = meta.get("challenge") or {}
+            cid = str(challenge.get("id") or "")
+            if not cid:
+                continue
+            item = states.setdefault(cid, {
+                "id": cid,
+                "title": str(challenge.get("title") or cid)[:120],
+                "deferred": bool(meta.get("deferred")),
+                "defer_reason": str(meta.get("defer_reason") or "")[:200],
+                "nodes": [],
+            })
+            item["deferred"] = item["deferred"] or bool(meta.get("deferred"))
+            if meta.get("defer_reason") and not item["defer_reason"]:
+                item["defer_reason"] = str(meta.get("defer_reason"))[:200]
+            item["nodes"].append({
+                "tactic": node.tactic, "status": node.status.value,
+                "title": node.title[:100]})
+        return states
+
+    async def _apply_competition_decisions(
+            self, dag: TaskDAG, decision: dict[str, Any]) -> None:
+        """执行模型给出的暂缓/重试裁定；后端只校验 id 并操作资源。"""
+        if not str(self.ctx.extra.get("mode_prompt") or "").strip():
+            return
+        states = self._challenge_states(dag)
+        known = set(states)
+
+        retried: list[str] = []
+        raw_retry = decision.get("retry_challenges") or []
+        if isinstance(raw_retry, list):
+            for item in raw_retry[:12]:
+                cid = str(item.get("id") if isinstance(item, dict) else item).strip()
+                if not cid or cid not in known:
+                    continue
+                for node in dag.all_nodes():
+                    ch = (node.meta or {}).get("challenge") or {}
+                    if str(ch.get("id") or "") != cid:
+                        continue
+                    node.meta["deferred"] = False
+                    node.meta.pop("defer_reason", None)
+                retried.append(cid)
+
+        deferred: list[dict[str, str]] = []
+        raw_defer = decision.get("defer_challenges") or []
+        if isinstance(raw_defer, list):
+            for item in raw_defer[:12]:
+                if isinstance(item, dict):
+                    cid = str(item.get("id") or "").strip()
+                    reason = str(item.get("reason") or "模型判定暂缓")[:200]
+                else:
+                    cid, reason = str(item).strip(), "模型判定暂缓"
+                if not cid or cid not in known or cid in retried:
+                    continue
+                for node in dag.all_nodes():
+                    ch = (node.meta or {}).get("challenge") or {}
+                    if str(ch.get("id") or "") != cid:
+                        continue
+                    node.meta["deferred"] = True
+                    node.meta["defer_reason"] = reason
+                    if node.status in (TaskStatus.PENDING, TaskStatus.DISPATCHED,
+                                       TaskStatus.RUNNING):
+                        dag.mark(node.node_id, TaskStatus.CANCELLED)
+                        node.meta["cancel_reason"] = f"赛题暂缓: {reason}"
+                deferred.append({"id": cid, "reason": reason})
+
+        platform = self.ctx.extra.get("platform")
+        released: list[str] = []
+        if deferred and platform is not None:
+            for item in deferred:
+                try:
+                    if await platform.close_instance(
+                            item["id"], reason=f"赛题暂缓: {item['reason']}"):
+                        released.append(item["id"])
+                except Exception as exc:  # noqa: BLE001 —— 回收失败不连坐主链路
+                    self.ctx.audit.log("platform.fact", self.agent_id, {
+                        "action": "defer_close_failed", "challenge": item["id"],
+                        "error": str(exc)[:200]})
+
+        if retried or deferred or released:
+            self.ctx.audit.log("decision.change", self.agent_id, {
+                "action": "competition_challenge_state",
+                "deferred": deferred, "retried": retried, "released": released})
+
     def _effort_options(self, task: Task) -> list[str]:
         """该任务可用的思考强度取值——按实际会用到的模型各自声明的档位算。
 
@@ -953,6 +1041,7 @@ class MasterAgent:
             llm_decision = None
         deferred_replan = False
         if llm_decision and not stop_reason:
+            await self._apply_competition_decisions(dag, llm_decision)
             if llm_decision.get("continue_iteration", False):
                 await self._ask_user_from_review(llm_decision)
             if not llm_decision.get("continue_iteration", False):
@@ -1325,11 +1414,18 @@ class MasterAgent:
                     for n in dag_now.all_nodes()][:30],
                 "last_plan_result": self.ctx.extra.get("last_plan_result") or {},
                 "round_routes": self._route_digest(state),
+                "challenges": self._challenge_states(dag_now),
+                "deferred_challenges": {
+                    cid: item.get("defer_reason", "")
+                    for cid, item in self._challenge_states(dag_now).items()
+                    if item.get("deferred")},
                 "constraints": (
                             "返回 JSON：{\"continue_iteration\": bool, \"reason\": str, "
                             "\"dag_nodes\": [{\"tactic\": 仅可用战术之一, \"title\": str, "
                             "\"target\": str（可选）, \"depends_on\": [依赖战术名，可空；"
-                            "填 tactic 不要填标题]}]}。"
+                            "填 tactic 不要填标题]}], "
+                            "\"defer_challenges\": [{\"id\": str, \"reason\": str}], "
+                            "\"retry_challenges\": [{\"id\": str, \"reason\": str}]}。"
                             "target 填新节点针对的授权目标（URL/主机名/CIDR，从 "
                             "world_state 的授权范围里挑）；多域补测按域拆节点各填，"
                             "留空沿用会话目标。"
@@ -1351,6 +1447,12 @@ class MasterAgent:
                             "continue_iteration=true 并给出换思路的新节点"
                             "（dag_nodes 必填，否则等于收手）；"
                             "确认无解题空间时 continue_iteration=false 并说明理由。"
+                            "竞赛/靶场语境下，若某题反复尝试仍无新增有效信息、"
+                            "关键前提缺失，或继续投入的预期得分效率明显低于其他"
+                            "未完成题，可把该题放入 defer_challenges；系统会停止"
+                            "该题后续派发并关闭平台容器。只有出现实质新线索、阻塞"
+                            "解除或用户明确要求时才用 retry_challenges 解除暂缓。"
+                            "不要按固定轮数机械暂缓，也不要为暂缓题写长篇复盘。"
                             "questions 可选（至多 2 条）：仅当继续迭代必须依赖"
                             "只有用户能提供的输入（测试账号/凭据、登录后操作的"
                             "请求记录、授权范围裁定）时给出，形如 "
@@ -1526,12 +1628,15 @@ class MasterAgent:
             f"{profile.name}({profile.key.value})：{profile.duty}"
             for profile in actual_agents
         )
+        mode_prompt = str(self.ctx.extra.get("mode_prompt") or "").strip()
+        mode_block = f"{mode_prompt}\n" if mode_prompt else ""
         return (
             agent_system_prompt(AgentType.MASTER)
             + "\n"
             f"{mission_block}"
             f"{rules_block}"
             f"{exp_block}"
+            f"{mode_block}"
             f"你全权决定：战术拆解（可参考 ATT&CK，也可按目标特点自由组合）、"
             f"任务下发与优先级、子 Agent 分工、迭代节奏与收敛时机。"
             f"本会话实际装配的执行角色只有：{roster or '无'}。不得虚构未装配角色"

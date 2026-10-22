@@ -38,6 +38,7 @@ from spiritscout.core.models import (
     BlackboardLayer,
     Event,
     RouteState,
+    RunMode,
     Task,
     TaskStatus,
 )
@@ -105,6 +106,7 @@ class SubAgentContext:
     # None = 无暂停能力，如测试/离线装配）
     pause_gate: Any = None
     journal: Any = None
+    mode: RunMode | None = None
 
     def __post_init__(self) -> None:
         if self.audit is None:
@@ -782,7 +784,12 @@ class SubAgent(abc.ABC):
         """稳定 system prompt：授权等运行时事实在 world_state 片段里更新。"""
         from spiritscout.agents.profiles import agent_system_prompt
 
-        return agent_system_prompt(self.agent_type)
+        prompt = agent_system_prompt(self.agent_type)
+        if getattr(self.ctx, "mode", None) == RunMode.COMPETITION:
+            from spiritscout.competition import competition_solver_prompt
+
+            prompt += "\n" + competition_solver_prompt()
+        return prompt
 
     def _world_state(self) -> dict[str, Any]:
         from spiritscout.gateway.world_state import snapshot

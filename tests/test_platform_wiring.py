@@ -253,8 +253,9 @@ class CompetitionAssemblyPlatformTests(unittest.IsolatedAsyncioTestCase):
             flag_manager=None, competition_engine=None, platform=platform)
 
     async def test_jeopardy_assembly_honours_platform_completion(self) -> None:
-        plan = self._assembly(StubPlatform(completed={"c1"})).plan_provider(
-            {"round_no": 1, "dag": {}})
+        assembly = self._assembly(StubPlatform(completed={"c1"}))
+        self.assertIn("单位时间", assembly.strategy_prompt)
+        plan = assembly.plan_provider({"round_no": 1, "dag": {}})
         cids = {n["meta"]["challenge"]["id"] for n in plan["dag_nodes"]}
         self.assertEqual(cids, {"c2"})   # 平台通报完成的题不再重攻
 
@@ -262,6 +263,17 @@ class CompetitionAssemblyPlatformTests(unittest.IsolatedAsyncioTestCase):
         plan = self._assembly(None).plan_provider({"round_no": 1, "dag": {}})
         cids = {n["meta"]["challenge"]["id"] for n in plan["dag_nodes"]}
         self.assertEqual(cids, {"c1", "c2"})
+
+    async def test_jeopardy_assembly_does_not_retry_deferred_challenge(self) -> None:
+        dag = TaskDAG()
+        dag.add_node(
+            "CTF-WEB", "[web] 题一", meta={
+                "challenge": {"id": "c1", "direction": "web"},
+                "deferred": True, "defer_reason": "连续无新增线索"})
+        plan = self._assembly(None).plan_provider(
+            {"round_no": 1, "dag": dag.to_dict()})
+        cids = {n["meta"]["challenge"]["id"] for n in plan["dag_nodes"]}
+        self.assertEqual(cids, {"c2"})
 
 
 if __name__ == "__main__":

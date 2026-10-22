@@ -14,10 +14,11 @@ from spiritscout.agents.master.agent import MasterAgent
 from spiritscout.agents.master.dag import TaskDAG
 from spiritscout.blackboard import Blackboard
 from spiritscout.config.settings import ModelEntry, SystemConfig, WorkspaceConfig
+from spiritscout.core.audit import AuditLogger
 from spiritscout.core.models import AgentType, BlackboardLayer, RunMode
 from spiritscout.launch import LaunchRequest, prepare_launch
 from spiritscout.web.app import _read_state, create_app
-from spiritscout.web.sessions import Session, SessionManager
+from spiritscout.web.sessions import Session, SessionManager, _llm_route_mode
 
 CTF_MISSION = (
     "一道ctf题目，拿flag："
@@ -49,6 +50,20 @@ class LaunchRoutingTests(unittest.TestCase):
 
         self.assertEqual(plan.authorization.mode, RunMode.SRC)
         self.assertTrue(plan.needs_mode_routing)
+
+    def test_agent_range_test_is_competition_not_plain_ctf(self) -> None:
+        """「智能体靶场测试」是竞赛语义，不能因为题目拿 Flag 就落入 CTF。"""
+        plan = prepare_launch(LaunchRequest(
+            mission="智能体靶场测试：平台有多道题，请按得分效率解题并提交 flag"))
+
+        self.assertEqual(plan.authorization.mode, RunMode.COMPETITION)
+        self.assertTrue(plan.mode_auto)
+
+    def test_smart_pentest_contest_declaration_is_competition(self) -> None:
+        plan = prepare_launch(LaunchRequest(
+            mission="智能渗透赛，多道题按难度计分，尽快拿 flag"))
+
+        self.assertEqual(plan.authorization.mode, RunMode.COMPETITION)
 
     def test_src_target_falls_back_to_authorized_scope(self) -> None:
         """续传合并进 extra_scope 的授权目标要成为工作入口，不能是 CTF 占位符。"""
@@ -86,6 +101,30 @@ class LaunchRoutingTests(unittest.TestCase):
 
         self.assertEqual(result.created[0].meta["target"],
                          "https://hg.example.test")
+
+
+class ModeRouterPromptTests(unittest.IsolatedAsyncioTestCase):
+    async def test_declared_competition_reaches_router_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = SystemConfig(workspace=WorkspaceConfig(root=str(root)))
+            cfg.audit_log_path = str(root / "audit.jsonl")
+            models = [ModelEntry(model="test-model")]
+            gateway = _FakeChatGateway(json.dumps({
+                "mode": "competition", "intent": "task",
+                "rationale": "智能体靶场测试是多题竞赛"},
+                ensure_ascii=False))
+            with patch("spiritscout.web.sessions._conversation_gateway",
+                       return_value=gateway):
+                mode, intent = await _llm_route_mode(
+                    cfg, models, "智能体靶场测试，多题拿分",
+                    RunMode.COMPETITION, AuditLogger(cfg.audit_log_path),
+                    declared=RunMode.COMPETITION)
+
+        self.assertEqual(mode, RunMode.COMPETITION)
+        self.assertEqual(intent, "task")
+        payload = json.loads(gateway.calls[0]["messages"][1]["content"])
+        self.assertEqual(payload["declared_branch"], "competition")
 
 
 class SessionLifecycleTests(unittest.IsolatedAsyncioTestCase):

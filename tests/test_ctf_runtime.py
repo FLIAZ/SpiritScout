@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -13,6 +15,26 @@ from spiritscout.ctf.agents import (
     _challenge_instance_blocker,
     _model_messages,
 )
+from spiritscout.runtime import _write_competition_summary
+
+
+class CompetitionSummaryTests(unittest.TestCase):
+    def test_summary_contains_scores_but_no_writeup_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            flags = SimpleNamespace(
+                stats=lambda: {"accepted": 1, "submitted": 1, "extracted": 2},
+                accepted_flags=lambda: [SimpleNamespace(challenge_id="c1")])
+            out = _write_competition_summary(
+                Path(tmp) / "summary.md", contest="jeopardy",
+                run_summary={"platform": {"platform": "fixture", "listed": 2}},
+                flag_manager=flags,
+                challenges=[{"id": "c1", "title": "题一"}])
+            body = out.read_text(encoding="utf-8")
+
+        self.assertIn("平台已确认 Flag：1", body)
+        self.assertIn("题一（c1）：平台确认完成", body)
+        self.assertNotIn("WriteUp", body)
+        self.assertNotIn("复现步骤", body)
 
 
 class ChallengeAvailabilityTests(unittest.TestCase):

@@ -9,8 +9,13 @@ from spiritscout.competition.engine import (
     PriorityWeights,
 )
 from spiritscout.competition.rules import CompetitionRules, ContestType
+from spiritscout.competition.strategy import (
+    competition_solver_prompt,
+    competition_strategy_prompt,
+)
 
 __all__ = [
     "ChallengeCard", "CompetitionEngine", "CompetitionRules",
-    "ContestType", "PriorityWeights",
+    "ContestType", "PriorityWeights", "competition_solver_prompt",
+    "competition_strategy_prompt",
 ]
