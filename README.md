@@ -4,6 +4,9 @@
 覆盖 SRC 漏洞挖掘、CTF 解题与渗透赛三类场景。设计原则是 **LLM 优先**——
 模型负责全部判断与取舍，后端只做感知、安全护栏与结果流向。
 
+<img width="1606" height="838" alt="Benchmark.jpg" src="https://github.com/user-attachments/assets/f5cea640-aa57-40d2-9d21-919960aadd64" />
+
+
 ## 核心特性
 
 - **子 Agent 实时工作台**：会话页按实例查看模型明确返回的分析与输出、工具反馈、
