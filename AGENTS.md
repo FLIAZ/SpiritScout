@@ -36,6 +36,19 @@
 ```bash
 .venv/bin/python -m unittest discover tests/
 .venv/bin/python -m ruff check src/ tests/
+for f in src/spiritscout/web/static/js/*.js; do node --check "$f"; done
+for f in tests/test_*.js; do node "$f"; done
 ```
 
 行为质量以真实任务浏览器实测为准——mock 不等于真实体验。
+
+## 任务完成标准（文档与测试）
+
+1. **文档与注释同步**：每次任务完成后都要检查并更新文档与注释——至少评估
+   `docs/` 下对应专题、`README.md`、`CHANGELOG.md` 是否仍然准确；行为、架构、
+   安全边界、算法、阶段或配置发生变化时必须同步修改，过时注释一并修正。
+   文档与代码冲突时以代码为准，并立即补齐文档。
+2. **测试先行与全量回归**：每新增一个功能或模块，都要编写测试；至少通过一个
+   最小可用性测试后才能继续下一步。任务结束前必须运行全量测试（后端 unittest、
+   ruff、前端 `node --check` 与 `tests/test_*.js`）；全部通过才能结束，否则继续
+   排查和修复。环境依赖导致的 skip 必须在交付说明中列出，不得用 skip 掩盖真实失败。

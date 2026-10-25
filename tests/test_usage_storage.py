@@ -69,7 +69,10 @@ class UsageStorageTests(unittest.TestCase):
             path = Path(directory) / "usage.json"
             cache = _file_cache(str(path.resolve()), False)
             for tokens in range(30):
-                path.write_text(json.dumps({"used_tokens": tokens}))
+                # 用长度变化的载荷验证“只保留最新快照”。同尺寸原位重写在
+                # 粗粒度时间戳文件系统（WSL DrvFs 等）上无法被 stat 版本
+                # 检测；生产写入走原子替换，见下一个用例。
+                path.write_text(json.dumps({"used_tokens": tokens, "pad": "x" * tokens}))
                 self.assertEqual(read_usage(path)["used_tokens"], tokens)
                 self.assertIs(_file_cache(str(path.resolve()), False), cache)
             self.assertEqual(cache.snapshot["used_tokens"], 29)
