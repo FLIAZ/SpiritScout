@@ -87,7 +87,7 @@ class InProcessBus(EventBus):
     # ------------------------------------------------------------ 内部
 
     async def _throttle(self) -> None:
-        """令牌桶流量控制（4.2.1）。"""
+        """令牌桶流量控制。"""
         if self._rate_limit <= 0:
             return
         while True:
@@ -111,7 +111,7 @@ class InProcessBus(EventBus):
             for sub in list(self._subs.values()):
                 if not sub.matches(event.topic):
                     continue
-                # 事件幂等：同一订阅者对重复 event_id 不重复执行（6.9）
+                # 事件幂等：同一订阅者对重复 event_id 不重复执行
                 if not remember_event(sub, event.event_id):
                     continue
                 try:
