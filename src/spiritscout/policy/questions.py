@@ -1,17 +1,7 @@
-"""模型发起的用户询问（问题与选项由模型撰写，后端只做送达与回收）。
+"""模型提问的送达与答复队列。
 
-语义（对齐 Claude Code 式提问）：
-- 模型遇到需要用户决策的事（授权范围外目标、路线分叉、取舍确认）时，
-  用 ask_user 工具提交**自己总结润色的问题与选项**，后端不代写文案；
-- ask() 挂起该分支直到用户作答或会话停止（不设超时，决策不可代答）；
-- 用户可点选模型给出的选项，也可直接输入自己的意见（自由文本优先）；
-- 问句附带的 scope targets 在控制台渲染为「加入本会话范围」勾选项——
-  只有用户显式勾选，后端才把目标写入 ScopeGuard 会话批准集；
-- 同一问题并发提交按问题文本合并（多条分支撞上同一个决策只问一次）；
-- 会话停止 → 全部挂起问题按「无答复」唤醒，分支据此继续或收尾。
-
-记录进审计（user.question / user.answered），经 /state 轮询实时可见。
-"""
+问题和选项由模型提供，自由输入优先；同文问题合并，停止会话时唤醒等待项。
+只有用户明确勾选的目标才加入当前会话的批准记录。"""
 
 from __future__ import annotations
 
@@ -57,8 +47,10 @@ class QuestionBroker:
     """
 
     def __init__(self, audit: AuditLogger | None = None, *,
-                 context_path: str | Path | None = None):
+                 context_path: str | Path | None = None,
+                 interactive: bool = True):
         self._audit = audit or NullAuditLogger()
+        self.interactive = interactive
         self._blackboard: Any = None
         self._context_path = context_path
         self._guard: Any = None                       # ScopeGuard（扩围写入）
@@ -90,6 +82,14 @@ class QuestionBroker:
         multiple=True 表示选项可多选（前端勾选后统一提交），默认单选。
         """
         question = str(question or "").strip()[:2000]
+        if not self.interactive:
+            # 无人值守模式不代填用户选择，不创建待办；明确交回模型自主决策。
+            self._audit.log("user.question_skipped", agent, {
+                "question": question[:500], "reason": "智能体模式禁止用户交互"})
+            return {"answer": "智能体模式为全自动模式，没有用户答复。请根据任务原文、"
+                    "比赛规则、已有授权与现场证据自主决策并继续；缺少必要条件时"
+                    "记录阻塞并推进其他任务，无法继续则如实报告结果，不等待用户。",
+                    "scope_added": [], "autonomous": True}
         fingerprint = f"{agent}|{question}"
         existing = self._by_question.get(fingerprint)
         if existing and existing in self._waiters:
