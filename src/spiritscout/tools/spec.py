@@ -65,6 +65,7 @@ class ToolSpec:
     automatic_replay: bool = True
     # 仅宿主可信配置赋值，远端工具描述不能授予角色权限。
     allowed_agents: tuple[str, ...] = ()
+    internet_search: bool = False  # 宿主声明的公开网页搜索能力
 
 
 @dataclass
