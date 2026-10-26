@@ -81,9 +81,7 @@ if TYPE_CHECKING:
     from spiritscout.competition import CompetitionRules
 
 
-# MCP 握手开工宽限：快服务器（秒级）宽限内就绪即开工前并入；超时的转入
-# 后台续握、就绪后中途并入——握手不再门控开工（实测 npx 解析 @latest 可
-# 挂满 60s 握手超时，整场白等一台最终失败的服务器）
+# 宽限期内完成 MCP 握手的工具先注册；其余连接在后台完成后补入。
 _MCP_STARTUP_GRACE = 10.0
 
 # 同一进程内：前台解题优先，后台提炼串行且仅在无前台任务时运行。
@@ -226,7 +224,7 @@ async def _build_infra(
     question_broker: Any = None,
     pause_gate: Any = None,
 ) -> _Infra:
-    # G1：授权未经人工确认/范围为空/时间窗过期 → 拒绝启动（异常中断，非静默）
+    # 启动前检查人工授权确认。
     if not authorization.human_confirmed:
         raise PolicyViolation("授权信息未经人工确认（human_confirmed=false），拒绝启动（G1）")
     audit = AuditLogger(cfg.audit_log_path)
@@ -234,6 +232,14 @@ async def _build_infra(
         "action": "engagement_start", "mode": authorization.mode.value,
         "auth_id": authorization.auth_id, "target": authorization.target_description,
     })
+    if authorization.mode == RunMode.COMPETITION:
+        from spiritscout.policy.questions import QuestionBroker
+
+        # Web 与 CLI 共用入口，调用方即使传入交互 Broker 也不能让竞赛等用户。
+        question_broker = QuestionBroker(audit, interactive=False)
+        audit.log("system.lifecycle", "runtime", {
+            "action": "autonomous_mode_enabled", "mode": authorization.mode.value,
+            "tool_approval": "automatic", "user_interaction": False})
     guard = ScopeGuard(authorization.scope)
     guard.assert_operable()
     if question_broker is not None:
@@ -326,12 +332,12 @@ async def _build_infra(
                                  memory, updated_by="project-memory")
         convergence = ConvergenceEngine(blackboard)
         gateway = ModelGateway(ModelRegistry(models), config=cfg.gateway, audit=audit)
-        gateway.set_mode(authorization.mode.value)   # 模式预算计量与熔断（4.9.4）
-        # 执行器三态（4.1）：本地 CLI 默认；docker 后端为子 Agent 沙箱隔离（加固）
+        gateway.set_mode(authorization.mode.value)   # 模式预算计量与熔断
+        # 执行器三态：本地 CLI 默认；docker 后端为子 Agent 沙箱隔离（加固）
         executor: ToolExecutor
         if cfg.executor.backend == "docker":
             if not docker_available():
-                # 不静默降级：显式选择的 docker 后端不可用时拒绝启动并给出出路
+                # 显式选择 Docker 时，不回退到宿主执行。
                 raise ConfigurationError(
                     "executor.backend=docker 但 Docker 守护进程不可用（docker CLI 缺失"
                     "或 dockerd 未运行）。请启动 Docker 服务，或将 executor.backend "
@@ -395,11 +401,28 @@ async def _build_infra(
             "guard_root": str(getattr(cfg.workspace, "guard_root", "") or ""),
             "resources": resources,
         }
+        from spiritscout.tools.search_policy import is_search_server, is_search_tool
+        from spiritscout.tools.web_search import (
+            SEARCH_SPEC,
+            effective_search,
+            search_service,
+            web_search,
+        )
+
+        search_root = Path(cfg.workspace.guard_root or cfg.workspace.root)
+        builtin_ctx["mode"] = authorization.mode
+        builtin_ctx["search"] = None
+        if authorization.mode != RunMode.COMPETITION:
+            search_config, search_key = effective_search(cfg.search, resources)
+            if search_config.enabled:
+                builtin_ctx["search"] = search_service(search_config, search_root, api_key=search_key)
+        registry.register_builtin("web_search", web_search, SEARCH_SPEC)
         # 外部 MCP 服务器：握手 + 工具清单并入智能体工具目录（失败留痕跳过，
         # 不阻断开工——MCP 是增益能力而非主链依赖；多台服务器并发握手，
         # 慢服务器不拖累开工时序）
         mcp_tools: dict[str, dict[str, Any]] = {}
-        enabled_specs = [s for s in cfg.mcp_servers if s.enabled]
+        enabled_specs = [s for s in cfg.mcp_servers if s.enabled
+                         and not (authorization.mode == RunMode.COMPETITION and is_search_server(s))]
         if enabled_specs:
             from spiritscout.tools.diagnostics import (
                 browser_failure,
@@ -414,11 +437,21 @@ async def _build_infra(
                 try:
                     if list(spec.args[:2]) == ["-m", "spiritscout.tools.chrome_mcp"]:
                         spec = spec.model_copy(update={"env": {
-                            **spec.env, "SPIRITSCOUT_CHROME_OUTPUT_DIR": str(workspace / "browser-output")}})
+                            **spec.env, "SPIRITSCOUT_CHROME_OUTPUT_DIR": str(workspace / "browser-output"),
+                            "SPIRITSCOUT_CHROME_MODE": (
+                                "cdp" if authorization.mode == RunMode.SRC else "headless")}})
                     client = build_client(spec)
                     # 启动前登记所有权；gather 尚未完成时取消也能完整回收。
                     mcp_clients.append(client)
-                    return spec, client, await client.start(), ""
+                    tools = await client.start()
+                    if list(spec.args[:2]) == ["-m", "spiritscout.tools.chrome_mcp"]:
+                        # MCP 握手不代表浏览器已就绪；只读列标签验证真实链路。
+                        health = await client.call("browser_tabs", {"action": "list"},
+                                                   timeout=min(float(spec.timeout), 5.0))
+                        if health.get("is_error"):
+                            raise RuntimeError("浏览器连接不可用："
+                                               + clean_tool_text(str(health.get("text") or "无诊断"))[:500])
+                    return spec, client, tools, ""
                 except Exception as exc:  # noqa: BLE001 —— 不可达：留痕后继续
                     if client is not None:
                         with contextlib.suppress(Exception):
@@ -434,10 +467,17 @@ async def _build_infra(
                         "action": "mcp_server_failed", "server": spec.name,
                         "error": err, "late": late})
                     return
+                shared_browser = (spec.name == "chrome"
+                                  and spec.env.get("SPIRITSCOUT_CHROME_MODE", "cdp") == "cdp")
                 for t in tools:
+                    if authorization.mode == RunMode.COMPETITION and is_search_tool(t["name"]):
+                        continue
                     t = {**t, "description": (t.get("description") or t["name"])
                          + browser_tool_guidance(t["name"])
-                         + (chrome_tool_guidance(t["name"]) if spec.name == "chrome" else "")}
+                         + (chrome_tool_guidance(t["name"]) if shared_browser else "")
+                         + (" 当前为会话独立的无头浏览器，不含用户已有登录态；"
+                            "并行处理不同题目时使用各自标签，依据当前标签快照操作。"
+                            if spec.name == "chrome" and not shared_browser else "")}
                     exposed_name = f"mcp__{spec.name}__{t['name']}"
                     risk = resolve_mcp_risk(spec, t)
                     properties = (t.get("inputSchema") or {}).get("properties") or {}
@@ -463,6 +503,7 @@ async def _build_infra(
                         schema["required"] = list(dict.fromkeys([*schema.get("required", []), action_param]))
                     tool_spec = ToolSpec(
                         name=exposed_name, kind=ToolKind.MCP,
+                        internet_search=is_search_server(spec) or is_search_tool(t["name"]),
                         description=t.get("description") or t["name"], risk=risk,
                         timeout_seconds=max(1, int(spec.timeout)),
                         allowed_params=set(properties) | ({action_param} if declaration else set()),
@@ -534,8 +575,7 @@ async def _build_infra(
                          ("tcp_scan", tcp_scan), ("file_analyze", file_analyze),
                          ("sandbox_exec", sandbox_exec)):
             registry.register_builtin(name, fn, BUILTIN_SPECS[name])
-        # 按 Agent 绑定的模型分配——失效模型（注册表已删）剔除并留痕，
-        # 不静默绑定到不存在的模型导致路由期失败
+        # 移除已从注册表删除的角色模型指派，并记录审计。
         bound = dict(agent_models or {})
         known = {m.model for m in models}
         stale = {k: v for k, v in bound.items() if v not in known}
@@ -694,7 +734,7 @@ async def _run_master(
                                      run_summary or None, mission=mission,
                                      outcome="cancelled")
         raise
-    except Exception as exc:  # noqa: BLE001 —— 失败同样不拖终态：后台沉淀教训后原样抛
+    except Exception as exc:  # noqa: BLE001 — 后台提炼不阻塞异常上抛
         _schedule_background_distill(infra, assembly, experience, enable_llm_planning,
                                      run_summary or None, mission=mission,
                                      outcome="failed",
@@ -884,12 +924,9 @@ async def _distill_experience(gateway: Any, experience: ExperienceStore,
                               timeout_seconds: int,
                               audit: Any = None,
                               source_session: str = "") -> dict[str, Any]:
-    """一次提炼调用：返回结果摘要（审计留痕由调用方负责）。
+    """提炼一次会话经验并返回摘要，由调用方记录审计。
 
-    走 chat_decision：思考型模型可能把输出额度全耗在思考上、正文为空
-    ——加大余量重试一次，而不是让整场经验提炼静默失败（实测 glm-5.3
-    思考可吃满 1024 额度，此前经验库因此长期为空）。
-    """
+    使用 chat_decision 处理思考型模型正文为空时的重试。"""
     import json as _json
 
     from spiritscout.gateway.backends import extract_json
@@ -1220,7 +1257,7 @@ async def run_engagement(
             infra, assembly, infra.experience, enable_llm_planning,
             run_summary, mission=mission, outcome="completed"))
         try:
-            # ---- 报告生成（4.6）
+            # ---- 报告生成
             report_path = report_path or _default_report_path(
                 infra.workspace, "src_report")
             report = ReportAgent(infra.blackboard)
@@ -1267,16 +1304,15 @@ async def run_ctf_engagement(
     dialogue_history: list[dict[str, str]] | None = None,
     platform_profile: dict[str, Any] | None = None,
 ) -> EngagementResult:
-    """CTF 专项任务入口（4.4/5.2）：五方向专项 Agent + Flag 统一管理。
+    """CTF 专项任务入口：五方向专项 Agent + Flag 统一管理。
 
-    硬约束 C7：CTF 模式不启用端口扫描（PolicyEngine 模式禁用表强制，
-    即使 LLM 规划出扫描动作也会在工具门被拒）。
-    flag_submit_fn=None 时只提取不提交（提交接口由使用者按赛方规范接入）。
-    resume=True（续传）：Flag 库照常重载，已破题的赛题不再重解，
-    未破题的与用户意见进入新一轮决策环。
-    platform_profile：平台档案（托管题/跑分平台）——列题/开容器/完成回收/
-    提交全部经适配器执行，题目源以平台清单为准；不提供时行为与原来一致。
-    """
+        CTF 模式所有工具操作自动审批并留痕；专项能力由角色工具目录提供。
+        flag_submit_fn=None 时只提取不提交（提交接口由使用者按赛方规范接入）。
+        resume=True（续传）：Flag 库照常重载，已破题的赛题不再重解，
+        未破题的与用户意见进入新一轮决策环。
+        platform_profile：平台档案（托管题/跑分平台）——列题/开容器/完成回收/
+        提交全部经适配器执行，题目源以平台清单为准；不提供时行为与原来一致。
+        """
     if authorization.mode != RunMode.CTF:
         raise SpiritScoutError("run_ctf_engagement 要求授权模式为 CTF")
     infra = await _build_infra(cfg, models, authorization,
@@ -1410,14 +1446,14 @@ async def run_competition_engagement(
     platform_profile: dict[str, Any] | None = None,
     mission: str = "",
 ) -> EngagementResult:
-    """智能渗透赛任务入口（4.5/5.3）：赛制自适应调度。
+    """智能渗透赛任务入口：赛制自适应调度。
 
-    用户选择智能体模式后，模型按原始规则和平台反馈动态规划；不按赛制
-    标签排序、裁剪角色或选择固定流程，结束时产出轻量结果摘要。
+        用户选择智能体模式后，模型按原始规则和平台反馈动态规划；不按赛制
+        标签排序、裁剪角色或选择固定流程，结束时产出轻量结果摘要。
 
-    platform_profile：平台档案（托管题/跑分平台）——列题/开容器/完成回收/
-    提交全部经适配器执行（与 CTF 模式同一套语义）；不提供时行为与原来一致。
-    """
+        platform_profile：平台档案（托管题/跑分平台）——列题/开容器/完成回收/
+        提交全部经适配器执行（与 CTF 模式同一套语义）；不提供时行为与原来一致。
+        """
     from spiritscout.competition import CompetitionEngine
 
     if authorization.mode != RunMode.COMPETITION:
@@ -1516,7 +1552,7 @@ async def run_competition_engagement(
         try:
             submit_stats = await flag_manager.submit_all()
             run_summary["flag_submit"] = submit_stats
-            # 已判定正确的 Flag → 标记赛题完成，驱动调度器资源转移（4.5.2）
+            # 已判定正确的 Flag → 标记赛题完成，驱动调度器资源转移
             for cand in flag_manager.accepted_flags():
                 engine.mark_solved([], cand.challenge_id)   # 审计留痕（卡片态在调度循环内维护）
             flag_stats = flag_manager.stats()
@@ -1560,3 +1596,121 @@ async def run_competition_engagement(
 def run_engagement_sync(**kwargs: Any) -> EngagementResult:
     """同步包装（CLI/调用方便利）。"""
     return asyncio.run(run_engagement(**kwargs))
+
+
+async def run_agent_side_session(*, cfg: SystemConfig, models: list[ModelEntry],
+                                 authorization: Authorization, agent_key: str,
+                                 mission: str, context: dict[str, Any],
+                                 agent_models: dict[str, str], approval_gate: Any,
+                                 question_broker: Any, ring: Any, pause_gate: Any,
+                                 dialogue_history: list[dict[str, str]],
+                                 standing_rules: str = "",
+                                 on_reply: Any = None) -> EngagementResult:
+    """独立执行选定子 Agent；沿用普通模式的工具审批与会话隔离。"""
+    from spiritscout.agents.profiles import get_profile
+    from spiritscout.core.models import AgentType, Task, TaskStatus
+    from spiritscout.gateway.world_state import sync_user_context
+    from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
+
+    if authorization.mode not in {RunMode.SRC, RunMode.CTF}:
+        raise SpiritScoutError("智能体模式不支持子 Agent 旁路会话")
+    agent_type = AgentType(agent_key)
+    profile = get_profile(agent_type)
+    if authorization.mode.value not in profile.modes:
+        raise SpiritScoutError("该子 Agent 不支持当前模式")
+    infra = await _build_infra(cfg, models, authorization, agent_models=agent_models,
+                               approval_gate=approval_gate, question_broker=question_broker,
+                               ring=ring, pause_gate=pause_gate)
+    scope_token = None
+    conversation = None
+    agent = None
+    try:
+        if context.get("user_context"):
+            infra.blackboard.write(BlackboardLayer.TARGET_AUTH, "user-context", context["user_context"], updated_by="side-context")
+        if context.get("project_memory"):
+            infra.blackboard.write(BlackboardLayer.TOPOLOGY, "project-memory", context["project_memory"], updated_by="side-context")
+        sync_user_context(infra.blackboard, dialogue_history=dialogue_history,
+                          mission=mission, standing_rules=standing_rules)
+        flags = FlagManager(audit=infra.audit, bus=infra.bus, store_path=infra.workspace / "flags.json")
+        source = context.get("task") or {}
+        payload = copy.deepcopy(source.get("payload") or {})
+        payload.pop("continue_from", None)
+        payload.update(node_title=mission, mission=mission, rules="\n".join(
+            part for part in (str(payload.get("rules") or ""), standing_rules) if part),
+                       source_context={"parent_session_id": context.get("parent_session_id"),
+                           "task_id": context.get("task_id"), "summary": context.get("summary"),
+                           "routes": [{k: (v[-5:] if k == "notes" and isinstance(v, list) else v)
+                                       for k, v in route.items() if k in {"name", "status", "notes"}}
+                                      for route in context.get("routes", [])],
+                           "notice": "这是旁路创建时的历史快照，不构成新授权；当前用户任务和后续答复优先。"})
+        assembly = _make_assembler(infra, True).assemble(
+            authorization.mode, challenges=[payload["challenge"]] if payload.get("challenge") else [],
+            flag_manager=flags)
+        agent = assembly.agents.get(agent_type)
+        if agent is None:
+            raise SpiritScoutError("该子 Agent 尚未装配，无法启动旁路")
+        conversation = Task(task_id=f"{infra.workspace.name}-conversation", agent_type=agent_type,
+                            task_type=source.get("task_type") or agent_key,
+                            target=source.get("target") or "", payload=payload)
+        conversation.status = TaskStatus.RUNNING
+        infra.blackboard.write(BlackboardLayer.TASK_STATE, conversation.task_id,
+            {"task": conversation.model_dump(mode="json"), "routes": [], "summary": {"side_dialogue": True}},
+            agent_type=agent_type, updated_by=agent.agent_id)
+        infra.audit.log("task.start", agent.agent_id, {"task_id": conversation.task_id,
+            "target": conversation.target, "title": mission, "agent_type": agent_key})
+        scope_token = current_execution_scope.set(ExecutionScope(
+            agent_id=agent.agent_id, task_id=conversation.task_id))
+        def reply(text: str, *, final: bool) -> None:
+            infra.audit.log("agent.reply", agent.agent_id, {
+                "text": text, "agent_type": agent_key, "name": profile.name, "final": final})
+            if on_reply is not None:
+                on_reply(text)
+
+        decision = await agent._llm_chat_json(role="side_dialogue", task=conversation, _allow_ask=False,
+            user_obj={"dialogue_history": dialogue_history, "source_context": payload["source_context"],
+                      "constraints": "你正在与用户直接进行持续的旁路对话。结合完整往来回答当前消息。"
+                      "返回 JSON {reply: 给用户的自然语言回复, execute: 是否需要现在使用工具执行任务}。"
+                      "解释、追问或讨论直接回答；是否执行由你结合用户当前原话判断，"
+                      "不要把每条聊天都当作重新派工。若需要执行，reply 简要说明准备做什么。"
+                      "保持本角色身份，不自称灵枢；继承的记录是历史参考，当前授权和答复优先。"})
+        if (not isinstance(decision, dict) or not isinstance(decision.get("reply"), str)
+                or not decision["reply"].strip() or type(decision.get("execute")) is not bool):
+            raise SpiritScoutError("子 Agent 未返回有效对话回复，请重试")
+        reply(decision["reply"], final=not decision["execute"])
+        summary: dict[str, Any] = {"conversation_only": True}
+        if decision["execute"]:
+            task = conversation.model_copy(update={"task_id": new_id("task"), "status": TaskStatus.PENDING}, deep=True)
+            summary = await agent.run(task)
+            evidence = infra.blackboard.read(BlackboardLayer.TASK_STATE, task.task_id) or {}
+            answer = await agent._llm_chat_json(role="side_reply", task=conversation, _allow_ask=False,
+                user_obj={"dialogue_history": dialogue_history, "execution": evidence or summary,
+                          "constraints": "根据本次真实执行记录直接回复用户，返回 JSON {reply: 回复正文}。"
+                          "说明已核实的结论、证据和仍未解决之处；不能把工具退出成功当作目标完成。"
+                          "使用自然语言，保持子 Agent 身份，不输出内部调度 JSON。"})
+            if not isinstance(answer, dict) or not str(answer.get("reply") or "").strip():
+                raise SpiritScoutError("执行记录已保存，但子 Agent 未返回有效总结回复")
+            reply(str(answer["reply"]), final=True)
+        conversation.status = TaskStatus.DONE
+        infra.blackboard.write(BlackboardLayer.TASK_STATE, conversation.task_id,
+            {"task": conversation.model_dump(mode="json"), "routes": [], "summary": {"side_dialogue": True}},
+            agent_type=agent_type, updated_by=agent.agent_id)
+        infra.audit.log("task.done", agent.agent_id, {"task_id": conversation.task_id})
+        infra.outcome = "completed"
+        return EngagementResult(run_summary={"side_agent": agent_key, "task": summary,
+                                             "model_usage": infra.gateway.usage_report()},
+                                verify_stats={}, report_path=None, flag_stats=flags.stats())
+    except asyncio.CancelledError:
+        infra.outcome = "cancelled"
+        raise
+    finally:
+        try:
+            if conversation is not None and agent is not None and conversation.status == TaskStatus.RUNNING:
+                conversation.status = TaskStatus.CANCELLED if infra.outcome == "cancelled" else TaskStatus.FAILED
+                infra.blackboard.write(BlackboardLayer.TASK_STATE, conversation.task_id,
+                    {"task": conversation.model_dump(mode="json"), "routes": []},
+                    agent_type=agent_type, updated_by=agent.agent_id)
+                infra.audit.log(f"task.{conversation.status.value}", agent.agent_id, {"task_id": conversation.task_id})
+        finally:
+            if scope_token is not None:
+                current_execution_scope.reset(scope_token)
+            await infra.close()
