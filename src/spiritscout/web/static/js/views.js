@@ -1,6 +1,7 @@
 /* ================= 视图：会话详情/拓扑/报告 ================= */
 /* ================= 会话详情 ================= */
 const TABS = ["chat", "topo", "challenges", "vulns", "flags", "events", "deliverables", "report"];
+const STEERING_STATUS_CN = {delivered: "已投递", accepted: "计划执行", completed: "已报告完成", blocked: "执行受阻"};
 $("#mobile-sessions-toggle").onclick = () => {
   const open = document.querySelector(".side").classList.toggle("mobile-sessions-open");
   $("#mobile-sessions-toggle").setAttribute("aria-expanded", String(open));
@@ -95,6 +96,7 @@ async function refreshState() {
     if (S.tab === "flags") renderFlags();
     renderChallenges();
     SessionObserver.render();
+    AgentWorkbench.render();
     ToolParameters.refresh();
     if (S.tab === "deliverables") SessionArchive.refreshIfStale();
   } catch (e) { if (S.cur === sessionId) toast(e.message, true); }
@@ -106,7 +108,7 @@ async function refreshState() {
   }
 }
 
-/* 题目面板直接展示平台完成标记，不按 Flag 数量猜测已解题数。 */
+/* 完成标记取自平台；解题中标记取自仍在执行的赛题任务。 */
 function renderChallenges() {
   const competition = S.state?.session?.mode === "competition";
   const button = document.querySelector('[data-tab="challenges"]');
@@ -115,10 +117,15 @@ function renderChallenges() {
   counter.hidden = !competition;
   const progress = S.state?.challenge_progress;
   const solved = progress?.solved_ids || [], unsolved = progress?.unsolved_ids || [];
+  const activeIds = new Set(S.state?.session?.status === "running"
+    ? (S.state.tasks || []).filter(task => ["running", "dispatched"].includes(task.status))
+      .map(task => task.challenge_id).filter(Boolean) : []);
+  const active = unsolved.filter(id => activeIds.has(id));
+  const pending = unsolved.filter(id => !activeIds.has(id));
   const total = progress?.total_challenges;
-  counter.textContent = progress ? `已解出 ${solved.length} / ${total} 题` : "等待读取题目列表";
+  counter.textContent = progress ? `已解出 ${solved.length} / ${total} 题${active.length ? ` · ${active.length} 题解题中` : ""}` : "等待读取题目列表";
   if (competition && S.tab !== "challenges") return;
-  const signature = JSON.stringify([S.cur, competition, progress]);
+  const signature = JSON.stringify([S.cur, competition, progress, active]);
   if (box.dataset.signature === signature) return;
   box.dataset.signature = signature;
   if (!competition) { box.replaceChildren(); return; }
@@ -126,15 +133,17 @@ function renderChallenges() {
     box.innerHTML = '<div class="card empty-note">等待读取赛方题目列表，获取后会在这里实时显示完成进度。</div>';
     return;
   }
-  const group = (ids, done) => `<section class="challenge-group">
-    <h4>${done ? "已解出" : "未完成"}<span>${ids.length}</span></h4>
-    ${ids.length ? `<ul class="challenge-grid">${ids.map(id => `<li class="challenge-id ${done ? "solved" : "pending"}" aria-label="${esc(id)}，${done ? "已解出" : "未完成"}"><span aria-hidden="true">${done ? "✓" : "○"}</span><code>${esc(id)}</code></li>`).join("")}</ul>` : `<p class="challenge-empty">${done ? "暂无已解出的题目" : "没有未完成题目"}</p>`}
+  const labels = {solved: "已解出", active: "解题中", pending: "未完成"};
+  const icons = {solved: "✓", active: "▶", pending: "○"};
+  const group = (ids, status) => `<section class="challenge-group">
+    <h4>${labels[status]}<span>${ids.length}</span></h4>
+    ${ids.length ? `<ul class="challenge-grid">${ids.map(id => `<li class="challenge-id ${status}" aria-label="${esc(id)}，${labels[status]}"><span aria-hidden="true">${icons[status]}</span><code>${esc(id)}</code>${status === "active" ? '<small class="challenge-active-label">解题中</small>' : ""}</li>`).join("")}</ul>` : `<p class="challenge-empty">${status === "solved" ? "暂无已解出的题目" : "没有未完成题目"}</p>`}
     </section>`;
   box.innerHTML = `<section class="card challenge-board" aria-label="题目完成进度">
     <header class="challenge-heading"><div><h3>题目列表</h3><p>平台确认通关后实时标记</p></div>
       <div class="challenge-score"><strong>${solved.length}<span> / ${total}</span></strong><small>已解出 / 全部题目</small></div></header>
     <progress class="challenge-meter" value="${solved.length}" max="${Math.max(total, 1)}" aria-label="已解出题目进度"></progress>
-    ${total ? group(solved, true) + group(unsolved, false) : '<p class="challenge-empty">赛方暂未提供题目。</p>'}
+    ${total ? (active.length ? group(active, "active") : "") + group(solved, "solved") + group(pending, "pending") : '<p class="challenge-empty">赛方暂未提供题目。</p>'}
     </section>`;
 }
 
@@ -333,83 +342,17 @@ async function renderDash() {
   const box = $("#dash-body");
   if (!box) return;
   const version = ++dashRenderVersion;
-  let metrics;
+  box.setAttribute("aria-busy", "true");
   try {
-    metrics = await api("/api/dashboard");
+    const metrics = await api(`/api/dashboard?period=${encodeURIComponent(Dashboard.period)}`);
+    if (S.view !== "dash" || version !== dashRenderVersion) return;
+    Dashboard.render(box, metrics);
   } catch (e) {
-    if (S.view === "dash" && version === dashRenderVersion) toast(e.message, true);
-    return;
+    if (S.view === "dash" && version === dashRenderVersion) Dashboard.error(box, e.message);
+  } finally {
+    if (version === dashRenderVersion) box.setAttribute("aria-busy", "false");
   }
-  if (S.view !== "dash" || version !== dashRenderVersion) return;
-  const list = S.sessions || [];
-  const running = metrics.running || 0;
-  const tokens = metrics.total_tokens || 0;
-  const cost = metrics.total_cost || 0;
-  const flagCell = f => !f || !f.total ? "—"
-    : (f.submitted ? `${f.accepted}/${f.submitted}` : `${f.total}`);
-
-  // 与列表、状态页共用后端用量来源；不把整场用量记在会话开始那一天。
-  const daily = metrics.daily || {};
-  const dailyArr = Object.entries(daily).sort((a, b) => a[0].localeCompare(b[0]));
-  const maxDaily = Math.max(...dailyArr.map(([, v]) => v), 1);
-
-  // 按模型聚合
-  const modelAgg = metrics.per_model || {};
-  const modelArr = Object.entries(modelAgg).sort((a, b) => b[1] - a[1]);
-  const maxModel = Math.max(...modelArr.map(([, v]) => v), 1);
-
-  // 发现台账
-  const findings = (S.cur && S.state && S.state.findings) || [];
-  // 经验沉淀：跨会话共享经验库（提炼自历史会话，供下次遇到同场景时参考）
-  const exps = (metrics.experience && metrics.experience.items) || [];
-  const expTotal = (metrics.experience && metrics.experience.total) || exps.length;
-
-  box.innerHTML = `
-    <div class="tiles">
-      <div class="tile"><span class="tk">token</span><b class="num">${fmtK(tokens)}</b><span class="mu">全部会话累计</span></div>
-      <div class="tile"><span class="tk">费用</span><b class="num">$${cost.toFixed(3)}</b><span class="mu">按单价估算</span></div>
-      <div class="tile"><span class="tk">会话</span><b class="num">${list.length}</b><span class="mu">${running} 个运行中</span></div>
-      <div class="tile"><span class="tk">Flag</span><b class="num">${list.reduce((a, x) => a + (x.flag_stats?.total || 0), 0)}</b><span class="mu">全部提取</span></div>
-    </div>
-    <div class="dash-sec">每日 Token 消耗</div>
-    ${dailyArr.length ? `<div class="bar-chart">${dailyArr.map(([day, t]) => `
-      <div class="bar-row"><span class="bar-label mono">${day}</span>
-        <div class="bar-track"><i style="width:${Math.round(t / maxDaily * 100)}%"></i></div>
-        <span class="bar-val mono">${fmtK(t)}</span></div>`).join("")}</div>`
-      : '<div class="empty-note" style="padding:16px 0">暂无数据</div>'}
-    <div class="dash-sec">按模型消耗</div>
-    ${modelArr.length ? `<div class="bar-chart">${modelArr.map(([m, t]) => `
-      <div class="bar-row"><span class="bar-label mono">${esc(m)}</span>
-        <div class="bar-track"><i style="width:${Math.round(t / maxModel * 100)}%"></i></div>
-        <span class="bar-val mono">${fmtK(t)}</span></div>`).join("")}</div>`
-      : '<div class="empty-note" style="padding:16px 0">暂无模型调用</div>'}
-    <div class="dash-sec">会话明细</div>
-    ${list.length ? `<table class="list"><thead><tr>
-      <th>会话</th><th>模式</th><th>状态</th><th>轮次</th><th>token</th><th>费用</th><th>Flag</th><th>用时</th></tr></thead>
-      <tbody>${list.map(x => `<tr class="dash-row" data-open="${esc(x.session_id)}">
-        <td>${esc(x.title || x.target || x.session_id)}</td>
-        <td>${esc(MODE_CN[x.mode] || x.mode || "")}</td>
-        <td><span class="pill ${x.status}">${STATUS_CN[x.status] || x.status}</span></td>
-        <td class="mono">${x.rounds || 0}</td>
-        <td class="mono">${fmtK(x.tokens || 0)}</td>
-        <td class="mono">$${Number(x.cost_usd || 0).toFixed(3)}</td>
-        <td class="mono">${esc(flagCell(x.flag_stats))}</td>
-        <td class="mono">${fmtDur(x.started_at ? x.started_at + (x.excluded_seconds || 0) : x.started_at, x.finished_at)}</td></tr>`).join("")}</tbody></table>`
-      : '<div class="empty-note">还没有会话——回「任务」页下达第一个任务</div>'}
-    ${findings.length ? `
-    <div class="dash-sec">最近发现</div>
-    <div class="dash-findings">${findings.slice(-6).reverse().map(f => `
-      <div class="find-card"><span class="fc-tag ${f.type || ""}">${esc(f.type || "")}</span>
-        <span class="fc-txt">${esc(f.text || "")}</span></div>`).join("")}</div>` : ""}
-    ${exps.length ? `
-    <div class="dash-sec">经验沉淀 · 共 ${expTotal} 条（跨会话自我进化）</div>
-    <div class="dash-findings">${exps.map(e => `
-      <div class="find-card"><span class="fc-tag">${esc((e.tags || [])[0] || "经验")}</span>
-        <span class="fc-txt">${esc(e.insight || "")}${e.context ? " —— " + esc(e.context) : ""}</span></div>`).join("")}</div>` : ""}`;
-  box.querySelectorAll("[data-open]").forEach(row =>
-    row.onclick = () => openSession(row.dataset.open));
 }
-
 
 function renderSessionHead() {
   const s = S.state.session;
@@ -425,14 +368,17 @@ function renderSessionHead() {
     // 用时扣除暂停与执行间隙区间（门内累计，实时随轮询刷新）
     s.started_at ? `<span class="tag">用时 ${fmtDur(s.started_at + (s.excluded_seconds || 0), s.finished_at)}</span>` : "",
     `<span class="tag mono">${esc(s.session_id)}</span>`,
+    s.side_session?.parent_session_id ? '<button type="button" class="tag" data-side-parent>返回来源会话</button>' : "",
   ].join("");
+  const sideParent=$("#s-meta [data-side-parent]");
+  if(sideParent) sideParent.onclick=()=>openSession(s.side_session.parent_session_id);
   const moveProject = $("#s-meta [data-move-project]");
   if (moveProject) moveProject.onclick = () => ProjectsPage.moveSession(S.cur);
   $("#s-err").innerHTML = [
     S.state?.recovery?.unresolved_count > 0
       ? `<div class="pause-banner">有 ${Number(S.state.recovery.unresolved_count)} 次操作的结果尚待核对。继续任务时，灵枢会收到这些记录；请先核实效果，避免重复操作。</div>` : "",
     running && s.paused
-      ? `<div class="pause-banner">⏸ 已暂停——智能体将在当前步骤完成后停下；你仍可与灵枢对话，审批照常</div>` : "",
+      ? `<div class="pause-banner">已暂停，当前步骤完成后停止。仍可发送消息。</div>` : "",
     s.error ? `<div class="err-banner">${esc(s.error)}</div>` : "",
   ].join("");
   $("#comp-send").disabled = false;
@@ -440,8 +386,9 @@ function renderSessionHead() {
   $("#comp-input").placeholder = running
     ? "给灵枢提意见、补充线索或上传附件…"
     : "继续对话——灵枢带着这段会话的完整上下文";
+  if(s.side_session) $("#comp-input").placeholder=`与 ${agentName(s.side_session.agent)} 继续旁路对话，补充任务或线索…`;
   $("#s-ops").innerHTML = `
-    ${running ? `<button class="btn sm" id="op-pause">${s.paused ? "▶ 继续" : "⏸ 暂停"}</button>` : ""}
+    ${running ? `<button class="btn sm" id="op-pause">${s.paused ? "继续" : "暂停"}</button>` : ""}
     ${running ? `<button class="btn danger sm" id="op-stop">停止</button>` : ""}
     <a class="btn sm" href="/api/sessions/${S.cur}/report/download" download>下载报告</a>
     <a class="btn sm" href="/api/sessions/${S.cur}/audit/download" download>导出审计</a>
@@ -494,32 +441,13 @@ function renderChips() {
 function topoModel() {
   const tp = (S.state && S.state.topology) || { dag_nodes: [], tasks: [] };
   const nodes = (tp.dag_nodes || []).map(n => ({...n})), tasks = tp.tasks || [];
-  const byId = new Map(nodes.map(n => [n.node_id, n]));
-  const depth = new Map();
-  const depthOf = (n, seen = new Set()) => {
-    if (depth.has(n.node_id)) return depth.get(n.node_id);
-    if (seen.has(n.node_id)) return 0;
-    seen.add(n.node_id);
-    const deps = (n.depends_on || []).map(d => byId.get(d)).filter(Boolean);
-    const d = deps.length ? 1 + Math.max(...deps.map(x => depthOf(x, seen))) : 0;
-    depth.set(n.node_id, d); return d;
-  };
-  nodes.forEach(n => depthOf(n));
-  const layers = new Map();
-  nodes.forEach(n => {
-    const d = depth.get(n.node_id) || 0;
-    if (!layers.has(d)) layers.set(d, []);
-    layers.get(d).push(n);
-  });
-  const assigned = new Set();
   const cardsOf = n => {
     const ids = new Set(n.task_ids || []);
-    return tasks.filter(t => ids.has(t.task_id) || t.parent_dag_node === n.node_id)
-      .map(t => { assigned.add(t.task_id); return t; });
+    return tasks.filter(t => ids.has(t.task_id) || t.parent_dag_node === n.node_id);
   };
-  const orphans = tasks.filter(t => !assigned.has(t.task_id) &&
+  const orphans = tasks.filter(t =>
     !nodes.some(n => (n.task_ids || []).includes(t.task_id) || t.parent_dag_node === n.node_id));
-  return { nodes, layers, cardsOf, orphans };
+  return { nodes, cardsOf, orphans };
 }
 const nodeStatus = s => ({ done: "done", completed: "done", active: "active",
                            running: "active" }[String(s || "").toLowerCase()] || "pending");
@@ -570,53 +498,34 @@ function topoZoom(box, k) {
 function drawTopo() {
   const box = $("#topo");
   if (!S.state) { box.innerHTML = ""; return; }
-  const { nodes, layers, cardsOf, orphans } = topoModel();
+  const { nodes, cardsOf, orphans } = topoModel();
   const running = !TERMINAL.has(S.state.session.status);
   // 督导台账（灵枢实时给子 Agent 的方向建议），任务卡据此挂提示芯片
   const ring = S.state.ring || { attempts: 0, steering: {} };
-  const routeRow = r => {
-    const pct = Math.round((r.progress || 0) * 100);
-    const st = String(r.status || "").toLowerCase();
-    const cls = st === "done" ? "done" : (st === "failed" || st === "pruned") ? "fail" : "";
-    return `<div class="rt">
-      <div class="rt-head"><span class="rt-dot ${esc(st)}"></span>
-        <span class="rt-name">${esc(r.name || "")}</span>
-        <span class="rt-pct">${pct}%</span></div>
-      <div class="prog ${cls}"><i style="width:${pct}%"></i></div>
-      ${r.note ? `<div class="rt-note">${esc(r.note)}</div>` : ""}
-    </div>`;
-  };
   const taskCard = t => {
     const tot = t.routes_total || 0, done = t.routes_done || 0;
     const pct = tot ? Math.round(done / tot * 100) : (t.status === "done" ? 100 : 0);
     const stCls = t.status === "done" ? "green" : t.status === "failed" ? "red" : "blue";
-    const steer = (ring.steering || {})[t.agent_type];
-    return `<div class="tcard" data-agent="${esc(t.agent_type || "")}">
+    const steer = (ring.task_steering || {})[t.task_id] || (ring.steering || {})[t.agent_type];
+    const steerStatus = steer ? [...new Set(Object.values(steer.feedback || {})
+      .filter(f => f.task_id === t.task_id).map(f => STEERING_STATUS_CN[f.status] || f.status))].join(" / ") : "";
+    return `<div class="tcard" data-agent="${esc(t.agent_type || "")}" data-task="${esc(t.task_id || "")}">
       <div class="row1"><span class="who">${esc(agentName(t.agent_type))}</span>
         <span class="what" title="${esc(TASK_CN[t.task_type] || t.task_type || "")}">${esc(TASK_CN[t.task_type] || t.task_type || "")}</span>
         <span class="tag ${stCls} st">${esc(t.status || "")}</span></div>
       ${tot ? `<div class="prog ${done === tot ? "done" : ""}"><i style="width:${pct}%"></i></div>` : ""}
       <div class="steps">${tot ? `路线 ${done}/${tot} · ` : ""}步骤 ${t.steps || 0}</div>
-      ${steer ? `<div class="steer-chip" title="${esc(steer.rationale || "")}">灵枢：${esc(steer.hint || "")}</div>` : ""}
+      ${steer ? `<div class="steer-chip" title="${esc(steer.rationale || "")}">灵枢（${esc(steerStatus || "待接收")}）：${esc(steer.hint || "")}</div>` : ""}
     </div>`;
   };
 
-  // ---- 渲染节点集合：DAG 节点按深度分层，孤儿任务挂首层伪节点
-  const depths = [...layers.keys()].sort((a, b) => a - b);
-  const layerIds = [], depthIndex = new Map();
-  depths.forEach(d => {
-    const arr = layers.get(d).map(n => n.node_id);
-    arr.forEach(id => depthIndex.set(id, layerIds.length));
-    layerIds.push(arr);
-  });
+  // 先收集节点和来源边，全部就绪后统一计算横向层级。
+  const depthIndex = new Map(nodes.map(n => [n.node_id, 0]));
   const ORPHAN = "__orphan__";
   if (orphans.length) {
-    if (!layerIds.length) layerIds.push([]);
-    layerIds[0].push(ORPHAN);
     depthIndex.set(ORPHAN, 0);
   }
   // 路由分支层：每个任务的路线作为子分支节点挂在其后（推理摘要并入分支）
-  const taskById = new Map((S.state.topology.tasks || []).map(t => [t.task_id, t]));
   const routeMeta = new Map();
   const digestFor = agentType => {
     for (const [k, v] of S.think) {
@@ -627,11 +536,10 @@ function drawTopo() {
   };
   const routesAll = [];
   const routeSeen = new Map();
-  nodes.filter(n => depthIndex.has(n.node_id)).forEach(n => {
-    (n.task_ids || []).forEach(tid => {
-      const t = taskById.get(tid);
+  [...nodes, ...(orphans.length ? [{node_id: ORPHAN, task_ids: orphans.map(t => t.task_id)}] : [])].forEach(n => {
+    cardsOf(n).forEach(t => {
       ((t && t.routes) || []).forEach(r => {
-        const key = `${n.node_id}|${r.name || ""}`;
+        const key = JSON.stringify([n.node_id, t.task_id, r.route_id || r.name || ""]);
         const prev = routeSeen.get(key);
         if (prev) {
           prev.status = prev.status === "done" ? "done" : r.status;
@@ -639,6 +547,7 @@ function drawTopo() {
           if (r.note) prev.note = r.note;
         } else {
           const item = { parent: n.node_id, agent: t.agent_type,
+                         task_id: t.task_id, route_id: r.route_id,
                          name: r.name, status: r.status,
                          progress: r.progress, note: r.note };
           routeSeen.set(key, item);
@@ -648,12 +557,9 @@ function drawTopo() {
     });
   });
   if (routesAll.length) {
-    const layerIdx = layerIds.length;
-    layerIds.push([]);
-    routesAll.forEach((r, i) => {
-      const id = `__route_${i}`;
-      layerIds[layerIdx].push(id);
-      depthIndex.set(id, layerIdx);
+    routesAll.forEach(r => {
+      const id = `__route_${JSON.stringify([r.parent, r.task_id, r.route_id || r.name || ""])}`;
+      depthIndex.set(id, 0);
       routeMeta.set(id, r);
       nodes.push({ node_id: id, title: r.name || "路线",
                    tactic: `${Math.round((r.progress || 0) * 100)}%`,
@@ -662,9 +568,7 @@ function drawTopo() {
     });
   }
 
-  // 发现组：黑板发现台账直投——发现即节点、产出即连线（拓扑=黑板架构的
-  // 直观投影）。节点随进度自动扩充，连线是真实出处：写下它的路线分支，
-  // 路线不在当前图上（旧轮）时挂该轮 DAG 方向节点；不凭空造边
+  // 发现优先连接到来源路线；路线不在图上时只接受唯一的任务或轮次来源。
   const findings = (S.state && S.state.findings) || [];
   // 展示上限：防画布刷屏；被折叠的数量写进图例，台账仍在发现组详情
   const uniqAssets = [...new Map(
@@ -676,28 +580,34 @@ function drawTopo() {
     ...findings.filter(f => f.type === "flag").slice(-4),
   ].sort((a, b) => (a.ts || 0) - (b.ts || 0));
   const foldedFindings = Math.max(0, findings.length - dispFindings.length);
+  const uniqueRoute = candidates => candidates.length === 1 ? candidates[0][0] : "";
   const producerOf = f => {
-    if (f.agent && f.route) {
-      const idx = routesAll.findIndex(
-        r => r.agent === f.agent && r.name === f.route);
-      if (idx >= 0 && depthIndex.has(`__route_${idx}`)) return `__route_${idx}`;
+    if (f.parent_finding_id) {
+      const index = dispFindings.findIndex(x => x.finding_id === f.parent_finding_id);
+      if (index >= 0) return FNODE(index);
     }
-    if (f.round != null) {
-      const n = nodes.find(x => x.round_created === f.round
-                                && depthIndex.has(x.node_id)
-                                && !String(x.node_id).startsWith("__"));
-      if (n) return n.node_id;
+    const candidates = [...routeMeta].filter(([, r]) =>
+      (!f.task_id || r.task_id === f.task_id) &&
+      (!f.parent_dag_node || r.parent === f.parent_dag_node) &&
+      (!f.agent || r.agent === f.agent) &&
+      (f.route_id ? r.route_id === f.route_id : f.route && r.name === f.route));
+    const route = uniqueRoute(candidates);
+    if (route) return route;
+    if (f.task_id) {
+      const owners = nodes.filter(n => cardsOf(n).some(t => t.task_id === f.task_id));
+      if (owners.length === 1) return owners[0].node_id;
+      if (orphans.some(t => t.task_id === f.task_id)) return ORPHAN;
     }
-    return "";
+    if (f.parent_dag_node && depthIndex.has(f.parent_dag_node)) return f.parent_dag_node;
+    // 旧记录只有轮次时，必须唯一匹配，不能随意挂到同轮其他任务。
+    const owners = nodes.filter(n => n.round_created === f.round && f.round != null);
+    return owners.length === 1 ? owners[0].node_id : "";
   };
-  const FNODE = i => `__finding_${i}`;
+  const FNODE = i => `__finding_${dispFindings[i].finding_id || JSON.stringify([dispFindings[i].task_id, dispFindings[i].agent, dispFindings[i].route, dispFindings[i].type, dispFindings[i].url, dispFindings[i].text, dispFindings[i].ts])}`;
   if (dispFindings.length) {
-    const layerIdx = layerIds.length;
-    layerIds.push([]);
     dispFindings.forEach((f, i) => {
       const id = FNODE(i);
-      layerIds[layerIdx].push(id);
-      depthIndex.set(id, layerIdx);
+      depthIndex.set(id, 0);
       const kind = ({ note: "笔记", flag: "Flag", asset: "入口" })[f.type]
         || f.type || "发现";
       nodes.push({ node_id: id,
@@ -725,28 +635,24 @@ function drawTopo() {
     }
   }
   // 路由分支连线：路线节点 ← 产生它的任务节点
-  routesAll.forEach((r, i) => {
-    const id = `__route_${i}`;
+  routesAll.forEach(r => {
+    const id = `__route_${JSON.stringify([r.parent, r.task_id, r.route_id || r.name || ""])}`;
     if (depthIndex.has(r.parent)) {
       preds.get(id).push(r.parent);
       succs.get(r.parent).push(id);
     }
   });
-  // 发现连线：产出者（路线分支/该轮 DAG 节点）→ 其写下的发现；无出处
-  // 信息（旧记录/SRC 发现）时退回前一列锚点。连线即真实出处
-  let findingAnchor = "";
-  if (dispFindings.length) {
-    const prevLayer = (layerIds[depthIndex.get(FNODE(0)) - 1] || [])
-      .filter(id => id !== ORPHAN);
-    findingAnchor = prevLayer[prevLayer.length - 1] || prevLayer[0] || "";
-    dispFindings.forEach((f, i) => {
-      const src = producerOf(f) || findingAnchor;
-      if (src && depthIndex.has(src)) {
-        preds.get(FNODE(i)).push(src);
-        succs.get(src).push(FNODE(i));
-      }
-    });
-  }
+  // 只按已知出处连线；未知出处的旧发现作为独立根节点保留。
+  dispFindings.forEach((f, i) => {
+    const src = producerOf(f), id = FNODE(i);
+    if (src && src !== id && depthIndex.has(src)) {
+      preds.get(id).push(src);
+      succs.get(src).push(id);
+    }
+  });
+  const graph = TopologyLayout.layers(ids, preds);
+  const layerIds = graph.columns;
+  graph.depth.forEach((d, id) => depthIndex.set(id, d));
   topoReorder(layerIds, preds, succs);
 
   const expanded = S.topoExpand || {};
@@ -762,7 +668,7 @@ function drawTopo() {
           <span class="tac">${pct}%</span></div>
         <div class="prog ${pct === 100 ? "done" : ""}"><i style="width:${pct}%"></i></div>
         ${r.note ? `<div class="rt-note">${esc(isExp ? r.note : (r.note || "").slice(0, 120))}</div>` : ""}
-        ${digest ? `<div class="mind-digest">✦ ${esc(digest)}</div>` : ""}
+        ${digest ? `<div class="mind-digest">${esc(digest)}</div>` : ""}
       </div>`;
     }
     const st = nodeStatus(n.status);
@@ -775,7 +681,8 @@ function drawTopo() {
   const orphanCard = `<div class="tnode" data-node="${ORPHAN}" style="visibility:hidden">
       <div class="tact"><span class="dot ${running ? "active" : "done"}"></span><b>下发任务</b></div>
       <div class="tcards">${orphans.map(taskCard).join("")}</div></div>`;
-  const steerItems = Object.entries(ring.steering || {});
+  const steerItems = [...Object.entries(ring.steering || {}),
+    ...Object.values(ring.task_steering || {}).map(v => [v.agent, v])];
   const opinions = (S.state && S.state.user_opinions) || [];
   const latestOp = opinions.length ? opinions[opinions.length - 1] : null;
   const replies = (S.state && S.state.master_replies) || [];
@@ -788,7 +695,7 @@ function drawTopo() {
 
   // 节点详情的数据源随图一并留存（点击路线/发现/孤儿节点时取用）
   S.topoRouteMeta = routeMeta;
-  S.topoFindings = dispFindings;
+  S.topoFindings = new Map(dispFindings.map((f, i) => [FNODE(i), f]));
   S.topoOrphans = orphans;
   box.innerHTML = `<div id="topo-stage">
       <svg class="edges"></svg>
@@ -823,19 +730,13 @@ function drawTopo() {
   const unH = unodeEl ? unodeEl.offsetHeight : 0;
   const unX = TOPO_GEO.PAD;
   const hubXpos = unX + unW + (unodeEl ? 26 : 0);   // 意见节点占灵枢左侧
-  const layerH = layerIds.map(arr =>
-    arr.reduce((a, id) => a + heights.get(id), 0) + TOPO_GEO.GAP_Y * Math.max(arr.length - 1, 0));
-  const totalH = Math.max(...layerH);
+  const layout = TopologyLayout.positions(layerIds, preds, heights, TOPO_GEO.GAP_Y, TOPO_GEO.PAD);
+  const totalH = layout.height - TOPO_GEO.PAD * 2;
   const centerY = TOPO_GEO.PAD + totalH / 2;
-  const xOf = new Map(), yOf = new Map();
+  const xOf = new Map(), yOf = layout.y;
   let cx = hubXpos + hubW + TOPO_GEO.HUB_GAP;
-  layerIds.forEach((arr, i) => {
-    let y = TOPO_GEO.PAD + (totalH - layerH[i]) / 2;
-    for (const id of arr) {
-      xOf.set(id, cx);
-      yOf.set(id, y);
-      y += heights.get(id) + TOPO_GEO.GAP_Y;
-    }
+  layerIds.forEach(arr => {
+    for (const id of arr) xOf.set(id, cx);
     cx += TOPO_GEO.NODE_W + TOPO_GEO.GAP_X;
   });
   const stageW = cx - TOPO_GEO.GAP_X + TOPO_GEO.PAD;
@@ -886,26 +787,14 @@ function drawTopo() {
   }
   // 督导连线：灵枢 → 建议所指向的角色任务节点（悬停看完整建议）
   for (const [agent, v] of steerItems) {
-    const el = stage.querySelector(`.tcard[data-agent="${CSS.escape(agent)}"]`);
+    const el = v.task_id
+      ? stage.querySelector(`.tcard[data-task="${CSS.escape(v.task_id)}"]`)
+      : stage.querySelector(`.tcard[data-agent="${CSS.escape(agent)}"]`);
     const tn = el && el.closest("[data-node]");
     const nid = tn && tn.dataset.node;
     if (nid && xOf.has(nid)) {
       paths += link(hubX, hubY, xOf.get(nid), midY(nid), "steer-edge",
                     `灵枢 → ${agentName(agent)}：${v.hint || ""}`);
-    }
-  }
-  // 积累链：同一产出者的连续发现按时间上下相连——先探到的节点支撑
-  // 后续发现，黑板节点互相提供数据支撑的可视形态（同列短竖线，散开不画）
-  const srcOf = f => producerOf(f) || findingAnchor;
-  for (let i = 1; i < dispFindings.length; i++) {
-    const prev = dispFindings[i - 1];
-    if (!srcOf(prev) || srcOf(prev) !== srcOf(dispFindings[i])) continue;
-    const ia = FNODE(i - 1), ib = FNODE(i);
-    if (!xOf.has(ia) || !xOf.has(ib) || xOf.get(ia) !== xOf.get(ib)) continue;
-    const y1 = yOf.get(ia) + heights.get(ia), y2 = yOf.get(ib);
-    if (y2 > y1 && y2 - y1 < 140) {
-      const cx = xOf.get(ia) + TOPO_GEO.NODE_W / 2;
-      paths += `<path class="chain-edge" d="M ${cx} ${y1} C ${cx} ${y1 + 20}, ${cx} ${y2 - 20}, ${cx} ${y2}"></path>`;
     }
   }
   svg.innerHTML = paths;
@@ -1020,7 +909,7 @@ function showNodeDetail(nodeId) {
     }
   } else if (nodeId.startsWith("__finding_")) {
     // 发现节点：完整内容与出处（哪条路线/哪一轮写下——黑板记录直读）
-    const f = (S.topoFindings || [])[Number(nodeId.slice(10))];
+    const f = (S.topoFindings || new Map()).get(nodeId);
     if (f) {
       title = ({ note: "共享笔记", flag: "Flag", asset: "入口 / 资产" })[f.type] || "发现";
       const who = [f.agent && agentName(f.agent), f.route,
@@ -1105,7 +994,8 @@ function traceReset() {
   traceScrollFrame = null; traceForceScroll = false;
   SessionObserver.reset();
   AgentWorkbench.reset();
-  $("#trace-box").innerHTML = '<div class="empty-note">等待灵枢开工——过程将按真实时间顺序在此展开</div>';
+  TaskTrace.reset();
+  $("#trace-box").innerHTML = '<div class="empty-note">等待任务开始</div>';
   TRACE_AGENT_SLOTS.clear();
   TRACE_TURNS.clear();
   S.think.clear();
@@ -1240,6 +1130,9 @@ function tracePush(e) {
   const actor = String(e.actor || "");
   SessionObserver.push(e);
   AgentWorkbench.push(e);
+  const sideSession=S.state?.session?.side_session || S.sessions?.find(s=>s.session_id===S.cur)?.side_session;
+  if(sideSession && !["user.message","user.attachment","agent.reply","agent.reply_failed","engagement.paused","engagement.resumed","system.lifecycle"].includes(e.type)) return;
+  if (typeof TaskTrace !== "undefined" && !sideSession && TaskTrace.push(e)) return;
   switch (e.type) {
     case "task.start":
       traceAppend(e, `<div class="m">开始执行 · ${esc(actorName(actor))}</div>`, "tl-sys");
@@ -1280,7 +1173,7 @@ function tracePush(e) {
             '<div class="tl-thinkchip" title="在上方子 Agent 工作台查看实时分析"></div>');
           chip = flow.lastElementChild;
         }
-        chip.textContent = `✦ 推理 ${fmtK(rec.chars)} 字`;
+        chip.textContent = `推理 ${fmtK(rec.chars)} 字`;
         break;
       }
       const text = d.text || "";
@@ -1419,13 +1312,13 @@ function tracePush(e) {
       break;
     case "system.lifecycle":
       if (d.action === "session_kickoff")
-        traceAppend(e, `<div class="m">灵枢开工准备中——加载任务配置…</div>`, "tl-sys");
+        traceAppend(e, `<div class="m">${sideSession ? "子 Agent 正在准备回复…" : "灵枢开工准备中——加载任务配置…"}</div>`, "tl-sys");
       break;
     case "engagement.paused":
-      traceAppend(e, `<div class="m">⏸ 已暂停——在途步骤跑完即停，对话与审批照常</div>`, "tl-sys");
+      traceAppend(e, `<div class="m">已暂停，当前步骤完成后停止。</div>`, "tl-sys");
       break;
     case "engagement.resumed":
-      traceAppend(e, `<div class="m">▶ 已继续${d.paused_seconds ? `（暂停 ${fmtElapsed(d.paused_seconds)}，不计入用时）` : ""}</div>`, "tl-sys");
+      traceAppend(e, `<div class="m">已继续${d.paused_seconds ? `（暂停 ${fmtElapsed(d.paused_seconds)}，不计入用时）` : ""}</div>`, "tl-sys");
       break;
     case "system.gap":
       // 执行间隙（合盖待机/Ctrl+Z/VM 快照）：时间线如实标记，区间不计入用时
@@ -1463,6 +1356,11 @@ function tracePush(e) {
         <span class="k">→ ${esc(agentName(d.agent))}</span></div>
         <div class="tl-reply">${esc(d.hint || "")}</div>`, "tl-master");
       break;
+    case "ring.steer_feedback":
+      traceAppend(e, `<div class="hd"><span class="who">${esc(agentName(e.actor))}</span>
+        <span class="k">督导回执 · ${esc(STEERING_STATUS_CN[d.status] || d.status || "")}</span></div>
+        <div class="m">${esc(d.detail || "当前指令已送入本任务的模型请求")}</div>`, "tl-master");
+      break;
     case "decision.change": {
       if (d.action === "llm_mode_route") {
         const verdict = (d.intent === "dialogue" || d.intent === "rules")
@@ -1491,6 +1389,12 @@ function tracePush(e) {
       }
       break;
     }
+    case "agent.reply":
+      traceAppend(e, `<i class="seal" aria-label="${esc(d.name || actorName(actor))}">${esc((d.name || "子").slice(0,1))}</i><div class="bubble"><div class="who">${esc(d.name || actorName(actor))}</div><div class="btxt md">${mdRender(d.text || "")}</div></div>`, "tl-master tl-conv tl-agent-conv");
+      break;
+    case "agent.reply_failed":
+      traceAppend(e, `<div class="bubble"><div class="btxt">${esc(d.error || "子 Agent 回复失败，请重试")}</div></div>`, "tl-master tl-conv");
+      break;
     case "master.reply":
       // 灵枢↔用户直达子会话的左气泡：名章为身份（无文字标签订），与用户右气泡成对
       traceAppend(e, `<i class="seal" aria-label="灵枢">灵</i><div class="bubble">
@@ -1499,7 +1403,7 @@ function tracePush(e) {
     case "master.reply_failed":
       // 应答通道失败必须可见——否则用户消息像被吞掉
       traceAppend(e, `<i class="seal" aria-label="灵枢">灵</i><div class="bubble">
-        <div class="btxt">应答暂时失败（${esc(d.error || "未知原因")}）——你的消息已留存，不会丢失</div></div>`, "tl-master tl-conv");
+        <div class="btxt">回复失败：${esc(d.error || "未知原因")}。消息已保存，可重试。</div></div>`, "tl-master tl-conv");
       break;
     case "agent.spawn":
       traceAppend(e, `<div class="m">🔮 派生分支 · ${esc(d.child || "")}</div>`, "tl-sys");
