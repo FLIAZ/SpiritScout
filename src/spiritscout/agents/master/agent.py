@@ -1,12 +1,4 @@
-"""主 Agent：LangGraph 元决策状态机（执行→汇聚→决策→调度闭环，5.1）。
-
-状态机节点：
-    meta_plan  元规划：目标拆解/动态补 DAG 节点/生成本轮任务包
-    dispatch   调度：任务包并发分发给环形子 Agent 集群
-    aggregate  汇聚：结果汇聚引擎产出全局视图
-    review     复盘：全局分析、漏洞终审、迭代/收敛决策 ─┐
-        └────────── continue_iteration ────────────────┘
-"""
+"""主 Agent 的 LangGraph 状态机：规划、派发、汇总和复盘。"""
 
 from __future__ import annotations
 
@@ -14,9 +6,12 @@ import asyncio
 import contextlib
 import copy
 import json
+import math
 import operator
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, StateGraph
@@ -47,6 +42,7 @@ from spiritscout.gateway.context import (
     shared_context,
 )
 from spiritscout.policy.engine import PolicyEngine
+from spiritscout.tools.search_policy import search_allowed
 
 # 战术 → 子 Agent 映射（3.3.6 子Agent↔战术映射；MVP 装配 recon/web_vuln）
 TACTIC_AGENT_MAP: dict[str, tuple[AgentType, str]] = {
@@ -99,8 +95,8 @@ class MasterContext:
 class MasterAgent:
     """主 Agent（元规划决策层）。"""
 
-    # 灵枢自身的思考强度：固定取最高档，不做动态裁定（动态裁定只用于
-    # 子 Agent——见 _assign_dispatch_plan）。模型未声明该档位时按端点
+    # 常规规划使用最高档；竞赛首轮只装配顺序待发队列，走低强度以尽快开工。
+    # 子 Agent 的动态裁定见 _assign_dispatch_plan。模型未声明该档位时按端点
     # 默认档执行（网关门禁忽略未声明值，不猜不代填）
     _MASTER_EFFORT = "max"
 
@@ -152,7 +148,7 @@ class MasterAgent:
         assert self.ctx.audit is not None
         self.ctx.audit.log("decision.change", self.agent_id, {
             "action": "engagement_start", "target": target, "mode": authorization.mode.value})
-        # 授权写入黑板目标与授权层（4.8.1）
+        # 授权写入黑板目标与授权层
         self.ctx.blackboard.write(
             BlackboardLayer.TARGET_AUTH, authorization.auth_id,
             authorization.model_dump(mode="json"),
@@ -210,11 +206,15 @@ class MasterAgent:
             await self.ctx.pause_gate.wait()
 
     async def _meta_plan(self, state: MasterState, *,
-                         dispatch_only: bool = False) -> dict[str, Any]:
+                         dispatch_only: bool = False,
+                         live_dag: TaskDAG | None = None,
+                         blocked_challenge_ids: set[str] | None = None,
+                         on_dispatch: Callable[[dict[str, Any], Task], None] | None = None,
+                         ) -> dict[str, Any]:
         ctx = self.ctx
         assert ctx.audit is not None
         await self._gate_wait()
-        dag = TaskDAG.from_dict(state["dag"])
+        dag = live_dag if live_dag is not None else TaskDAG.from_dict(state["dag"])
         round_no = state["round_no"]
         plan_source = "llm"
 
@@ -233,14 +233,17 @@ class MasterAgent:
                         plan_source = "rule"
             plan["dag_nodes"] = self._ensure_business_gate(
                 plan.get("dag_nodes", []))
+            rejected_reason = ""
             try:
-                result = dag.upsert_from_plan(plan.get("dag_nodes", []), round_no)
+                result = dag.upsert_from_plan(
+                    self._resolve_plan_challenges(plan.get("dag_nodes", [])), round_no)
             except SpiritScoutError as exc:
                 # 计划不可落图（未知依赖/成环）：明确落痕后回退规则计划，
                 # 不让一次坏规划卡死整轮
                 ctx.audit.log("decision.change", self.agent_id, {
                     "action": "plan_rejected", "round": round_no,
                     "source": plan_source, "reason": str(exc)[:200]})
+                rejected_reason = str(exc)
                 self._record_plan_result(round_no, [], [], rejected=str(exc))
                 if plan_source != "llm":
                     raise
@@ -253,7 +256,9 @@ class MasterAgent:
                 plan["dag_nodes"] = self._ensure_business_gate(
                     plan.get("dag_nodes", []))
                 result = dag.upsert_from_plan(plan.get("dag_nodes", []), round_no)
-            self._record_plan_result(round_no, result.created, result.skipped)
+            await self._apply_competition_decisions(dag, plan)
+            self._record_plan_result(round_no, result.created, result.skipped,
+                                     rejected=rejected_reason)
             ctx.audit.log("decision.change", self.agent_id, {
                 "action": "meta_plan", "round": round_no, "source": plan_source,
                 "new_nodes": [n.node_id for n in result.created],
@@ -266,7 +271,10 @@ class MasterAgent:
         # 就绪节点 → 任务包（任务依赖：前置条件满足才下发，4.1.2）
         tactic_map = ctx.tactic_map or TACTIC_AGENT_MAP
         platform = ctx.extra.get("platform")
+        continuous = platform is not None and getattr(platform, "continuous", False)
         task_objs: list[tuple[Task, str]] = []
+        deferred_ids = {cid for cid, item in self._challenge_states(dag).items()
+                        if item["deferred"]}
         for node in dag.ready_nodes():
             # 重攻节点战术名带 @轮次 后缀（同题换角度再攻），按基名解析归属
             mapping = (tactic_map.get(node.tactic)
@@ -284,12 +292,26 @@ class MasterAgent:
             # 赛题绑定：规划器节点自带；复盘新增节点按 id 匹配/单题沿用，
             # 保证 CTF 任务永远带着赛题载荷下发（载荷为空的节点无题可解）
             challenge = node.meta.get("challenge") or self._bind_challenge(dag, node)
+            if str((challenge or {}).get("id") or "") in (blocked_challenge_ids or set()):
+                continue
+            if str((challenge or {}).get("id") or "") in deferred_ids:
+                node.meta["deferred"] = True
+                node.meta["cancel_reason"] = "赛题仍暂缓，需模型通过 retry_challenges 解除"
+                dag.mark(node.node_id, TaskStatus.CANCELLED)
+                continue
             if challenge and platform is not None:
                 if (getattr(platform, "continuous", False)
                         and platform.is_completed(str(challenge.get("id") or ""))):
                     dag.mark(node.node_id, TaskStatus.CANCELLED)
                     node.meta["cancel_reason"] = "平台已确认整题完成"
                     continue
+                cid = str(challenge.get("id") or "")
+                if (continuous and platform.owns(cid)
+                        and not platform.can_start_instance(cid)):
+                    continue
+                # 供给中也占据节点，避免慢启动期间的回收误关新实例。
+                dag.mark(node.node_id, TaskStatus.DISPATCHED)
+                self._write_dag_snapshot(dag, round_no)
                 try:
                     provisioned = (await platform.ensure_instance(challenge)
                                    if platform.owns(str(challenge.get("id") or ""))
@@ -300,9 +322,14 @@ class MasterAgent:
                         "challenge": str(challenge.get("id") or ""),
                         "error": str(exc)[:200]})
                     provisioned = None
+                finally:
+                    if node.status == TaskStatus.DISPATCHED:
+                        dag.mark(node.node_id, TaskStatus.PENDING)
                 if provisioned is None:
                     # 活跃名额已满 / 平台暂未接受：本轮不派发，节点保持待发，
                     # 下轮补位（名额靠完成回收与平台自身节奏释放）
+                    continue
+                if node.status == TaskStatus.CANCELLED:
                     continue
                 challenge = provisioned
                 self._approve_platform_target(challenge)
@@ -318,6 +345,8 @@ class MasterAgent:
                          "mission": self._mission(),
                          "execution_recovery": self.ctx.extra.get("execution_recovery", {}),
                          "rules": self._rules(),
+                         "platform_handoff": self._platform_handoff(platform, challenge),
+                         "continue_from": copy.deepcopy(node.meta.get("continue_from") or {}),
                          "recent_experience": (self.ctx.extra.get("recent_experience") or [])[-3:],
                          # 题级事实深拷贝注入：同一赛题的多个任务各持副本，
                          # 一方的运行期改写不污染其他方向/其他轮次
@@ -326,6 +355,11 @@ class MasterAgent:
             dag.attach_task(node.node_id, task.task_id)
             dag.mark(node.node_id, TaskStatus.RUNNING)
             task_objs.append((task, node.node_id))
+            if on_dispatch is not None:
+                on_dispatch({"task": task.model_dump(mode="json"), "node_id": node.node_id}, task)
+            # 首个任务先交执行环开工；后续供给在连续调度器中逐个启动、即时派发。
+            if continuous and not dispatch_only:
+                break
 
         # 思考强度/路线预算的下发决策不再挡在开工路径上（见 _dispatch：
         # 与子 Agent 执行并行裁定，落定后即时生效）
@@ -335,6 +369,26 @@ class MasterAgent:
         self._write_dag_snapshot(dag, round_no)
         return {"dag": dag.to_dict(), "tasks_dispatched": tasks,
                 "plan_source": plan_source}
+
+    @staticmethod
+    def _platform_handoff(platform: Any, challenge: dict[str, Any] | None) -> dict[str, Any]:
+        """把主控已经完成的操作回执交给执行者，不要求其重跑全队流程。"""
+        if platform is None or not challenge:
+            return {}
+        cid = str(challenge.get("id") or "")
+        if not platform.owns(cid):
+            return {}
+        facts = getattr(platform, "facts", [])
+        receipts = copy.deepcopy(getattr(platform, "operation_receipts", {}))
+        for action in ("precheck", "list_refreshed"):
+            fact = next((f for f in reversed(facts) if f.get("action") == action), None)
+            if fact:
+                receipts[action] = {k: fact[k] for k in
+                                    ("action", "ts", "ok", "status", "count") if k in fact}
+        return {"coordinator": "master", "challenge_id": cid,
+                "entry_url": challenge.get("url", ""),
+                "completed_operations": receipts,
+                "instance_provisioning": copy.deepcopy(challenge.get("instance_provisioning") or {})}
 
     @staticmethod
     def _task_target(node: Any, challenge: dict[str, Any] | None,
@@ -439,8 +493,94 @@ class MasterAgent:
                 item["defer_reason"] = str(meta.get("defer_reason"))[:200]
             item["nodes"].append({
                 "tactic": node.tactic, "status": node.status.value,
-                "title": node.title[:100]})
+                "title": node.title[:100], "node_id": node.node_id,
+                "task_ids": list(node.task_ids),
+                "cancel_reason": meta.get("cancel_reason", ""),
+                "skip_reason": meta.get("skip_reason", "")})
         return states
+
+    def _competition_status(self, dag: TaskDAG) -> dict[str, Any]:
+        """完整保留短小的调度事实；流式观察可裁剪，完成态和取消原因不可裁剪。"""
+        platform = self.ctx.extra.get("platform")
+        if platform is None or not getattr(platform, "continuous", False):
+            return {}
+        progress = platform.progress()
+        challenges = self._challenge_states(dag)
+        for item in challenges.values():
+            nodes = item["nodes"]
+            counts: dict[str, int] = {}
+            latest = {}
+            active = []
+            for node in nodes:
+                counts[node["status"]] = counts.get(node["status"], 0) + 1
+                if node["status"] in {"pending", "dispatched", "running"}:
+                    active.append(node)
+                else:
+                    latest[node["tactic"].split("@", 1)[0]] = node
+            item.update(attempt_count=len(nodes), status_counts=counts,
+                        nodes=[*latest.values(), *active],
+                        history_note="历史按战术汇总，展示各战术最新回执与全部在途节点；完整历史在 DAG/任务记录")
+            bb = getattr(self.ctx, "blackboard", None)
+            if bb is not None:
+                for node in item["nodes"]:
+                    refs = []
+                    for tid in node["task_ids"]:
+                        task_state = bb.read(BlackboardLayer.TASK_STATE, tid) or {}
+                        refs.extend({"task_id": tid, "route_id": r["route_id"], "name": r.get("name", "")}
+                                    for r in task_state.get("routes", []) if r.get("route_id"))
+                    node["conversation_refs"] = refs
+        return {
+            "solved_ids": list(progress.get("solved_ids") or []),
+            "unsolved_ids": list(progress.get("unsolved_ids") or []),
+            "challenges": challenges,
+            "active_instance_ids": sorted(platform.active_instance_ids()),
+            "retained_instance_ids": sorted({
+                str((n.meta.get("challenge") or {}).get("id") or "")
+                for n in dag.all_nodes() if n.meta.get("retain_instance") is True
+                and not n.meta.get("deferred")}),
+            "spending": self._spending_observation(progress),
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _spending_observation(self, progress: dict[str, Any]) -> dict[str, Any]:
+        """把得分未变化期间的实际消耗交模型权衡，不设置回合顶或预算熔断。"""
+        budget = getattr(getattr(self.ctx, "gateway", None), "budget", None)
+        calls = getattr(budget, "call_log", None)
+        if not isinstance(calls, list):
+            return {"available": False}
+        manager = self.ctx.extra.get("flag_manager")
+        accepted = manager.stats().get("accepted") if manager is not None else None
+        signature = (tuple(sorted(progress.get("solved_ids") or [])), accepted)
+        observation = self.ctx.extra.get("_score_cost_observation")
+        if observation is None or observation["signature"] != signature:
+            observation = {"signature": signature, "since": time.time(), "call_offset": len(calls)}
+            self.ctx.extra["_score_cost_observation"] = observation
+        recent = calls[observation["call_offset"]:]
+        priced = [c for c in recent if c.get("estimated_cost_cny_min") is not None]
+        return {"available": True, "observed_since": observation["since"],
+                "seconds_without_observed_score_change": int(time.time() - observation["since"]),
+                "calls_since_observed_score_change": len(recent),
+                "uncached_input_tokens": sum(c.get("input_tokens", 0) -
+                    (c.get("cached_input_tokens") or 0) for c in recent
+                    if c.get("cached_input_tokens") is not None),
+                "estimated_cny_min": sum(c["estimated_cost_cny_min"] for c in priced),
+                "priced_calls": len(priced), "unpriced_calls": len(recent) - len(priced),
+                "note": "仅统计已观测区间，不是预算上限；余额是否正常须有供应商证据"}
+
+    def _decision_nodes(self, dag: TaskDAG) -> list[Any]:
+        """调度图保持完整，模型观察只合并同题同战术的已结束历史。"""
+        platform = self.ctx.extra.get("platform")
+        if platform is None or not getattr(platform, "continuous", False):
+            return dag.all_nodes()
+        latest = {}
+        active = []
+        for node in dag.all_nodes():
+            cid = str((node.meta.get("challenge") or {}).get("id") or "")
+            if not cid or node.status in {TaskStatus.PENDING, TaskStatus.DISPATCHED, TaskStatus.RUNNING}:
+                active.append(node)
+            else:
+                latest[(cid, node.tactic.split("@", 1)[0])] = node
+        return [*latest.values(), *active]
 
     def _competition_auto_continue(self, dag: TaskDAG) -> bool:
         """竞赛列表保留未完成题且有待发节点时，跳过“要不要继续”的复盘。"""
@@ -469,11 +609,18 @@ class MasterAgent:
             return
         states = self._challenge_states(dag)
         known = set(states)
+        # 生命周期由模型明确选择；保留现场不意味着增加并发或阻止其后暂缓。
+        raw_retained = decision.get("retain_instances") or []
+        retained = {str(cid) for cid in (raw_retained if isinstance(raw_retained, list) else [])
+                    if isinstance(cid, str) and cid in known}
+        for node in dag.all_nodes():
+            if str((node.meta.get("challenge") or {}).get("id") or "") in retained:
+                node.meta["retain_instance"] = True
 
         retried: list[str] = []
         raw_retry = decision.get("retry_challenges") or []
         if isinstance(raw_retry, list):
-            for item in raw_retry[:12]:
+            for item in raw_retry:
                 cid = str(item.get("id") if isinstance(item, dict) else item).strip()
                 if not cid or cid not in known:
                     continue
@@ -488,7 +635,7 @@ class MasterAgent:
         deferred: list[dict[str, str]] = []
         raw_defer = decision.get("defer_challenges") or []
         if isinstance(raw_defer, list):
-            for item in raw_defer[:12]:
+            for item in raw_defer:
                 if isinstance(item, dict):
                     cid = str(item.get("id") or "").strip()
                     reason = str(item.get("reason") or "模型判定暂缓")[:200]
@@ -501,6 +648,7 @@ class MasterAgent:
                     if str(ch.get("id") or "") != cid:
                         continue
                     node.meta["deferred"] = True
+                    node.meta.pop("retain_instance", None)
                     node.meta["defer_reason"] = reason
                     if node.status in (TaskStatus.PENDING, TaskStatus.DISPATCHED,
                                        TaskStatus.RUNNING):
@@ -521,10 +669,11 @@ class MasterAgent:
                         "action": "defer_close_failed", "challenge": item["id"],
                         "error": str(exc)[:200]})
 
-        if retried or deferred or released:
+        if retried or deferred or released or retained:
             self.ctx.audit.log("decision.change", self.agent_id, {
                 "action": "competition_challenge_state",
-                "deferred": deferred, "retried": retried, "released": released})
+                "deferred": deferred, "retried": retried, "released": released,
+                "retained": sorted(retained)})
 
     def _effort_options(self, task: Task) -> list[str]:
         """该任务可用的思考强度取值——按实际会用到的模型各自声明的档位算。
@@ -661,6 +810,9 @@ class MasterAgent:
             "node_id": n.node_id, "tactic": n.tactic, "title": n.title,
             "status": n.status.value, "depends_on": list(n.depends_on),
             "task_ids": list(n.task_ids), "round_created": n.round_created,
+            "challenge_id": str((n.meta.get("challenge") or {}).get("id") or ""),
+            "cancel_reason": n.meta.get("cancel_reason", ""),
+            "skip_reason": n.meta.get("skip_reason", ""),
         } for n in dag.all_nodes()]
 
     def _write_dag_snapshot(self, dag: TaskDAG, round_no: int | None = None) -> None:
@@ -684,6 +836,9 @@ class MasterAgent:
 
     # ------------------------------------------------------------ 节点：调度
 
+    _REFILL_INTERVAL = 1.0       # 无事件时重查资源退避，不依赖其他解题任务结束
+    _QUEUE_RETRY_INTERVAL = 5.0  # 规划失败或没有新增节点时的重试间隔
+
     async def _dispatch(self, state: MasterState) -> dict[str, Any]:
         ctx = self.ctx
         await self._gate_wait()
@@ -702,6 +857,21 @@ class MasterAgent:
                     TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.PRUNED, TaskStatus.CANCELLED
                 } else TaskStatus.FAILED
                 return spec["node_id"], status
+            except asyncio.CancelledError:
+                task.status = TaskStatus.CANCELLED
+                bb = getattr(ctx, "blackboard", None)
+                if bb is not None:
+                    data = bb.read(BlackboardLayer.TASK_STATE, task.task_id)
+                    if data is not None:
+                        data["task"] = task.model_dump(mode="json")
+                        for route in data.get("routes", []):
+                            if route.get("status") in {"pending", "dispatched", "running"}:
+                                route["status"] = TaskStatus.CANCELLED.value
+                        bb.write(BlackboardLayer.TASK_STATE, task.task_id, data,
+                                 agent_type=task.agent_type, updated_by=self.agent_id,
+                                 dedup_key=f"task|{task.task_id}")
+                ctx.audit.log("task.cancelled", self.agent_id, {"task_id": task.task_id})
+                raise
             except Exception as exc:  # noqa: BLE001 —— 单子 Agent 故障不影响全局（2.1-3）
                 assert ctx.audit is not None
                 ctx.audit.log("task.failed", self.agent_id,
@@ -719,43 +889,235 @@ class MasterAgent:
         # 环形督导：派发期间灵枢实时观察各子 Agent 路线进度，
         # 按全局态势给方向建议（建议经环形台账投递，子 Agent 在 LLM 决策上下文消费）
         watch = None
-        if ctx.ring is not None and ctx.enable_llm_planning and round_tasks:
+        watched_ids = [t.task_id for t in round_tasks]
+        decisions: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        if ctx.ring is not None and ctx.enable_llm_planning:
             watch = asyncio.create_task(
-                self._steering_watch([t.task_id for t in round_tasks]))
+                self._steering_watch(watched_ids, decisions))
         try:
             platform = (getattr(ctx, "extra", None) or {}).get("platform")
             refill_specs: list[dict[str, Any]] = []
             if platform is not None and getattr(platform, "continuous", False):
-                # 平台提交线程归还名额即唤醒，不等同批任务或同题并行路线收尾。
-                running = {asyncio.create_task(_run_one(s, t))
+                running = {asyncio.create_task(_run_one(s, t)): s["node_id"]
                            for s, t in zip(round_specs, round_tasks)}
                 completed = asyncio.create_task(platform.completion_queue.get())
+                adjudicated = asyncio.create_task(decisions.get())
+                planning: asyncio.Task[Any] | None = None
+                provisioning: asyncio.Task[Any] | None = None
+                cleanup: set[asyncio.Task[Any]] = set()
+                closing_ids: set[str] = set()
+                next_close_at: dict[str, float] = {}
+                next_plan_at = 0.0
+                last_plan_fingerprint = ""
+                planning_fingerprint = ""
+                model_recheck_at = float("inf")
+
+                def launch(spec: dict[str, Any], task: Task) -> None:
+                    # 同一份 DAG 就地更新；每个容器就绪就立即开工，不等其余供给。
+                    refill_specs.append(spec)
+                    watched_ids.append(task.task_id)
+                    running[asyncio.create_task(_run_one(spec, task))] = spec["node_id"]
+                    self._write_dag_snapshot(dag, state["round_no"])
+
+                async def close_idle(cid: str) -> None:
+                    try:
+                        await platform.close_instance(cid, reason="本题执行已收尾，释放名额供后续题")
+                    finally:
+                        closing_ids.discard(cid)
+                        next_close_at[cid] = time.monotonic() + self._QUEUE_RETRY_INTERVAL
+
+                async def finish_deferral(decision: dict[str, Any], jobs: list[asyncio.Task[Any]],
+                                          ids: set[str]) -> None:
+                    try:
+                        # 同题必须先退场再关容器；其他题的补位不等待这里的清理。
+                        await asyncio.gather(*jobs, return_exceptions=True)
+                        await self._apply_competition_decisions(dag, decision)
+                    finally:
+                        closing_ids.difference_update(ids)
+                        for cid in ids:
+                            next_close_at[cid] = time.monotonic() + self._QUEUE_RETRY_INTERVAL
+
                 try:
-                    while running:
-                        done, _ = await asyncio.wait(
-                            running | {completed}, return_when=asyncio.FIRST_COMPLETED)
-                        for job in done & running:
+                    while True:
+                        listed = (ctx.extra.get("competition_context") or {}).get("challenges") or []
+                        covered = set(self._challenge_states(dag))
+                        missing = {str(ch["id"]) for ch in listed
+                                   if isinstance(ch, dict) and ch.get("id")
+                                   and str(ch["id"]) not in covered
+                                   and not platform.is_completed(str(ch["id"]))}
+                        # 回访队列也要持续补位，不能只补从未进入过 DAG 的题。
+                        active_ids = {str((n.meta.get("challenge") or {}).get("id") or "")
+                                      for n in dag.all_nodes() if n.status in {
+                                          TaskStatus.PENDING, TaskStatus.DISPATCHED, TaskStatus.RUNNING}}
+                        revisit = {cid for cid in covered - active_ids - closing_ids
+                                   if not platform.is_completed(cid)
+                                   and platform.can_start_instance(cid)}
+                        retained_idle = {
+                            str((n.meta.get("challenge") or {}).get("id") or "")
+                            for n in dag.all_nodes() if n.meta.get("retain_instance") is True
+                            and not n.meta.get("deferred")} - active_ids - closing_ids
+                        ready = dag.ready_nodes()
+                        capacity_blocked = bool(ready) and all(
+                            platform.owns(str((n.meta.get("challenge") or {}).get("id") or ""))
+                            and not platform.can_start_instance(
+                                str((n.meta.get("challenge") or {}).get("id") or "")) for n in ready)
+                        can_plan = bool(ctx.enable_llm_planning and (
+                            missing or (running and not ready and revisit)
+                            or (retained_idle and capacity_blocked)))
+                        # 有效规划已看过的现场不因计时器反复付费；失败仍按原间隔重试。
+                        # 空位、任务状态、用户约定或实际执行证据变化均会重新唤醒。
+                        refill_fingerprint = json.dumps({
+                            "missing": sorted(missing), "revisit": sorted(revisit),
+                            "retained_idle": sorted(retained_idle),
+                            "closing": sorted(closing_ids),
+                            "instances": sorted(platform.active_instance_ids()),
+                            "nodes": [(n.node_id, n.status.value) for n in dag.all_nodes()],
+                            "world": self._world_state(),
+                            "execution": self._progress_digest(watched_ids),
+                        }, ensure_ascii=False, sort_keys=True, default=str)
+                        can_plan = can_plan and (refill_fingerprint != last_plan_fingerprint
+                                                 or time.monotonic() >= model_recheck_at)
+                        if can_plan and planning is None and time.monotonic() >= next_plan_at:
+                            planning_fingerprint = refill_fingerprint
+                            planning = asyncio.create_task(self._llm_plan({
+                                **state, "dag": dag.to_dict(), "queue_refill": True}))
+                        if provisioning is None and dag.ready_nodes():
+                            ready = dag.ready_nodes()
+                            if any(not platform.owns(str((n.meta.get("challenge") or {}).get("id") or ""))
+                                   or platform.can_start_instance(
+                                       str((n.meta.get("challenge") or {}).get("id") or ""))
+                                   for n in ready):
+                                provisioning = asyncio.create_task(self._meta_plan(
+                                    {**state, "dag": dag.to_dict()}, dispatch_only=True,
+                                    live_dag=dag, blocked_challenge_ids=closing_ids,
+                                    on_dispatch=launch))
+                        # 回收按具体实例安排，避免慢 close 阻塞其他空位；供给中的
+                        # DISPATCHED 节点纳入保护，不能按旧快照误关新启动的容器。
+                        active = {str((n.meta.get("challenge") or {}).get("id") or "")
+                                  for n in dag.all_nodes()
+                                  if n.status in {TaskStatus.PENDING, TaskStatus.RUNNING,
+                                                  TaskStatus.DISPATCHED}}
+                        active.update(str((n.meta.get("challenge") or {}).get("id") or "")
+                                      for n in dag.all_nodes() if n.meta.get("retain_instance") is True
+                                      and not n.meta.get("deferred")
+                                      and not platform.is_completed(
+                                          str((n.meta.get("challenge") or {}).get("id") or "")))
+                        for cid in platform.active_instance_ids() - active - closing_ids:
+                            if time.monotonic() < next_close_at.get(cid, 0.0):
+                                continue
+                            closing_ids.add(cid)
+                            cleanup.add(asyncio.create_task(close_idle(cid)))
+                        if not (running or planning or provisioning or cleanup
+                                or dag.ready_nodes() or can_plan):
+                            break
+                        waiters = set(running) | cleanup | {completed, adjudicated}
+                        if planning is not None:
+                            waiters.add(planning)
+                        if provisioning is not None:
+                            waiters.add(provisioning)
+                        # 资源事件优先唤醒；超时只重查退避与资源，不触发固定回合上限。
+                        done, _ = await asyncio.wait(waiters, timeout=self._REFILL_INTERVAL,
+                                                     return_when=asyncio.FIRST_COMPLETED)
+                        for job in done & running.keys():
                             node_id, status = job.result()
                             dag.mark(node_id, status)
-                            running.remove(job)
+                            running.pop(job)
+                        for job in done & cleanup:
+                            cleanup.remove(job)
+                            try:
+                                job.result()
+                            except Exception as exc:  # noqa: BLE001 —— 清理故障留痕供后续重试
+                                ctx.audit.log("platform.fact", self.agent_id, {
+                                    "action": "release_failed", "error": str(exc)[:200]})
+                        if adjudicated in done:
+                            decision = adjudicated.result()
+                            adjudicated = asyncio.create_task(decisions.get())
+                            ids = {str(item.get("id") or "")
+                                   for item in decision.get("defer_challenges", [])
+                                   if isinstance(item, dict)
+                                   and str(ctx.extra.get("mode_prompt") or "").strip()
+                                   and not platform.is_completed(str(item.get("id") or ""))
+                                   and str(item.get("id") or "") not in closing_ids}
+                            decision = {"defer_challenges": [
+                                i for i in decision.get("defer_challenges", [])
+                                if isinstance(i, dict) and str(i.get("id") or "") in ids]}
+                            cancel_provisioning = any(
+                                n.status == TaskStatus.DISPATCHED
+                                and str((n.meta.get("challenge") or {}).get("id") or "") in ids
+                                for n in dag.all_nodes())
+                            # 先冻结同题节点，异步清理期间也不能被续规划重新派发。
+                            for node in dag.all_nodes():
+                                cid = str((node.meta.get("challenge") or {}).get("id") or "")
+                                if cid in ids:
+                                    node.meta["deferred"] = True
+                                    reason = next(str(i.get("reason") or "模型判定暂缓")
+                                                  for i in decision["defer_challenges"] if str(i["id"]) == cid)
+                                    node.meta["defer_reason"] = reason[:200]
+                                    if node.status in {TaskStatus.PENDING, TaskStatus.DISPATCHED,
+                                                       TaskStatus.RUNNING}:
+                                        dag.mark(node.node_id, TaskStatus.CANCELLED)
+                            cancelled = [job for job, nid in running.items()
+                                         if str((dag.get(nid).meta.get("challenge") or {})
+                                                .get("id") or "") in ids]
+                            for job in cancelled:
+                                job.cancel()
+                                running.pop(job)
+                            # 供给与同题清理发生交叉时先收口供给，避免关后又开。
+                            if provisioning is not None and cancel_provisioning:
+                                provisioning.cancel()
+                                cancelled.append(provisioning)
+                                provisioning = None
+                            if ids:
+                                closing_ids.update(ids)
+                                cleanup.add(asyncio.create_task(finish_deferral(decision, cancelled, ids)))
+                        if planning is not None and planning in done:
+                            plan = planning.result()
+                            planning = None
+                            if plan is not None:
+                                last_plan_fingerprint = planning_fingerprint
+                                delay = plan.get("recheck_after_seconds")
+                                model_recheck_at = (time.monotonic() + delay
+                                    if type(delay) in {int, float} and math.isfinite(delay) and delay > 0
+                                    else float("inf"))
+                            next_plan_at = time.monotonic() + self._QUEUE_RETRY_INTERVAL
+                            if plan:
+                                try:
+                                    # 规划和督导的暂缓走同一退场通道：先取消同题执行，再关实例。
+                                    await self._apply_competition_decisions(
+                                        dag, {**plan, "defer_challenges": []})
+                                    if plan.get("defer_challenges"):
+                                        decisions.put_nowait({
+                                            "defer_challenges": plan["defer_challenges"]})
+                                    result = dag.upsert_from_plan(self._resolve_plan_challenges(
+                                        plan.get("dag_nodes", [])), state["round_no"])
+                                    self._record_plan_result(state["round_no"],
+                                                             result.created, result.skipped)
+                                    if result.created:
+                                        next_plan_at = 0.0
+                                    ctx.audit.log("decision.change", self.agent_id, {
+                                        "action": "queue_refilled",
+                                        "new_nodes": [n.node_id for n in result.created]})
+                                except SpiritScoutError as exc:
+                                    self._record_plan_result(state["round_no"], [], [], rejected=str(exc))
+                                    ctx.audit.log("decision.change", self.agent_id, {
+                                        "action": "plan_rejected", "source": "queue_refill",
+                                        "reason": str(exc)[:200]})
+                        if provisioning is not None and provisioning in done:
+                            provisioning.result()
+                            provisioning = None
                         if completed in done:
                             completed.result()
                             completed = asyncio.create_task(platform.completion_queue.get())
-                        if dag.ready_nodes():
-                            # 只派发已规划的待做题，不触发新一轮重攻或模型复盘。
-                            refill = await self._meta_plan(
-                                {**state, "dag": dag.to_dict()}, dispatch_only=True)
-                            dag = TaskDAG.from_dict(refill["dag"])
-                            for spec in refill["tasks_dispatched"]:
-                                task = Task.model_validate(spec["task"])
-                                refill_specs.append(spec)
-                                running.add(asyncio.create_task(_run_one(spec, task)))
                         self._write_dag_snapshot(dag, state["round_no"])
                 finally:
                     completed.cancel()
-                    for job in running:
+                    adjudicated.cancel()
+                    pending = (set(running) | cleanup
+                               | ({planning} if planning is not None else set())
+                               | ({provisioning} if provisioning is not None else set()))
+                    for job in pending:
                         job.cancel()
-                    await asyncio.gather(completed, *running, return_exceptions=True)
+                    await asyncio.gather(completed, adjudicated, *pending, return_exceptions=True)
                 results = []
             else:
                 results = await asyncio.gather(
@@ -835,7 +1197,8 @@ class MasterAgent:
                     dedup_key=f"reply|{time.time()}")
             for item in steering:
                 self.ctx.ring.steer(item["agent"], item["hint"],
-                                    rationale=item.get("rationale", ""))
+                                    rationale=item.get("rationale", ""),
+                                    task_id=item.get("task_id", ""))
             if steering:
                 self.ctx.audit.log("decision.change", self.agent_id, {
                     "action": "user_chat_steering", "count": len(steering)})
@@ -848,13 +1211,15 @@ class MasterAgent:
             f"{get_profile(agent_type).name}({agent_type.value})"
             for agent_type in self.ctx.agents)
         paused = bool(self.ctx.pause_gate is not None and self.ctx.pause_gate.paused)
+        situation = self._engagement_status()
         payload = {
             "mission": self._mission()[:1000],
             "world_state": self._world_state(),
             "agents": [a.value for a in self.ctx.agents],
             "roster": roster,
             "engagement_paused": paused,
-            "situation": self._engagement_status(),
+            "situation": situation,
+            "active_tasks": situation.get("active_tasks", []),
             "chat_history": history[-self._CHAT_HISTORY_MAX:],
             "new_messages": messages,
             "attachments": attachments,
@@ -871,30 +1236,26 @@ class MasterAgent:
                 "steering 里给出建议（agent 必须取自 agents 列表，hint 一句话，"
                 "涉及附件写明文件路径，子 Agent 可直接读取；hint 会随会话页"
                 "展示给用户——用平实中文，不用 HAR、PoC 这类行话缩写）；"
-                "无需调整则 steering 给空列表。返回 JSON：{\"reply\": str, "
-                "\"steering\": [{\"agent\": str, \"hint\": str, "
+                "无需调整则 steering 给空列表。"
+                "针对具体任务的指令须填写 active_tasks 中的 task_id；仅当明确需要"
+                "通知该类型所有任务时才填写 broadcast=true。"
+                "返回 JSON：{\"reply\": str, "
+                "\"steering\": [{\"agent\": str, \"task_id\": str, \"broadcast\": bool, \"hint\": str, "
                 "\"rationale\": str}]}"),
         }
         try:
-            resp = await self.ctx.gateway.chat(
-                [
-                    {"role": "system", "content": self._system_prompt()
-                     + "\nROLE: user_chat"},
-                    {"role": "user",
-                     "content": compact_json(payload, max_chars=16000)},
-                ],
+            resp = await chat_decision(
+                self.ctx.gateway,
+                decision_messages(self._system_prompt() + "\nROLE: user_chat", payload, 16000),
+                memory=decision_memory(self, "user_chat"), audit=self.ctx.audit, actor=self.agent_id,
                 task_type="meta_planning", response_format="json",
                 reasoning_effort="low",   # 对话应答要快，不与重推理抢档
             )
             data = extract_json(resp.content) or {}
             reply = str(data.get("reply") or "").strip()[:4000]
-            valid = {a.value for a in self.ctx.agents}
-            steering = [
-                {"agent": str(i["agent"]), "hint": str(i["hint"])[:300],
-                 "rationale": str(i.get("rationale", ""))[:200]}
-                for i in (data.get("steering") or [])
-                if isinstance(i, dict) and i.get("agent") in valid
-                and isinstance(i.get("hint"), str) and i["hint"].strip()]
+            steering = self._target_steering(
+                data.get("steering") or [], situation.get("active_tasks", []),
+                allow_broadcast=True)
             return reply, steering
         except (SpiritScoutError, OSError, ValueError, TypeError) as exc:
             # 对话通道失败不影响主链路，但留痕可见
@@ -905,7 +1266,6 @@ class MasterAgent:
     # ------------------------------------------------------------ 环形督导
 
     _STEER_INTERVAL = 2.0   # 观察节拍（秒）；无进展变化不调用 LLM
-    _STEER_MAX_CALLS = 3    # 单轮派发内督导 LLM 调用上限（预算护栏）
 
     def _drain_user_feed(self) -> list[dict[str, Any]]:
         """取走用户会话中发来的消息与附件记录（用户直达通道的消费点）。"""
@@ -924,51 +1284,68 @@ class MasterAgent:
         inbox.clear()
         return items
 
-    async def _steering_watch(self, task_ids: list[str]) -> None:
+    async def _steering_watch(
+            self, task_ids: list[str],
+            decisions: asyncio.Queue[dict[str, Any]] | None = None) -> None:
         """派发期并发督导：读各任务实时路线笔记 → LLM 判读全局 → 写方向建议。
 
-        确定性边界：本函数只做「读进度、问模型、投递建议」；建议是否采纳由
-        子 Agent 的 LLM 在其决策上下文中自行权衡，执行仍走原确定性通道。
+        新补位任务通过共享名单进入观察；方向建议交子 Agent 权衡，竞赛暂缓
+        裁定经队列交调度器取消同题任务并回收实例。是否暂缓始终由模型决定。
         用户消息不在这里消费——它们走独立的直达通道（_user_chat_watch），
         两条通道并行互不阻塞。
         """
         assert self.ctx.audit is not None
         last_fingerprint = ""
-        calls = 0
         while True:
             await asyncio.sleep(self._STEER_INTERVAL)
             digest = self._progress_digest(task_ids)
             if not digest["tasks"]:
                 continue
-            fingerprint = json.dumps(digest, ensure_ascii=False, sort_keys=True)
-            if fingerprint == last_fingerprint or calls >= self._STEER_MAX_CALLS:
+            # 投递新指令本身不是现场进展，避免“发指令→摘要变化→再发指令”自激循环。
+            facts = {**digest, "tasks": [{k: v for k, v in t.items() if k != "steering"}
+                                          for t in digest["tasks"]]}
+            fingerprint = json.dumps(facts, ensure_ascii=False, sort_keys=True)
+            if fingerprint == last_fingerprint:
                 continue
             last_fingerprint = fingerprint
-            steering = await self._llm_steer(digest)
-            calls += 1
+            steering = await self._llm_steer(digest, decisions)
             for item in steering:
                 self.ctx.ring.steer(item["agent"], item["hint"],
-                                    rationale=item.get("rationale", ""))
+                                    rationale=item.get("rationale", ""),
+                                    task_id=item.get("task_id", ""))
 
     def _progress_digest(self, task_ids: list[str]) -> dict[str, Any]:
         """本轮任务的实时进度摘要（子 Agent 随步上报的路线笔记）。"""
-        bb = self.ctx.blackboard
+        bb = getattr(self.ctx, "blackboard", None)
         tasks: list[dict[str, Any]] = []
         for tid in task_ids:
-            data = bb.read(BlackboardLayer.TASK_STATE, tid)
+            data = bb.read(BlackboardLayer.TASK_STATE, tid) if bb is not None else None
             if data is None:
                 continue
             task = data.get("task", {})
+            if task.get("status") not in {
+                    TaskStatus.PENDING.value, TaskStatus.DISPATCHED.value,
+                    TaskStatus.RUNNING.value}:
+                continue
             routes = [
                 {"route": r.get("name"), "status": r.get("status"),
                  "progress": r.get("progress"),
-                 "last_note": (r.get("notes") or [""])[-1][:120]}
+                 "notes": [str(n)[:500] for n in (r.get("notes") or [])[-3:]]}
                 for r in data.get("routes", [])
             ]
+            challenge = (task.get("payload") or {}).get("challenge") or {}
             tasks.append({"agent": task.get("agent_type"),
+                          "task_id": tid,
+                          "challenge": {k: challenge[k] for k in ("id", "title")
+                                        if k in challenge},
+                          "steering": self.ctx.ring.steerings_for(
+                              task.get("agent_type"), task_id=tid) if self.ctx.ring else [],
                           "title": str(task.get("title", ""))[:80],
                           "routes": routes})
-        return {"tasks": tasks}
+        platform = self.ctx.extra.get("platform")
+        return {"tasks": tasks,
+                "platform_progress": {k: v for k, v in platform.progress().items() if k != "updated_at"} if platform is not None
+                and hasattr(platform, "progress") else {}}
 
     def _route_digest(self, state: MasterState) -> list[dict[str, Any]]:
         """本轮各子 Agent 路线的执行笔记摘要（任务结果流向复盘）。
@@ -1001,7 +1378,9 @@ class MasterAgent:
                 })
         return routes
 
-    async def _llm_steer(self, digest: dict[str, Any]) -> list[dict[str, Any]]:
+    async def _llm_steer(
+            self, digest: dict[str, Any],
+            decisions: asyncio.Queue[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         """LLM 判读全局进度，产出需调整方向的子 Agent 建议（白名单校验）。"""
         valid_agents = sorted({t["agent"] for t in digest["tasks"]
                                if t.get("agent")})
@@ -1013,42 +1392,94 @@ class MasterAgent:
                 "mission": self._mission()[:1000],
                 "world_state": self._world_state(),
                 "business_context": shared_context(self.ctx.blackboard),
-                "progress": digest,
+                # 按任务 ID 编址，某条路线变化只追加该任务的补丁，不重发整批。
+                "progress": {**digest, "tasks": {
+                    t["task_id"]: {k: v for k, v in t.items() if k != "steering"}
+                    for t in digest["tasks"] if t.get("task_id")}},
+                "active_tasks": [{k: t.get(k) for k in ("task_id", "agent", "challenge")}
+                                 for t in digest["tasks"]],
+                "steering_status": {t["task_id"]: t.get("steering", [])
+                                    for t in digest["tasks"] if t.get("task_id")},
+                "competition": {
+                    "challenges": [{k: ch[k] for k in
+                                    ("id", "title", "difficulty", "score", "solved_count")
+                                    if k in ch}
+                                   for ch in (self.ctx.extra.get("competition_context") or {})
+                                   .get("challenges", []) if isinstance(ch, dict)]},
                 "agents": valid_agents,
                 "constraints": (
                             "你在实时督导并行作业的子 Agent。依据各路线进度与最新"
                             "笔记判断：谁走进了死胡同（建议换方向）、谁发现了高价值"
                             "线索（建议深挖或提醒同伴接力）、谁在同质重复做功"
-                            "（建议避开同伴已覆盖的入口）。只对有明确调整必要的 "
-                            "Agent 给建议，一切正常则返回空列表。返回 JSON："
+                            "（建议避开同伴已覆盖的入口）。竞赛中某题反复探测而无新增"
+                            "有效信息时，建议保存断点、以待解结论收尾，把名额交给列表"
+                            "后续题，首轮扫完后再回访；不要只要求继续换路径穷举。"
+                            "进度百分比和命令成功不等于得分或有效线索。只对有明确调整必要的 "
+                            "Agent 给建议，一切正常则返回空列表。竞赛连续调度中，"
+                            "比较卡题与清单中尚未尝试的容易题的得分效率；决定暂缓时，"
+                            "输出 defer_challenges，系统会取消同题在途任务、关闭容器并补位。"
+                            "reason 简短保留已排除方向、有效线索和回访条件。"
+                            "不要按固定时长或回合数机械跳题。有实质突破可继续。返回 JSON："
                             "{\"steering\": [{\"agent\": 仅 agents 列表之一, "
-                            "\"hint\": 一句话方向建议, \"rationale\": 判断依据}]}"),
+                            "\"task_id\": active_tasks 中对应任务的 task_id, "
+                            "\"hint\": 下一步指令, \"rationale\": 判断依据}], "
+                            "\"defer_challenges\": [{\"id\": 进度中在途赛题ID, \"reason\": str}]}"),
             }
+            payload["constraints"] += (
+                "每条指令必须指定 task_id，不能把某题指令发给所有同类型任务。"
+                "steering.feedback 中 delivered 仅表示已投递，accepted 仅表示计划执行；"
+                "completed/blocked 是子 Agent 自报，结合后续工具结果判断实际效果。"
+                "若前次指令尚未奏效，结合反馈与新证据纠偏或暂缓，不要重复改写同一建议。"
+                "只引用对应任务的可见事实，不把截断摘要当完整源码，不臆测已经具备的能力；"
+                "以 platform_progress 的已完成题目为准，不能把已完成题当未尝试题。")
             resp = await chat_decision(
                 self.ctx.gateway,
-                [
-                    {"role": "system", "content": self._system_prompt()
-                     + "\nROLE: collab_judge"},
-                    {"role": "user", "content": compact_json(payload, max_chars=16000)},
-                ],
+                decision_messages(self._system_prompt() + "\nROLE: collab_judge", payload, 16000),
                 audit=self.ctx.audit, actor=self.agent_id,
+                memory=decision_memory(self, "steering"),
                 task_type="meta_planning", response_format="json",
                 reasoning_effort=self._MASTER_EFFORT,
             )
             data = extract_json(resp.content) or {}
+            active_ids = {str((t.get("challenge") or {}).get("id") or "")
+                          for t in digest["tasks"]}
+            raw_defer = data.get("defer_challenges") or []
+            deferred = [i for i in (raw_defer if isinstance(raw_defer, list) else [])
+                        if isinstance(i, dict) and str(i.get("id") or "") in active_ids
+                        and i.get("id") and str(i.get("reason") or "").strip()]
+            if deferred and decisions is not None:
+                decisions.put_nowait({"defer_challenges": deferred})
             items = data.get("steering")
             if not isinstance(items, list):
                 raise TypeError("steering 应答不是列表")
-            out = [
-                {"agent": str(i["agent"]), "hint": str(i["hint"])[:300],
-                 "rationale": str(i.get("rationale", ""))[:200]}
-                for i in items
-                if isinstance(i, dict) and i.get("agent") in valid_agents
-                and isinstance(i.get("hint"), str) and i["hint"].strip()
-            ]
-            return out
+            return self._target_steering(items, digest["tasks"])
         except Exception:  # noqa: BLE001 —— 督导失败不拖垮派发
             return []
+
+    def _target_steering(self, items: list[Any], tasks: list[dict[str, Any]], *,
+                         allow_broadcast: bool = False) -> list[dict[str, str]]:
+        """校验模型选定的收件任务；不把歧义指令静默广播给全部同类型任务。"""
+        out = []
+        valid_agents = {a.value for a in self.ctx.agents} if allow_broadcast else {
+            t.get("agent") for t in tasks}
+        for item in items:
+            if (not isinstance(item, dict) or item.get("agent") not in valid_agents
+                    or not isinstance(item.get("hint"), str) or not item["hint"].strip()):
+                continue
+            candidates = [t for t in tasks if t.get("agent") == item["agent"]]
+            tid = str(item.get("task_id") or "")
+            broadcast = allow_broadcast and item.get("broadcast") is True and not tid
+            if not tid and not broadcast and len(candidates) == 1:
+                tid = str(candidates[0].get("task_id") or "")
+            if not broadcast and (not tid or tid not in {t.get("task_id") for t in candidates}):
+                self.ctx.audit.log("decision.change", self.agent_id, {
+                    "action": "steering_rejected", "agent": item["agent"],
+                    "task_id": tid, "reason": "收件任务缺失、歧义或不属于该 Agent"})
+                continue
+            out.append({"agent": item["agent"], "task_id": tid,
+                        "hint": item["hint"][:2000],
+                        "rationale": str(item.get("rationale", ""))[:600]})
+        return out
 
     # ------------------------------------------------------------ 节点：汇聚
 
@@ -1141,7 +1572,7 @@ class MasterAgent:
                     deferred_replan = bool(nodes)
                 else:
                     try:
-                        result = dag.upsert_from_plan(nodes, next_round)
+                        result = dag.upsert_from_plan(self._resolve_plan_challenges(nodes), next_round)
                     except SpiritScoutError as exc:
                         # 复盘建议不可落图（未知依赖/成环）：留痕后不入图，
                         # 本轮收敛判定按「模型继续但无新节点」走下方回元规划
@@ -1253,12 +1684,21 @@ class MasterAgent:
         try:
             tactic_map = self.ctx.tactic_map or TACTIC_AGENT_MAP
             dag = TaskDAG.from_dict(state["dag"])
+            # 只调整调用强度，不替模型选择题目、战术或判定停滞。
+            competition_opening = (state["round_no"] == 0 and not dag.all_nodes()
+                                   and bool(self.ctx.extra.get("mode_prompt"))
+                                   and bool((self.ctx.extra.get("competition_context")
+                                             or {}).get("challenges")))
             resp = await chat_decision(
                 self.ctx.gateway,
                 decision_messages(self._system_prompt() + "\nROLE: meta_planner", {
                         "target": state["target"], "round": state["round_no"],
                         "mission": self._mission()[:2000],
                         "competition_context": self.ctx.extra.get("competition_context", {}),
+                        "competition_status": self._competition_status(dag),
+                        "queue_refill": bool(state.get("queue_refill")),
+                        "planned_challenge_ids": list(self._challenge_states(dag)),
+                        "platform_facts": (self.ctx.extra.get("platform_facts") or [])[-8:],
                         "world_state": self._world_state(),
                         "project_rules": self._project_rules(),
                         "execution_recovery": self.ctx.extra.get("execution_recovery", {}),
@@ -1270,7 +1710,7 @@ class MasterAgent:
                             {"tactic": n.tactic, "title": n.title,
                              "status": n.status.value,
                              "target": str((n.meta or {}).get("target") or "")}
-                            for n in dag.all_nodes()][:30],
+                            for n in self._decision_nodes(dag)],
                         "last_plan_result": self.ctx.extra.get("last_plan_result") or {},
                         "views": state["round_views"][-3:],
                         "constraints": (
@@ -1278,13 +1718,45 @@ class MasterAgent:
                             "仅可用战术之一, \"title\": str, \"technique\": str, "
                             "\"target\": str（可选）, \"depends_on\": [依赖战术名，可空；"
                             "填已有或本计划内节点的 tactic，不要填标题], "
-                            "\"meta\": {\"challenge\": 完整赛题对象（赛题节点必填）}}]}。"
+                            "\"challenge_id\": str（赛题节点必填，非赛题节点省略）, "
+                            "\"continue_from\": {\"task_id\": str, \"route_id\": str}（可选）}], "
+                            "\"retry_challenges\": [{\"id\": str, \"reason\": str}], "
+                            "\"retain_instances\": [需跨节点保留现场的赛题ID], "
+                            "\"defer_challenges\": [{\"id\": str, \"reason\": str}], "
+                            "\"recheck_after_seconds\": 正数（可选，等待后复查）}。"
                             "competition_context 提供赛方规则原文与实际题目清单；"
                             "不得按赛制名称假定计分、轮次、提交或完成条件。"
-                            "赛题节点的 meta.challenge 从清单取对应对象，保留题目 id。"
-                            "target 填该节点针对的授权目标（URL/主机名/CIDR，从 "
+                            "赛题节点仅输出清单中的 challenge_id，系统会装配该题完整原始对象；"
+                            "不要复写题面、描述或整份赛题对象。analysis 简述派工依据和缺口，"
+                            "不复述已有规则、题目清单和工具回执。平台提供独立题目列表时，"
+                            "默认按原列表顺序为未完成题形成简短待发节点，title 只需题号与"
+                            "完成目标，technique 可留空，analysis 用一句话说明即可。"
+                            "不要先比较各题难度、分值、收益或安排做题排名，不展开各题解法；"
+                            "不要因容器名额有限只规划首批，后续待发节点供名额释放后立即补位。"
+                            "实际依赖或用户明确指定顺序时遵循其要求。没有独立题目列表的任务"
+                            "仍按现场形成最小可执行计划。"
+                            "queue_refill=true 表示其他题正在执行，本次补待发队列，不等待在途任务。"
+                            "competition_status 是完整完成态与逐题执行回执，优先于节选历史；"
+                            "先补尚未尝试的未完成题；首轮扫完后，为空位安排未完成题的回访。"
+                            "在途/待发题不重复，已完成题不重建；回访用唯一 tactic@序号，"
+                            "暂缓题同时返回 retry_challenges:[{id,reason}] 解除暂缓。"
+                            "retain_instances 可声明跨节点保留实例，避免登录态、文件和取证进展因关闭重开丢失；"
+                            "若继续既有调查，可从 conversation_refs 选择 continue_from 继承原对话；"
+                            "要独立重试则省略。只有同题、同模型协议且实例回执一致的历史可继承，"
+                            "历史工具不自动执行，当前任务与授权优先。"
+                            "本次无新增节点时，相同现场不会被计时器反复询问；"
+                            "若需定时复查而非等新事实，返回 recheck_after_seconds。"
+                            "需换题释放名额时用 defer_challenges，不能一边保留一边强开超过平台容量。"
+                            "待发节点因保留实例占满名额时，只需明确暂缓待换出的题，避免重复创建待发节点。"
+                            "剩余都是回访题时，优先复用已运行实例和断点，给执行者实质验证的目标；"
+                            "不要因换节点或战术名就重新做已经验证的探测。"
+                            "spending 是得分未变化区间的实际消耗；投入增长而没有新证据时调整执行方式，"
+                            "复用断点，避免反复创建同质节点。未经供应商核实不要断言余额正常。"
+                            "platform_facts 是装配层已完成操作的真实回执，已成功的预检/列题无需再派工；"
+                            "按角色实际能力派工，不让只支持首页/指纹采集的角色承担平台 API 编排。"
+                            "target 只填该节点针对的单个授权目标（URL/主机名/CIDR，从 "
                             "world_state 的授权范围里挑）；多个域名需要分别测绘或测试"
-                            "时，按「战术@序号」拆成多个节点并各填 target，留空则沿用"
+                            "时，按「战术@序号」拆成多个节点并各填 target；禁止用逗号、空格或数组拼接地址。留空则沿用"
                             "会话目标。每个节点是一个可核验的交付"
                             "目标——title 写清要产出什么、完成判据是什么（产经验证的"
                             "结论/证据），不写动作步骤；侦察与扫描是手段，本身不构成"
@@ -1294,12 +1766,14 @@ class MasterAgent:
                             "如 BUSINESS-CONTEXT@2）。last_plan_result 是最近一次"
                             "规划落图的真实回执：skipped 里的战术已有节点、"
                             "rejected 非空表示整批被拒——按原因修正，不要原样重发。"
-                            "SRC 模式先建立业务上下文；智能体模式的阶段、依赖与"
-                            "任务顺序按赛方规则和当前现场自行决定。"),
+                            "SRC 模式先建立业务上下文；智能体模式的阶段与依赖按"
+                            "实际规则理解，独立题目默认遵循列表顺序、卡题留档后跳过，"
+                            "首轮扫完再回访；用户明确指令和实际依赖优先。"),
                     }, 8000),
                 audit=self.ctx.audit, actor=self.agent_id, memory=decision_memory(self, "plan"),
                 task_type="meta_planning", response_format="json",
-                reasoning_effort=self._MASTER_EFFORT,
+                reasoning_effort=("low" if competition_opening or state.get("queue_refill")
+                                  else self._MASTER_EFFORT),
             )
             data = extract_json(resp.content)
             if not isinstance(data, dict) or "dag_nodes" not in data:
@@ -1317,6 +1791,28 @@ class MasterAgent:
             self.ctx.audit.log("llm.plan_failed", self.agent_id, {
                 "round": state["round_no"], "error": str(exc)[:300]})
             return None
+
+    def _resolve_plan_challenges(self, nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """模型只回传赛题引用，装配层按原始清单恢复完整题面，避免输出重复大对象。
+
+        只做引用解析，不选择题目或改派战术；兼容原有 meta.challenge 计划。
+        未知引用回传规划错误，不猜题、不把残缺引用派给执行者。
+        """
+        source = (self.ctx.extra.get("competition_context") or {}).get("challenges") or []
+        by_id = {str(ch.get("id")): ch for ch in source
+                 if isinstance(ch, dict) and ch.get("id") is not None}
+        resolved = []
+        for spec in nodes:
+            node = copy.deepcopy(spec)
+            meta = node.get("meta") if isinstance(node.get("meta"), dict) else {}
+            cid = str(node.get("challenge_id") or meta.get("challenge_id") or "")
+            if cid:
+                if cid not in by_id:
+                    raise SpiritScoutError(f"规划错误：challenge_id「{cid}」不在当前赛题清单中")
+                node["meta"] = {**meta, "challenge_id": cid,
+                                "challenge": copy.deepcopy(by_id[cid])}
+            resolved.append(node)
+        return resolved
 
     def _filter_plannable(self, plan_nodes: list[Any]) -> list[dict[str, Any]]:
         """LLM 产出节点过滤：仅保留可用战术（规则引擎调度裁决，不外包给模型）。
@@ -1401,6 +1897,12 @@ class MasterAgent:
         snapshot = bb.read(BlackboardLayer.TASK_STATE, "dag-snapshot") or {}
         nodes = snapshot.get("dag_snapshot") if isinstance(snapshot, dict) else None
         if isinstance(nodes, list) and nodes:
+            digest = self._progress_digest([
+                tid for n in nodes if isinstance(n, dict)
+                and n.get("status") in {"dispatched", "running"}
+                for tid in n.get("task_ids", [])])
+            status["active_tasks"] = [{k: t.get(k) for k in ("task_id", "agent", "challenge")}
+                                      for t in digest["tasks"]]
             status["round"] = snapshot.get("round")
             status["nodes"] = [
                 {"tactic": n.get("tactic"),
@@ -1479,6 +1981,7 @@ class MasterAgent:
                 "action": "review", "view": view,
                 "mission": self._mission()[:2000],
                 "competition_context": self.ctx.extra.get("competition_context", {}),
+                "competition_status": self._competition_status(dag_now),
                 "world_state": self._world_state(),
                 "project_rules": self._project_rules(),
                 "execution_recovery": self.ctx.extra.get("execution_recovery", {}),
@@ -1491,7 +1994,7 @@ class MasterAgent:
                     {"tactic": n.tactic, "title": n.title,
                      "status": n.status.value,
                      "target": str((n.meta or {}).get("target") or "")}
-                    for n in dag_now.all_nodes()][:30],
+                    for n in self._decision_nodes(dag_now)],
                 "last_plan_result": self.ctx.extra.get("last_plan_result") or {},
                 "round_routes": self._route_digest(state),
                 "challenges": self._challenge_states(dag_now),
@@ -1503,14 +2006,18 @@ class MasterAgent:
                             "返回 JSON：{\"continue_iteration\": bool, \"reason\": str, "
                             "\"dag_nodes\": [{\"tactic\": 仅可用战术之一, \"title\": str, "
                             "\"target\": str（可选）, \"depends_on\": [依赖战术名，可空；"
-                            "填 tactic 不要填标题], \"meta\": {\"challenge\": "
-                            "完整赛题对象（赛题节点必填）}}], "
+                            "填 tactic 不要填标题], \"challenge_id\": "
+                            "str（赛题节点必填，引用清单 id，不复写题面或完整赛题对象）}], "
                             "\"defer_challenges\": [{\"id\": str, \"reason\": str}], "
-                            "\"retry_challenges\": [{\"id\": str, \"reason\": str}]}。"
-                            "target 填新节点针对的授权目标（URL/主机名/CIDR，从 "
+                            "\"retry_challenges\": [{\"id\": str, \"reason\": str}], "
+                            "\"retain_instances\": [需跨节点保留现场的赛题ID]}。"
+                            "target 只填新节点针对的单个授权目标（URL/主机名/CIDR，从 "
                             "world_state 的授权范围里挑）；多域补测按域拆节点各填，"
-                            "留空沿用会话目标。"
-                            "existing_nodes 是图中全部节点（含状态）：已完成节点"
+                            "禁止用逗号、空格或数组拼接地址；留空沿用会话目标。"
+                            "competition_status 是完整完成态和取消原因，优先于节选观察："
+                            "仅从 unsolved_ids 中安排解题；平台已完成导致的取消不是执行故障，"
+                            "仍暂缓导致的取消需先 retry_challenges。不得把 cancelled 总数当成"
+                            "基础设施故障证据。existing_nodes 是图中节点（含状态）：已完成节点"
                             "不复建；同一战术需要续作/补做（如凭据到位后补登录态"
                             "走访）时用「战术@序号」新建（序号从 2 起，如 "
                             "BUSINESS-CONTEXT@2）。last_plan_result 是最近一次规划"
@@ -1526,14 +2033,26 @@ class MasterAgent:
                             "判据是什么，不写动作步骤。"
                             "若 Flag/核心目标未收且仍有未试过的思路，"
                             "continue_iteration=true 并给出换思路的新节点"
-                            "（dag_nodes 必填，否则等于收手）；"
-                            "确认无解题空间时 continue_iteration=false 并说明理由。"
+                            "（有独立题目列表时优先为后续尚未尝试题补节点，"
+                            "不要让卡题重攻排在它们前面）；"
+                            "停止应依据用户目标与比赛规则的真实终止条件。比赛尚未结束且仍有待解题时，"
+                            "本轮无得分、已扫完一轮或自己先前声明的重试次数都不是结束依据；"
+                            "应轮转回访、利用断点换思路。仅在目标完成、用户叫停、规则时限已到，"
+                            "或有可核验证据证明全局已无法继续时才停止，并给出对应事实。"
                             "竞赛/靶场语境下，若某题反复尝试仍无新增有效信息、"
                             "关键前提缺失，或继续投入的预期得分效率明显低于其他"
                             "未完成题，可把该题放入 defer_challenges；系统会停止"
-                            "该题后续派发并关闭平台容器。只有出现实质新线索、阻塞"
-                            "解除或用户明确要求时才用 retry_challenges 解除暂缓。"
+                            "该题后续派发并关闭平台容器。暂缓原因简要保留已验证事实、"
+                            "证据位置和阻塞点，接着按列表顺序推进后续未尝试题。"
+                            "后续题首轮扫完、容易题已完成后，主动用 retry_challenges"
+                            "解除暂缓，并给出复用断点的回访节点；即使没有新线索也应"
+                            "回访，不等待用户催促。新线索、阻塞解除或用户明确要求"
+                            "同样可作为回访依据。"
                             "不要按固定轮数机械暂缓，也不要为暂缓题写长篇复盘。"
+                            "换节点不等于应重置实例；跨节点取证时用 retain_instances 保留现场，"
+                            "需要换题或结束该目标时释放。已有失败证据应由后续节点复用。"
+                            "spending 展示得分未变化区间的实际消耗，据此调整方法，避免同质重复派发；"
+                            "没有供应商证据不要断言余额正常。"
                             "questions 可选（至多 2 条）：仅当继续迭代必须依赖"
                             "只有用户能提供的输入（测试账号/凭据、登录后操作的"
                             "请求记录、授权范围裁定）时给出，形如 "
@@ -1594,11 +2113,14 @@ class MasterAgent:
             from spiritscout.policy.questions import normalize_targets
             targets = normalize_targets(item.get("targets"))
             multiple = bool(item.get("multiple"))
-            self.ctx.audit.log("master.ask_user", self.agent_id, {
-                "question": question[:500], "options": options,
-                "multiple": multiple, "targets": targets})
+            if getattr(broker, "interactive", True):
+                self.ctx.audit.log("master.ask_user", self.agent_id, {
+                    "question": question[:500], "options": options,
+                    "multiple": multiple, "targets": targets})
             result = await broker.ask("master", question, options, targets,
                                       multiple=multiple)
+            if result.get("autonomous"):
+                continue   # 系统返回的自主决策提示不是用户答复，不写入用户事实。
             answer = str(result.get("answer") or "").strip()
             added = result.get("scope_added") or []
             self.ctx.audit.log("master.ask_answered", self.agent_id, {
@@ -1717,7 +2239,7 @@ class MasterAgent:
         mode_prompt = str(self.ctx.extra.get("mode_prompt") or "").strip()
         mode_block = f"{mode_prompt}\n" if mode_prompt else ""
         return (
-            agent_system_prompt(AgentType.MASTER)
+            agent_system_prompt(AgentType.MASTER, allow_search=search_allowed(self.ctx))
             + "\n"
             f"{mission_block}"
             f"{rules_block}"
