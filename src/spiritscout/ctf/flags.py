@@ -1,10 +1,6 @@
-"""Flag 统一提交模块（设计书 4.4.6）。
+"""Flag 候选登记、去重、提交与反馈。
 
-- 格式识别：Flag 格式正则模板可配置（flag{...}/ctf{...}/SCTF{...}）；
-- 自动提取：各专项子 Agent 产出的文本统一过格式校验与去重；
-- 自动提交：可插拔提交函数（赛方 API/Mock），限速 + 退避（4.5.3 频率管控）；
-- 反馈闭环：提交失败发布反馈事件供子 Agent 调整；成功发布 flag.submit 事件。
-"""
+提交函数可替换，未决响应按退避间隔重试；结果写入审计并发布反馈事件。"""
 
 from __future__ import annotations
 
@@ -200,7 +196,7 @@ class FlagManager:
     async def _publish_feedback(self, cand: FlagCandidate) -> None:
         if self.bus is None:
             return
-        # 成功：标记题目完成、释放资源；失败：反馈子 Agent 调整提取策略（4.4.6）
+        # 成功：标记题目完成、释放资源；失败：反馈子 Agent 调整提取策略
         topic = "flag.submit" if cand.accepted else "flag.feedback"
         await self.bus.publish(Event(
             topic=topic, data_id=cand.flag_id, source="flag_manager",
