@@ -1,10 +1,4 @@
-"""多模型网关（设计书 4.9）：统一接入、注册表、路由、主备切换、预算治理。
-
-模型接入方式（硬约束 C9）：OpenAI/Anthropic 兼容格式 API，
-配置 base_url + api_key 即启用云端模型；LiteLLM 为统一调用层。
-原则：模型是建议者、规则引擎是裁决者（4.9.5）。
-六协作模式（4.9.3）：路由/主备（gateway）+ 投票/辩论/级联/异构角色（collab）。
-"""
+"""模型网关：端点接入、路由、故障切换、用量统计与协作调用。"""
 
 from spiritscout.gateway.backends import extract_json
 from spiritscout.gateway.collab import (
