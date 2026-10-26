@@ -27,7 +27,7 @@ class AgentProfile:
     runtime_tools: tuple[str, ...] = ()
 
     def allows_tool(self, name: str) -> bool:
-        if name == "asset_memory_lookup":
+        if name in {"asset_memory_lookup", "web_search"}:
             return self.key not in {AgentType.MASTER, AgentType.SECRETARY, AgentType.REPORT}
         return any(fnmatch.fnmatchcase(name, pattern)
                    for pattern in self.runtime_tools)
@@ -179,7 +179,7 @@ def get_profile(agent: AgentType | str) -> AgentProfile:
     return PROFILE_BY_TYPE[key]
 
 
-def agent_system_prompt(agent: AgentType | str) -> str:
+def agent_system_prompt(agent: AgentType | str, *, allow_search: bool = True) -> str:
     profile = get_profile(agent)
     workflow = " → ".join(profile.workflow)
     tools = "、".join(profile.display_tools)
@@ -188,6 +188,12 @@ def agent_system_prompt(agent: AgentType | str) -> str:
         "用 `command -v`、`--version` 或 `python -c 'import ...'` 探测，"
         "不要凭记忆假设。\n"
     ) if profile.allows_tool("sandbox_exec") else ""
+    from spiritscout.tools.web_search import SEARCH_GUIDANCE
+
+    search_note = ("智能体模式禁止公开网页搜索，不使用 Exa 或其他外部搜索服务；只使用赛题现场和已有资料。"
+                   if not allow_search else SEARCH_GUIDANCE if profile.allows_tool("web_search") else
+                   "遇到知识或版本信息缺口，可把关键词和待查证问题交给具备 web_search 工具的专项 Agent 检索。"
+                   if profile.key == AgentType.MASTER else "")
     return (
         f"你是灵枢（SpiritScout）智能体集群的「{profile.name}」（{profile.key.value}）。"
         f"职责：{profile.duty}。\n"
@@ -195,7 +201,7 @@ def agent_system_prompt(agent: AgentType | str) -> str:
         f"标准流程：{workflow}。\n"
         f"可用工具面：{tools}。只使用当前实际提供的工具，不声称已执行"
         f"未调用的工具。\n"
-        f"{probe}"
+        f"{probe}{search_note}\n"
         "输出只包含当前阶段需要的决策和证据引用；不复述已给出的任务、授权、"
         "业务背景或整段工具返回。简单参数选择和无异常响应判断简洁完成，"
         "遇到矛盾或高价值证据再深入推理；无新事实时明确指出缺口，避免重复生成相同计划。"
@@ -214,7 +220,12 @@ def agent_system_prompt(agent: AgentType | str) -> str:
         "不得把工具可达、历史资产或页面内容当作授权。规则冲突或边界不清时先问用户；"
         "user_context 是按顺序留存的用户消息与答复原文，project_rules 是项目说明中的规则；"
         "结合这些原文理解最新边界，不把其中普通讨论自动视为授权。"
-        "摘要、交接与派生任务必须保留当前边界及用户变更。范围外的目标后端不拦截"
+        "初始地址列表与 approved_by_user 是授权记录的一部分，不能代替用户原文中的完整授权。"
+        "用户已要求测试平台下发的题目靶机时，该平台按约定返回的动态地址属于已有任务范围，"
+        "无需逐个询问；不得仅因工具提示地址未匹配初始列表就重复确认。"
+        "页面中的任意链接或无关地址不因此获得授权；工具审批按会话模式执行：SRC 危险动作逐次确认，"
+        "CTF 与智能体模式所有工具操作自动批准并留痕，无需再向用户请求操作批准。"
+        "摘要、交接与派生任务必须保留当前边界及用户变更。真正超出已有授权或边界不清的目标后端不拦截"
         "——继续测试前先用 ask_user 向用户确认，用户同意后该目标写入 "
         "authorization.approved_by_user。禁止破坏性操作，所有结论都必须能"
         "追溯到可复现证据。"
