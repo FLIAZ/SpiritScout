@@ -1224,6 +1224,7 @@ class CTFBaseAgent(SubAgent):
                 # 输出上限由网关按模型配置处理，避免截断思考或工具参数。
                 timeout_seconds=_SOLVER_TIMEOUT,
                 tools=self.tool_schemas, tool_choice="auto",
+                preserve_tool_order=bool(state.get("shared_prefix", False)),
                 preserve_context=True,
                 on_delta=emitter,
                 reasoning_effort=self.task_effort(task))
@@ -2258,7 +2259,8 @@ class CTFBaseAgent(SubAgent):
             self.agent_type.value, task_id=task.task_id)
             if (record.get("feedback", {}).get(key) or {}).get("status") != "completed"]
 
-    def _solver_system_prompt(self) -> str:
+    def _solver_system_prompt(self, *, shared_prefix: bool = False,
+                              correct_artifact_path: bool = False) -> str:
         from spiritscout.agents.profiles import agent_system_prompt
 
         prompt = (
@@ -2314,6 +2316,15 @@ class CTFBaseAgent(SubAgent):
             "多个入口、批量看响应），不要拆成多轮一次做一件——每多一轮就多付"
             "一次完整的思考时间。"
         )
+        if shared_prefix:
+            from spiritscout.agents.profiles import agent_prompt_parts
+
+            common, role = agent_prompt_parts(self.agent_type, allow_search=search_allowed(self.ctx))
+            # 通用工作契约和基础工具可跨专项复用；角色职责原文完整保留在末尾。
+            original = role + common
+            prompt = common + prompt[len(original):] + "\n" + role.rstrip("\n")
+        if shared_prefix or correct_artifact_path:
+            prompt = prompt.replace("工作目录的 ../artifacts/", "world_state.environment.artifacts 指定的目录")
         if getattr(self.ctx, "mode", None) == RunMode.COMPETITION:
             from spiritscout.competition import competition_solver_prompt
 
@@ -2423,8 +2434,22 @@ class CTFBaseAgent(SubAgent):
         body = "\n\n".join(parts)
         fixed = len(world_part) + len(rules_part) + len(task_rules_part) + len(task_part) + 8
         body_budget = max(4000, 24000 - fixed)
+        config = getattr(getattr(self.ctx, "gateway", None), "config", None)
+        shared_prefix = bool(getattr(config, "shared_ctf_prefix", False))
+        correct_path = config is not None
+        ref = task.payload.get("continue_from")
+        journal = getattr(self.ctx, "journal", None)
+        if isinstance(ref, dict) and journal is not None:
+            saved = journal.latest_checkpoint("ctf_conversation", f"{ref.get('task_id')}:{ref.get('route_id')}")
+            if isinstance(saved, dict) and isinstance(saved.get("state"), dict):
+                shared_prefix = bool(saved["state"].get("shared_prefix", False))
+                correct_path = bool(saved["state"].get("artifact_path_v2", False))
+        state["shared_prefix"] = shared_prefix
+        state["artifact_path_v2"] = correct_path
         state["messages"] = [
-            {"role": "system", "content": self._solver_system_prompt()},
+            {"role": "system", "content": (self._solver_system_prompt(shared_prefix=shared_prefix,
+                                              correct_artifact_path=correct_path)
+                                           if shared_prefix or correct_path else self._solver_system_prompt())},
             {"role": "user", "content": "\n\n".join(
                 part for part in (world_part, body[:body_budget], task_rules_part, rules_part,
                                   task_part) if part)},
