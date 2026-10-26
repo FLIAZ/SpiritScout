@@ -11,7 +11,7 @@ import unittest
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 from spiritscout.config.settings import (
     McpServerConfig,
@@ -32,6 +32,21 @@ from spiritscout.tools.registry import AgentToolView
 
 
 class ChromeEndpointTests(unittest.TestCase):
+    def test_headless_command_is_isolated_and_does_not_attach_to_cdp(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cli = root / "cli.js"
+            cli.touch()
+            env = {"SPIRITSCOUT_CHROME_MCP_CLI": str(cli), "SPIRITSCOUT_CHROME_MODE": "headless",
+                   "SPIRITSCOUT_CHROME_EXECUTABLE": "/installed/chromium"}
+            with patch.object(Path, "cwd", return_value=root), patch("shutil.which", return_value="/bin/node"):
+                argv = command("http://unavailable:9223", env)
+            self.assertIn("--headless", argv)
+            self.assertIn("--isolated", argv)
+            self.assertEqual(argv[argv.index("--executable-path") + 1], "/installed/chromium")
+            self.assertNotIn("--cdp-endpoint", argv)
+            self.assertNotIn("--user-data-dir", argv)
+
     def test_project_adapter_uses_running_venv_without_path_activation(self) -> None:
         with patch.dict(os.environ, {"SPIRITSCOUT_CHROME_CDP_URL": "http://127.0.0.1:9223",
                                     "SPIRITSCOUT_CHROME_MCP_CLI": "/installed/cli.js"}):
@@ -97,6 +112,30 @@ class ChromeEndpointTests(unittest.TestCase):
 
 
 class ChromeRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_competition_selects_headless_without_shared_login_guidance(self) -> None:
+        client = SimpleNamespace(start=AsyncMock(return_value=[
+            {"name": "browser_navigate", "inputSchema": {"type": "object", "properties": {}}}]),
+            close=AsyncMock(), call=AsyncMock(return_value={"is_error": False, "text": "tabs ready"}))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cfg = SystemConfig(workspace=WorkspaceConfig(root=temp),
+                audit_log_path=str(root / "audit.jsonl"), mcp_servers=[McpServerConfig(
+                    name="chrome", command="python", args=["-m", "spiritscout.tools.chrome_mcp"])])
+            cfg.blackboard.sqlite_path = str(root / "bb.db")
+            cfg.knowledge.sqlite_path = str(root / "kb.db")
+            for mode in (RunMode.CTF, RunMode.COMPETITION):
+                with patch("spiritscout.tools.mcp_client.build_client", return_value=client) as build:
+                    infra = await _build_infra(cfg, [ModelEntry(model="mock", provider="mock")],
+                        Authorization(auth_id="headless-test", mode=mode, human_confirmed=True,
+                                      scope=Scope(allowed_urls=["http://127.0.0.1"])))
+                try:
+                    self.assertEqual(build.call_args.args[0].env["SPIRITSCOUT_CHROME_MODE"], "headless")
+                    description = infra.mcp_tools["mcp__chrome__browser_navigate"]["schema"]["description"]
+                    self.assertIn("会话独立的无头浏览器", description)
+                    self.assertNotIn("用户可见的现有浏览器", description)
+                finally:
+                    await infra.close()
+
     async def test_catalog_reaches_business_and_ctf_with_human_handoff_guidance(self) -> None:
         tools = [{"name": name, "inputSchema": {"type": "object", "properties": {}}}
                  for name in ("browser_navigate", "browser_cookie_list")]
@@ -110,11 +149,12 @@ class ChromeRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     default_risk="readonly", risk_by_action=True, allowed_agents=["business_context", "ctf_web"])])
             cfg.blackboard.sqlite_path = str(root / "bb.db")
             cfg.knowledge.sqlite_path = str(root / "kb.db")
-            with patch("spiritscout.tools.mcp_client.build_client", return_value=client):
+            with patch("spiritscout.tools.mcp_client.build_client", return_value=client) as build:
                 infra = await _build_infra(cfg, [ModelEntry(model="mock", provider="mock")],
                     Authorization(auth_id="chrome-test", mode=RunMode.SRC, human_confirmed=True,
                                   scope=Scope(allowed_urls=["http://127.0.0.1"])))
             try:
+                self.assertEqual(build.call_args.args[0].env["SPIRITSCOUT_CHROME_MODE"], "cdp")
                 name = "mcp__chrome__browser_cookie_list"
                 for role in ("business_context", "ctf_web"):
                     self.assertTrue(AgentToolView(infra.tools, role).allows(name))
@@ -126,10 +166,82 @@ class ChromeRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("重新读取", description)
                 response = await infra.tools.call(name, {"_safety_action": "analysis"}, **infra.builtin_ctx)
                 self.assertTrue(response.ok)
-                client.call.assert_awaited_once_with("browser_cookie_list", {}, timeout=180.0)
+                self.assertEqual(client.call.await_args_list, [
+                    call("browser_tabs", {"action": "list"}, timeout=5.0),
+                    call("browser_cookie_list", {}, timeout=180.0)])
             finally:
                 await infra.close()
             client.close.assert_awaited_once()
+
+    async def test_handshake_without_browser_connection_is_not_registered_as_ready(self) -> None:
+        client = SimpleNamespace(start=AsyncMock(return_value=[{"name": "browser_navigate"}]),
+            close=AsyncMock(), call=AsyncMock(return_value={"is_error": True,
+                "text": "async initializeServer: connect ECONNREFUSED 127.0.0.1:9223"}))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cfg = SystemConfig(workspace=WorkspaceConfig(root=temp),
+                audit_log_path=str(root / "audit.jsonl"), mcp_servers=[McpServerConfig(
+                    name="chrome", command="python", args=["-m", "spiritscout.tools.chrome_mcp"])])
+            cfg.blackboard.sqlite_path = str(root / "bb.db")
+            cfg.knowledge.sqlite_path = str(root / "kb.db")
+            with patch("spiritscout.tools.mcp_client.build_client", return_value=client):
+                infra = await _build_infra(cfg, [ModelEntry(model="mock", provider="mock")],
+                    Authorization(auth_id="chrome-unavailable", mode=RunMode.SRC, human_confirmed=True,
+                                  scope=Scope(allowed_urls=["http://127.0.0.1"])))
+            try:
+                self.assertNotIn("mcp__chrome__browser_navigate", infra.mcp_tools)
+                records = [json.loads(line) for line in (root / "audit.jsonl").read_text().splitlines()]
+                failed = [r for r in records if r["detail"].get("action") == "mcp_server_failed"]
+                self.assertEqual(len(failed), 1)
+                self.assertIn("9223", failed[0]["detail"]["error"])
+            finally:
+                await infra.close()
+
+
+@unittest.skipUnless(os.environ.get("SPIRITSCOUT_TEST_HEADLESS_MCP") == "1",
+                     "需要本机 MCP CLI 与浏览器，可显式开启真实无头链路测试")
+class ChromeManagedHeadlessLiveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ctf_and_competition_runtime_navigate_without_cdp(self) -> None:
+        async def handle(reader, writer):
+            try:
+                await reader.readuntil(b"\r\n\r\n")
+                body = b"<!doctype html><title>SpiritScout isolated browser</title><h1>Local fixture</h1>"
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n"
+                             + f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        target = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+        try:
+            for mode in (RunMode.CTF, RunMode.COMPETITION):
+                with tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp)
+                    cfg = SystemConfig(workspace=WorkspaceConfig(root=temp),
+                        audit_log_path=str(root / "audit.jsonl"), mcp_servers=[McpServerConfig(
+                            name="chrome", command="python", args=["-m", "spiritscout.tools.chrome_mcp"],
+                            risk_by_action=True,
+                            env={"SPIRITSCOUT_CHROME_CDP_URL": "http://127.0.0.1:1"})])
+                    cfg.blackboard.sqlite_path = str(root / "bb.db")
+                    cfg.knowledge.sqlite_path = str(root / "kb.db")
+                    infra = await _build_infra(cfg, [ModelEntry(model="mock", provider="mock")],
+                        Authorization(auth_id="headless-live", mode=mode, human_confirmed=True,
+                                      scope=Scope(allowed_urls=[target])))
+                    try:
+                        await asyncio.gather(*infra.mcp_startup_tasks)
+                        name = "mcp__chrome__browser_navigate"
+                        self.assertIn(name, infra.mcp_tools, (root / "audit.jsonl").read_text())
+                        result = await infra.tools.call(name, {"url": target, "_safety_action": "analysis"},
+                                                        **infra.builtin_ctx)
+                        self.assertTrue(result.ok, result.error)
+                        self.assertIn("SpiritScout isolated browser", result.stdout)
+                    finally:
+                        await infra.close()
+        finally:
+            server.close()
+            await server.wait_closed()
 
 
 _CDP = os.environ.get("SPIRITSCOUT_TEST_CHROME_CDP_URL")
