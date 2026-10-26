@@ -60,6 +60,58 @@ def read_audit_page(path: Path, *, before: int | None = None,
                 "cursor": offset, "has_more": older > 0}
 
 
+def read_activity_page(path: Path, *, before: int | None = None,
+                       limit: int = 160) -> dict[str, Any]:
+    """按完整活动计页，流式碎片不消耗工具记录的展示名额，游标仍指原始字节。"""
+    items: list[dict[str, Any]] = []
+    cursor = before
+    newest = 0
+    older = 0
+    has_more = False
+    count = 0
+    while count < limit:
+        page = read_audit_page(path, before=cursor, limit=limit)
+        if not items:
+            newest = page["cursor"]
+        batch = page["items"]
+        items = batch + items
+        count += sum(item["event"].get("type") != "agent.delta" for item in batch)
+        older, has_more = page["older_cursor"], page["has_more"]
+        if not has_more or not batch:
+            break
+        cursor = older
+    # 以第 limit 个完整活动的起点切页，前面的原始片段留给上一页。
+    remaining = limit
+    start = 0
+    for index in range(len(items) - 1, -1, -1):
+        if items[index]["event"].get("type") != "agent.delta":
+            remaining -= 1
+        if remaining == 0:
+            start = index
+            break
+    if start:
+        older, has_more = items[start - 1]["id"], True
+        items = items[start:]
+    merged: list[dict[str, Any]] = []
+    for item in items:
+        event = item["event"]
+        detail = event.get("detail") or {}
+        previous = merged[-1]["event"] if merged else {}
+        prev_detail = previous.get("detail") or {}
+        if (event.get("type") == previous.get("type") == "agent.delta"
+                and event.get("actor") == previous.get("actor")
+                and detail.get("kind") in {"reasoning", "text"}
+                and all(detail.get(key) == prev_detail.get(key)
+                        for key in ("kind", "call_id", "route", "turn"))):
+            merged[-1] = {"id": item["id"], "event": {
+                **event, "detail": {**detail,
+                    "text": str(prev_detail.get("text") or "") + str(detail.get("text") or "")}}}
+        else:
+            merged.append(item)
+    return {"items": merged, "older_cursor": older, "cursor": newest,
+            "has_more": has_more, "activity_count": min(count, limit)}
+
+
 def _frame(event_id: int, line: str) -> str:
     # 历史日志可能含旧版本写下的原始参数；读取时也不能直接转发。
     try:
