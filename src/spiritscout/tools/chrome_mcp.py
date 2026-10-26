@@ -1,4 +1,4 @@
-"""将现有 chrome-mcp-kit 的 CDP 链路接入灵枢，不启动或重配其他 Agent。"""
+"""浏览器 MCP：SRC 连接现有 CDP，自动解题使用独立无头浏览器。"""
 
 from __future__ import annotations
 
@@ -70,14 +70,30 @@ def command(endpoint: str, env: dict[str, str]) -> list[str]:
         Path.cwd() / ".tools" / "chrome-mcp" / "output")
     output.mkdir(parents=True, exist_ok=True)
     env.setdefault("npm_config_cache", str(Path.cwd() / ".tools" / "chrome-mcp" / "npm-cache"))
-    return [*prefix, "--cdp-endpoint", endpoint, "--caps", "storage",
+    mode = env.get("SPIRITSCOUT_CHROME_MODE", "cdp")
+    if mode == "headless":
+        # 使用本机已安装浏览器；配置目录由 MCP 隔离，不读取用户 Chrome 登录态。
+        executable = env.get("SPIRITSCOUT_CHROME_EXECUTABLE", "") or next(
+            (found for name in ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable")
+             if (found := shutil.which(name))), "")
+        connection = ["--headless", "--isolated"]
+        if executable:
+            connection += ["--executable-path", executable]
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            connection.append("--no-sandbox")
+    elif mode == "cdp":
+        connection = ["--cdp-endpoint", endpoint]
+    else:
+        raise ValueError("SPIRITSCOUT_CHROME_MODE 必须是 cdp 或 headless")
+    return [*prefix, *connection, "--caps", "storage",
             "--snapshot-boxes", "--output-dir", str(output)]
 
 
 def main() -> int:
     try:
         env = dict(os.environ)
-        endpoint = cdp_endpoint(env.get("SPIRITSCOUT_CHROME_CDP_URL", ""))
+        endpoint = ("" if env.get("SPIRITSCOUT_CHROME_MODE") == "headless" else
+                    cdp_endpoint(env.get("SPIRITSCOUT_CHROME_CDP_URL", "")))
         argv = command(endpoint, env)
         # stdout 只承载 MCP 协议；替换进程后由原有 MCP 生命周期负责回收连接。
         os.execvpe(argv[0], argv, env)
