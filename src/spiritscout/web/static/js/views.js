@@ -987,15 +987,30 @@ function renderFlags() {
 
 /* ---- 解题轨迹：按真实发生顺序还原成一条可读时间线 ---- */
 let traceStick = true;
+let traceRenderTarget = null;
 const TRACE_AGENT_SLOTS = new Map();
 const TRACE_TURNS = new Map();
-function traceReset() {
+function traceBeginRender() {
+  const live = $("#trace-box"), stage = document.createElement("div");
+  stage.className = "trace trace-staging";
+  stage.setAttribute("aria-hidden", "true");
+  stage.style.width = `${live.getBoundingClientRect().width}px`;
+  stage.style.height = `${live.clientHeight}px`;
+  live.parentNode.append(stage);
+  traceRenderTarget = stage;
+  return stage;
+}
+function traceEndRender(stage, commit) {
+  if (traceRenderTarget === stage) traceRenderTarget = null;
+  if (commit) $("#trace-box").replaceChildren(...stage.childNodes);
+  stage.remove();
+}
+function traceReset({preservePanels = false} = {}) {
   if (traceScrollFrame !== null) cancelAnimationFrame(traceScrollFrame);
   traceScrollFrame = null; traceForceScroll = false;
-  SessionObserver.reset();
-  AgentWorkbench.reset();
+  if (!preservePanels) { SessionObserver.reset(); AgentWorkbench.reset(); }
   TaskTrace.reset();
-  $("#trace-box").innerHTML = '<div class="empty-note">等待任务开始</div>';
+  (traceRenderTarget || $("#trace-box")).innerHTML = '<div class="empty-note">等待任务开始</div>';
   TRACE_AGENT_SLOTS.clear();
   TRACE_TURNS.clear();
   S.think.clear();
@@ -1021,7 +1036,7 @@ function traceRow(e, body, cls = "") {
     <time class="t">${esc(traceClock(e.ts))}</time><div class="b">${body}</div></div>`;
 }
 function traceAppend(e, body, cls = "") {
-  const box = $("#trace-box");
+  const box = traceRenderTarget || $("#trace-box");
   box.querySelector(".empty-note")?.remove();
   box.insertAdjacentHTML("beforeend", traceRow(e, body, cls));
   traceScroll();
@@ -1123,13 +1138,12 @@ function traceToolsStrip(turn) {
   flow.append(strip);   // 始终钉在回合流末尾，后续动作卡插在其前
   return strip;
 }
-function tracePush(e) {
-  const box = $("#trace-box");
+function tracePush(e, {observe = true} = {}) {
+  const box = traceRenderTarget || $("#trace-box");
   if (!box) return;
   const d = (typeof e.detail === "object" && e.detail) || {};
   const actor = String(e.actor || "");
-  SessionObserver.push(e);
-  AgentWorkbench.push(e);
+  if (observe) { SessionObserver.push(e); AgentWorkbench.push(e); }
   const sideSession=S.state?.session?.side_session || S.sessions?.find(s=>s.session_id===S.cur)?.side_session;
   if(sideSession && !["user.message","user.attachment","agent.reply","agent.reply_failed","engagement.paused","engagement.resumed","system.lifecycle"].includes(e.type)) return;
   if (typeof TaskTrace !== "undefined" && !sideSession && TaskTrace.push(e)) return;
@@ -1418,14 +1432,15 @@ function tracePush(e) {
 }
 const traceBox = $("#trace-box");
 traceBox.addEventListener("scroll", () => {
+  if (SessionHistory.isRendering?.()) return;
   const gap = traceBox.scrollHeight - traceBox.scrollTop - traceBox.clientHeight;
   traceStick = gap < 24;
   $("#trace-jump").hidden = traceStick || traceBox.scrollHeight <= traceBox.clientHeight + 2;
 }, {passive: true});
-$("#trace-jump").onclick = () => traceScroll(true);
-function renderAuditEvent(e) {
-  tracePush(e);
-  if (e.type !== "agent.delta") {
+$("#trace-jump").onclick = () => SessionHistory.isPast() ? SessionHistory.latest() : traceScroll(true);
+function renderAuditEvent(e, {observe = true} = {}) {
+  tracePush(e, {observe});
+  if (observe && e.type !== "agent.delta") {
     const box = $("#events");
     box.insertAdjacentHTML("afterbegin", evLine(e));
     while (box.children.length > 250) box.lastChild.remove();
@@ -1436,7 +1451,7 @@ function startStreams(rebuild = true) {
   if (!S.cur) return;
   if (rebuild) { S.evSeen = 0; SessionHistory.open(); return; }
   S.esTick = Date.now();
-  // 分页与 SSE 共用字节游标，重连直接 seek，不从文件头重扫。
+  // 滚动历史与 SSE 共用字节游标，重连直接 seek，不从文件头重扫。
   const sessionId = S.cur;
   const es = new EventSource(`/api/sessions/${sessionId}/events`
     + `?cursor=bytes&offset=${S.evSeen || 0}`);
