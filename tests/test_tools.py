@@ -131,7 +131,10 @@ class ToolBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.parsed["status_code"], 200)
         self.assertTrue(result.parsed["redirect_chain"])
-        self.assertIn("授权范围之外", result.parsed["scope_note"])
+        self.assertIn("未匹配初始范围列表", result.parsed["scope_note"])
+        self.assertIn("不代表该目标未经授权", result.parsed["scope_note"])
+        self.assertIn("无需重复确认", result.parsed["scope_note"])
+        self.assertNotIn("继续测试该目标前先用", result.parsed["scope_note"])
 
     async def test_http_body_gets_default_content_type(self) -> None:
         """表单串/JSON 原文自动补 Content-Type：服务端按表单解析能读到字段。
