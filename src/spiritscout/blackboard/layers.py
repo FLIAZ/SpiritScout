@@ -1,7 +1,4 @@
-"""黑板 8 层定义与写权限分级（4.8.1 / 4.8.3）。
-
-防止越权覆盖：每类子 Agent 只允许写入与其职责匹配的黑板层。
-"""
+"""黑板层定义与角色写权限。"""
 
 from __future__ import annotations
 
@@ -54,7 +51,7 @@ LAYER_WRITE_PERMISSIONS: dict[AgentType, set[BlackboardLayer]] = {
                           BlackboardLayer.TASK_STATE},
     AgentType.CTF_MISC: {BlackboardLayer.VULN, BlackboardLayer.TOPOLOGY,
                           BlackboardLayer.TASK_STATE},
-    AgentType.REPORT: set(),  # 报告 Agent 只读（4.6）
+    AgentType.REPORT: set(),  # 报告 Agent 只读
 }
 
 
