@@ -1053,10 +1053,12 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
   .mission-settings select { width: 100%; }
 }
 
-/* 历史窗口独立翻页，打开长会话无需从第一条事件重放。 */
+/* 有界滚动历史，打开长会话无需从第一条事件重放。 */
 .trace-history { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); color: var(--ink-3); font-size: 11px; flex: none; }
 .trace-history > div { display: flex; gap: 6px; }
-.trace > .tl { content-visibility: auto; contain-intrinsic-size: auto 80px; }
+/* 滚动窗口已限制 DOM 数量；使用真实高度量锚点，避免估算高度在入屏时跳动。 */
+.trace { overflow-anchor: none; }
+.trace.trace-staging { position: fixed; left: -100000px; top: 0; visibility: hidden; pointer-events: none; flex: none; }
 
 /* 工作台以任务为中心：实例轨道、当前现场和独立反馈区。 */
 .agent-workbench { max-height: min(65vh, 640px); }
