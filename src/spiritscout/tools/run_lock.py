@@ -2,12 +2,36 @@
 
 from __future__ import annotations
 
-import fcntl
+import errno
 import hashlib
 import os
 from pathlib import Path
 
 from spiritscout.core.exceptions import ConfigurationError
+
+
+def _lock(fd: int) -> None:
+    """锁同一个文件身份；Windows 锁区避开 SQLite 自身的保留锁字节。"""
+    if os.name == "nt":
+        import msvcrt
+
+        # 字节范围锁可以位于 EOF 之后，不写入、不扩大数据库文件。
+        os.lseek(fd, (1 << 63) - 2, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                raise BlockingIOError from exc
+            raise
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _open(path: Path) -> int:
+    return os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+                   | getattr(os, "O_BINARY", 0), 0o600)
 
 
 class ExecutionRunLock:
@@ -27,9 +51,9 @@ class ExecutionRunLock:
         directory = self.workspace.parent / ".execution-locks"
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         name = hashlib.sha256(str(self.workspace).encode()).hexdigest() + ".lock"
-        fd = os.open(directory / name, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
+        fd = _open(directory / name)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _lock(fd)
         except BlockingIOError:
             os.close(fd)
             raise ConfigurationError("该会话工作区已有执行进程，请先停止原运行") from None
@@ -47,7 +71,7 @@ class ExecutionRunLock:
     def acquire_database(self, database: Path) -> None:
         """直接锁数据库 inode，路径别名/硬链接也不能取得第二份执行权。
 
-        flock 与 SQLite 的字节范围锁独立；Web 只读查询不申请执行锁。
+        Unix flock / Windows 保留区锁与 SQLite 自身锁独立；Web 查询不申请执行锁。
         """
         database = database.resolve()
         if not self.owned:
@@ -57,9 +81,9 @@ class ExecutionRunLock:
                 raise ConfigurationError("运行锁不能切换到其他执行数据库")
             return
         database.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(database, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
+        fd = _open(database)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _lock(fd)
         except BlockingIOError:
             os.close(fd)
             raise ConfigurationError("该执行数据库已有运行进程，请先停止原运行") from None

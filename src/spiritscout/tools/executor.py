@@ -10,9 +10,7 @@ from __future__ import annotations
 import abc
 import asyncio
 import contextlib
-import os
 import shlex
-import signal
 import time
 import uuid
 from pathlib import Path
@@ -20,20 +18,13 @@ from typing import Any
 
 from spiritscout.core.audit import AuditLogger, NullAuditLogger
 from spiritscout.core.exceptions import ToolExecutionError
+from spiritscout.platform_support import kill_process_tree, process_options
 from spiritscout.tools.spec import ToolKind, ToolResult, ToolSpec
 
 
 def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
     """杀整个进程组（子进程派生的孙进程一并终止）；单杀兜底。"""
-    try:
-        # start_new_session=True 保证 pgid=pid；父进程退出后仍可清理后代，
-        # 不能再通过已消失的父 PID 查询进程组。
-        os.killpg(proc.pid, signal.SIGKILL)
-        return
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
-    with contextlib.suppress(ProcessLookupError):
-        proc.kill()
+    kill_process_tree(proc)
 
 
 _READ_CHUNK = 65536
@@ -97,7 +88,7 @@ class ToolExecutor(abc.ABC):
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
+                **process_options(),
             )
         except OSError as exc:
             # 启动失败也是工具结果；取消异常不在此吞掉。

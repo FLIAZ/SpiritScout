@@ -19,6 +19,7 @@ venv/
 .spiritscout/
 .playwright-mcp/
 execution.key
+.execution-locks/
 
 # 本地生成的按 Agent 模型指派表（Web 编队页写回，属本机状态）
 configs/agent_models.yaml
