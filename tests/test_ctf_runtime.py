@@ -20,6 +20,20 @@ from spiritscout.ctf.flags import FlagManager, SubmitResult
 from spiritscout.runtime import _write_competition_summary
 
 
+class HTTPAddressResolutionTests(unittest.TestCase):
+    def test_explicit_platform_url_wins_over_simultaneous_relative_path(self) -> None:
+        agent = object.__new__(CTFBaseAgent)
+        task = Task(task_id="test-url", task_type="ctf_solve", target="http://challenge.test:8443",
+                    agent_type=AgentType.CTF_WEB, payload={"challenge": {
+                        "id": "c-09", "url": "http://challenge.test:8443"}})
+        full = "https://platform.test/openapi/v1/challenges/start?unique_code=c-09"
+        resolved = agent._resolve_http(task, {"path": "/openapi/v1/challenges/start", "url": full})
+        self.assertEqual(resolved[0], full)
+        self.assertEqual(agent._resolve_http(task, {"path": "/login"})[0],
+                         "http://challenge.test:8443/login")
+        self.assertIsNone(agent._resolve_http(task, {"path": "/login", "url": "invalid"}))
+
+
 class CompetitionSummaryTests(unittest.TestCase):
     def test_summary_contains_scores_but_no_writeup_sections(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -853,15 +867,17 @@ class FindingDedupKeyTests(unittest.TestCase):
         agent.direction = "web"
         calls: list[dict] = []
         agent.ctx = SimpleNamespace(blackboard=SimpleNamespace(
-            write=Mock(side_effect=lambda layer, rid, data, **kw: calls.append(kw))))
+            write=Mock(side_effect=lambda layer, rid, data, **kw: calls.append({**kw, "data": data}))))
         task = Task(task_id="t1", task_type="ctf_solve", target="http://x",
-                    agent_type=AgentType.CTF_WEB,
+                    agent_type=AgentType.CTF_WEB, parent_dag_node="dag-1",
                     payload={"challenge": {"id": "c1"}})
 
         agent._record_finding(task, "flag", "flag{deadbeef}", url="http://x/f")
 
         expected = f"finding|c1|flag|{zlib.crc32(b'http://x/f'):08x}"
         self.assertEqual(calls[0]["dedup_key"], expected)
+        self.assertEqual(calls[0]["data"]["task_id"], "t1")
+        self.assertEqual(calls[0]["data"]["parent_dag_node"], "dag-1")
 
 
 if __name__ == "__main__":
