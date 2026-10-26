@@ -1,17 +1,6 @@
-"""子 Agent 基座：路线生成 → 并发执行 → 健康度剪枝 → 局部反思 → 结果上报。
+"""子 Agent 基类：生成路线、执行工具、更新进度并上报结果。
 
-路线是**交付目标**而非固定流程：strategy 声明本路线要产出的可核验结果
-（证据 → 结论），步骤只是探测单元与合规通道，怎么走到验证点由执行者
-按现场证据自定；灵枢任务包携带的任务意图（mission/node_title）随每次
-LLM 决策下发，执行者不持有全局提示词。
-
-硬约束 C2 落地：
-- 差异化路线：route_templates 按交付目标绑定探测单元；LLM 只在声明了
-  动作白名单的子 Agent 上增广路线（提议→白名单校验→规则放行）；
-- 路线间经 LocalSharedCache 共享中间结果；
-- BranchHealthManager 每步评估、自动剪枝/合并；
-- 局部反思：每 3 步复盘，连续失败自动调整（毫秒级本地决策，6.4）。
-"""
+路线描述交付目标；模型结合任务和现场信息选择执行步骤。"""
 
 from __future__ import annotations
 
@@ -48,6 +37,7 @@ from spiritscout.gateway.context import decision_messages, shared_context
 from spiritscout.policy.engine import PolicyEngine
 from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
 from spiritscout.tools.registry import AgentToolView, ToolRegistry
+from spiritscout.tools.search_policy import search_allowed
 
 
 @dataclass
@@ -209,8 +199,6 @@ class SubAgent(abc.ABC):
         # 环形共享现场（ctf_shared 等）因此跨 Agent 可见
         self.cache = self.ctx.shared_cache or LocalSharedCache(default_ttl_seconds=3600)
         self.agent_id = new_id(self.agent_type.value.replace("_", "-"))
-        # 灵枢督导注入水位：同一条建议只进一次决策载荷（见 _llm_chat_json）
-        self._steer_seen_ts = 0.0
 
     @staticmethod
     def task_effort(task: Task) -> str:
@@ -234,14 +222,18 @@ class SubAgent(abc.ABC):
         """执行一个任务包：路线生成 → 并发执行 → 汇总上报。"""
         task.status = TaskStatus.RUNNING
         self.ctx.audit.log("task.start", self.agent_id,
-                           {"task_id": task.task_id, "type": task.task_type, "target": task.target})
-        # 开工即开回合：时间线以回合块聚合本 Agent 的步骤动作与结论
-        # （SRC 侧此前只记 task.start/done，执行过程在会话页是黑盒）
+                           {"task_id": task.task_id, "type": task.task_type, "agent_type": self.agent_type.value,
+                            "target": task.target, "title": task.payload.get("node_title", "")})
+        # 发布回合开始事件，供时间线聚合步骤和结论。
         self.ctx.audit.log("agent.turn", self.agent_id, {
-            "turn": 1,
+            "task_id": task.task_id, "turn": 1,
             "angle": str(task.payload.get("node_title")
                          or task.payload.get("tactic") or "")[:200],
         })
+        if getattr(self.ctx, "blackboard", None) is not None:
+            self.ctx.blackboard.write(BlackboardLayer.TASK_STATE, task.task_id,
+                {"task": task.model_dump(mode="json"), "routes": []},
+                agent_type=self.agent_type, updated_by=self.agent_id, dedup_key=f"task|{task.task_id}")
         plans = await self.plan_routes(task)
         routes = [RouteState(route_id=new_id("route"), task_id=task.task_id, name=p.name)
                   for p in plans]
@@ -268,7 +260,7 @@ class SubAgent(abc.ABC):
             for r in routes if not r.conclusion_published)[:2000]
         if conclude:
             self.ctx.audit.log("agent.conclude", self.agent_id,
-                               {"summary": conclude})
+                               {"task_id": task.task_id, "summary": conclude})
         await self._report(task, routes, summary)
         return summary
 
@@ -456,15 +448,14 @@ class SubAgent(abc.ABC):
                 self.ctx.audit.log("route.pruned", self.agent_id,
                                    {"route": route.name, "health": round(route.health, 3)})
                 break
-            # 步骤级实况：动作卡片随执行即时上时间线（开始 → 完成/失败），
-            # 让会话页看得见子 Agent 的实时关键产出而非黑盒等待
+            # 步骤 ID 用于关联开始、结果和执行台账。
             step_id = f"{task.task_id}:{route.name}:{step_index}"
             journal = getattr(self.ctx, "journal", None)
             if journal is not None:
                 journal.checkpoint("route", route.route_id, "before_step", {
                     "task": task.model_dump(mode="json"), "route": route.model_dump(mode="json"),
                     "plan": dataclasses.asdict(plan), "step_index": step_index})
-            self.ctx.audit.log("agent.tool_call", self.agent_id, {"calls": [{
+            self.ctx.audit.log("agent.tool_call", self.agent_id, {"task_id": task.task_id, "route_id": route.route_id, "calls": [{
                 "id": step_id, "name": str(step.get("action", "step")),
                 "arguments": {k: v for k, v in step.items() if k != "action"}}]})
             # 环形避让：同伴已在同一入口做过无产出尝试 → 不再深入（互不等候、
@@ -498,6 +489,7 @@ class SubAgent(abc.ABC):
                         agent_name=self.agent_type.value, action=str(step.get("action", "")),
                         outcome=result.value, note=result.note)
             self.ctx.audit.log("agent.tool_result", self.agent_id, {
+                "task_id": task.task_id, "route_id": route.route_id,
                 "id": step_id, "ok": result.ok,
                 "note": (result.note or "")[:300]})
             self._update_route(route, result, total_steps)
@@ -512,7 +504,7 @@ class SubAgent(abc.ABC):
             # 本地缓存共享（路线间复用）
             for key, value in result.cache_writes.items():
                 self.cache.put(self.route_namespace, key, value)
-            # 局部反思：每 3 步复盘一次（4.3.1）
+            # 局部反思：每 3 步复盘一次
             if route.steps_executed % 3 == 0:
                 self._reflect(route, plan)
         if route.status == TaskStatus.RUNNING:
@@ -617,7 +609,7 @@ class SubAgent(abc.ABC):
     async def _report(
         self, task: Task, routes: list[RouteState], summary: dict[str, Any]
     ) -> None:
-        """上报：任务状态写黑板任务状态层 + 结果事件发布总线（4.3.3）。"""
+        """上报：任务状态写黑板任务状态层 + 结果事件发布总线。"""
         assert self.ctx.audit is not None
         self.ctx.blackboard.write(
             BlackboardLayer.TASK_STATE,
@@ -629,7 +621,9 @@ class SubAgent(abc.ABC):
             dedup_key=f"task|{task.task_id}",
         )
         self.ctx.audit.log(f"task.{task.status.value}", self.agent_id,
-                           {"task_id": task.task_id, "summary": summary})
+                           {"task_id": task.task_id, "summary": summary,
+                            "conclusions": [{"route": r.name, "text": r.notes[-1]}
+                                            for r in routes if r.notes]})
         await self.ctx.bus.publish(Event(
             topic="task.result", data_id=task.task_id, source=self.agent_id,
             payload={"agent_type": self.agent_type.value, "summary": summary},
@@ -669,18 +663,18 @@ class SubAgent(abc.ABC):
             intent = {k: v for k, v in intent.items() if v}
             if intent:
                 user_obj = {**user_obj, "task_intent": intent}
+        if task is not None and task.payload.get("source_context"):
+            user_obj = {**user_obj, "source_context": task.payload["source_context"]}
         world = self._world_state()
         if world:
             user_obj = {**user_obj, "world_state": world}
-        # 灵枢督导：主 Agent 按全局实时进度给出的方向建议（上下文而非指令）。
-        # 一条建议只注入一次（ts 水位）——同一条建议跟着每次决策重复出现
-        # 只是花 Token 的脏上下文；换新建议（ts 更新）才再次注入
-        steering = (self.ctx.ring.steering_for(self.agent_type.value)
-                    if self.ctx.ring is not None else None)
-        if steering and float(steering.get("ts") or 0) > self._steer_seen_ts:
-            user_obj = {**user_obj, "灵枢督导": {
-                "hint": steering["hint"], "rationale": steering.get("rationale", "")}}
-            self._steer_seen_ts = float(steering.get("ts") or 0)
+        # JSON 决策调用无会话记忆：当前指令每次带入，不能由同类型共享实例
+        # 的全局水位把其他任务、路线尚未读到的指令提前消费。
+        steering = (self.ctx.ring.steerings_for(
+            self.agent_type.value, task_id=task.task_id if task else "")
+            if self.ctx.ring is not None else [])
+        if steering:
+            user_obj = {**user_obj, "灵枢当前指令": steering}
         # 后续执行读取最新持久化事实；业务建模本身仍以本次直接观测为准。
         if task is not None and role != "business_analyst" and "business_context" not in user_obj:
             shared = shared_context(getattr(self.ctx, "blackboard", None))
@@ -703,21 +697,57 @@ class SubAgent(abc.ABC):
 
         execution = current_execution_scope.get() or ExecutionScope()
         memory_key = f"{task.task_id if task else 'local'}:{execution.route_id}:{role}"
+        from spiritscout.tools.web_search import SEARCH_SCHEMA
+
+        search_contract = (
+            "\n如果需要先查证公开资料，本轮仅输出 {\"web_search\": {检索参数}}，"
+            "收到 search_observations 后继续原约定 JSON 决策。参数契约："
+            + json.dumps(SEARCH_SCHEMA["function"]["parameters"], ensure_ascii=False)
+        )
+        if not search_allowed(self.ctx):
+            search_contract = ""
+        observations: list[dict[str, Any]] = []
         try:
-            resp = await chat_decision(
-                self.ctx.gateway,
-                decision_messages(self._system_prompt() + f"\nROLE: {role}"
-                                  + ("\n" + _ASK_CHANNEL_NOTE if _allow_ask else ""),
-                                  user_obj, max(budget, 500)),
-                audit=self.ctx.audit, actor=self.agent_id,
-                memory=decision_memory(self, memory_key),
-                task_type="execution", response_format="json",
-                timeout_seconds=timeout_seconds,
-                reasoning_effort=reasoning_effort,
-            )
-            data = extract_json(resp.content)
-            if not isinstance(data, dict):
-                return None
+            while True:
+                pause_gate = getattr(self.ctx, "pause_gate", None)
+                if pause_gate is not None:
+                    await pause_gate.wait()
+                resp = await chat_decision(
+                    self.ctx.gateway,
+                    decision_messages(self._system_prompt() + f"\nROLE: {role}" + search_contract
+                                      + "\n保持原 JSON 决策格式；发现新证据、遇到阻碍或改变方向时，"
+                                      "可增加 progress 字符串，用一到三句向用户说明已确认的情况和下一步验证目标，"
+                                      "无需复述工具原始响应或内部推理。"
+                                      + ("\n" + _ASK_CHANNEL_NOTE if _allow_ask else ""),
+                                      {**user_obj, **({"search_observations": observations} if observations else {})},
+                                      max(budget, 500) + len(json.dumps(observations, ensure_ascii=False))),
+                    audit=self.ctx.audit, actor=self.agent_id,
+                    memory=decision_memory(self, memory_key),
+                    task_type="execution", response_format="json",
+                    timeout_seconds=timeout_seconds,
+                    reasoning_effort=reasoning_effort,
+                )
+                data = extract_json(resp.content)
+                if not isinstance(data, dict):
+                    return None
+                request = data.get("web_search")
+                if not isinstance(request, dict):
+                    break
+                call_id = new_id("search")
+                detail = {"task_id": task.task_id if task else "", "route_id": execution.route_id}
+                self.ctx.audit.log("agent.tool_call", self.agent_id, {**detail,
+                    "calls": [{"id": call_id, "name": "web_search", "arguments": request}]})
+                if search_allowed(self.ctx):
+                    result = await self.ctx.tools.call("web_search", request, **self.ctx.builtin_ctx)
+                else:
+                    from spiritscout.tools.spec import ToolResult
+
+                    result = ToolResult(tool="web_search", ok=False, error="智能体模式禁止公开网页搜索")
+                self.ctx.audit.log("agent.tool_result", self.agent_id, {**detail,
+                    "id": call_id, "name": "web_search", "ok": result.ok,
+                    "result": result.stdout or result.failure_reason(), **result.parsed})
+                observations.append({"query": request.get("query"), "ok": result.ok,
+                                     "result": result.stdout or result.failure_reason()})
             return await self._settle_ask(
                 data, role=role, user_obj=user_obj,
                 max_user_chars=max_user_chars,
@@ -784,7 +814,7 @@ class SubAgent(abc.ABC):
         """稳定 system prompt：授权等运行时事实在 world_state 片段里更新。"""
         from spiritscout.agents.profiles import agent_system_prompt
 
-        prompt = agent_system_prompt(self.agent_type)
+        prompt = agent_system_prompt(self.agent_type, allow_search=search_allowed(self.ctx))
         if getattr(self.ctx, "mode", None) == RunMode.COMPETITION:
             from spiritscout.competition import competition_solver_prompt
 
