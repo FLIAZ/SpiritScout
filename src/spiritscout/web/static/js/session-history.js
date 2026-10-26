@@ -95,7 +95,7 @@ const SessionHistory = (() => {
   }
   async function redraw(session, token, {anchor = null, follow = true, observe = false} = {}) {
     const opened = new Set(), tools = new Set();
-    const toolKey = el => el.dataset.toolKey || el.dataset.id;
+    const toolKey = el => el.dataset.stepKey || el.dataset.toolKey || el.dataset.id;
     const detailKey = (row, el, i) => `${identity(row)}:${toolKey(el.closest?.('.tl-act') || el) || i}:${el.className}`;
     for (const row of box().children) {
       row.querySelectorAll("details").forEach((el, i) => {

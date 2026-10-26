@@ -540,12 +540,13 @@ class MasterCoordination:
             assign_task = asyncio.create_task(self._assign_dispatch_plan(
                 list(zip(round_tasks, (s["node_id"] for s in round_specs)))))
 
-        # 环形督导：派发期间灵枢实时观察各子 Agent 路线进度，
-        # 按全局态势给方向建议（建议经环形台账投递，子 Agent 在 LLM 决策上下文消费）
+        # 普通 CTF 的在途路线由子 Agent 自主推进，完成后统一复盘。
+        # 用户主动指导仍走独立对话通道；其他模式保留实时全局督导。
         watch = None
         watched_ids = [t.task_id for t in round_tasks]
         decisions: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        if ctx.ring is not None and ctx.enable_llm_planning:
+        if (ctx.ring is not None and ctx.enable_llm_planning
+                and (getattr(ctx, "extra", None) or {}).get("run_mode") != "ctf"):
             watch = asyncio.create_task(
                 self._steering_watch(watched_ids, decisions))
         try:

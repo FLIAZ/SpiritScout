@@ -617,6 +617,25 @@ function drawTopo() {
                    depends_on: [] });
     });
   }
+  // 过程投影与调度 DAG 分层：观察/产物是独立节点，随后进入下一步上下文。
+  const process = S.state.topology?.process || {nodes:[],edges:[]};
+  const processMeta = new Map((process.nodes || []).map(n=>[n.id,n]));
+  const processEdges = new Map();
+  const processKinds = {step:"执行步骤",observation:"工具观察",finding:"发现记录",artifact:"输出产物"};
+  for(const p of processMeta.values()) {
+    depthIndex.set(p.id,0);
+    const dependencies=(process.edges || []).filter(e=>e.target === p.id && processMeta.has(e.source));
+    let parent="";
+    if(!dependencies.length) {
+      const candidates=[...routeMeta].filter(([,r])=>r.task_id === p.task_id && r.route_id === p.route_id);
+      if(candidates.length === 1) parent=candidates[0][0];
+    }
+    nodes.push({node_id:p.id,title:p.kind === "step" && p.body ? p.body.replace(/\s+/g," ").slice(0,90) : p.title,
+      tactic:processKinds[p.kind] || "执行记录",status:p.status,
+      depends_on:dependencies.length ? dependencies.map(e=>e.source) : parent ? [parent] : []});
+    for(const e of dependencies) processEdges.set(JSON.stringify([e.source,e.target]),e.kind);
+  }
+  S.topoProcess=processMeta;
   const ids = [...depthIndex.keys()];
   if (!ids.length) {
     box.innerHTML = `<div class="empty-note">等待灵枢规划——任务拓扑将在此实时展开</div>`;
@@ -709,7 +728,7 @@ function drawTopo() {
       <button id="topo-zout" title="缩小">－</button>
       <button id="topo-fit" title="适应窗口">⤢</button>
     </div>
-    <div class="topo-hint">滚轮缩放 · 拖拽平移 · 双击复位 · 点击节点看详情${foldedFindings > 0 ? ` · 黑板 ${findings.length} 条发现（展示最近 ${dispFindings.length} 条）` : ""}</div>
+    <div class="topo-hint">滚轮缩放 · 拖拽平移 · 双击复位 · 点击节点看详情${processMeta.size ? ` · ${processMeta.size} 个过程节点（实线：产出，虚线：进入后续上下文或执行先后）` : ""}${process.has_more ? " · 展示最近过程，更早记录见会话历史" : ""}${foldedFindings > 0 ? ` · 黑板 ${findings.length} 条发现（展示最近 ${dispFindings.length} 条）` : ""}</div>
     <div class="topo-detail" id="topo-detail" hidden>
       <div class="td-head"><b id="td-title"></b>
         <button class="td-close" id="td-close">×</button></div>
@@ -779,7 +798,11 @@ function drawTopo() {
     const deps = preds.get(id) || [];
     if (!deps.length) paths += link(hubX, hubY, xOf.get(id), midY(id), st);
     for (const d of deps) {
-      paths += link(xOf.get(d) + TOPO_GEO.NODE_W, midY(d), xOf.get(id), midY(id), st);
+      const kind=processEdges.get(JSON.stringify([d,id]));
+      paths += link(xOf.get(d) + TOPO_GEO.NODE_W, midY(d), xOf.get(id), midY(id),
+        kind === "context" || kind === "sequence" ? "context-edge" : st,
+        kind === "context" ? "该观察或产物已在后续步骤前产生；进入后续上下文，不代表已验证因果" :
+          kind === "sequence" ? "同一路线的执行先后" : kind === "produces" ? "此步骤产生的观察或产物" : "");
     }
   }
   if (orphans.length) {
@@ -800,7 +823,18 @@ function drawTopo() {
   svg.innerHTML = paths;
 
   // ---- 视图：首次进入自动适应，此后保留用户平移/缩放
-  if (!S.topoView) S.topoView = topoFit(box, stageW, stageH);
+  if (!S.topoView) {
+    S.topoView = topoFit(box, stageW, stageH);
+    if(processMeta.size && S.topoView.s<0.35) {
+      const latest=[...processMeta.keys()].at(-1);
+      S.topoView={s:0.65,tx:box.clientWidth/2-((xOf.get(latest) || 0)+TOPO_GEO.NODE_W/2)*0.65,
+        ty:box.clientHeight/2-midY(latest)*0.65};
+    }
+  } else if(S.topoViewport) {
+    S.topoView.tx+=(box.clientWidth-S.topoViewport.width)/2;
+    S.topoView.ty+=(box.clientHeight-S.topoViewport.height)/2;
+  }
+  S.topoViewport={width:box.clientWidth,height:box.clientHeight};
   topoApplyView(box, S.topoView);
   box.querySelector("#topo-zin").onclick = () => topoZoom(box, 1.25);
   box.querySelector("#topo-zout").onclick = () => topoZoom(box, 0.8);
@@ -894,7 +928,15 @@ function showNodeDetail(nodeId) {
     }
     return h + `</div>`;
   };
-  if (nodeId.startsWith("__route_")) {
+  if (nodeId.startsWith("__process_")) {
+    const p=S.topoProcess?.get(nodeId);
+    if(p) {
+      title=p.title;
+      body=`<div class="td-task"><div class="td-agent">第 ${esc(String(p.turn))} 步 · ${esc(p.route || p.route_id)} · ${esc(p.task_id)}</div>
+        <div class="td-note" style="white-space:pre-wrap">${esc(p.body || "尚无公开进展说明")}</div>
+        <div class="td-empty">工具观察仅记录返回；发现记录由 Agent 提出，均保留审计出处 #${esc(String(p.seq || ""))}。</div></div>`;
+    }
+  } else if (nodeId.startsWith("__route_")) {
     // 路线分支节点：执行现场全量呈现（agent / 状态 / 进度 / 最新笔记）
     const r = (S.topoRouteMeta || new Map()).get(nodeId);
     if (r) {

@@ -1338,6 +1338,7 @@ class CTFBaseAgent(SubAgent):
             self.ctx.audit.log("agent.tool_result", self.agent_id, {
                 "task_id": task.task_id, "route_id": route.route_id,
                 "route": route.name, "challenge": self.challenge_id(task),
+                "turn": turn,
                 "id": call.get("id"), "name": call.get("name"), "ok": out.ok,
                 "note": out.note[:200], "result": (out.text or "")[:1200], **out.metadata})
         state["empty_streak"] = (empty_streak + 1) if outcomes and all(
@@ -1400,6 +1401,8 @@ class CTFBaseAgent(SubAgent):
                 return _ToolOutcome(ok=False, text="note 需要 text 参数。")
             self._record_note(task, text, route=route.name)
             self.ctx.audit.log("agent.note", self.agent_id, {
+                "task_id": task.task_id, "route_id": route.route_id,
+                "turn": state.get("turn", 0),
                 "route": route.name, "challenge": self.challenge_id(task),
                 "text": text[:400]})
             return _ToolOutcome(ok=True, value=0.05, note=f"共享笔记：{text[:60]}",
@@ -1538,6 +1541,10 @@ class CTFBaseAgent(SubAgent):
                     final_text=receipt if complete else "",
                     text=(receipt if complete else
                           "该 Flag 已由平台确认过；若还有未完成 Flag，继续本题。"))
+            if (self.flag_manager.submit_fn is None and existing is not None
+                    and not existing.submitted and existing.accepted is None):
+                return _ToolOutcome(ok=True, value=0.0, note="Flag 已登记，等待人工提交",
+                                    text=self._manual_flag_receipt(value))
             return _ToolOutcome(ok=True, value=0.0, note=f"Flag 重复: {value[:40]}",
                                 text="该 Flag 值此前已登记过，无需重复提交。")
         self._record_flag(task, cand.value,
@@ -1554,6 +1561,10 @@ class CTFBaseAgent(SubAgent):
             "route": route.name, "challenge": self.challenge_id(task),
             "flag_id": cand.flag_id, "verdict": str(result.accepted),
             "note": str(args.get("note", ""))[:200]})
+        if self.flag_manager.submit_fn is None:
+            return _ToolOutcome(
+                ok=True, value=0.6, findings=[{"type": "flag", "value": cand.value}],
+                note="Flag 已登记，等待人工提交", text=self._manual_flag_receipt(cand.value))
         text = (f"已登记并提交：{cand.value}\n平台应答：{verdict}"
                 + (f"（{result.submit_response[:200]}）" if result.submit_response else ""))
         if (result.accepted is True
@@ -1573,6 +1584,15 @@ class CTFBaseAgent(SubAgent):
                 0.2 if result.accepted is False else 0.6),
             findings=[{"type": "flag", "value": cand.value}],
             note=f"Flag 提交 {cand.value} → {verdict}", text=text)
+
+    @staticmethod
+    def _manual_flag_receipt(value: str) -> str:
+        """区分没有判定接口与接口未决；仍由模型确认现有证据能否收尾。"""
+        return (f"已登记：{value}\n本题未配置提交接口，等待用户人工提交；"
+                "未发送平台请求，也没有平台正确/错误判定。"
+                "无需重复提交来等待不存在的回执。若现有来源与验证证据已充分，"
+                "直接给出 Flag 原文、来源与依据并收尾，无需为无回执重复取证；"
+                "若有具体反证、尚缺证据或任务另有目标，由你判断是否继续。")
 
     def _finish_accepted(self, task: Task, route, state: dict[str, Any],
                          receipt: str) -> None:
@@ -2096,7 +2116,7 @@ class CTFBaseAgent(SubAgent):
             ok=True, value=0.05, empty=not (res.stdout or "").strip(),
             findings=[],
             note=f"{desc} → {status}；{evidence}",
-            text="\n".join(lines))
+            text="\n".join(lines), metadata={"output_file": out_file} if out_file else {})
 
     async def _tool_analyze_text(self, task: Task) -> _ToolOutcome:
         """题面文本取证：全部载荷字符串的编码串链式解码 + 零宽字符统计 + Flag 提取。"""

@@ -27,7 +27,8 @@ const TaskTrace = (() => {
     let task = store.tasks.get(key);
     if (!task) {
       task = {key, id:d.task_id || "", actor:e.actor, title:"", status:"running", progress:"正在准备", tools:new Map(),
-        texts:new Map(), conclusions:new Map(), summary:"", updated:e.ts, event:e, version:0};
+        texts:new Map(), steps:new Map(), activeSteps:new Map(), routeAliases:new Map(),
+        conclusions:new Map(), summary:"", updated:e.ts, event:e, version:0};
       store.tasks.set(key,task);
     }
     task.updated=e.ts; task.version++;
@@ -39,23 +40,43 @@ const TaskTrace = (() => {
       store.routes.get(routeKey).add(key);
     }
     if(d.call_id) store.calls.set(keyOf(e.actor,d.call_id),key);
-    const route=d.route_id || d.route || "";
+    if(d.route_id && d.route) {
+      if(!task.routeAliases.has(d.route)) task.routeAliases.set(d.route,new Set());
+      task.routeAliases.get(d.route).add(d.route_id);
+    }
+    const aliases=task.routeAliases.get(d.route);
+    const route=d.route_id || (aliases?.size === 1 ? [...aliases][0] : d.route) || "";
+    let step=route ? task.activeSteps.get(route) : null;
+    if(route && Number.isInteger(d.turn) && d.turn>0) {
+      const sk=JSON.stringify([route,d.turn]);
+      if(!task.steps.has(sk)) {
+        if(step && d.turn>step.turn) step.status="done";
+        task.steps.set(sk,{key:sk,route,turn:d.turn,texts:new Map(),status:"running"});
+      }
+      step=task.steps.get(sk);
+      if(!task.activeSteps.has(route) || d.turn>=task.activeSteps.get(route).turn) task.activeSteps.set(route,step);
+    }
     const stem=JSON.stringify([route,d.call_id || d.turn || ""]);
     if (e.type === "task.start") { task.status="running";task.progress="开始执行"; }
     if (e.type === "agent.turn") task.progress=`正在推进${d.turn ? ` · 第 ${d.turn} 步` : ""}`;
     if (e.type === "model.started") task.progress="正在分析下一步";
     if (e.type === "agent.delta") {
-      if (d.kind === "reset") task.texts.delete(stem);
+      if (d.kind === "reset") {task.texts.delete(stem);step?.texts.delete(stem);}
       else if (d.kind !== "reasoning" && d.kind !== "tool_call" && d.text) {
         const text=(task.texts.get(stem) || "")+d.text;
         task.texts.set(stem,text.slice(-24000)); task.progress="正在更新进展";
+        if(step) step.texts.set(stem,text.slice(-24000));
       }
     }
-    if (e.type === "agent.note") {task.progress="已更新进展";task.texts.set(`note:${e.seq || e.ts}`,textOf(d.text));}
+    if (e.type === "agent.note") {
+      task.progress="已更新进展";task.texts.set(`note:${e.seq || e.ts}`,textOf(d.text));
+      if(step) step.texts.set(`note:${e.seq || e.ts}`,textOf(d.text));
+    }
     if (e.type === "agent.tool_call") {
       for (const c of d.calls || []) {
         const toolKey=JSON.stringify([route,c.id || `${e.seq || e.ts}:${task.tools.size}`]);
-        task.tools.set(toolKey,{key:toolKey,call:c,route,id:c.id,name:c.name,status:"running",result:"",note:"",version:1});
+        task.tools.set(toolKey,{key:toolKey,call:c,route,id:c.id,name:c.name,status:"running",result:"",note:"",version:1,
+          stepKey:c.name === "investigate" ? "" : step?.key || ""});
       }
       task.progress=(d.calls || []).length ? `正在调用 ${d.calls.map(c => SessionObserver.toolName(c.name)).join("、")}` : task.progress;
     }
@@ -67,7 +88,8 @@ const TaskTrace = (() => {
       }
       if (!tool) {
         const toolKey=JSON.stringify([route,d.id || `result:${e.seq || e.ts}`]);
-        tool={key:toolKey,call:{name:d.name},route,id:d.id,name:d.name || "工具",version:0,missingCall:true};
+        tool={key:toolKey,call:{name:d.name},route,id:d.id,name:d.name || "工具",version:0,missingCall:true,
+          stepKey:d.name === "investigate" ? "" : step?.key || ""};
         task.tools.set(toolKey,tool);
       }
       tool.status=d.ok === false ? "failed" : "done";tool.version++;
@@ -84,6 +106,7 @@ const TaskTrace = (() => {
     if (e.type === "model.cancelled") task.progress="本次模型调用已取消";
     if (/^task\.(done|failed|cancelled|pruned)$/.test(e.type)) {
       task.status=e.type.slice(5);
+      for(const s of task.steps.values()) if(s.status === "running") s.status=task.status;
       if(d.conclusions?.length) task.conclusions.clear();
       for (const item of d.conclusions || []) {
         if(item.text) task.conclusions.set(item.route || "",textOf(item.text));
@@ -144,6 +167,7 @@ const TaskTrace = (() => {
         <div class="task-commentary"></div>
         <details class="task-narrative" hidden><summary>查看完整进展</summary><div class="md"></div></details>
         <p class="task-progress"></p>
+        <div class="task-step-list"></div>
         <details class="task-activity"><summary><span>执行详情</span><span class="task-count"></span><span class="task-errors"></span></summary>
           <div class="task-activity-body"><div class="task-tools"></div></div>
         </details>
@@ -167,6 +191,7 @@ const TaskTrace = (() => {
     root.querySelector(".task-errors").textContent=failed ? `${failed} 次失败` : "";
     const updates=updatesOf(task), visible=updates.slice(-3);
     const commentary=root.querySelector(".task-commentary");
+    commentary.hidden=task.steps.size>0;
     const signature=JSON.stringify(visible);
     if(commentary.dataset.signature !== signature) {
       commentary.dataset.signature=signature;
@@ -177,14 +202,33 @@ const TaskTrace = (() => {
     }
     const narrative=root.querySelector(".task-narrative");
     const narrativeText=updates.map(u=>u.text).join("\n\n");
-    narrative.hidden=updates.length<=3 && visible.every(u=>u.text.length<=600);
+    narrative.hidden=task.steps.size>0 || (updates.length<=3 && visible.every(u=>u.text.length<=600));
     narrative.querySelector("summary").textContent=`查看完整进展（${updates.length} 条）`;
     if(narrative.dataset.text !== narrativeText) {
       narrative.dataset.text=narrativeText;
       if(narrative.open) narrative.querySelector(".md").innerHTML=mdRender(narrativeText);
     }
-    const list=root.querySelector(".task-tools");
+    const stepList=root.querySelector(".task-step-list");
+    for(const step of task.steps.values()) {
+      let group=[...stepList.children].find(el=>el.dataset.stepKey === step.key);
+      if(!group) {
+        group=document.createElement("details");group.className="task-step";group.dataset.stepKey=step.key;
+        group.innerHTML='<summary><b></b><span></span></summary><div class="task-step-text md"></div><div class="task-tools"></div>';
+        stepList.appendChild(group);
+      }
+      const updates=[...step.texts.values()].map(commentaryText).filter(Boolean);
+      const owned=tools.filter(t=>t.stepKey === step.key);
+      group.querySelector("summary b").textContent=`第 ${step.turn} 步 · ${statuses[step.status] || "执行中"}`;
+      group.querySelector("summary span").textContent=brief(updates.at(-1)) || owned.map(t=>{
+        const outcome=(t.note || "").split(" → ").slice(1).join(" → ") || t.note;
+        return SessionObserver.toolName(t.name)+(outcome ? `：${brief(outcome).slice(0,110)}` : "");
+      }).join("；") || "分析与验证";
+      const text=updates.join("\n\n"), target=group.querySelector(".task-step-text");
+      if(target.dataset.text !== text) {target.dataset.text=text;target.innerHTML=mdRender(text);}
+    }
     for(const tool of tools) {
+      const group=tool.stepKey && [...stepList.children].find(el=>el.dataset.stepKey === tool.stepKey);
+      const list=(group || root.querySelector(".task-activity")).querySelector(".task-tools");
       let el=[...list.children].find(child=>child.dataset.toolKey === tool.key);
       if(!el) {
         list.insertAdjacentHTML("beforeend",`<div class="tl-act"><button class="hd" type="button" aria-expanded="false"><span class="nm"></span><span class="ar"></span><span class="st"></span><span class="cv" aria-hidden="true">⌄</span></button><div class="nt"></div><pre class="tl-output"></pre></div>`);
@@ -205,6 +249,8 @@ const TaskTrace = (() => {
       el.querySelector(".nt").textContent=tool.note || "";
       el.querySelector(".tl-output").textContent=(tool.result || "等待工具返回")+(tool.clipped ? "\n\n此处展示前 24,000 字，完整内容可导出审计查看。" : "");
     }
+    const other=root.querySelector(".task-activity");
+    other.hidden=task.steps.size>0 && tools.every(t=>t.stepKey || t.name === "investigate");
     const summary=root.querySelector(".task-summary");
     summary.hidden=!terminal.has(task.status);
     if(!summary.hidden) summary.querySelector(".md").innerHTML=mdRender(summaryOf(task));

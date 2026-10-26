@@ -678,6 +678,7 @@ async def _run_master(
     recall = (experience.recent(limit=infra.cfg.experience.recall_limit)
               if experience else [])
     master_extra: dict[str, Any] = {
+        "run_mode": infra.authorization.mode.value,
         "mode_notes": assembly.notes, "mission": mission,
         "mode_prompt": getattr(assembly, "strategy_prompt", ""),
         "competition_context": getattr(assembly, "competition_context", {}),
@@ -1021,7 +1022,7 @@ async def _distill_best_effort(infra: _Infra, assembly: Any, experience: Any,
                                run_summary: dict[str, Any] | None,
                                *, mission: str, outcome: str,
                                error: str = "") -> None:
-    """终态提炼（尽力而为，原地等待）：正常收尾与报告并行，用户等得起。"""
+    """需前台完成的终态提炼；普通 CTF 与智能体模式使用持久后台队列。"""
     digest = _prepare_distill(infra, assembly, enabled, experience, run_summary,
                               mission=mission, outcome=outcome, error=error)
     if digest is None:
@@ -1373,34 +1374,34 @@ async def run_ctf_engagement(
             platform=adapter,
             platform_facts=adapter.facts if adapter is not None else None)
 
-        # ---- Flag 统一提交（4.4.6：格式校验/去重/频率控制/退避重试）
-        # 经验提炼与提交/WriteUp 互不依赖：并行执行（两笔模型调用串行磨
-        # 曾让 flag 后还要白等三分半钟）
-        distill = asyncio.ensure_future(_distill_best_effort(
-            infra, assembly, infra.experience, enable_llm_planning,
-            run_summary, mission="", outcome="completed"))
-        try:
-            submit_stats = await flag_manager.submit_all()
-            run_summary["flag_submit"] = submit_stats
-            flag_stats = flag_manager.stats()
-            if adapter is not None:
-                run_summary["platform"] = adapter.summary()
+        # 提交与完整报告仍在前台交付；经验提炼复用持久后台队列，
+        # 不再与报告争抢前台模型槽位，也不阻塞会话完成。
+        submit_stats = await flag_manager.submit_all()
+        run_summary["flag_submit"] = submit_stats
+        flag_stats = flag_manager.stats()
+        if adapter is not None:
+            run_summary["platform"] = adapter.summary()
 
-            report_path = report_path or _default_report_path(
-                infra.workspace, "ctf_writeup")
-            out = await _render_writeup(
-                infra, challenges, flag_manager, run_summary, report_path,
-                contest="ctf", enable_llm=enable_llm_planning,
-                fallback_context={
-                    "contest_type": "ctf", "flag_stats": flag_stats,
-                    "submit_enabled": flag_manager.submit_fn is not None,
-                    "notes": assembly.notes,
-                    "current_task_ids": [
-                        task_id for node in run_summary.get("dag_nodes", [])
-                        for task_id in node.get("task_ids", [])]},
-            )
-        finally:
-            await distill
+        report_path = report_path or _default_report_path(
+            infra.workspace, "ctf_writeup")
+        out = await _render_writeup(
+            infra, challenges, flag_manager, run_summary, report_path,
+            contest="ctf", enable_llm=enable_llm_planning,
+            fallback_context={
+                "contest_type": "ctf", "flag_stats": flag_stats,
+                "submit_enabled": flag_manager.submit_fn is not None,
+                "notes": assembly.notes,
+                "current_task_ids": [
+                    task_id for node in run_summary.get("dag_nodes", [])
+                    for task_id in node.get("task_ids", [])]},
+        )
+        distill_task = _schedule_background_distill(
+            infra, assembly, infra.experience, enable_llm_planning,
+            run_summary, mission="", outcome="completed")
+        run_summary["experience_distill"] = {
+            "status": "queued" if distill_task is not None else "skipped",
+            "mode": "background",
+        }
         infra.audit.log("system.lifecycle", "runtime", {
             "action": "engagement_complete", "mode": "ctf", "report": str(out),
             "flags": flag_stats, "rounds": run_summary["rounds_executed"],
