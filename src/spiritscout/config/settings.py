@@ -107,6 +107,10 @@ class GatewayConfig(ValidatedConfig):
     vote_min_models: int = 2                    # 投票最少模型数（4.9.3-2：≥2 独立判断）
     request_timeout_seconds: int = Field(default=300, gt=0)  # 重推理模型单次调用可达 3~4 分钟，120s 会中途掐死
     max_retries: int = 2
+    stable_snapshot_prefix: bool = True  # 新决策段保留稳定事实前缀，历史不重写
+    shared_ctf_prefix: bool = False  # 共享布局实验关闭，真实复杂对照尚未证明命中收益
+    compact_decision_patches: bool = False  # 无损补丁短编码，真实模型对照通过后再启用
+    remember_endpoint_capabilities: bool = True  # 只复用已成功的可选参数兼容回退
 
 
 class ExecutorConfig(ValidatedConfig):
