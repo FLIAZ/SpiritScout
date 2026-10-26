@@ -73,6 +73,13 @@ class PlatformLockTests(unittest.TestCase):
 
 
 class PlatformCommandTests(unittest.TestCase):
+    def test_cli_help_works_with_non_unicode_redirected_output(self):
+        result = subprocess.run([sys.executable, "-m", "spiritscout", "--help"],
+                                capture_output=True, timeout=20,
+                                env=dict(os.environ, PYTHONUTF8="0", PYTHONIOENCODING="cp1252"))
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
+        self.assertIn("灵枢", result.stdout.decode("utf-8"))
+
     def test_dashboard_timezone_is_available_on_native_platform(self):
         from datetime import datetime
 

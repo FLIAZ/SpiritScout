@@ -69,6 +69,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 英文 Windows 的重定向输出可能默认 cp1252，中文帮助/错误信息也须能输出。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
     args = build_parser().parse_args(argv)
     dotenv = _find_dotenv()
     if dotenv:
