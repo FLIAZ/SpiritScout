@@ -8,6 +8,12 @@ from spiritscout.tools.diagnostics import browser_failure, clean_tool_text
 
 
 class BrowserDiagnosticTests(unittest.TestCase):
+    def test_missing_cdp_is_distinct_from_target_site_failure(self) -> None:
+        result = browser_failure("browser_navigate", "async initializeServer: "
+            "connect ECONNREFUSED 127.0.0.1:9223\nretrieving websocket url")
+        self.assertEqual(result["failure_kind"], "browser_connection_unavailable")
+        self.assertIn("尚未访问题目页面", result["failure_summary"])
+
     def test_viewport_reason_is_preserved_beyond_ui_preview_length(self) -> None:
         text = "Timeout 5000ms exceeded\n" + "waiting for locator\n" * 40
         text += "element is outside of the viewport"
