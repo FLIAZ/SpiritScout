@@ -1,9 +1,6 @@
-"""多模型网关主类（4.9 / 6.10）。
+"""模型调用、路由、主备切换与 Token 用量统计。
 
- 实现：路由模式（默认）+ 主备切换 + 预算治理 + token 计量。
- 补齐：模式预算硬顶与用量降级（4.9.4）；投票 / 辩论 / 级联 / 异构角色
-完整协作见 gateway.collab。
-"""
+多模型协作调用位于 gateway.collab。"""
 
 from __future__ import annotations
 
@@ -19,6 +16,7 @@ from typing import Any
 from spiritscout.config.settings import GatewayConfig, ModelEntry
 from spiritscout.core.audit import AuditLogger, NullAuditLogger
 from spiritscout.core.exceptions import SpiritScoutError
+from spiritscout.gateway.attempts import AttemptTrace, current_attempt_trace
 from spiritscout.gateway.backends import (
     ChatBackend,
     DeltaCallback,
@@ -29,6 +27,7 @@ from spiritscout.gateway.backends import (
 )
 from spiritscout.gateway.cache import PrefixTracker, cache_summary
 from spiritscout.gateway.context import DecisionMemory
+from spiritscout.gateway.pricing import estimate_deepseek_cny
 from spiritscout.gateway.registry import ModelRegistry
 from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
 
@@ -51,9 +50,7 @@ class ChatResponse:
 
 
 def output_lost(resp: ChatResponse) -> bool:
-    """正文为空或被端点掐断：思考型模型可能把输出额度耗在思考上，正文
-    只剩半截 JSON——决策通道据此加大余量重试，而不是把残缺当决策缺席
-    静默降级（空报告的代价远大于重试一次的 token）。"""
+    """检查模型正文是否为空或因输出上限截断，供决策重试使用。"""
     return (not str(resp.content or "").strip()) or resp.finish_reason in ("length", "max_tokens")
 
 
@@ -72,7 +69,13 @@ async def chat_decision(
     失败会被上层当成决策缺席走规则回退，一次重试远比误判便宜。重试失败
     沿用原响应交由上层解析兜底，不掩盖原始结果。"""
     if memory is not None:
-        messages = memory.prepare(messages)
+        budget_for = getattr(gateway, "context_budget", None)
+        budget = budget_for(**kwargs) if callable(budget_for) else None
+        messages = memory.prepare(messages, max_input_tokens=budget)
+        # 追加式现场已由 DecisionMemory 管理；二次节选历史会改写缓存前缀。
+        kwargs["preserve_context"] = True
+        if audit is not None and memory.segment_changed:
+            audit.log("context.decision_segment", actor, memory.segment_info)
     resp = await gateway.chat(messages, **kwargs)
     if output_lost(resp):
         if audit is not None:
@@ -88,7 +91,7 @@ async def chat_decision(
         except Exception:  # noqa: BLE001, S110 —— 重试失败沿用原响应，解析端兜底
             pass
     if memory is not None and not output_lost(resp) and isinstance(extract_json(resp.content), dict):
-        memory.commit(resp.content or "")
+        memory.commit(resp.content or "", reasoning=getattr(resp, "reasoning", "") or "")
     return resp
 
 
@@ -211,6 +214,7 @@ class ModelGateway:
         tool_choice: str | None = None,
         on_delta: DeltaCallback | None = None,
         reasoning_effort: str = "",
+        preserve_context: bool = False,
     ) -> ChatResponse:
         """统一对话入口：路由 → 限流 → 调用（主备切换）→ 计量 → 审计。
 
@@ -255,6 +259,7 @@ class ModelGateway:
                     # 思考强度按每个候选模型各自声明的档位把关（主备档位可能不同）
                     reasoning_effort=self._resolve_effort(candidate, reasoning_effort),
                     task_type=task_type,
+                    preserve_context=preserve_context,
                 )
                 if idx > 0:
                     resp.fallback_used = True
@@ -268,7 +273,23 @@ class ModelGateway:
                 continue
         raise SpiritScoutError(f"模型调用全链失败（主备均不可用）: {last_exc}")
 
+    def context_budget(self, *, task_type: str = "execution", model: str | None = None,
+                       required_capability: str | None = None,
+                       max_tokens: int | None = None, **kwargs: Any) -> int | None:
+        """和 chat 使用同一路由，向对话所有者暴露输入整理阈值。"""
+        from spiritscout.gateway.context import input_window_budget
+
+        entry = self.registry.route(task_type, prefer_model=model,
+                                    required_capability=required_capability)
+        return input_window_budget(entry.context_window, max_tokens or entry.max_output_tokens)
+
     # ------------------------------------------------------------ 内部
+
+    def context_identity(self, *, model: str | None = None, task_type: str = "execution") -> dict[str, str]:
+        """对话协议身份；不包含密钥，供显式接力核对模型与端点。"""
+        entry = self.registry.route(task_type, prefer_model=model)
+        return {"model": entry.model, "provider": entry.provider,
+                "base_url": entry.base_url, "api_format": entry.api_format}
 
     def _resolve_effort(self, entry: ModelEntry, requested: str) -> str:
         """思考强度把关：只下发该模型自己声明过的取值。
@@ -304,19 +325,19 @@ class ModelGateway:
         on_delta: DeltaCallback | None = None,
         reasoning_effort: str = "",
         task_type: str = "execution",
+        preserve_context: bool = False,
     ) -> ChatResponse:
         backend: ChatBackend = backend_for(entry, self._mock)
         messages = copy.deepcopy(messages)
-        if entry.context_window:
-            from spiritscout.gateway.context import compact_history
+        if entry.context_window and not preserve_context:
+            from spiritscout.gateway.context import (
+                compact_history_tokens,
+                input_window_budget,
+            )
 
-            # 字符阈值是保守的软投影，不是回合数/Token 熔断；约束不被丢弃。
-            reserve = max_tokens or entry.max_output_tokens or 4096
-            # 输出余量不得反超窗口本身：档案把输出上限配得比窗口大时
-            # （如 128K 输出遇上 100K 窗口的旧配置），宁可少压缩也不能
-            # 把历史预算钳到 1024 字符压死现场
-            reserve = min(reserve, entry.context_window // 2)
-            compact_history(messages, max(1024, entry.context_window - reserve))
+            budget = input_window_budget(entry.context_window, max_tokens or entry.max_output_tokens)
+            if budget is not None:
+                compact_history_tokens(messages, budget, tools=tools)
         if tools:
             tools = sorted(copy.deepcopy(tools), key=lambda t: str(t.get("function", {}).get("name", t.get("name", ""))))
             tools = json.loads(json.dumps(tools, ensure_ascii=False, sort_keys=True))
@@ -328,11 +349,13 @@ class ModelGateway:
         wall = time.time()                      # 记账用墙钟（时序图按日聚合）
         scope = current_execution_scope.get() or ExecutionScope()
         actor = scope.agent_id or "gateway"
+        role = next((line[6:].strip() for m in messages if m.get("role") == "system"
+                     for line in str(m.get("content") or "").splitlines() if line.startswith("ROLE: ")), "")
         prefix = self.prefix_tracker.observe(
-            (entry.provider, entry.base_url or "", entry.model, actor, scope.task_id or "", task_type),
+            (entry.provider, entry.base_url or "", entry.model, actor, scope.task_id or "", scope.route_id or "", task_type, role),
             messages, tools)
         call = {"call_id": f"model-{uuid.uuid4().hex}", "model": entry.model,
-                "task_type": task_type, "task_id": scope.task_id, "route_id": scope.route_id, **prefix}
+                "task_type": task_type, "task_id": scope.task_id, "route_id": scope.route_id, "cache_scope": role or task_type, **prefix}
         self.audit.log("model.started", actor, call)
         stream = None
         if on_delta is None and scope.agent_id:
@@ -340,6 +363,8 @@ class ModelGateway:
 
             stream = AuditStream(self.audit, actor, call)
             on_delta = stream
+        attempts = AttemptTrace(self.audit, actor, call)
+        attempt_token = current_attempt_trace.set(attempts)
         try:
             raw = await backend.complete(
                 entry, messages,
@@ -350,6 +375,7 @@ class ModelGateway:
                 reasoning_effort=reasoning_effort,
             )
         except BaseException as exc:
+            attempts.finish("cancelled" if isinstance(exc, asyncio.CancelledError) else "failed")
             if stream is not None:
                 stream.flush()
             self.audit.log("model.cancelled" if isinstance(exc, asyncio.CancelledError)
@@ -357,6 +383,8 @@ class ModelGateway:
                            {**call, "error": str(exc)[:300],
                             "latency_ms": round((time.perf_counter() - started) * 1000, 1)})
             raise
+        finally:
+            current_attempt_trace.reset(attempt_token)
         if stream is not None:
             # 不支持流式的端点至少回放实际返回正文，不能伪造生成中的分析。
             if not stream.emitted and not stream.parts:
@@ -365,6 +393,9 @@ class ModelGateway:
             stream.flush()
         latency = (time.perf_counter() - started) * 1000
         metrics = {key: raw.get(key) for key in ("cached_input_tokens", "cache_write_tokens", "first_delta_ms")}
+        metrics.update(estimate_deepseek_cny(entry, wall, raw["prompt_tokens"],
+                                             raw.get("cached_input_tokens"), raw["completion_tokens"]))
+        metrics.update(cache_scope=role or task_type, task_id=scope.task_id, route_id=scope.route_id)
         metrics.update(input_tokens=raw["prompt_tokens"], output_tokens=raw["completion_tokens"],
                        task_type=task_type, actor=actor, call_id=call["call_id"], **prefix)
         total_tokens = raw["prompt_tokens"] + raw["completion_tokens"]
@@ -448,3 +479,14 @@ class AgentBoundGateway:
         if self._model and not kwargs.get("model"):
             kwargs["model"] = self._model
         return await self._inner.chat(messages, **kwargs)
+
+    def context_budget(self, **kwargs: Any) -> int | None:
+        """容量查询也必须遵从编队绑定，不能错用注册表第一个模型。"""
+        if self._model and not kwargs.get("model"):
+            kwargs["model"] = self._model
+        return self._inner.context_budget(**kwargs)
+
+    def context_identity(self, **kwargs: Any) -> dict[str, str]:
+        if self._model and not kwargs.get("model"):
+            kwargs["model"] = self._model
+        return self._inner.context_identity(**kwargs)
