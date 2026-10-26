@@ -28,3 +28,24 @@ assert.equal(recon.blocks.at(-1).text.length,24000);assert.equal(recon.blocks.at
 assert.equal(store.selected,'recon-abcd1234');
 assert.equal(api.create().agents.size,0,'新会话不携带旧实例');
 console.log('agent workbench: parallel actors/routes, fallback reset, tool failures, output bounds and session isolation passed');
+// 同角色并行任务的收尾不能清掉另一任务的在途请求；工具 ID 按任务/路线隔离。
+const parallel=api.create();
+const feed=(type,detail)=>api.reduce(parallel,{actor:'recon-parallel',type,detail,ts:'now'});
+feed('task.start',{task_id:'t1',target:'https://a.test',agent_type:'recon'});
+feed('model.started',{task_id:'t1',call_id:'c1'});
+feed('task.start',{task_id:'t2',target:'https://b.test'});
+feed('model.started',{task_id:'t2',call_id:'c2'});
+feed('agent.tool_call',{task_id:'t1',route_id:'r1',calls:[{id:'same',name:'read'}]});
+feed('agent.tool_call',{task_id:'t2',route_id:'r2',calls:[{id:'same',name:'read'}]});
+feed('agent.tool_result',{task_id:'t1',route_id:'r1',id:'same',ok:true,result:'A'});
+feed('task.done',{task_id:'t1'});
+const active=parallel.agents.get('recon-parallel');
+assert.equal(active.calls.size,1);assert(active.calls.has('c2'));
+assert.equal(active.status,'模型生成中');assert.equal(active.tools.size,2);
+assert.equal(active.tools.get('t2:r2:same').status,'执行中');
+assert.equal(active.tasks.get('t1').status,'已完成');
+console.log('workbench task isolation passed');
+feed('agent.delta',{task_id:'t1',route_id:'r1',route:'same-route',turn:1,kind:'reasoning',text:'任务一'});
+feed('agent.delta',{task_id:'t2',route_id:'r2',route:'same-route',turn:1,kind:'reasoning',text:'任务二'});
+assert.equal(active.blocks.filter(b=>b.taskId==='t1').at(-1).text,'任务一');
+assert.equal(active.blocks.filter(b=>b.taskId==='t2').at(-1).text,'任务二');
