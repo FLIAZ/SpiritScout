@@ -4,12 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>灵枢 SpiritScout</title>
-<link rel="stylesheet" href="/static/css/base.css?v=20261026-brand">
-<link rel="stylesheet" href="/static/css/dashboard.css?v=20261026-brand">
-<link rel="stylesheet" href="/static/css/views.css?v=20261026-brand">
-<link rel="stylesheet" href="/static/css/deliverables.css?v=20261026-brand">
-<link rel="stylesheet" href="/static/css/resources.css?v=20261026-brand">
-<link rel="stylesheet" href="/static/css/projects.css?v=20261026-brand">
+<link rel="stylesheet" href="/static/css/base.css?v=20261026-home">
+<link rel="stylesheet" href="/static/css/dashboard.css?v=20261026-scroll">
+<link rel="stylesheet" href="/static/css/views.css?v=20261026-scroll">
+<link rel="stylesheet" href="/static/css/deliverables.css?v=20261026-scroll">
+<link rel="stylesheet" href="/static/css/resources.css?v=20261026-scroll">
+<link rel="stylesheet" href="/static/css/projects.css?v=20261026-scroll">
+<link rel="stylesheet" href="/static/css/home.css?v=20261026-stacked">
 </head>
 <body>
 <div id="app">
@@ -53,38 +54,58 @@
   </aside>
 
   <main>
-    <!-- 空态：任务下达（输入框常驻页底） -->
+    <!-- 首页：选择模式并发布任务 -->
     <section id="view-home">
       <div class="hero">
-        <h2 class="lead">下达任务，剩下的交给<span class="lead-em">灵枢</span></h2>
+        <p class="home-eyebrow"><span></span> 新建任务</p>
+        <h2 class="lead">下达任务，<br>剩下的交给<span class="lead-em">灵枢</span></h2>
+        <p class="home-intro">选好模式，写下目标。从这里开始。</p>
       </div>
+      <fieldset class="home-modes"><legend>任务模式</legend>
+          <label class="home-mode-card"><input type="radio" name="home-mode" value="src">
+            <span class="mode-symbol"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6l-8-3Z"/><path d="m8 12 3 3 5-6"/></svg></span>
+            <span class="mode-copy"><strong>SRC 渗透测试</strong><small>网站、资产与业务安全</small></span><span class="mode-check" aria-hidden="true"></span>
+          </label>
+          <label class="home-mode-card"><input type="radio" name="home-mode" value="ctf">
+            <span class="mode-symbol"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 21V4m0 0c5-4 9 4 14 0v10c-5 4-9-4-14 0"/></svg></span>
+            <span class="mode-copy"><strong>CTF 解题</strong><small>题目入口与附件分析</small></span><span class="mode-check" aria-hidden="true"></span>
+          </label>
+          <label class="home-mode-card"><input type="radio" name="home-mode" value="competition">
+            <span class="mode-symbol"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="3" width="8" height="5" rx="1"/><rect x="2" y="16" width="8" height="5" rx="1"/><rect x="14" y="16" width="8" height="5" rx="1"/><path d="M12 8v4M6 16v-4h12v4"/></svg></span>
+            <span class="mode-copy"><strong>智能体竞赛</strong><small>按赛方规则连续执行</small></span><span class="mode-check" aria-hidden="true"></span>
+          </label>
+      </fieldset>
       <div class="card composer">
         <div class="mission-settings">
-          <label for="c-mode">任务模式<select id="c-mode" required>
+          <label for="c-mode" hidden>任务模式<select id="c-mode" required data-selx="native">
             <option value="" selected disabled>请选择任务类型</option>
             <option value="src">SRC 渗透测试</option>
             <option value="ctf">CTF 解题</option>
             <option value="competition">智能渗透赛 / 智能体靶场</option>
           </select></label>
+          <label class="home-mission-label" for="c-mission">任务描述</label>
           <p id="c-mode-hint">选择模式后填写目标与任务要求。</p>
         </div>
-        <textarea id="c-mission" placeholder="描述目标与授权范围。例如：评估 https://example.com 的商品浏览与搜索流程"></textarea>
+        <textarea id="c-mission" aria-describedby="c-mode-hint" placeholder="写下目标地址、题目描述或测试要求…"></textarea>
         <div class="comp-files" id="home-files"></div>
         <div class="bar">
           <div class="bar-left">
             <button class="icon-btn" id="home-attach" type="button" title="上传题目附件" aria-label="上传附件">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </button>
             <input type="file" id="home-file" multiple hidden>
             <select id="c-project" aria-label="项目分区"><option value="">未分类</option></select>
             <button class="btn sm" id="c-project-new" type="button" title="新建项目分区">+ 项目</button>
           </div>
-          <button class="send-btn" id="c-go" type="button" title="开始执行" aria-label="开始执行"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+          <button class="send-btn" id="c-go" type="button" title="开始执行" aria-label="开始执行"><span>开始执行</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6"/></svg></button>
         </div>
+      </div>
+      <div class="home-examples">
+        <span>也可以从示例开始</span>
         <div class="suggestions">
-          <button class="chip-s" type="button" data-mode="src">对 https://example.com 做一次完整的渗透测试评估</button>
-          <button class="chip-s" type="button" data-mode="ctf">解一道 CTF 题目</button>
-          <button class="chip-s" type="button" data-mode="competition">在智能体靶场中连续解题拿分</button>
+          <button class="chip-s" type="button" data-mode="src" data-mission="对 https://example.com 做一次完整的渗透测试评估">测试一个网站<span aria-hidden="true">↗</span></button>
+          <button class="chip-s" type="button" data-mode="ctf" data-mission="解一道 CTF 题目">分析一道 CTF 题<span aria-hidden="true">↗</span></button>
+          <button class="chip-s" type="button" data-mode="competition" data-mission="在智能体靶场中连续解题拿分">参加智能体竞赛<span aria-hidden="true">↗</span></button>
         </div>
       </div>
       <p class="notice">
@@ -148,9 +169,8 @@
           </section>
           <div id="trace-history" class="trace-history" aria-label="会话历史记录">
             <span data-history-status role="status">正在读取记录…</span>
-            <div><button class="btn sm" type="button" data-history="older" disabled>更早记录</button>
-              <button class="btn sm" type="button" data-history="newer" disabled>较新记录</button>
-              <button class="btn sm" type="button" data-history="latest">最近记录</button></div>
+            <div><button class="btn sm" type="button" data-history="retry" hidden>重试</button>
+              <button class="btn sm" type="button" data-history="latest">回到最新</button></div>
           </div>
           <div class="trace" id="trace-box"></div>
           <button id="trace-jump" type="button" hidden aria-label="回到最新轨迹" title="回到最新轨迹">↓ 回到最新</button>
@@ -357,28 +377,28 @@
 
 <div id="toasts"></div>
 
-<script src="/static/js/polling.js?v=20261026-brand"></script>
-<script src="/static/js/core.js?v=20261026-brand"></script>
-<script src="/static/js/observer.js?v=20261026-brand"></script>
-<script src="/static/js/deliverables.js?v=20261026-brand"></script>
-<script src="/static/js/tool-parameters.js?v=20261026-brand"></script>
-<script src="/static/js/markdown.js?v=20261026-brand"></script>
-<script src="/static/js/agent-side-chat.js?v=20261026-brand"></script>
-<script src="/static/js/agent-workbench.js?v=20261026-brand"></script>
-<script src="/static/js/experience.js?v=20261026-brand"></script>
-<script src="/static/js/projects.js?v=20261026-brand"></script>
-<script src="/static/js/session-history.js?v=20261026-brand"></script>
-<script src="/static/js/topology.js?v=20261026-brand"></script>
-<script src="/static/js/task-trace.js?v=20261026-brand"></script>
-<script src="/static/js/dashboard.js?v=20261026-brand"></script>
-<script src="/static/js/views.js?v=20261026-brand"></script>
-<script src="/static/js/console.js?v=20261026-brand"></script>
+<script src="/static/js/polling.js?v=20261026-scroll"></script>
+<script src="/static/js/core.js?v=20261026-scroll"></script>
+<script src="/static/js/observer.js?v=20261026-scroll"></script>
+<script src="/static/js/deliverables.js?v=20261026-scroll"></script>
+<script src="/static/js/tool-parameters.js?v=20261026-scroll"></script>
+<script src="/static/js/markdown.js?v=20261026-scroll"></script>
+<script src="/static/js/agent-side-chat.js?v=20261026-scroll"></script>
+<script src="/static/js/agent-workbench.js?v=20261026-scroll"></script>
+<script src="/static/js/experience.js?v=20261026-scroll"></script>
+<script src="/static/js/projects.js?v=20261026-scroll"></script>
+<script src="/static/js/session-history.js?v=20261026-scroll"></script>
+<script src="/static/js/topology.js?v=20261026-scroll"></script>
+<script src="/static/js/task-trace.js?v=20261026-scroll"></script>
+<script src="/static/js/dashboard.js?v=20261026-scroll"></script>
+<script src="/static/js/views.js?v=20261026-scroll"></script>
+<script src="/static/js/console.js?v=20261026-home"></script>
 <dialog id="resource-editor"><form method="dialog"><div class="resource-editor-head"><h3 id="resource-editor-title">资源配置</h3><button class="btn sm" aria-label="关闭" value="cancel">关闭</button></div></form>
 <label>标识<input id="resource-key" autocomplete="off" placeholder="唯一名称"></label>
 <label>配置内容（JSON）<textarea id="resource-json" rows="15" spellcheck="false"></textarea></label>
 <div id="resource-secrets"><label>环境变量（JSON，可留空保持原值）<input id="resource-env" type="password" autocomplete="new-password" placeholder='{"API_KEY":"…"}'></label><label>请求头（JSON，可留空保持原值）<input id="resource-headers" type="password" autocomplete="new-password" placeholder='{"Authorization":"Bearer …"}'></label></div>
 <p class="muted">密钥只通过专用字段填写。聊天中不要粘贴密钥；保存的 MCP 接入对新会话生效。</p><div id="resource-save-error" role="alert"></div><button type="button" class="btn primary" id="resource-save">保存配置</button></dialog>
-<script src="/static/js/exa-settings.js?v=20261026-brand"></script>
-<script src="/static/js/resources.js?v=20261026-brand"></script>
+<script src="/static/js/exa-settings.js?v=20261026-scroll"></script>
+<script src="/static/js/resources.js?v=20261026-scroll"></script>
 </body>
 </html>
