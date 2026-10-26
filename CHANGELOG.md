@@ -2,6 +2,7 @@
 
 ## 2026-10-26
 
+- 修复 Windows CI 的 Chrome MCP 测试：按文件身份比较长短路径别名，显式以 UTF-8 读取中文审计日志，避免依赖本机默认编码。
 - 完成 Windows/Linux/macOS 部署兼容优化：新增通用 `deploy.py` 与 Windows PowerShell 启动器，macOS 停止/重启兼容 lsof；Windows 使用不干扰 SQLite 的原生运行锁，适配虚拟环境工具路径、npm/npx JS 入口、Chrome 标准安装目录及平台进程清理。
 - Docker 默认采用镜像源码与独立配置/数据卷，显式开发覆盖保留源码挂载；新增首次随机凭据、环境检查、健康等待、旧数据停服迁移、可配置宿主端口与 Linux host-gateway，移除固定公共 DNS。镜像统一 Debian Bookworm，修复沙箱无法使用 venv 及镜像工具库的问题；增加 Windows 兼容 CI 与 amd64 镜像构建检查。本次以 Windows/Linux 为交付范围，macOS/ARM64 未实测。
 - 修正 IPv4 映射 IPv6 回归用例对文本格式的依赖，按地址语义验证，兼容不同 Python/httpx 版本。

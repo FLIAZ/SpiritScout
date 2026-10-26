@@ -92,7 +92,9 @@ class ChromeEndpointTests(unittest.TestCase):
             env = {"SPIRITSCOUT_CHROME_MCP_CLI": str(cli)}
             with patch.object(Path, "cwd", return_value=root), patch("shutil.which", return_value="/bin/node"):
                 argv = command("http://127.0.0.1:9223", env)
-            self.assertEqual(argv[:2], ["/bin/node", str(cli)])
+            self.assertEqual(argv[0], "/bin/node")
+            # Windows CI 的 TEMP 可能使用 8.3 短路径，按文件身份比较。
+            self.assertTrue(Path(argv[1]).samefile(cli))
             self.assertIn("storage", argv)
             self.assertIn("--cdp-endpoint", argv)
             self.assertNotIn("--headless", argv)
@@ -190,7 +192,7 @@ class ChromeRuntimeTests(unittest.IsolatedAsyncioTestCase):
                                   scope=Scope(allowed_urls=["http://127.0.0.1"])))
             try:
                 self.assertNotIn("mcp__chrome__browser_navigate", infra.mcp_tools)
-                records = [json.loads(line) for line in (root / "audit.jsonl").read_text().splitlines()]
+                records = [json.loads(line) for line in (root / "audit.jsonl").read_text(encoding="utf-8").splitlines()]
                 failed = [r for r in records if r["detail"].get("action") == "mcp_server_failed"]
                 self.assertEqual(len(failed), 1)
                 self.assertIn("9223", failed[0]["detail"]["error"])
@@ -232,7 +234,7 @@ class ChromeManagedHeadlessLiveTests(unittest.IsolatedAsyncioTestCase):
                     try:
                         await asyncio.gather(*infra.mcp_startup_tasks)
                         name = "mcp__chrome__browser_navigate"
-                        self.assertIn(name, infra.mcp_tools, (root / "audit.jsonl").read_text())
+                        self.assertIn(name, infra.mcp_tools, (root / "audit.jsonl").read_text(encoding="utf-8"))
                         result = await infra.tools.call(name, {"url": target, "_safety_action": "analysis"},
                                                         **infra.builtin_ctx)
                         self.assertTrue(result.ok, result.error)
