@@ -232,5 +232,11 @@ const TaskTrace = (() => {
     return true;
   }
   function reset() {if(timer !== null) clearTimeout(timer);timer=null;dirty.clear();store=create();rows.clear();}
-  return {push,reset,create,reduce,summaryOf,resolve,updatesOf,commentaryText};
+  function flush() {
+    if(timer !== null) clearTimeout(timer);
+    timer=null;
+    for(const key of dirty) {const task=store.tasks.get(key);if(task) render(task);}
+    dirty.clear();
+  }
+  return {push,reset,flush,create,reduce,summaryOf,resolve,updatesOf,commentaryText};
 })();
