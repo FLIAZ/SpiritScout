@@ -191,9 +191,9 @@ for f in tests/test_*.js; do node "$f" || exit; done
 
 ### 参考项目
 
-- [carlospolop/HackTricks](https://github.com/carlospolop/HackTricks)（CC BY-NC-SA）——方法论思路参考，内容未直接使用
-- [OWASP WSTG](https://github.com/OWASP/wstg)（CC BY-SA-4.0）——测试标准思路参考，内容未直接使用
-- [GTFOBins](https://github.com/GTFOBins/GTFOBins.github.io)（GPL-3.0）——Unix 二进制利用思路参考，内容未直接使用
+- [carlospolop/HackTricks](https://github.com/carlospolop/HackTricks)（CC BY-NC-SA）——方法论思路参考
+- [OWASP WSTG](https://github.com/OWASP/wstg)（CC BY-SA-4.0）——测试标准思路参考
+- [GTFOBins](https://github.com/GTFOBins/GTFOBins.github.io)（GPL-3.0）——Unix 二进制利用思路参考
 - [VoltAgent/awesome-agent-skills](https://github.com/VoltAgent/awesome-agent-skills)（MIT）——智能体技能目录（1000+ 条）
 
 ### 项目使用的 MCP 服务器
@@ -216,8 +216,18 @@ for f in tests/test_*.js; do node "$f" || exit; done
 - [anthropics/skills](https://github.com/anthropics/skills)——SKILL.md 格式规范参考（无 LICENSE，仅格式参考，内容未使用）
 - [VoltAgent/awesome-agent-skills](https://github.com/VoltAgent/awesome-agent-skills)（MIT）——智能体技能目录（1000+ 条）
 
-### GitHub 用户
+### 用户
 
-<!-- 按此格式添加：
-- [@用户名](https://github.com/用户名)：具体帮助。
--->
+- [@BProbie](https://github.com/BProbie)：修正文档格式
+- [@k1ne](https://github.com/k1ne7)：多平台兼容功能
+- [@neko](https://github.com/neko-11451)：对登录页的前端美化
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=fliaz%2Fspiritscout&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=fliaz/spiritscout&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=fliaz/spiritscout&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=fliaz/spiritscout&type=date&legend=top-left" />
+ </picture>
+</a>
