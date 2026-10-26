@@ -85,7 +85,7 @@ class BusConfig(ValidatedConfig):
     shared_request_rps: float = Field(default=10.0, gt=0, allow_inf_nan=False)
     nats_url: str = "nats://127.0.0.1:4222"
     queue_maxsize: int = Field(default=10000, gt=0)
-    rate_limit_per_second: float = Field(default=1000.0, gt=0)   # 总线流量控制（4.2.1）
+    rate_limit_per_second: float = Field(default=1000.0, gt=0)   # 总线流量控制
 
 
 class BlackboardConfig(ValidatedConfig):
@@ -93,7 +93,7 @@ class BlackboardConfig(ValidatedConfig):
 
 
 class GatewayConfig(ValidatedConfig):
-    """多模型网关：预算与协作策略（4.9、6.10）。"""
+    """多模型网关：预算与协作策略。"""
 
     budget_tokens: int = Field(default=2_000_000, description="Token 用量参考值，仅计量不熔断")
     budget_usd: float = Field(default=20.0, description="费用参考值，仅计量不熔断")
@@ -136,7 +136,7 @@ class KnowledgeConfig(ValidatedConfig):
 
 
 class ReportConfig(ValidatedConfig):
-    template: str = "src_standard"        # 报告模板（4.6.2）
+    template: str = "src_standard"        # 报告模板
     output_format: Literal["markdown", "html"] = "markdown"
     output_dir: str = ".spiritscout/reports"
 
@@ -183,6 +183,7 @@ class McpServerConfig(ValidatedConfig):
     tool_risk_overrides: dict[str, Literal["readonly", "intrusive", "destructive"]] = Field(
         default_factory=dict,
         description="宿主可信配置的单工具风险映射，仅精确匹配远端工具名；不支持通配放行")
+    internet_search: bool = Field(default=False, description="公开网页搜索服务；智能体模式不连接")
     scope_enforcement: Literal["required", "best_effort", "none"] = Field(
         default="required",
         description="旧配置兼容字段，仅影响目标元数据展示；测试边界统一由模型上下文判断")
@@ -227,6 +228,17 @@ class ExperienceConfig(ValidatedConfig):
     recall_limit: int = Field(default=6, gt=0, le=20, description="会话开工注入的经验条数上限")
 
 
+class SearchConfig(ValidatedConfig):
+    """公开资料检索；凭据从加密资源库或环境变量读取，不进入模型上下文。"""
+
+    enabled: bool = False
+    api_url: str = "https://api.exa.ai/search"
+    api_key_env: str = "EXA_API_KEY"
+    timeout_seconds: float = Field(default=25, gt=0, le=120)
+    cache_ttl_seconds: int = Field(default=21600, ge=1)
+    cache_max_entries: int = Field(default=2000, ge=1)
+
+
 class SystemConfig(ValidatedConfig):
     """系统总配置。"""
 
@@ -237,6 +249,7 @@ class SystemConfig(ValidatedConfig):
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     executor: ExecutorConfig = Field(default_factory=ExecutorConfig)
     knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
+    search: SearchConfig = Field(default_factory=SearchConfig)
     report: ReportConfig = Field(default_factory=ReportConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     secretary: SecretaryConfig = Field(default_factory=SecretaryConfig)
