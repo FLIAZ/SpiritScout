@@ -137,9 +137,9 @@ class Blackboard:
     ) -> int:
         """写入记录并发布事件，返回新版本号。
 
-        - 写权限分级：agent_type 无该层写权限 → PolicyViolation（4.8.3）；
-        - 乐观锁：expected_version 与库中不一致 → VersionConflict（6.1）。
-        """
+                - 写权限分级：agent_type 无该层写权限 → PolicyViolation；
+                - 乐观锁：expected_version 与库中不一致 → VersionConflict。
+                """
         if not can_write(agent_type, layer):
             raise PolicyViolation(f"{agent_type.value} 无黑板层 {layer.value} 写入权限")
         now = datetime.now(UTC).isoformat()
