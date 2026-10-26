@@ -1,18 +1,13 @@
-"""Web 控制台会话管理器（会话隔离的任务操作台）。
+"""会话注册、持久化和生命周期管理。
 
-隔离模型：每会话独立工作区 ``<workspace>/sessions/<id>/`` 与独立
-SystemConfig 副本（黑板 DB / 知识库 / 审计 / 报告路径全部重定向，互不共享）；
-同进程 ``asyncio.Task`` 驱动三模式 engagement（runtime 无模块级单例，
-天然支持并发，D4）。
-
-``meta.json`` 持久化会话元数据 → 进程重启后扫描 sessions/ 目录重建注册表，
-历史会话离线可查；重启时发现 running 残留标记 interrupted（显式而非猜测）。
-"""
+各会话使用独立工作区和配置副本；meta.json 用于重启恢复。
+重启时将残留的 running 会话标记为 interrupted。"""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import ipaddress
 import json
 import math
@@ -690,12 +685,7 @@ def _clean_scope_question(
 
 def _preflight_models(cfg: SystemConfig, models: list[ModelEntry],
                       audit: AuditLogger) -> None:
-    """开工前预检（静态，毫秒级）：模型注册表非空。
-
-    连通性不再用 LLM 调用证明——重推理端点上一次「就绪检查」曾花 10s+，
-    多题并发时是纯浪费；语义路由分支由路由调用兼任预检，静态路由分支的
-    连通性由首个真实模型调用证明（失败在时间线上即时可见）。
-    """
+    """检查模型注册表非空，不发送预检模型请求。"""
     if not models:
         audit.log("system.lifecycle", "preflight", {
             "action": "model_preflight_failed", "error": "模型注册表为空"})
@@ -926,6 +916,11 @@ class Session:
             "paused": self.pause_gate.paused,
             "excluded_seconds": round(self.pause_gate.excluded_seconds, 1),
         }
+        if self.request.get("side_agent"):
+            source = self.request.get("side_context") or {}
+            out["side_session"] = {"agent": self.request["side_agent"],
+                "parent_session_id": source.get("parent_session_id"), "task_id": source.get("task_id"),
+                "actor": source.get("actor")}
         # 仪表盘总览的轻量指标（从运行摘要提取，不走完整 summary）
         run = (self.summary or {}).get("run", {}) if isinstance(self.summary, dict) else {}
         usage = self.model_usage()
@@ -1291,6 +1286,7 @@ class SessionManager:
                      if k not in ("challenges_yaml", "rules_yaml",
                                   "upload_ids", "project_id")},
             created_at=time.time(),
+            standing_rules=str(payload.get("standing_rules") or ""),
         )
         session.workspace.mkdir(parents=True, exist_ok=False)
         session.plan = plan
@@ -1309,7 +1305,8 @@ class SessionManager:
             cfg = self._session_cfg(session, payload.get("budget_tokens"))
             session.approvals = ApprovalBroker(AuditLogger(cfg.audit_log_path))
             session.questions = QuestionBroker(
-                AuditLogger(cfg.audit_log_path), context_path=session.bb_path)
+                AuditLogger(cfg.audit_log_path), context_path=session.bb_path,
+                interactive=session.mode != RunMode.COMPETITION.value)
             session.ring = RingLedger(AuditLogger(cfg.audit_log_path))
             session.pause_gate = PauseGate(AuditLogger(cfg.audit_log_path))
             no_llm = bool(payload.get("no_llm", False))
@@ -1339,6 +1336,24 @@ class SessionManager:
                         ch["attachments"] = [r["path"] for r in records]
                 for updir in {p.parent for p in staged_files}:
                     shutil.rmtree(updir, ignore_errors=True)
+            if payload.get("side_agent"):
+                context = session.request.get("side_context") or {}
+                parent = self.get(str(context.get("parent_session_id") or ""))
+                challenge = ((context.get("task") or {}).get("payload") or {}).get("challenge") or {}
+                if parent is not None and challenge.get("attachments"):
+                    rewritten = []
+                    for index, name in enumerate(challenge["attachments"]):
+                        source = Path(str(name))
+                        if source.is_file() and source.resolve().is_relative_to((parent.workspace / "attachments").resolve()):
+                            dest = session.workspace / "attachments" / f"{index}-{source.name}"
+                            dest.parent.mkdir(exist_ok=True)
+                            shutil.copy2(source, dest)
+                            rewritten.append(str(dest))
+                        else:
+                            rewritten.append(str(name))
+                    challenge["attachments"] = rewritten
+                    session.launch_request["side_context"] = copy.deepcopy(context)
+                self._persist(session)
             self.start()        # 直接使用（非 Web lifespan）时懒启动监督协程
             await self._queue.put((session, cfg, plan, no_llm, models, False))
         except Exception as exc:
@@ -1453,7 +1468,7 @@ class SessionManager:
         「先不测」/会话停止返回空目标。问题与选项由模型按记忆撰写
         （LLM 不可用时用确定性兜底），目标声明原样回灌模型上下文。
         """
-        if not project_memory:
+        if session.mode == RunMode.COMPETITION.value or not project_memory:
             return False, [], ""
         candidates = self._project_target_candidates(project_memory, plan)
         if not candidates:
@@ -1661,7 +1676,8 @@ class SessionManager:
         cfg = self._session_cfg(session, session.request.get("budget_tokens"))
         session.approvals = ApprovalBroker(AuditLogger(cfg.audit_log_path))
         session.questions = QuestionBroker(
-            AuditLogger(cfg.audit_log_path), context_path=session.bb_path)
+            AuditLogger(cfg.audit_log_path), context_path=session.bb_path,
+            interactive=session.mode != RunMode.COMPETITION.value)
         session.ring = RingLedger(AuditLogger(cfg.audit_log_path))
         # 暂停门换新（带本轮审计器），暂停态与已扣账的暂停/间隙时长跨续传
         # 保留：用户没手动继续前重开的任务在检查点挂起等待；时长丢失会让
@@ -1717,6 +1733,35 @@ class SessionManager:
                     audit.log("user.message", "user", {"content": plan.mission})
                 audit.log("system.lifecycle", "runtime", {
                     "action": "session_kickoff", "resume": resume})
+                if session.request.get("side_agent"):
+                    from spiritscout.runtime import run_agent_side_session
+
+                    self._set_phase(session, "executing", audit)
+                    def remember_reply(text: str) -> None:
+                        session.dialogue_history.append({"role": "assistant", "content": text})
+                        del session.dialogue_history[:-DIALOGUE_HISTORY_MAX]
+                        self._persist(session)
+
+                    mission = (session.dialogue_history[-1]["content"] if resume and session.dialogue_history
+                               else plan.mission)
+                    while True:
+                        # 本轮历史已包含这些用户消息；执行中新增的消息留待下一轮回应。
+                        session.user_inbox.clear()
+                        result = await run_agent_side_session(
+                            cfg=cfg, models=models, authorization=plan.authorization,
+                            agent_key=session.request["side_agent"], mission=mission,
+                            context=session.request.get("side_context") or {},
+                            agent_models=agentcfg.read_assignments(cfg.agent_models_path),
+                            approval_gate=session.approvals.ask, question_broker=session.questions,
+                            ring=session.ring, pause_gate=session.pause_gate,
+                            dialogue_history=copy.deepcopy(session.dialogue_history),
+                            standing_rules=session.standing_rules, on_reply=remember_reply)
+                        session.summary = {"run": result.run_summary, "flags": result.flag_stats}
+                        if not session.user_inbox:
+                            break
+                        mission = "\n".join(str(item.get("text") or "") for item in session.user_inbox)
+                    session.status = session.phase = "completed"
+                    return
                 routed = None
                 intent = "task"
                 routed_contest = ""
@@ -2082,6 +2127,9 @@ class SessionManager:
             session.status = "stopped"
             session.phase = "stopped"
         except Exception as exc:  # noqa: BLE001 —— 会话故障隔离：单会话失败不影响其他会话
+            if session.request.get("side_agent"):
+                AuditLogger(session.audit_path).log("agent.reply_failed", session.request["side_agent"],
+                    {"error": f"子 Agent 本轮回复未完成（{type(exc).__name__}），可继续发送消息重试。"})
             if resume and session.resume_prev_status:
                 # 续传未开工/中途失败：恢复原终态，原成果与摘要不丢
                 session.status = session.resume_prev_status
