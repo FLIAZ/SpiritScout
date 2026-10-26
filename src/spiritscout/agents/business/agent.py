@@ -1,11 +1,6 @@
-"""业务体验 Agent：真实浏览器走访业务流程，观测接口交易，产出带证据的业务上下文。
+"""业务分析：通过浏览器和 HTTP 工具记录页面、接口与流程，整理业务上下文。
 
-模型持有工具（playwright 浏览器 / http_probe / record_endpoint）自主走访——
-渲染后的页面、网络面板里的 XHR/fetch 交易都算证据；后端只做证据记账
-（导航页与登记的接口入黑板）与终局建模（business_analyst 归纳角色/对象/
-流程），不写死走访步骤。静态 HTML 解析管线已拆除：对 JS 渲染站点它天然
-失明（主页 0 导航 0 表单的教训），真实浏览器是唯一对得起「体验」二字的手。
-"""
+页面和接口观测写入黑板，由业务分析模型归纳角色、对象和流程。"""
 
 from __future__ import annotations
 
@@ -17,6 +12,10 @@ from spiritscout.agents.sub.base import RoutePlan, StepResult, SubAgent
 from spiritscout.core.audit import tool_preview
 from spiritscout.core.ids import new_id
 from spiritscout.core.models import AgentType, Asset, BlackboardLayer, Task
+from spiritscout.gateway.context import append_instruction_events, compact_history
+from spiritscout.tools.catalog import MCP_PROXY_SCHEMAS, search_mcp_tools
+from spiritscout.tools.search_policy import search_allowed
+from spiritscout.tools.web_search import SEARCH_SCHEMA
 
 
 class BusinessContextAgent(SubAgent):
@@ -49,7 +48,7 @@ class BusinessContextAgent(SubAgent):
 
     # ------------------------------------------------------------ 工具面
 
-    def _tool_schemas(self) -> list[dict[str, Any]]:
+    def _tool_schemas(self, *, deferred: bool = False) -> list[dict[str, Any]]:
         """模型可用工具清单：record_endpoint + http_probe + 会话装配的浏览器 MCP。"""
         schemas: list[dict[str, Any]] = [
             {"type": "function", "function": {
@@ -104,6 +103,10 @@ class BusinessContextAgent(SubAgent):
         schemas.append({"type":"function","function":{"name":"asset_memory_lookup",
             "description":"读取同一主机的历史资产，旧结果须按本次任务复核，不携带授权",
             "parameters":{"type":"object","properties":{"host":{"type":"string"},"query":{"type":"string"},"offset":{"type":"integer","minimum":0}},"required":["host"]}}})
+        if search_allowed(self.ctx):
+            schemas.append(SEARCH_SCHEMA)
+        if deferred:
+            return [*schemas, *MCP_PROXY_SCHEMAS]
         for name, meta in sorted((self.ctx.mcp_tools or {}).items()):
             schema = meta.get("schema")
             if not isinstance(schema, dict):
@@ -141,11 +144,6 @@ class BusinessContextAgent(SubAgent):
         cleaned = {k: v for k, v in intent.items() if v}
         if cleaned:
             payload["task_intent"] = cleaned
-        steering = (self.ctx.ring.steering_for(self.agent_type.value)
-                    if self.ctx.ring is not None else None)
-        if steering:
-            payload["灵枢督导"] = {"hint": steering["hint"],
-                                  "rationale": steering.get("rationale", "")}
         return json.dumps(payload, ensure_ascii=False)
 
     # ------------------------------------------------------------ 走访回合
@@ -174,25 +172,25 @@ class BusinessContextAgent(SubAgent):
             if fragment:
                 st["messages"].append({"role": "user", "content": fragment})
             st["world_state"] = current_world
-            steering = (self.ctx.ring.steering_for(self.agent_type.value)
-                        if self.ctx.ring is not None else None)
-            if steering and steering.get("ts") != st.get("steer_seen"):
-                st["steer_seen"] = steering.get("ts")
-                st["messages"].append({"role": "user", "content": json.dumps(
-                    {"灵枢督导": {"hint": steering["hint"],
-                                  "rationale": steering.get("rationale", "")}},
-                    ensure_ascii=False)})
-        from spiritscout.gateway.context import compact_history
-
-        compact_history(st["messages"])
+        steering = (self.ctx.ring.steerings_for(self.agent_type.value, task_id=task.task_id)
+                    if self.ctx.ring is not None else [])
+        append_instruction_events(st, steering, consumer_key=f"{task.task_id}|{route.route_id}")
+        size = len(json.dumps(st["messages"], ensure_ascii=False))
+        if size > st.get("compact_at", 48000):
+            compact_history(st["messages"])
+            size = len(json.dumps(st["messages"], ensure_ascii=False))
+            st["compact_at"] = size + max(16000, size // 2)
+        messages = [{k: v for k, v in m.items() if not k.startswith("_context_")}
+                    for m in st["messages"]]
         st["turn"] += 1
         if st["turn"] > 1:
             self.ctx.audit.log("agent.turn", self.agent_id, {"turn": st["turn"], "task_id": task.task_id})
         try:
             resp = await self.ctx.gateway.chat(
-                st["messages"], task_type="execution",
+                messages, task_type="execution",
                 timeout_seconds=self._TOOL_TIMEOUT,
-                tools=self._tool_schemas(), tool_choice="auto",
+                tools=self._tool_schemas(deferred=True), tool_choice="auto",
+                preserve_context=True,
                 reasoning_effort=self.task_effort(task))
         except Exception as exc:  # noqa: BLE001 —— 决策不可用如实报给路线
             self.ctx.audit.log("llm.step_fallback", self.agent_id, {
@@ -205,6 +203,7 @@ class BusinessContextAgent(SubAgent):
         st["messages"].append({
             "role": "assistant",
             "content": resp.content or "",
+            **({"reasoning_content": resp.reasoning} if getattr(resp, "reasoning", "") else {}),
             "tool_calls": [{"id": c.get("id") or "", "type": "function",
                             "function": {"name": c.get("name") or "",
                                          "arguments": str(c.get("raw") or "{}")}}
@@ -225,7 +224,8 @@ class BusinessContextAgent(SubAgent):
             st["messages"].append({
                 "role": "tool",
                 "tool_call_id": call.get("id") or "call_0",
-                "content": text[: self._TOOL_RESULT_CAP],
+                "content": text if call.get("name") == "mcp_search" else text[: self._TOOL_RESULT_CAP],
+                **({"_context_contract": True} if call.get("name") == "mcp_search" else {}),
             })
         plan.steps.append({"action": "explore"})   # 续回合：终局由模型给出
         return StepResult(ok=True, value=min(0.1 * st["turn"], 0.6),
@@ -242,15 +242,28 @@ class BusinessContextAgent(SubAgent):
         try:
             if call.get("parse_error"):
                 ok, text = False, f"工具参数解析失败: {call['parse_error']}。请修正 JSON 后重新调用。"
+            elif name == "mcp_search":
+                result = search_mcp_tools(self.ctx.mcp_tools or {}, str(args.get("query") or ""),
+                                          offset=int(args.get("offset") or 0),
+                                          limit=int(args.get("limit") or 3))
+                ok, text = True, json.dumps(result, ensure_ascii=False)
             elif name == "record_endpoint":
                 ok, text = await self._tool_record_endpoint(task, args)
             elif name == "ask_user":
                 ok, text = await self._tool_ask_user(task, args)
             else:
+                if name == "mcp_call":
+                    name, arguments = str(args.get("name") or ""), args.get("arguments")
+                    if name not in (self.ctx.mcp_tools or {}) or not isinstance(arguments, dict):
+                        raise ValueError("MCP 工具不在当前角色目录，或 arguments 不是对象")
+                    args = arguments
+                    result_meta["tool"] = name
                 res = await self.ctx.tools.call(name, args, **self.ctx.builtin_ctx)
                 ok = res.ok
                 text = (f"工具执行失败: {res.failure_reason()}"
                         if not res.ok else (res.stdout or "（无输出）"))
+                if name == "web_search":
+                    result_meta.update(res.parsed)
                 result_meta.update(invocation_id=res.invocation_id, returncode=res.returncode,
                                    attempts=res.attempts)
                 result_meta.update({key: res.parsed[key] for key in ("failure_kind", "failure_summary")
