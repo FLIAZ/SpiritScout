@@ -1,11 +1,4 @@
-"""模式装配器：运行模式 → 子 Agent 池 + 战术映射 + 模式模块。
-
-硬约束落地：
-- C7：CTF 模式不装配任何端口扫描能力（ReconAgent 在 CTF 下自动剔除
-  服务发现路线；CTF 五方向直接面向赛题入口）；
-- 智能体模式不按赛制标签裁剪角色，规划依赖赛方规则与平台事实；
-- 5.2.1：CTF 赛题未标注方向时按入口特征自动归类（URL/附件类型/二进制）。
-"""
+"""运行模式对应的角色池与战术映射。"""
 
 from __future__ import annotations
 
@@ -179,7 +172,7 @@ def ctf_plan_provider(challenges: list[dict[str, Any]], *,
                 "tactic": tactic, "title": title, "depends_on": [],
                 "meta": {"challenge": meta_ch},
             })
-    analysis = (f"CTF 赛题分发：{len(nodes)} 个方向节点并行开工（跳过端口扫描，C7）"
+    analysis = (f"CTF 赛题分发：{len(nodes)} 个方向节点并行开工（工具操作自动审批）"
                 if round_no == 0 else
                 f"CTF 重攻轮 #{round_no}：{len(nodes)} 个方向节点，换角度再攻")
     return {"analysis": analysis, "dag_nodes": nodes}
@@ -280,7 +273,7 @@ class ModeAssembler:
                 deferred=deferred,
                 skip_solved=resume and int(state.get("round_no", 0) or 0) == 0)
 
-        notes = [("CTF 模式：五方向专项，不启用端口扫描（C7）；"
+        notes = [("CTF 模式：五方向专项，所有工具操作自动批准并留痕；"
                   "赛题直接分发至专项子 Agent（5.2.1）；未破题自动换角度重攻")]
         if platform is not None:
             notes.append("平台托管：列题/开容器/回收/提交由灵枢侧适配器执行，"
