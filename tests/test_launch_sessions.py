@@ -204,6 +204,28 @@ class SessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(state["session"]["phase"], "model_preflight")
             self.assertIsNone(state["business_context"])
 
+    async def test_topology_preserves_route_and_finding_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Session(session_id="sess-topology", mode="ctf", target="challenge",
+                              workspace=Path(tmp), status="completed")
+            bb = Blackboard(session.bb_path)
+            bb.write(BlackboardLayer.TASK_STATE, "t1", {
+                "task": {"task_id": "t1", "parent_dag_node": "dag-1"},
+                "routes": [{"route_id": "r1", "name": "入口"}],
+            }, updated_by="test")
+            bb.write(BlackboardLayer.TOPOLOGY, "f1", {
+                "kind": "finding", "type": "note", "text": "结果",
+                "task_id": "t1", "route_id": "r1", "parent_dag_node": "dag-1",
+            }, updated_by="test")
+            bb.close()
+
+            state = _read_state(session)
+
+            self.assertEqual(state["topology"]["tasks"][0]["routes"][0]["route_id"], "r1")
+            self.assertEqual(state["tasks"][0]["routes"][0]["route_id"], "r1")
+            self.assertEqual(state["findings"][0]["finding_id"], "f1")
+            self.assertEqual(state["findings"][0]["task_id"], "t1")
+
     async def test_resume_cancels_stale_running_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
