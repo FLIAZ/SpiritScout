@@ -1,16 +1,6 @@
-"""环形协同底座（AWE 环形对等节点）：子 Agent 间实时共享进度与已尝试
-路线登记 + 灵枢督导通道。
+"""子 Agent 协同台账：共享尝试记录、进展和督导意见。
 
-- **已尝试登记（attempt ledger）**：每次网络探测按「方法+URL+参数形状」
-  归一化登记结果价值；后续 Agent 发现同一入口已被同伴尝试过且无产出时，
-  跳过深入——环形节点互不等候、互不重复做功。
-- **督导通道（steering）**：灵枢按实时进度为各子 Agent 写下方向建议，
-  子 Agent 在下一次 LLM 决策的上下文中消费（LLM 提议、规则放行：
-  建议是上下文而非指令，执行仍走原确定性通道）。
-
-进程内状态，随会话消亡（协调语义不落盘；路线笔记已各自持久化）。
-本模块的确定性行为只有三件：登记、查重、投递。
-"""
+尝试记录用于提示同伴已有结果；是否复查、换向或结束由模型决定。"""
 
 from __future__ import annotations
 
@@ -38,6 +28,8 @@ class RingLedger:
         self._audit = audit or NullAuditLogger()
         self._attempts: dict[str, dict] = {}
         self._steering: dict[str, dict] = {}       # agent_key → 最新督导建议
+        self._task_steering: dict[str, dict] = {}
+        self._steer_sequence = 0
 
     # ------------------------------------------------------------ 已尝试登记
 
@@ -69,17 +61,55 @@ class RingLedger:
 
     # ------------------------------------------------------------ 督导通道
 
-    def steer(self, agent_key: str, hint: str, *, rationale: str = "") -> None:
-        """灵枢写下对某子 Agent 的方向建议（新的覆盖旧的——只保留当前有效思路）。"""
-        self._steering[agent_key] = {
-            "hint": hint[:300], "rationale": rationale[:200],
+    def steer(self, agent_key: str, hint: str, *, rationale: str = "",
+              task_id: str = "") -> None:
+        """仅替换同一收件任务的旧指令；未指定任务表示该类型的公共指令。"""
+        self._steer_sequence += 1
+        record = {
+            "id": f"steer-{self._steer_sequence}", "agent": agent_key,
+            "task_id": task_id, "hint": hint[:2000], "rationale": rationale[:600],
+            "feedback": {},
             "ts": time.time(),
         }
-        self._audit.log("ring.steer", "ring", {
-            "agent": agent_key, "hint": hint[:300], "rationale": rationale[:200]})
+        if task_id:
+            self._task_steering[task_id] = record
+        else:
+            self._steering[agent_key] = record
+        self._audit.log("ring.steer", "ring", dict(record))
 
-    def steering_for(self, agent_key: str) -> dict | None:
-        return self._steering.get(agent_key)
+    def steerings_for(self, agent_key: str, *, task_id: str = "") -> list[dict]:
+        """公共指令与本任务指令同时可见，别题指令不可见。"""
+        return [{**r, "feedback": {k: dict(v) for k, v in r["feedback"].copy().items()
+                                    if not task_id or v["task_id"] == task_id}}
+                for r in (self._steering.get(agent_key),
+                                  self._task_steering.get(task_id))
+                if r is not None and r["agent"] == agent_key]
+
+    def steering_for(self, agent_key: str, *, task_id: str = "") -> dict | None:
+        records = self.steerings_for(agent_key, task_id=task_id)
+        return records[-1] if records else None
+
+    def steering_feedback(self, agent_key: str, *, task_id: str, route_id: str,
+                          instruction_id: str, status: str, detail: str = "") -> bool:
+        """记录投递事实或模型自报结果，不把接收指令冒充已执行。"""
+        if status not in {"delivered", "accepted", "completed", "blocked"}:
+            return False
+        record = next((r for r in (self._steering.get(agent_key),
+                                  self._task_steering.get(task_id))
+                       if r and r["agent"] == agent_key and r["id"] == instruction_id), None)
+        if record is None:
+            return False
+        key = f"{task_id}|{route_id}"
+        previous = record["feedback"].get(key)
+        # 每轮重送不覆盖模型反馈，也不重复产生“已接收”事件。
+        if status == "delivered" and previous is not None:
+            return True
+        feedback = {"task_id": task_id, "route_id": route_id,
+                    "status": status, "detail": detail[:600]}
+        record["feedback"][key] = feedback
+        self._audit.log("ring.steer_feedback", agent_key, {
+            "instruction_id": instruction_id, **feedback})
+        return True
 
     # ------------------------------------------------------------ 展示
 
@@ -88,5 +118,8 @@ class RingLedger:
         return {
             "attempts": len(self._attempts),
             # 先复制再遍历（/state 在线程池执行，避开并发登记/写督导）
-            "steering": {k: dict(v) for k, v in self._steering.copy().items()},
+            "steering": {k: {**v, "feedback": dict(v["feedback"])}
+                         for k, v in self._steering.copy().items()},
+            "task_steering": {k: {**v, "feedback": dict(v["feedback"])}
+                              for k, v in self._task_steering.copy().items()},
         }
