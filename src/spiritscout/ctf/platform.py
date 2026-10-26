@@ -1,21 +1,6 @@
-"""平台档案与对接适配器：主办方托管平台（跑分/CTF）的通用对接格式。
+"""比赛平台档案与适配器：读取题目、管理实例、提交结果并保存进度。
 
-平台档案是一份声明式配置（YAML/JSON）——接口名单（列题 / 开实例 /
-关实例 / 提交 / 提示）、挑战字段映射、并发上限与固定请求头。换主办方
-= 换一份档案，代码不动：档案由会话装配层从任务文本抽取或由用户显式
-提供（LLM 读平台 API 文档产出，草稿即用、失败降级不阻断）。
-
-边界（与「子 Agent 不接触平台」一致）：
-- 平台凭据（请求头）只在本适配器内使用，审计与落盘一律打码；
-- 所有平台操作由主 Agent（灵枢）侧调用：列题在会话装配期、开实例在
-  调度期、关实例在完成回收期、Flag 提交经 FlagManager 的提交回调；
-- 题面事实经 request 的字段映射展开注入（点路径 + 数组取首元素），
-  不写死任何主办方字段名。
-
-机械语义与模型语义的分界：id / 容器地址 / 完成态这类「接线用」字段由
-档案映射后机械使用；description、difficulty 等其余映射值只作为题面
-事实随挑战载荷下发，由解题 Agent 自行理解。
-"""
+请求方式和字段映射来自平台档案，保留操作回执供模型核对。"""
 
 from __future__ import annotations
 
@@ -286,6 +271,8 @@ class PlatformAdapter:
             "total_challenges": 0, "solved_ids": [], "unsolved_ids": []}
         self._client: httpx.AsyncClient | None = None
         self._instances: dict[str, str] = {}          # 题 id → 容器地址
+        self._instance_receipts: dict[str, dict[str, Any]] = {}
+        self.operation_receipts: dict[str, dict[str, Any]] = {}
         self._listed: dict[str, dict[str, Any]] = {}  # 题 id → 映射后的挑战
         self._listed_at = 0.0
         self._start_blocked_until = 0.0
@@ -295,6 +282,9 @@ class PlatformAdapter:
 
     def _record(self, action: str, **fields: Any) -> None:
         fact = {"action": action, "ts": int(time.time()), **fields}
+        if action in {"precheck", "list_refreshed"}:
+            self.operation_receipts[action] = {
+                k: fact[k] for k in ("action", "ts", "ok", "status", "count") if k in fact}
         self.facts.append(fact)
         del self.facts[:-40]
         self.audit.log("platform.fact", "platform_adapter", dict(fact))
@@ -504,6 +494,19 @@ class PlatformAdapter:
         except _SIZE_ERRORS:  # noqa: BLE001 —— 档案里给了非法值就当不限
             return 0
 
+    def active_instance_ids(self) -> set[str]:
+        """已登记的实例（包括等待平台补齐地址的实例）。"""
+        return set(self._instances)
+
+    def can_start_instance(self, cid: str) -> bool:
+        """供调度器判断资源与退避，不在名额已满时逐题产生等待日志。"""
+        if cid in self._instances and self._instances[cid]:
+            return True
+        if time.monotonic() < self._start_blocked_until:
+            return False
+        limit = self._max_active()
+        return cid in self._instances or not limit or len(self._instances) < limit
+
     async def ensure_instance(self, challenge: dict[str, Any]) -> dict[str, Any] | None:
         """按题幂等供给容器：已有实例直回；名额满 / 平台拒绝回 None（下轮补位）。"""
         cid = _as_str(challenge.get("id"))
@@ -512,10 +515,10 @@ class PlatformAdapter:
             return challenge
         if cid in self._instances:
             addr = self._instances[cid]
-            if addr and not challenge.get("url"):
-                return {**challenge, "container_addr": addr, "url": _maybe_url(addr)}
-            if addr or challenge.get("url"):
-                return challenge
+            if addr:
+                return self._provisioned_challenge(challenge, cid, addr)
+            if challenge.get("url"):
+                return self._provisioned_challenge(challenge, cid, "")
             # 已登记但地址空缺且题面无入口（平台异步供给/字段不符）：不能
             # 当成就绪回给调用方——该题将永远拿不到入口，还白占一个活跃
             # 名额；按退避重试供给（本题名额已占，不再走名额检查）
@@ -528,6 +531,7 @@ class PlatformAdapter:
         now = time.monotonic()
         if now < self._start_blocked_until:
             return None
+        self._record("instance_starting", challenge=cid)
         resp = await self._request(op, {"challenge": cid})
         if not resp.ok:
             self._start_blocked_until = now + self._START_RETRY_BACKOFF
@@ -547,14 +551,37 @@ class PlatformAdapter:
                          status=resp.status, detail=resp.text[:160])
             return None
         self._record("instance_started", challenge=cid, addr=addr, status=resp.status)
+        self._instance_receipts[cid] = {
+            "source": "platform.start", "challenge_id": cid,
+            "start_accepted": True, "http_status": resp.status,
+            "observed_at": int(time.time()), "service_readiness": "not_checked",
+        }
         if addr:
-            return {**challenge, "container_addr": addr, "url": _maybe_url(addr)}
-        return {**challenge}
+            return self._provisioned_challenge(challenge, cid, addr)
+        return self._provisioned_challenge(challenge, cid, "")
+
+    def _provisioned_challenge(self, challenge: dict[str, Any], cid: str,
+                               addr: str) -> dict[str, Any]:
+        """供给回执与列题快照分开：启动成功不等于 HTTP 服务已经就绪。"""
+        result = {**challenge}
+        receipt = dict(self._instance_receipts.get(cid) or {
+            "source": "runtime.instance_registry", "challenge_id": cid,
+            "service_readiness": "not_checked",
+        })
+        if addr:
+            result.update(container_addr=addr, url=_maybe_url(addr))
+        receipt["entry_url"] = result.get("url", "")
+        # 不能伪造 running；旧 stopped 保留出处，但不能继续充当启动后的当前态。
+        if "container_status" in result and receipt.get("start_accepted"):
+            receipt["listing_snapshot"] = {"container_status": result.pop("container_status")}
+        result["instance_provisioning"] = receipt
+        return result
 
     async def close_instance(self, cid: str, *, reason: str = "") -> bool:
         op = self.profile.ops.get("close")
         if op is None or not cid:
             self._instances.pop(cid, None)   # 平台无关闭能力：本地销账即可
+            self._instance_receipts.pop(cid, None)
             return False
         resp = await self._request(op, {"challenge": cid})
         ok = bool(resp.ok and 200 <= resp.status < 300)
@@ -562,6 +589,7 @@ class PlatformAdapter:
             # 成功才销账：请求失败记录留档，close_all 收尾还能重试；
             # 先销账会让失败被永久遗忘，平台容器继续占用启动名额
             self._instances.pop(cid, None)
+            self._instance_receipts.pop(cid, None)
         self._record("instance_closed" if ok else "instance_close_failed",
                      challenge=cid, status=resp.status, reason=reason[:80],
                      detail="" if ok else (resp.error or resp.text)[:160])
@@ -604,6 +632,12 @@ class PlatformAdapter:
             if cid in done and await self.close_instance(cid, reason="赛题完成"):
                 released.append(cid)
         return released
+
+    async def release_idle(self, active_challenge_ids: set[str]) -> None:
+        """模型已收尾且没有同题在途任务的实例及时归还，不等待整批复盘。"""
+        for cid in list(self._instances):
+            if cid not in active_challenge_ids:
+                await self.close_instance(cid, reason="本题执行已收尾，释放名额供后续题")
 
     def all_completed(self) -> bool:
         """平台视野内是否全部赛题完成（无完成态信号或无清单 → False）。
