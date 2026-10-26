@@ -13,6 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from spiritscout import __version__
 from spiritscout.config.settings import GatewayConfig, ModelEntry
 from spiritscout.core.audit import AuditLogger, NullAuditLogger
 from spiritscout.core.exceptions import SpiritScoutError
@@ -26,6 +27,7 @@ from spiritscout.gateway.backends import (
     extract_json,
 )
 from spiritscout.gateway.cache import PrefixTracker, cache_summary
+from spiritscout.gateway.capabilities import EndpointCapabilities
 from spiritscout.gateway.context import DecisionMemory
 from spiritscout.gateway.pricing import estimate_deepseek_cny
 from spiritscout.gateway.registry import ModelRegistry
@@ -71,7 +73,9 @@ async def chat_decision(
     if memory is not None:
         budget_for = getattr(gateway, "context_budget", None)
         budget = budget_for(**kwargs) if callable(budget_for) else None
-        messages = memory.prepare(messages, max_input_tokens=budget)
+        messages = memory.prepare(messages, max_input_tokens=budget,
+            compact_patches=bool(getattr(getattr(gateway, "config", None), "compact_decision_patches", False)),
+            stable_snapshot_prefix=bool(getattr(getattr(gateway, "config", None), "stable_snapshot_prefix", False)))
         # 追加式现场已由 DecisionMemory 管理；二次节选历史会改写缓存前缀。
         kwargs["preserve_context"] = True
         if audit is not None and memory.segment_changed:
@@ -185,6 +189,7 @@ class ModelGateway:
         self.prefix_tracker = PrefixTracker()
         self.registry = registry
         self.config = config or GatewayConfig()
+        self.endpoint_capabilities = EndpointCapabilities(enabled=self.config.remember_endpoint_capabilities)
         self.audit = audit or NullAuditLogger()
         self.budget = BudgetTracker(
             self.config.budget_tokens, self.config.budget_usd,
@@ -215,6 +220,7 @@ class ModelGateway:
         on_delta: DeltaCallback | None = None,
         reasoning_effort: str = "",
         preserve_context: bool = False,
+        preserve_tool_order: bool = False,
     ) -> ChatResponse:
         """统一对话入口：路由 → 限流 → 调用（主备切换）→ 计量 → 审计。
 
@@ -259,7 +265,7 @@ class ModelGateway:
                     # 思考强度按每个候选模型各自声明的档位把关（主备档位可能不同）
                     reasoning_effort=self._resolve_effort(candidate, reasoning_effort),
                     task_type=task_type,
-                    preserve_context=preserve_context,
+                    preserve_context=preserve_context, preserve_tool_order=preserve_tool_order,
                 )
                 if idx > 0:
                     resp.fallback_used = True
@@ -326,8 +332,9 @@ class ModelGateway:
         reasoning_effort: str = "",
         task_type: str = "execution",
         preserve_context: bool = False,
+        preserve_tool_order: bool = False,
     ) -> ChatResponse:
-        backend: ChatBackend = backend_for(entry, self._mock)
+        backend: ChatBackend = backend_for(entry, self._mock, capabilities=self.endpoint_capabilities)
         messages = copy.deepcopy(messages)
         if entry.context_window and not preserve_context:
             from spiritscout.gateway.context import (
@@ -339,7 +346,9 @@ class ModelGateway:
             if budget is not None:
                 compact_history_tokens(messages, budget, tools=tools)
         if tools:
-            tools = sorted(copy.deepcopy(tools), key=lambda t: str(t.get("function", {}).get("name", t.get("name", ""))))
+            tools = copy.deepcopy(tools)
+            if not preserve_tool_order:
+                tools = sorted(tools, key=lambda t: str(t.get("function", {}).get("name", t.get("name", ""))))
             tools = json.loads(json.dumps(tools, ensure_ascii=False, sort_keys=True))
         # 输出上限落点：调用点显式给定值优先（小通道定值）；否则按模型档案
         # 声明下发；档案也没声明就 None（请求不带该字段，端点自定）
@@ -354,7 +363,7 @@ class ModelGateway:
         prefix = self.prefix_tracker.observe(
             (entry.provider, entry.base_url or "", entry.model, actor, scope.task_id or "", scope.route_id or "", task_type, role),
             messages, tools)
-        call = {"call_id": f"model-{uuid.uuid4().hex}", "model": entry.model,
+        call = {"call_id": f"model-{uuid.uuid4().hex}", "model": entry.model, "runtime_version": __version__,
                 "task_type": task_type, "task_id": scope.task_id, "route_id": scope.route_id, "cache_scope": role or task_type, **prefix}
         self.audit.log("model.started", actor, call)
         stream = None
@@ -393,6 +402,8 @@ class ModelGateway:
             stream.flush()
         latency = (time.perf_counter() - started) * 1000
         metrics = {key: raw.get(key) for key in ("cached_input_tokens", "cache_write_tokens", "first_delta_ms")}
+        metrics.update(runtime_version=__version__, **attempts.metrics())
+        metrics["patch_optimization_enabled"] = self.config.compact_decision_patches
         metrics.update(estimate_deepseek_cny(entry, wall, raw["prompt_tokens"],
                                              raw.get("cached_input_tokens"), raw["completion_tokens"]))
         metrics.update(cache_scope=role or task_type, task_id=scope.task_id, route_id=scope.route_id)
