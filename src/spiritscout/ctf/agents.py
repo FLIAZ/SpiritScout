@@ -1,33 +1,7 @@
-"""CTF 五方向专项子 Agent（设计书 4.4.1~4.4.5）：原生工具调用解题环。
+"""CTF 各方向的原生工具调用与持久对话执行。
 
-框架只提供两样东西：**工具目录**与**结果流向**。
-- 工具目录：各方向可调用的确定性动作（含通用 HTTP 探测通道 http_request，
-  与文件/文本/编码分析工具），以原生 function calling 的 schema 交给模型；
-  参数由 LLM 按当前证据现场构造，不按固定模板出牌。
-- 结果流向：①网络请求走同一 http_probe 通道（范围标注/RPS/审计/审批
-  边界不变）；②Flag 只由 FlagManager 确定性正则提取（LLM 声明不作数）；
-  ③工具结果以 tool 消息回灌模型并进本路线观察序列与题级共享结论（同伴
-  路线与主 Agent 复盘都能读到）；④已尝试入口登记进环形台账（同伴路线
-  避让，不重复做功）。
-
-解题方式是**一条持久对话**：首条消息装入题面、入口预感知与同伴结论，
-完整系统提示只在第一次模型调用时注入；之后只续传题面、既有判断、工具证据
-与新增动态，避免长系统提示在每轮重新压过现场推理。每轮模型决定调用哪些工具
-（互不依赖的请求同轮并发），工具结果回灌，直到模型不再调用工具——那就是
-它的结论。不设固定回合顶——收尾由模型自主决定，滥用由网关 token
-预算与连续故障熔断兜底；已读取过的地址再次请求时直接回放
-当时记录（重取与否由模型用 refresh 参数决定）；除此之外是否重复、
-要不要换思路由模型自己判断（后端不做动作去重截断——归一化签名无法
-真正判定两次调用意图相同）。LLM 不可用时
-解题环诚实停摆留痕，不做固定模板兜底。
-
-分支并行：路线预算由灵枢按任务复杂度裁定（1~8），K>1 时按题面提出
-互不重叠的调查角度并行展开——分支共享现场（已探入口/笔记/Flag）
-相互接力；任一分支夺旗会即时通报其余路线，是否收尾由模型依现场决定
-（多 Flag 题还可继续深挖）；简单题自然落在单线。
-
-不启用端口扫描（C7）；仅访问赛题入口（URL 需在授权范围内）与本地附件。
-"""
+每条路线保留工具往返，按需读取同伴笔记和提交反馈；Flag 候选由模型登记。
+并行请求共享题目状态，已读结果可回放或通过 refresh 重新获取。"""
 
 from __future__ import annotations
 
@@ -35,6 +9,7 @@ import asyncio
 import base64
 import binascii
 import codecs
+import copy
 import html
 import json
 import re
@@ -52,8 +27,16 @@ from spiritscout.core.ids import new_id
 from spiritscout.core.models import AgentType, BlackboardLayer, RunMode, Task
 from spiritscout.ctf.flags import FlagManager
 from spiritscout.gateway import world_state
+from spiritscout.gateway.context import (
+    append_instruction_events,
+    compact_history_tokens,
+    estimate_input_tokens,
+)
+from spiritscout.tools.catalog import MCP_PROXY_SCHEMAS, search_mcp_tools
 from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
+from spiritscout.tools.search_policy import search_allowed
 from spiritscout.tools.spec import ActionCategory
+from spiritscout.tools.web_search import SEARCH_SCHEMA
 
 # 题面中疑似编码串的最小长度（降噪）
 _MIN_BLOB_LEN = 12
@@ -160,30 +143,40 @@ def _collapse(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-_EMPTY_ASSISTANT_MARKER = re.compile(
-    r"(?:empty message content|content is empty|message content sanitised|"
-    r"空消息内容|提供的内容为空|内容为空.*协议)", re.IGNORECASE)
-
-
 def _model_messages(messages: list[dict[str, Any]], *, initialized: bool) \
         -> list[dict[str, Any]]:
-    """无状态端点每轮均保留系统约束，稳定前缀可由端点缓存复用。"""
-    selected = messages
-    # 发送视图与持久状态使用不同的容器：网关/后端即使对
-    # message 字典增补字段，也不会改写缓存中的对话。
-    view = [dict(message) for message in selected]
-    for message in view:
-        if message.get("role") != "assistant" or not message.get("tool_calls"):
-            continue
-        content = str(message.get("content") or "").strip()
-        if not content or _EMPTY_ASSISTANT_MARKER.search(content):
-            names = [str((call.get("function") or {}).get("name") or "")
-                     for call in message.get("tool_calls", [])
-                     if isinstance(call, dict)]
-            message["content"] = "已发起工具调用" + (
-                "：" + "、".join(name for name in names if name)
-                if any(names) else "。")
-    return view
+    """原样回放模型正文、思考与工具调用；仅移除框架内部元数据。
+
+    空正文的工具调用也是有效原生响应，不能合成正文污染缓存前缀。
+    嵌套工具参数必须脱离持久状态，防止适配器修改历史。
+    """
+    return copy.deepcopy([{k: v for k, v in message.items() if not k.startswith("_context_")}
+                          for message in messages])
+
+
+def _complete_tool_history(messages: Any) -> bool:
+    """恢复时只接受完整的原生工具往返；不猜测中断工具的执行结果。"""
+    if not isinstance(messages, list):
+        return False
+    pending: set[str] = set()
+    for message in messages:
+        if not isinstance(message, dict):
+            return False
+        if message.get("role") == "tool":
+            call_id = message.get("tool_call_id")
+            if call_id not in pending:
+                return False
+            pending.remove(call_id)
+        else:
+            if pending:
+                return False
+            for call in message.get("tool_calls") or []:
+                if not isinstance(call, dict) or not isinstance(call.get("id"), str):
+                    return False
+                if not call["id"] or call["id"] in pending:
+                    return False
+                pending.add(call["id"])
+    return not pending
 
 
 def _challenge_instance_blocker(status: Any, text: str) -> str:
@@ -402,6 +395,7 @@ class _ToolOutcome:
     observation: dict[str, Any] | None = None
     empty: bool = False        # 成功执行但无有效输出（喂空转感知，不做拦截）
     stop: bool = False         # 平台已确认该得分目标完成：不再请求模型写收尾
+    metadata: dict[str, Any] = field(default_factory=dict)
     final_text: str = ""       # stop=True 时的确定性短回执
 
 
@@ -459,6 +453,8 @@ class _DeltaEmitter:
         self._last = time.monotonic()
         if text.strip():
             self.audit.log("agent.delta", self.agent_id, {
+                "task_id": (current_execution_scope.get() or ExecutionScope()).task_id,
+                "route_id": (current_execution_scope.get() or ExecutionScope()).route_id,
                 "route": self.route, "challenge": self.challenge,
                 "turn": self.turn, "kind": self._kind or "text",
                 "text": text[:4000]})
@@ -491,6 +487,13 @@ class CTFBaseAgent(SubAgent):
     flag_manager: FlagManager | None = None
     # 本方向工具目录（原生 function calling schema）；子类在此之上增补方向工具
     tool_schemas: ClassVar[list[dict[str, Any]]] = [
+        *MCP_PROXY_SCHEMAS,
+        _fn("steering_feedback", "向灵枢回报本任务指令的处理情况；accepted=说明下一步计划，"
+            "completed=给出实际动作与证据，blocked=说明无法执行的事实原因。回执不代替实际操作。",
+            {"instruction_id": {"type": "string"},
+             "status": {"type": "string", "enum": ["accepted", "completed", "blocked"]},
+             "detail": {"type": "string", "description": "计划、执行证据或阻塞原因"}},
+            ["instruction_id", "status", "detail"]),
         _fn("http_request",
             "向赛题目标发一次 HTTP 请求并拿到响应（状态码/响应头/正文摘要）。"
             "GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS 全部支持——表单提交、"
@@ -586,6 +589,7 @@ class CTFBaseAgent(SubAgent):
             required=["text"]),
         _fn("asset_memory_lookup", "读取同一主机的跨会话历史观测；历史不代表当前事实，不含凭据或授权。",
             {"host": {"type": "string"}, "query": {"type": "string"}, "offset":{"type":"integer","minimum":0}}, required=["host"]),
+        SEARCH_SCHEMA,
         _fn("kb_search",
             "检索本地经验知识库：敏感路径/备份文件清单、PHP 弱类型等平台特性"
             "事实、模板注入 canary、隐写与提权检查点、攻击路径模板与核验方法。"
@@ -601,8 +605,9 @@ class CTFBaseAgent(SubAgent):
             "为什么想继续、不同选择意味着什么」；options 给 2~4 个你建议的"
             "选项（用户也可以自由输入其他意见）；targets 填你希望纳入测试"
             "范围的目标，形如 [{\"target\": \"主机或 URL\", \"why\": \"一句话"
-            "说明它是什么、为什么需要（面向普通用户）\"}]——用户勾选后系统才"
-            "真正放行；只列授权范围外的新目标，不要罗列已在范围内的。一次性把"
+            "说明它是什么、为什么需要（面向普通用户）\"}]——用户勾选后系统会"
+            "记录扩围；已有任务授权覆盖的平台动态靶机无需重复确认，不能仅因地址"
+            "未匹配初始列表就提问。只列真正超出已有授权的新目标。一次性把"
             "问题问清楚，不要反复追问。",
             {"question": {"type": "string",
                           "description": "要问用户的问题（自己组织语言）"},
@@ -646,13 +651,16 @@ class CTFBaseAgent(SubAgent):
                         "description": "期望回传的结论"}},
             required=["brief"]),
     ]
-    # 解题路线的安全顶是回合上限与重复空转熔断；健康度剪枝面向多路线资源
-    # 再分配场景，逐轮探索的起步进展分天然低于阈值，会误杀在途调查——豁免
+    # 解题环由模型判断收尾；健康度剪枝面向多路线资源再分配，逐轮探索的
+    # 起步进展分天然低于阈值，会误杀在途调查，因此不在这里按分数剪枝
     health_prune_enabled: ClassVar[bool] = False
 
     def __init__(self, ctx, *, flag_manager: FlagManager | None = None, **kw):
         super().__init__(ctx, **kw)
         self.flag_manager = flag_manager
+        if not search_allowed(self.ctx):
+            self.tool_schemas = [schema for schema in self.tool_schemas
+                                 if schema["function"]["name"] != "web_search"]
         self._merge_mcp_schemas()
 
     @staticmethod
@@ -671,16 +679,7 @@ class CTFBaseAgent(SubAgent):
         }
 
     def _merge_mcp_schemas(self) -> None:
-        """活目录对账：把尚未并入的 MCP 工具补进本实例工具清单。
-
-        MCP 服务器在会话基建里后台续握、就绪一台注册一台——已运行的
-        Agent 下回合对账即可见（类级目录不动，实例副本追加）。
-        """
-        mcp = getattr(self.ctx, "mcp_tools", None) or {}
-        have = {s["function"]["name"] for s in self.tool_schemas}
-        fresh = [self._mcp_tool_schema(p, e) for p, e in mcp.items() if p not in have]
-        if fresh:
-            self.tool_schemas = [*self.tool_schemas, *fresh]
+        """工具入口保持稳定；MCP 活目录通过 mcp_search 按需提供，无需改写前缀。"""
 
     # ------------------------------------------------------------ 赛题载荷
 
@@ -807,6 +806,18 @@ class CTFBaseAgent(SubAgent):
         key = f"inv|{self.challenge_id(task)}|{route.name}|{task.task_id}"
         state = self.cache.get(self.route_namespace, key)
         if not isinstance(state, dict):
+            journal = getattr(self.ctx, "journal", None)
+            load = getattr(journal, "latest_checkpoint", None)
+            checkpoint = load("ctf_conversation", f"{task.task_id}:{route.route_id}") if callable(load) else None
+            saved = checkpoint.get("state") if isinstance(checkpoint, dict) else None
+            if isinstance(saved, dict) and _complete_tool_history(saved.get("messages")):
+                # 仅恢复同一任务、同一路线的原文，不接管其他任务或重放工具。
+                state = copy.deepcopy(saved)
+                self.cache.put(self.route_namespace, key, state)
+                self.ctx.audit.log("context.conversation_restored", self.agent_id, {
+                    "task_id": task.task_id, "route_id": route.route_id,
+                    "messages": len(state["messages"])})
+        if not isinstance(state, dict):
             state = {"messages": [], "seed": [], "observations": [],
                      "flags": [], "concluded": False, "stall": "",
                      "turn": 0, "llm_failures": 0, "empty_streak": 0,
@@ -826,6 +837,7 @@ class CTFBaseAgent(SubAgent):
         return state
 
     def _save_inv_state(self, task: Task, route, state: dict[str, Any]) -> None:
+        state["conversation_identity"] = self._conversation_identity(task)
         self.cache.put(self.route_namespace,
                        f"inv|{self.challenge_id(task)}|{route.name}|{task.task_id}",
                        state)
@@ -833,6 +845,43 @@ class CTFBaseAgent(SubAgent):
         if journal is not None:
             journal.checkpoint("ctf_conversation", f"{task.task_id}:{route.route_id}",
                                "turn_saved", state)
+
+    def _conversation_identity(self, task: Task) -> dict[str, Any]:
+        """协议、题目与实例回执标识；换实例不能沿用旧现场当作当前事实。"""
+        gateway = self.ctx.gateway
+        identity_for = getattr(gateway, "context_identity", None)
+        transport = identity_for() if callable(identity_for) else {"model": getattr(gateway, "_model", "")}
+        return {"challenge_id": self.challenge_id(task), "agent": self.agent_type.value,
+                "target": task.target,
+                "transport": transport,
+                "instance": copy.deepcopy((task.payload.get("platform_handoff") or {})
+                                           .get("instance_provisioning") or {}),
+                "challenge": copy.deepcopy(task.payload.get("challenge") or {})}
+
+    def _inherit_conversation(self, task: Task, route: Any, state: dict[str, Any]) -> None:
+        """只执行模型显式选择的对话分叉，历史结论不控制新任务的收尾。"""
+        ref = task.payload.get("continue_from")
+        journal = getattr(self.ctx, "journal", None)
+        if not isinstance(ref, dict) or not ref.get("task_id") or not ref.get("route_id") or journal is None:
+            return
+        checkpoint = journal.latest_checkpoint("ctf_conversation", f"{ref['task_id']}:{ref['route_id']}")
+        saved = checkpoint.get("state") if isinstance(checkpoint, dict) else None
+        messages = saved.get("messages") if isinstance(saved, dict) else None
+        identity = self._conversation_identity(task)
+        expected_model = identity["transport"].get("model", "")
+        accepted = bool(isinstance(saved, dict) and messages and _complete_tool_history(messages)
+                        and saved.get("conversation_identity") == identity
+                        and all(model == expected_model for model in saved.get("response_models", []))
+                        and messages[0] == state["messages"][0])
+        self.ctx.audit.log("context.conversation_handoff", self.agent_id, {
+            "task_id": task.task_id, "route_id": route.route_id,
+            "source": ref, "accepted": accepted})
+        if accepted:
+            current = copy.deepcopy(state["messages"][1:])
+            state["messages"] = copy.deepcopy(messages) + [{"role": "user", "content": (
+                "以下为新任务的当前现场与约定，优先于历史。旧结论、失败和工具结果属于历史证据，"
+                "不代表本任务已完成，也不自动复用旧授权；重新依据当前现场判断。")}] + current
+            state["system_initialized"] = True
 
     def _shared_conclusions(self, task: Task) -> list[str]:
         """题级共享结论：各路线收尾结论（同伴路线与复盘都能读到）。"""
@@ -862,6 +911,7 @@ class CTFBaseAgent(SubAgent):
             {"kind": "finding", "type": kind, "text": str(text)[:400],
              "url": str(url)[:300], "by": self.direction,
              "agent": self.agent_type.value, "route": str(route)[:40],
+             "task_id": task.task_id, "parent_dag_node": task.parent_dag_node,
              "challenge": str(ch.get("id") or "")[:80],
              "round": int(getattr(task, "round_no", 0) or 0),
              "ts": time.time()},
@@ -968,13 +1018,9 @@ class CTFBaseAgent(SubAgent):
 
     def _peer_accepted_flags(self, task: Task,
                              state: dict[str, Any]) -> list[str]:
-        """本轮并行同伴（不含本方向自己）获平台判定正确的 Flag 值。
+        """返回本轮同伴提交且已通过的 Flag，排除本路线已知值。
 
-        识别口径此前不看提交者：本路线刚提交成功的 Flag 下一回合会被当成
-        「同伴夺旗」通报（文本谎报出处、多 Flag 题失去再挖机会）。归属
-        只能看提交者方向 by——route 名会撞：各方向路线默认全部叫 solve，
-        拿名字比会把同伴战果统统滤掉（通报从此静默）。
-        """
+        按提交方向 by 区分归属，路线名可能相同。"""
         rnd = int(getattr(task, "round_no", 0) or 0)
         mine = set(state.get("flags") or [])
         return [f["value"] for f in self._shared_flags(task)
@@ -1127,14 +1173,6 @@ class CTFBaseAgent(SubAgent):
             if (update := self._peer_updates(task, state)):
                 # 同伴动态作为新消息注入：并行 Agent 的现场即时互通
                 state["messages"].append({"role": "user", "content": update})
-            steer = (self.ctx.ring.steering_for(self.agent_type.value)
-                     if self.ctx.ring is not None else None)
-            if steer and float(steer.get("ts") or 0) > float(state.get("steer_seen") or 0):
-                # 灵枢督导（含用户会话中发来的意见）注入活跃解题对话；
-                # 一条建议只注入一次（ts 水位），采纳与否由模型自行权衡
-                state["messages"].append({"role": "user", "content":
-                    f"灵枢督导（全局方向建议，结合现场自行权衡）：{steer['hint']}"})
-                state["steer_seen"] = steer["ts"]
 
         fragment, changed = self._sync_world_state(state)
         if fragment:
@@ -1144,26 +1182,49 @@ class CTFBaseAgent(SubAgent):
         state["turn"] += 1
         turn = state["turn"]
         include_initial_system = not bool(state.get("system_initialized"))
-        self._compact_messages(
-            state["messages"], initialized=not include_initial_system)
+        records = (self.ctx.ring.steerings_for(self.agent_type.value, task_id=task.task_id)
+                   if self.ctx.ring is not None else [])
+        append_instruction_events(state, records, consumer_key=f"{task.task_id}|{route.route_id}")
+        self._merge_mcp_schemas()
+        budget_for = getattr(self.ctx.gateway, "context_budget", None)
+        budget = budget_for(task_type="execution") if callable(budget_for) else None
+        if budget is not None:
+            before = estimate_input_tokens(state["messages"], self.tool_schemas)
+            if compact_history_tokens(state["messages"], budget, tools=self.tool_schemas):
+                self.ctx.audit.log("context.compacted", self.agent_id, {
+                    "task_id": task.task_id, "route_id": route.route_id,
+                    "reason": "token_window_pressure", "max_input_tokens": budget,
+                    "estimated_tokens_before": before,
+                    "estimated_tokens_after": estimate_input_tokens(
+                        state["messages"], self.tool_schemas)})
+        else:
+            # 未声明容量的第三方端点保留旧整理方式，不猜测其真实窗口。
+            size = len(json.dumps(state["messages"], ensure_ascii=False))
+            if size > state.get("compact_at", _MSG_CHAR_BUDGET):
+                self._compact_messages(state["messages"], initialized=not include_initial_system)
+                size = len(json.dumps(state["messages"], ensure_ascii=False))
+                state["compact_at"] = size + max(16000, size // 2)
+                self.ctx.audit.log("context.compacted", self.agent_id, {
+                    "task_id": task.task_id, "route_id": route.route_id,
+                    "reason": "unknown_window_legacy", "chars": size})
         messages: list[dict[str, Any]] = _model_messages(
             state["messages"], initialized=not include_initial_system)
+        directives = self._active_steering(task, route)
         emitter = _DeltaEmitter(self.ctx.audit, self.agent_id, route=route.name,
                                 challenge=self.challenge_id(task), turn=turn)
         self.ctx.audit.log("agent.turn", self.agent_id, {
+            "task_id": task.task_id, "route_id": route.route_id,
             "route": route.name, "challenge": self.challenge_id(task),
             "turn": turn,
             "initial_system_prompt": include_initial_system,
             "angle": plan.strategy[:160] if turn == 1 else ""})
         try:
-            self._merge_mcp_schemas()   # 后台就绪的 MCP 工具本回合起可见
             resp = await self.ctx.gateway.chat(
                 messages, task_type="execution",
-                # 不传 max_tokens：由网关按模型档案的真实上限执行（如 128K）。
-                # 此前硬编码 4096 时思考型模型把额度耗在思考上正文为空
-                # （收尾空结论），长脚本参数中途截断引发协议层报错连坐停摆。
+                # 输出上限由网关按模型配置处理，避免截断思考或工具参数。
                 timeout_seconds=_SOLVER_TIMEOUT,
                 tools=self.tool_schemas, tool_choice="auto",
+                preserve_context=True,
                 on_delta=emitter,
                 reasoning_effort=self.task_effort(task))
         except Exception as exc:  # noqa: BLE001 —— 单次调用失败允许下一回合重试
@@ -1182,10 +1243,20 @@ class CTFBaseAgent(SubAgent):
         emitter.flush()
         state["llm_failures"] = 0
         state["system_initialized"] = True
+        if isinstance(getattr(resp, "model", None), str) and resp.model:
+            models = state.setdefault("response_models", [])
+            if resp.model not in models:
+                models.append(resp.model)
+        for directive in directives:
+            self.ctx.ring.steering_feedback(
+                self.agent_type.value, task_id=task.task_id, route_id=route.route_id,
+                instruction_id=directive["id"], status="delivered")
 
         calls = [c for c in (resp.tool_calls or []) if isinstance(c, dict)]
         assistant: dict[str, Any] = {"role": "assistant",
                                      "content": resp.content or ""}
+        if getattr(resp, "reasoning", ""):
+            assistant["reasoning_content"] = resp.reasoning
         if calls:
             assistant["tool_calls"] = [
                 {"id": c.get("id") or f"call_{i}", "type": "function",
@@ -1235,6 +1306,7 @@ class CTFBaseAgent(SubAgent):
                               note=self._merge_note(boot_note, note))
 
         self.ctx.audit.log("agent.tool_call", self.agent_id, {
+            "task_id": task.task_id, "route_id": route.route_id,
             "route": route.name, "challenge": self.challenge_id(task),
             "turn": turn,
             "calls": [{"id": c.get("id"), "name": c.get("name"),
@@ -1255,15 +1327,18 @@ class CTFBaseAgent(SubAgent):
                          "note 记下后换条路；是否调整由你判断）")
             state["messages"].append({
                 "role": "tool", "tool_call_id": call.get("id") or "call_0",
-                "content": text[:_TOOL_RESULT_CAP]})
+                # 参数契约按需查询后必须完整可读，不能把 schema JSON 截成半段。
+                "content": text if call.get("name") == "mcp_search" else text[:_TOOL_RESULT_CAP],
+                **({"_context_contract": True} if call.get("name") == "mcp_search" else {})})
             total_value += out.value
             findings.extend(out.findings)
             if out.note:
                 notes.append(out.note)
             self.ctx.audit.log("agent.tool_result", self.agent_id, {
+                "task_id": task.task_id, "route_id": route.route_id,
                 "route": route.name, "challenge": self.challenge_id(task),
                 "id": call.get("id"), "name": call.get("name"), "ok": out.ok,
-                "note": out.note[:200], "result": (out.text or "")[:1200]})
+                "note": out.note[:200], "result": (out.text or "")[:1200], **out.metadata})
         state["empty_streak"] = (empty_streak + 1) if outcomes and all(
             o.ok and o.empty for o in outcomes) else 0
         head = f"第 {turn} 回合"
@@ -1300,11 +1375,24 @@ class CTFBaseAgent(SubAgent):
             str(schema.get("function", {}).get("name") or "")
             for schema in self.tool_schemas
         }
-        if name not in allowed_tools:
+        legacy_mcp = name.startswith("mcp__") and name in (getattr(self.ctx, "mcp_tools", None) or {})
+        if name not in allowed_tools and not legacy_mcp:
             return _ToolOutcome(
                 ok=False,
                 text=f"工具 {name} 不在 {self.agent_type.value} 的工具目录内。",
             )
+        if name == "steering_feedback":
+            ring = self.ctx.ring
+            status = str(args.get("status") or "")
+            detail = str(args.get("detail") or "").strip()
+            if (ring is None or status not in {"accepted", "completed", "blocked"}
+                    or not detail or not ring.steering_feedback(
+                        self.agent_type.value, task_id=task.task_id, route_id=route.route_id,
+                        instruction_id=str(args.get("instruction_id") or ""),
+                        status=status, detail=detail)):
+                return _ToolOutcome(ok=False, text="指令不存在、已被替换、不属于本任务或回执缺失。")
+            return _ToolOutcome(ok=True, note=f"督导回执 {status}：{detail[:160]}",
+                                text="回执已交灵枢；实际完成情况仍以工具结果与证据为准。")
         if name == "note":
             text = str(args.get("text", "") or "").strip()
             if not text:
@@ -1317,7 +1405,18 @@ class CTFBaseAgent(SubAgent):
                                 text="已写入团队共享笔记并落黑板（跨轮可见），"
                                      "同伴下一回合即可看到。")
         try:
-            if name == "http_request":
+            if name == "mcp_search":
+                result = search_mcp_tools(getattr(self.ctx, "mcp_tools", None) or {},
+                                          str(args.get("query") or ""),
+                                          offset=int(args.get("offset") or 0),
+                                          limit=int(args.get("limit") or 3))
+                out = _ToolOutcome(ok=True, note="已查询 MCP 工具目录",
+                                   text=json.dumps(result, ensure_ascii=False))
+            elif name == "mcp_call":
+                if not isinstance(args.get("arguments"), dict):
+                    raise ValueError("mcp_call.arguments 必须是参数对象")
+                out = await self._tool_mcp(task, str(args.get("name") or ""), args["arguments"])
+            elif name == "http_request":
                 out = await self._tool_http(task, route, state, args)
             elif name in ("shell", "python"):
                 out = await self._tool_sandbox(task, route, state, name, args)
@@ -1333,6 +1432,10 @@ class CTFBaseAgent(SubAgent):
                 page = resources.assets(query=str(args.get("query", "")),host=host,offset=max(0,int(args.get("offset",0))),limit=20)
                 out = _ToolOutcome(ok=True, value=0, note="已读取历史资产，仍需按任务复核",
                     text=json.dumps({**page,"notice":"历史参考，不代表本次已验证；旧授权和凭据不会复用"},ensure_ascii=False))
+            elif name == "web_search":
+                res = await self.ctx.tools.call(name, args, **self._tool_ctx(task))
+                out = _ToolOutcome(ok=res.ok, text=res.stdout or res.failure_reason(),
+                    note=f"公开资料检索：{args.get('query', '')}", metadata=res.parsed)
             elif name == "kb_search":
                 out = await self._tool_kb_search(args)
             elif name == "ask_user":
@@ -1607,12 +1710,16 @@ class CTFBaseAgent(SubAgent):
                 "当前会话没有可用的用户询问通道——基于已有证据自行决策，"
                 "并在结论中说明该不确定点。"))
         multiple = bool(args.get("multiple"))
-        self.ctx.audit.log("agent.ask_user", self.agent_id, {
-            "route": route.name, "challenge": self.challenge_id(task),
-            "question": question[:500], "options": options,
-            "multiple": multiple, "targets": targets})
+        if getattr(broker, "interactive", True):
+            self.ctx.audit.log("agent.ask_user", self.agent_id, {
+                "route": route.name, "challenge": self.challenge_id(task),
+                "question": question[:500], "options": options,
+                "multiple": multiple, "targets": targets})
         result = await broker.ask(self.agent_type.value, question, options, targets,
                                   multiple=multiple)
+        if result.get("autonomous"):
+            return _ToolOutcome(ok=True, value=0.0, note="全自动模式：交回 Agent 自主决策",
+                                text=str(result.get("answer") or "基于已有证据自主决策。"))
         answer = str(result.get("answer") or "").strip()
         added = result.get("scope_added") or []
         if result.get("cancelled"):
@@ -1736,8 +1843,11 @@ class CTFBaseAgent(SubAgent):
         res = await self.ctx.tools.call(name, args, **self._tool_ctx(task))
         text = res.stdout or res.error or res.stderr
         note = f"MCP {entry['server']}/{entry['tool']}"
+        if not res.ok:
+            reason = res.parsed.get("failure_summary") or res.error or text or "未提供诊断"
+            note += " 失败：" + " ".join(str(reason).split())
         return _ToolOutcome(ok=res.ok,
-                            value=0.2,
+                            value=0.2 if res.ok else 0.0,
                             findings=[],
                             note=note[:120],
                             text=text[:_TOOL_RESULT_CAP] or "（无输出）")
@@ -1754,10 +1864,12 @@ class CTFBaseAgent(SubAgent):
         path = str(args.get("path", "") or "").strip()
         full = str(args.get("url", "") or "").strip()
         url = ""
-        if path.startswith("/") and "://" not in path and len(path) <= 300 and base:
+        # 显式完整 URL 优先：模型可能同时带站内 path，不能把平台 API 发往题目靶机。
+        if full:
+            if full.startswith(("http://", "https://")) and len(full) <= 400:
+                url = full
+        elif path.startswith("/") and "://" not in path and len(path) <= 300 and base:
             url = base + path
-        elif full.startswith(("http://", "https://")) and len(full) <= 400:
-            url = full
         if not url:
             return None
         params = args.get("params")
@@ -1956,9 +2068,11 @@ class CTFBaseAgent(SubAgent):
         rc = res.parsed.get("exit_code", res.returncode)
         status = (f"超时终止（{timeout:.0f}s）" if res.timed_out
                   else f"退出码 {rc}")
+        # 督导需要看到实际响应；进程成功不代表假设成立或取得有效线索。
+        evidence = _head_tail((res.stdout or res.stderr or "无输出").strip(), 160)
         state["observations"].append(
             {"action": desc,
-             "result": f"{status}；输出 {len(res.stdout or '')} 字符"})
+             "result": f"{status}；{evidence}"})
         workdir = str((res.parsed or {}).get("workdir") or "")
         out_file = str((res.parsed or {}).get("output_file") or "")
         head = (f"（{status}，耗时 {res.duration_ms / 1000:.1f}s，"
@@ -1980,7 +2094,7 @@ class CTFBaseAgent(SubAgent):
         return _ToolOutcome(
             ok=True, value=0.05, empty=not (res.stdout or "").strip(),
             findings=[],
-            note=f"{desc} → {status}",
+            note=f"{desc} → {status}；{evidence}",
             text="\n".join(lines))
 
     async def _tool_analyze_text(self, task: Task) -> _ToolOutcome:
@@ -2072,13 +2186,16 @@ class CTFBaseAgent(SubAgent):
             res = await self.ctx.tools.call("http_probe", {"url": url},
                                             **self._tool_ctx(task))
             if not res.ok:
-                state["seed"].append(f"入口页 {url}：不可达（{str(res.error)[:120]}）")
+                state["seed"].append(
+                    f"入口页 {url}：本次 HTTP 请求失败（{str(res.error)[:120]}）。"
+                    "这是一次请求的观察，不能据此认定容器未启动或 VPN 不通；"
+                    "结合实例供给回执判断服务就绪情况。")
                 if self.ctx.ring is not None:
                     self.ctx.ring.record_attempt(
                         akey, agent_id=self._ring_actor(route),
                         agent_name=self._ring_name(route), action="bootstrap",
-                        outcome=0.0, note="入口页不可达")
-                return 0.0, "赛题入口不可达"
+                        outcome=0.0, note="首次入口 HTTP 请求失败，服务就绪状态待确认")
+                return 0.0, "首次入口请求失败（未证明容器停止或 VPN 故障）"
             status = res.parsed.get("status_code", 0)
             obs = _http_observation(f"GET {url}", res, url, [])
             state["observations"].append(obs)
@@ -2132,18 +2249,32 @@ class CTFBaseAgent(SubAgent):
         state["world_state"] = current
         return fragment or "", changed
 
+    def _active_steering(self, task: Task, route) -> list[dict[str, Any]]:
+        """只取本任务尚未回报完成的指令；各路线独立接收与反馈。"""
+        if self.ctx.ring is None:
+            return []
+        key = f"{task.task_id}|{route.route_id}"
+        return [record for record in self.ctx.ring.steerings_for(
+            self.agent_type.value, task_id=task.task_id)
+            if (record.get("feedback", {}).get(key) or {}).get("status") != "completed"]
+
     def _solver_system_prompt(self) -> str:
         from spiritscout.agents.profiles import agent_system_prompt
 
         prompt = (
-            agent_system_prompt(self.agent_type)
+            agent_system_prompt(self.agent_type, allow_search=search_allowed(self.ctx))
             + "\n"
             "工作方式：工具就是你的手——需要看什么就用工具去拿，不要凭空猜测"
             "页面内容或响应。拿到页面先读懂它：可见文案、注释、表单与链接是"
             "出题人放在现场的第一手情报，往往比直接上手打接口更能说明这道题"
             "要什么。每一轮可以调用一个或多个工具：互不依赖的请求放在"
             "同一轮并发发出，省时间。\n"
-            "环境与知识：工具列表里的工具与 mcp__ 前缀的外部工具都是你的手；"
+            "进展沟通：发现新证据、遇到阻碍或调整方向时，在调用工具的同一条回复正文中，"
+            "用一到三句简短自然语言告诉用户刚确认了什么、接下来准备验证什么及原因。"
+            "只陈述已有证据与当前行动意图，不输出内部推理过程，不逐条复述命令和原始响应。"
+            "调查尚在继续时仍须随该回复调用工具，不要单发一条仅有进度说明的结束消息。\n"
+            "环境与知识：工具列表里的工具都是你的手；外部 MCP 能力用 mcp_search 查询完整说明，"
+            "再用 mcp_call 调用，目录可实时发现后来就绪的工具。"
             "工具、解释器与库是否可用以实际执行结果为准，不确定时先探测；"
             "经验库里的检查清单与平台特性事实用 kb_search 检索——它们是"
             "参考资料，采纳与否由你基于现场证据判断。\n"
@@ -2159,6 +2290,10 @@ class CTFBaseAgent(SubAgent):
             "别人探过的入口、写下的笔记、拿到的 Flag 会以「同伴动态」出现在对话里；"
             "有值得同伴立刻知道的发现（接口/参数/口令线索）就用 note 工具写一条，"
             "发现别人已经解决或已经试过的，不要重复做功。\n"
+            "灵枢指令：收到当前任务指令后，优先调整下一步实际操作，"
+            "用 steering_feedback 回报接受后的计划、已完成的证据或无法执行的原因；"
+            "回执本身不代表完成。指令里的技术推测仍须现场验证，"
+            "有冲突就给证据反馈，不要忽略指令、反复重复原有操作。\n"
             "提问：遇到授权范围外的目标或需要用户拍板的分叉，用 ask_user 向"
             "用户提问——问题与选项用你自己的话写清楚；用户同意的目标会被"
             "加入本会话范围，之后可正常测试。\n"
@@ -2193,6 +2328,9 @@ class CTFBaseAgent(SubAgent):
         world = self._world_snapshot()
         if world:
             parts.append(world_state.render(world))
+        if task.payload.get("source_context"):
+            parts.append("## 旁路来源（历史快照，当前任务与授权优先）\n"
+                         + json.dumps(task.payload["source_context"], ensure_ascii=False))
         state["world_state"] = world
         recovery = task.payload.get("execution_recovery")
         if recovery:
@@ -2231,8 +2369,10 @@ class CTFBaseAgent(SubAgent):
             "concl": len(self._shared_conclusions(task)),
             "flags": [self._flag_line(f) for f in peer_flags]})
         rules = str((task.payload or {}).get("rules") or "")
-        task_rules_part = ("## 用户既定规则（全程遵守，含终止条件）\n" + rules
-                           if rules else "")
+        # 原规则若已完整出现在世界状态里，不再复制一次；不同或新增原文仍完整发送。
+        world_text = json.dumps(world, ensure_ascii=False)
+        task_rules_part = ("## 用户既定规则（全队原始约定，含终止条件；结合当前派工与已完成回执分工执行）\n" + rules
+                           if rules and json.dumps(rules, ensure_ascii=False)[1:-1] not in world_text else "")
         exps = task.payload.get("recent_experience") or []
         if exps:
             parts.append("## 实战经验（同类场景的参考事实与信号，非步骤；"
@@ -2242,8 +2382,23 @@ class CTFBaseAgent(SubAgent):
         if angle:
             parts.append("## 本路线调查角度（与并行分支分工，不重复做功）\n"
                          + angle[:200])
-        task_part = ("## 任务\n夺取本题 Flag；判定拿到后用 submit_flag 提交，"
+        task_part = (f"## 任务\n当前派工题号：{ch.get('id', '')}；本题入口：{target}。\n"
+                     "题目入口优先于世界状态中的比赛平台地址；有实例入口时直接解本题，"
+                     "不要重新从平台首页找题或申请同一实例。\n"
+                     "夺取本题 Flag；判定拿到后用 submit_flag 提交，"
                      "拿到应答即收尾。")
+        handoff = task.payload.get("platform_handoff") or {}
+        if handoff:
+            task_part += (
+                "\n## 主控平台交接回执\n" + json.dumps(handoff, ensure_ascii=False)
+                + "\n用户原始标准流程由全队分工执行：已完成的平台预检、列题与实例申请"
+                "无需在每道题或每条路线重新执行。instance_provisioning.start_accepted"
+                "只表示平台已接受启动，不能当成服务已就绪；listing_snapshot 是启动前快照，"
+                "其中 stopped 不能用来推翻启动回执。首次连接失败可能是服务尚未就绪，"
+                "下一步应结合真实入口响应复核，而非从比赛平台重新跑流程。"
+                "本题得分通过 submit_flag 交给已配置的提交链路；名额释放、容器关闭或重新"
+                "供给由主控协调。需要协调时以 note 或 steering_feedback 说明证据与阻塞，"
+                "不要绕过协调自行重复申请或关闭共享实例。")
         history = self.ctx.blackboard.read(BlackboardLayer.TOPOLOGY, "historical-assets")
         if history:
             parts.append("## 同一资产的历史参考（本次未复核，不能沿用旧授权）\n" + json.dumps(history, ensure_ascii=False)[:8000])
@@ -2274,6 +2429,7 @@ class CTFBaseAgent(SubAgent):
                 part for part in (world_part, body[:body_budget], task_rules_part, rules_part,
                                   task_part) if part)},
         ]
+        self._inherit_conversation(task, route, state)
 
     @staticmethod
     def _compact_messages(messages: list[dict[str, Any]], *,
@@ -2296,7 +2452,7 @@ class CTFBaseAgent(SubAgent):
                 break
             content = str(msg.get("content") or "")
             role = msg.get("role")
-            if role not in ("tool", "assistant") or len(content) <= 400:
+            if msg.get("_context_contract") or role not in ("tool", "assistant") or len(content) <= 400:
                 continue
             keep = (content[:200]
                     + "…（早前内容已折叠，头尾摘录；完整内容可按记录重取）"
@@ -2327,7 +2483,7 @@ class CTFBaseAgent(SubAgent):
 
 
 class CTFWebAgent(CTFBaseAgent):
-    """Web 专项（4.4.1）：LLM 按题提出调查角度，逐环自主探测。"""
+    """Web 专项：LLM 按题提出调查角度，逐环自主探测。"""
 
     agent_type = AgentType.CTF_WEB
     direction = "web"
@@ -2346,11 +2502,11 @@ class CTFWebAgent(CTFBaseAgent):
 
 
 class CTFCryptoAgent(CTFBaseAgent):
-    """Crypto 专项（4.4.4）：编码链/古典密码工具 + LLM 按题分析。
+    """Crypto 专项：编码链/古典密码工具 + LLM 按题分析。
 
-    RSA/AES/ECC 现代密码攻击依赖 SageMath/z3， 经工具层接入（不静默降级）；
-    数学求解超出工具能力时，由 LLM 把结构分析与可验证线索写入结论。
-    """
+        RSA/AES/ECC 现代密码攻击依赖 SageMath/z3， 经工具层接入（不静默降级）；
+        数学求解超出工具能力时，由 LLM 把结构分析与可验证线索写入结论。
+        """
 
     agent_type = AgentType.CTF_CRYPTO
     direction = "crypto"
@@ -2411,10 +2567,10 @@ class CTFCryptoAgent(CTFBaseAgent):
 
 
 class CTFMiscAgent(CTFBaseAgent):
-    """Misc 专项（4.4.5）：附件/字符串/编码工具 + LLM 按题分析。
+    """Misc 专项：附件/字符串/编码工具 + LLM 按题分析。
 
-    zsteg/binwalk/tshark 等隐写工具链 经 CLI 封装接入（6.8）。
-    """
+        zsteg/binwalk/tshark 等隐写工具链 经 CLI 封装接入。
+        """
 
     agent_type = AgentType.CTF_MISC
     direction = "misc"
@@ -2456,10 +2612,10 @@ class CTFMiscAgent(CTFBaseAgent):
 
 
 class CTFReverseAgent(CTFBaseAgent):
-    """Reverse 专项（4.4.3）：二进制情报工具 + LLM 按题分析。
+    """Reverse 专项：二进制情报工具 + LLM 按题分析。
 
-    Ghidra 脚本化/angr 符号执行/z3 求解 经工具层接入（6.8）。
-    """
+        Ghidra 脚本化/angr 符号执行/z3 求解 经工具层接入。
+        """
 
     agent_type = AgentType.CTF_REVERSE
     direction = "reverse"
@@ -2497,11 +2653,11 @@ class CTFReverseAgent(CTFBaseAgent):
 
 
 class CTFPwnAgent(CTFBaseAgent):
-    """Pwn 专项（4.4.2）：保护机制/危险函数情报工具 + LLM 按题分析。
+    """Pwn 专项：保护机制/危险函数情报工具 + LLM 按题分析。
 
-    pwntools 模板化利用链生成/ROP 拼接 接入（6.8）；
-    本专项完成结构化侦察（ELF 识别、保护机制清单、危险函数情报）。
-    """
+        pwntools 模板化利用链生成/ROP 拼接 接入；
+        本专项完成结构化侦察（ELF 识别、保护机制清单、危险函数情报）。
+        """
 
     agent_type = AgentType.CTF_PWN
     direction = "pwn"
