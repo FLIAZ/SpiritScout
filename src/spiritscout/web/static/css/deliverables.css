@@ -1,15 +1,14 @@
-/* 档案页：证据索引是视觉主线，沿用作战台表面色，青灰与紫灰区分记录性质。 */
+/* 会话记录：分类、列表和详情。 */
 .archive { --archive-teal:#426e72; --archive-plum:#80647f; --archive-blue:#527492;
-  --archive-display:"Noto Serif CJK SC","Songti SC",SimSun,serif; padding:6px 0 24px; }
-.archive-head {display:flex;justify-content:space-between;gap:24px;align-items:center;padding:24px 26px 26px;
+  padding:6px 0 24px; }
+.archive-head {display:flex;justify-content:space-between;gap:24px;align-items:center;padding:18px 20px;
   border:1px solid var(--line);border-bottom:0;background:var(--surface);border-radius:12px 12px 0 0;
-  box-shadow:inset 4px 0 0 var(--archive-teal);}
-.archive-eyebrow {font-size:11px;letter-spacing:.16em;color:var(--ink-2);}
-.archive-head h3 {font:600 clamp(23px,2.5vw,32px)/1.4 var(--archive-display);letter-spacing:.06em;margin:9px 0;}
+}
+.archive-head h3 {font-size:18px;font-weight:600;line-height:1.5;margin:0 0 6px;}
 .archive-head p {margin:0;color:var(--ink-2);font-size:12px;}
 .archive-actions {display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end;}
 #archive-sync {font-size:11px;color:var(--ink-2);flex-basis:100%;text-align:right;font-family:var(--mono);}
-.archive-layout {display:grid;grid-template-columns:180px minmax(230px,1fr) minmax(250px,.85fr);border:1px solid var(--line);border-radius:0 0 12px 12px;overflow:hidden;background:var(--surface);min-height:540px;}
+.archive-layout {display:grid;grid-template-columns:180px minmax(230px,1fr) minmax(250px,.85fr);border:1px solid var(--line);border-radius:0 0 12px 12px;overflow:hidden;background:var(--surface);min-height:360px;}
 .archive-rail {padding:22px 14px;background:color-mix(in srgb,var(--archive-teal) 4%,var(--surface));border-right:1px solid var(--line);min-width:0;}
 .archive-rail label {font-size:11px;color:var(--ink-2);display:block;margin-bottom:7px;}
 #archive-search {width:100%;min-width:0;font-size:12px;padding:9px;border-radius:6px;}
@@ -35,7 +34,7 @@
 .archive-row-foot span {overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .archive-detail {border-left:1px solid var(--line);padding:22px;min-width:0;background:color-mix(in srgb,var(--archive-blue) 2%,var(--surface));}
 .archive-detail-top {display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:10px;color:var(--ink-2);}
-.archive-detail h4 {font:600 19px/1.7 var(--archive-display);overflow-wrap:anywhere;margin:22px 0 14px;}
+.archive-detail h4 {font-size:16px;font-weight:600;line-height:1.7;overflow-wrap:anywhere;margin:22px 0 14px;}
 .archive-detail-text {font-size:12px;white-space:pre-wrap;line-height:1.9;overflow-wrap:anywhere;color:var(--ink-2);}
 .archive-target {font:11px/1.8 var(--mono);padding:10px;background:var(--surface-2);border-radius:5px;overflow-wrap:anywhere;}
 .archive-meta {display:grid;grid-template-columns:65px minmax(0,1fr);gap:12px 10px;padding:20px 0;border-top:1px solid var(--line);margin-top:22px;font-size:11px;}
