@@ -46,6 +46,7 @@ const turnEl = {
 };
 const box = { querySelectorAll: sel => sel === ".tl-turn" ? [turnEl] : [], querySelector: () => null };
 Object.assign(context, {
+  traceRenderTarget: null,
   TRACE_TURNS: new Map([[ACTOR, turnEl]]),
   $: () => box, esc: v => String(v ?? ""), actorName: a => String(a), fmtK: n => String(n),
   fmtElapsed: n => String(n), fmtSize: n => String(n), TERMINAL: new Set(),
@@ -55,7 +56,7 @@ Object.assign(context, {
   ToolParameters: { attach: () => {} },
   traceAppend: () => ({ dataset: {} }), traceScroll: () => {},
 });
-vm.runInContext(cut("function traceTurn(", "function argBrief(") + cut("function tracePush(e) {", 'const traceBox = $("#trace-box");'), context);
+vm.runInContext(cut("function traceTurn(", "function argBrief(") + cut("function tracePush(", 'const traceBox = $("#trace-box");'), context);
 
 const push = (type, detail) => vm.runInContext("tracePush", context)({ type, actor: ACTOR, detail, ts: "2026-10-17T00:00:00Z" });
 const say = () => children.filter(c => c.kind === "say");
