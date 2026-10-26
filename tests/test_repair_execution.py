@@ -47,7 +47,7 @@ class ExecutionRegressionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sensitive_action_is_denied_even_with_startup_allow(self) -> None:
         gate = AsyncMock(return_value=False)
-        policy = PolicyEngine(RunMode.CTF, ScopeGuard(Scope(allow_sensitive_actions=True)),
+        policy = PolicyEngine(RunMode.SRC, ScopeGuard(Scope(allow_sensitive_actions=True)),
                               approval_gate=gate)
         registry = ToolRegistry(LocalExecutor(), policy=policy)
         execute = AsyncMock()
@@ -120,6 +120,28 @@ class ExecutionRegressionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DAGRegressionTests(unittest.TestCase):
+    def test_multi_target_field_rejected_without_partial_nodes(self) -> None:
+        """坏目标由规划器修正，不静默挑第一个地址或丢失其它目标。"""
+        for bad in ("http://10.0.100.58, https://bench.test", "a.test,b.test",
+                    ["a.test", "b.test"], "http://10.0.100.58,%20https://bench.test"):
+            for field in ({"target": bad}, {"meta": {"target": bad}}):
+                with self.subTest(bad=bad, field=field):
+                    dag = TaskDAG()
+                    with self.assertRaisesRegex(SpiritScoutError, "target 必须是单个目标"):
+                        dag.upsert_from_plan([{"tactic": "GOOD", "target": "https://a.test"},
+                                              {"tactic": "BAD", **field}], 0)
+                    self.assertEqual(dag.all_nodes(), [])
+
+    def test_separate_targets_and_commas_in_url_paths_remain_valid(self) -> None:
+        dag = TaskDAG()
+        result = dag.upsert_from_plan([
+            {"tactic": "RECON", "target": "http://10.0.100.58"},
+            {"tactic": "RECON@2", "target": "https://bench.test/a,b?next=https://a.test"},
+            {"tactic": "RECON@3", "target": "10.0.0.0/24"},
+            {"tactic": "RECON@4", "target": "http://[::1]:8080/"},
+        ], 0)
+        self.assertEqual(len(result.created), 4)
+
     def test_failed_parent_replacement_rebinds_existing_child(self) -> None:
         dag = TaskDAG()
         dag.upsert_from_plan([{"tactic": "CHILD", "depends_on": ["PARENT"]},
