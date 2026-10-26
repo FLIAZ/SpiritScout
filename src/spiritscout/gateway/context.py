@@ -318,8 +318,21 @@ class DecisionMemory:
         self.checkpoint_key = ""
 
     @staticmethod
+    def _same_value(old: Any, new: Any) -> bool:
+        """JSON 类型也属于事实；Python 的 True == 1 不能吞掉现场变化。"""
+        if type(old) is not type(new):
+            return False
+        if isinstance(old, dict):
+            return old.keys() == new.keys() and all(
+                DecisionMemory._same_value(value, new[key]) for key, value in old.items())
+        if isinstance(old, list):
+            return len(old) == len(new) and all(
+                DecisionMemory._same_value(a, b) for a, b in zip(old, new))
+        return old == new
+
+    @staticmethod
     def patch(old: Any, new: Any, path: str = "") -> list[dict[str, Any]]:
-        if old == new:
+        if DecisionMemory._same_value(old, new):
             return []
         if isinstance(old, list) and isinstance(new, list):
             # 数组追加或某一项状态变化不应重发整份历史。
@@ -344,8 +357,59 @@ class DecisionMemory:
                 changes.extend(DecisionMemory.patch(old[key], new[key], child))
         return changes
 
+    @staticmethod
+    def compact_patch(old: Any, new: Any, path: str = "") -> list[dict[str, Any]]:
+        """无损选择增量表达：只缩短新消息，不修改历史、原文或字段含义。
+
+        少量变更沿用原补丁；密集变化可用子树整值替换，仍是原契约支持的
+        JSON Patch。只有编码字节至少减少两成且 token 估值不增加才采用。
+        """
+        regular = DecisionMemory.patch(old, new, path)
+        if len(regular) < 8:
+            return regular
+        compact: list[dict[str, Any]] = []
+        if isinstance(old, dict) and isinstance(new, dict):
+            for key in sorted(old.keys() | new.keys()):
+                child = path + "/" + key.replace("~", "~0").replace("/", "~1")
+                if key in old and key in new:
+                    compact.extend(DecisionMemory.compact_patch(old[key], new[key], child))
+                elif key not in new:
+                    compact.append({"op": "remove", "path": child})
+                else:
+                    compact.append({"op": "add", "path": child, "value": new[key]})
+        elif isinstance(old, list) and isinstance(new, list):
+            for index in range(min(len(old), len(new))):
+                compact.extend(DecisionMemory.compact_patch(old[index], new[index], path + f"/{index}"))
+            compact.extend({"op": "remove", "path": path + f"/{index}"}
+                           for index in range(len(old) - 1, len(new) - 1, -1))
+            compact.extend({"op": "add", "path": path + "/-", "value": value}
+                           for value in new[len(old):])
+        else:
+            return regular
+
+        def encode(operations: list[dict[str, Any]]) -> str:
+            return json.dumps({"patch": operations}, ensure_ascii=False,
+                              separators=(",", ":"), sort_keys=True)
+
+        baseline = encode(regular)
+        baseline_bytes = len(baseline.encode())
+        baseline_tokens = estimate_input_tokens([{"role": "user", "content": baseline}])
+        best, best_bytes = regular, baseline_bytes
+        for candidate in (compact, [{"op": "replace", "path": path, "value": new}]):
+            content = encode(candidate)
+            size = len(content.encode())
+            # 大证据整块替换通常更长，先按字节淘汰，不再做逐字符 token 估算。
+            if size * 5 > baseline_bytes * 4 or size >= best_bytes:
+                continue
+            tokens = estimate_input_tokens([{"role": "user", "content": content}])
+            if tokens <= baseline_tokens:
+                best, best_bytes = candidate, size
+        return best
+
     def prepare(self, messages: list[dict[str, Any]], *,
-                max_input_tokens: int | None = None) -> list[dict[str, Any]]:
+                max_input_tokens: int | None = None,
+                compact_patches: bool = False,
+                stable_snapshot_prefix: bool = False) -> list[dict[str, Any]]:
         system = "\n".join(m["content"] for m in messages if m.get("role") == "system")
         snapshot: dict[str, Any] = {}
         for message in messages:
@@ -358,7 +422,8 @@ class DecisionMemory:
             return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
         if self.messages and system == self.system:
             prepared = [*self.messages, {"role": "user", "content": serialize({
-                "patch": self.patch(self.snapshot, snapshot)})}]
+                "patch": (self.compact_patch(self.snapshot, snapshot) if compact_patches
+                          else self.patch(self.snapshot, snapshot))})}]
         else:
             prepared = []
         # 达到上下文软窗口时，用真实最新现场重新建段；不限制回合、不沿用旧授权。
@@ -373,8 +438,19 @@ class DecisionMemory:
                                  "previous_chars": len(serialize(self.messages)),
                                  "estimated_input_tokens": estimate_input_tokens(prepared),
                                  "max_input_tokens": max_input_tokens}
+            if stable_snapshot_prefix:
+                # 只布局新建段；已提交的历史（含旧版本检查点）绝不重新排序。
+                stable = ("world_state", "available_tactics", "task_intent", "mission",
+                          "rules", "target", "execution_recovery", "reference_skills",
+                          "business_context", "shared_context", "project_rules")
+                canonical = json.loads(serialize(snapshot))
+                ordered = {key: canonical.pop(key) for key in stable if key in canonical}
+                ordered.update(canonical)
+                initial = json.dumps({"snapshot": ordered}, ensure_ascii=False, separators=(",", ":"))
+            else:
+                initial = serialize({"snapshot": snapshot})
             prepared = [{"role": "system", "content": system + self.note},
-                        {"role": "user", "content": serialize({"snapshot": snapshot})}]
+                        {"role": "user", "content": initial}]
         self.pending = (prepared, copy.deepcopy(snapshot), system)
         return copy.deepcopy(prepared)
 
