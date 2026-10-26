@@ -1,18 +1,4 @@
-"""知识库存储：五库 + 两经验库（设计书 3.5），SQLite 结构化 + FTS5 关键词检索。
-
-库表映射（3.5「五库+两经验库」）：
-- 五库：base_assets（资产库·跨目标攻击面沉淀）/ base_vuln_standards（漏洞标准库·
-  多平台可配置规则）/ base_fp_signatures（误报特征库）/ base_poc_templates（PoC
-  模板库）/ base_competition_rules（赛制规则库）；
-- 红队经验库（3.3）：exp_attack_map（ATT&CK 27 行映射）/ exp_redteam_entries
-  （checklist 条目，字段对标 Atomic Red Team + 红队实战扩展）/ exp_attack_paths
-  （6 类攻击路径模板）；
-- SRC 经验库（3.4）：exp_vuln_priority（P0~P4 分级含权重）/ exp_hunt_templates
-  （10 类挖洞思路模板）/ exp_report_templates（六段式报告模板 + 驳回原因库）。
-
-引用规范（3.5）：每条种子数据带 source + last_verified；过期条目标 deprecated
-保留审计，不物理删除。
-"""
+"""知识库的 SQLite 存储、FTS5 检索与版本管理。"""
 
 from __future__ import annotations
 
