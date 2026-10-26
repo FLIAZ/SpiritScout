@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import signal
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -67,7 +68,7 @@ class _RotatingLog:
 
 def sandbox_available() -> bool:
     """bwrap 可用性探测（工具调用与装配提示共用）。"""
-    return shutil.which(_BWRAP) is not None
+    return sys.platform.startswith("linux") and shutil.which(_BWRAP) is not None
 
 
 def _project_venv() -> Path | None:
@@ -76,9 +77,10 @@ def _project_venv() -> Path | None:
     沙箱路径：src/spiritscout/tools/sandbox.py → 项目根/.venv。
     """
     root = Path(__file__).resolve().parents[3]
-    venv = root / ".venv"
-    return venv if (venv / "bin" / "python3").exists() or \
-        (venv / "bin" / "python").exists() else None
+    candidates = [Path(os.environ["VIRTUAL_ENV"])] if os.environ.get("VIRTUAL_ENV") else []
+    candidates.append(root / ".venv")
+    return next((venv for venv in candidates if (venv / "bin" / "python3").exists()
+                 or (venv / "bin" / "python").exists()), None)
 
 
 def _venv_site_dirs(venv: Path) -> list[str]:
@@ -223,7 +225,8 @@ async def sandbox_exec(
                           error="执行内容为空")
     if not sandbox_available():
         return ToolResult(tool="sandbox_exec", ok=False, returncode=-1, error=(
-            "沙箱不可用：未找到 bubblewrap（bwrap）。请安装 bubblewrap 后重试"
+            "沙箱不可用：需要 Linux 与 bubblewrap（bwrap）。Windows/macOS 请使用 Docker 部署，"
+            "Linux 请安装 bubblewrap 并确认命名空间权限；不会直接在宿主执行"
             "（不静默降级为宿主直跑）。"))
     if not workspace_root:
         return ToolResult(tool="sandbox_exec", ok=False, returncode=-1,
