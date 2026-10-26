@@ -1,13 +1,6 @@
-"""Agent 模型分配表读写：Web 编队页 → configs/agent_models.yaml。
+"""角色模型指派与会话命名候选的配置读写。
 
-分配语义：key = AgentType 值（master/recon/web_vuln/...），value = 模型注册表
-里的模型 ID；空表/缺 key = 跟随网关档位路由（4.9.1，现状行为）。
-同文件还存 naming（会话命名候选链，模型页维护的降级顺序）——两段一起
-读、一起原子写回，防互相覆盖。
-校验：模型 ID 必须在注册表中存在（Web 编队页给出下拉，服务端仍独立校验，
-不静默接受失效模型——失效模型在运行期会导致路由失败且原因难查）。
-写回：tmp + os.replace 原子替换（与 modelcfg 同约定）。
-"""
+两段配置一起读取并原子写回；保存前校验模型 ID。"""
 
 from __future__ import annotations
 
