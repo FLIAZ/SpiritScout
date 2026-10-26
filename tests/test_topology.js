@@ -78,3 +78,20 @@ assert.equal(built.depthIndex.get("__finding_fa"), 2);
 assert.equal(built.depthIndex.get("__finding_fb"), 3);
 assert.equal(built.depthIndex.get("__finding_fc"), 4);
 console.log("topology: production graph task ownership, same-name routes, ambiguous provenance and grandchildren passed");
+
+context.S.state.topology.process={nodes:[
+  {id:"__process_s1",kind:"step",task_id:"task-a",route_id:"ra",turn:1,title:"核实入口",body:"读取公开页面"},
+  {id:"__process_o1",kind:"observation",task_id:"task-a",route_id:"ra",turn:1,title:"入口响应",body:"HTTP 200"},
+  {id:"__process_a1",kind:"artifact",task_id:"task-a",route_id:"ra",turn:1,title:"输出产物",body:"response.log"},
+  {id:"__process_s2",kind:"step",task_id:"task-a",route_id:"ra",turn:2,title:"跟进线索",body:"核对返回中的入口"}
+],edges:[
+  {source:"__process_s1",target:"__process_o1",kind:"produces"},
+  {source:"__process_o1",target:"__process_a1",kind:"produces"},
+  {source:"__process_o1",target:"__process_s2",kind:"context"},
+  {source:"__process_a1",target:"__process_s2",kind:"context"}
+]};
+const processGraph=vm.runInContext("drawTopo()",context);
+assert.equal(processGraph.preds.get("__process_s1")[0],routeFor("task-a"));
+assert.equal(processGraph.preds.get("__process_o1")[0],"__process_s1");
+assert.deepEqual(Array.from(processGraph.preds.get("__process_s2")),["__process_o1","__process_a1"]);
+assert(processGraph.depthIndex.get("__process_s2")>processGraph.depthIndex.get("__process_a1"));

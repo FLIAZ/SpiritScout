@@ -65,5 +65,21 @@ explain("agent.delta",{task_id:"n",route_id:"r",turn:3,kind:"reset"});
 assert.equal(api.updatesOf(first).length,2,"重试的未完成进展被正确撤销");
 console.log("task commentary: persistent natural-language updates, structured progress, retries and honest final fallback passed");
 
+// 同一任务不同路线/回合必须分别展开，迟到的结果仍归原步骤。
+const phases=api.create();
+let phaseSeq=0;
+const phase=(type,detail)=>api.reduce(phases,{actor:"web",type,detail,seq:++phaseSeq});
+phase("agent.turn",{task_id:"one",route_id:"r1",route:"solve",turn:1});
+const grouped=phase("agent.tool_call",{task_id:"one",route_id:"r1",turn:1,calls:[{id:"late",name:"shell"}]});
+phase("agent.turn",{task_id:"one",route_id:"r1",turn:2});
+phase("agent.delta",{task_id:"one",route_id:"r1",turn:2,kind:"text",text:"新的独立验证"});
+phase("agent.tool_result",{task_id:"one",route_id:"r1",id:"late",ok:true,result:"上一回合的结果"});
+assert.equal(grouped.steps.size,2);
+const parts=[...grouped.steps.values()];
+assert.equal([...grouped.tools.values()][0].stepKey,parts[0].key);
+assert.equal(parts[1].texts.size,1);
+phase("agent.turn",{task_id:"one",route_id:"r2",turn:2});
+assert.equal(grouped.steps.size,3,"不同路线同回合不合并");
+
 first.summary="## 核实登录行为";
 assert.match(api.summaryOf(first),/最后一次进展/,"只重复任务标题的摘要不能覆盖已有进展正文");

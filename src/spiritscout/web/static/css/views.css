@@ -1164,6 +1164,15 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
 .task-errors { margin-left: auto; color: var(--bad); font-size: 11px; }
 .task-activity-body { padding: 10px; display: grid; gap: 8px; }
 .task-tools { display: grid; gap: 7px; }
+.task-step-list { display: grid; gap: 9px; margin: 10px 0 14px 16px; }
+.task-step { border: 1px solid var(--line); border-radius: 9px; background: var(--surface); min-width: 0; }
+.task-step > summary { cursor: pointer; padding: 12px 14px; color: var(--ink-2); font-size: 12px; }
+.task-step > summary b { color: var(--ink); margin-right: 10px; }
+.task-step > summary span { overflow-wrap: anywhere; }
+.task-step > .task-tools, .task-step-text:not(:empty) { padding: 0 12px 12px; }
+.task-step:focus-within { outline: 1px solid var(--accent); }
+.edges .context-edge { stroke: var(--ink-3); stroke-dasharray: 5 4; }
+@media(max-width:640px) { .task-step-list { margin-left: 0; } }
 .task-tools:empty::after { content: "此记录片段暂无工具调用"; padding: 5px; font-size: 12px; color: var(--ink-3); }
 .task-tools .tl-act { background: transparent; border-radius: 6px; }
 .task-tools .tl-act:not(.open) > .nt, .task-tools .tl-act:not(.open) > .tl-parameters { display: none; }

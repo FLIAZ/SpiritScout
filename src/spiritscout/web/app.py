@@ -178,6 +178,7 @@ def _read_state(session: Session) -> dict[str, Any]:
     flags.json），输出 JSON 而非文本面板。
     """
     from spiritscout.tools.journal import read_recovery_view
+    from spiritscout.web.process_graph import read_process_graph
 
     run_summary: dict[str, Any] = session.summary.get("run", {})
     # 实时用量：运行中由网关逐笔持久化（usage.db，兼容旧 usage.json），终态回退运行汇总
@@ -197,7 +198,8 @@ def _read_state(session: Session) -> dict[str, Any]:
         "model_usage": live_usage or run_summary.get("model_usage"),
         "verify": session.summary.get("verify"),
         "business_context": None,
-        "topology": {"dag_nodes": [], "tasks": []},
+        "topology": {"dag_nodes": [], "tasks": [],
+                     "process": read_process_graph(session.audit_path)},
     }
     if not session.bb_path.exists():
         # 黑板未建（排队中）：终态摘要兜底（重开历史会话）
