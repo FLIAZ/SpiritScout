@@ -49,7 +49,7 @@ const moreEl = () => page.querySelector("[data-more]");
   state.fixture = {total: 0, items: [], has_more: false, tags: [],
                    sources: 0, last_ts: null, history: []};
   await Page.load();
-  assert.match(listEl().innerHTML, /经验库还是空的/);
+  assert.match(listEl().innerHTML, /暂无经验/);
   assert.match(listEl().innerHTML, /提炼记录/);
   assert.equal(moreEl().hidden, true, "无更多数据时隐藏加载更多");
 
