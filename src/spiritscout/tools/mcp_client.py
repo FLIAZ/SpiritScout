@@ -1,22 +1,6 @@
-"""MCP 客户端（官方 ``mcp`` SDK）：把外部安全工具服务器接入智能体工具环。
+"""MCP SDK 客户端，支持 stdio、HTTP 和 SSE 传输。
 
-三类传输（协议规范 transports）：
-- **stdio**：子进程 + 标准输入输出 JSON-RPC（本机 CLI 型服务器，
-  如 ``idalib-mcp --stdio``、``yak mcp``）；
-- **http**：Streamable HTTP——POST 单端点，应答为 JSON 或 SSE 流
-  （Yakit 引擎 ``--transport streamable_http``，端点为 ``/mcp``）；
-- **sse**：旧版 SSE 传输——GET 长连接 + POST 消息端点（Burp 官方扩展等）。
-
-接入方式完全配置驱动（configs/system.yaml 的 ``mcp_servers`` 段）：
-每台服务器在会话基础设施建立时握手并拉取工具清单，工具以
-``mcp__<服务器名>__<工具名>`` 前缀并入智能体工具目录。服务器不可达
-不阻断开工（留痕后跳过）——MCP 是增益能力而非主链依赖。
-
-生命周期：官方 SDK 的会话是异步上下文管理器（进入=连接+协商，
-退出=断开），而灵枢的 MCP 连接随一次会话存续、跨多次调用——因此每台
-服务器由一个常驻任务持有会话，调用请求经队列投递、结果回填 Future；
-任务退出（服务器断开）时唤醒全部等待者并拒绝后续调用。
-"""
+每条连接的握手和工具调用在同一管理任务内执行，避免跨任务关闭 SDK 上下文。"""
 
 from __future__ import annotations
 
@@ -283,7 +267,8 @@ def build_client(spec: Any) -> McpClient:
     if list(spec.args[:2]) == ["-m", "spiritscout.tools.chrome_mcp"]:
         # SDK 的子进程环境默认仅继承基础键；只显式转交该适配器的连接配置。
         env = {**{key: os.environ[key] for key in (
-            "SPIRITSCOUT_CHROME_CDP_URL", "SPIRITSCOUT_CHROME_MCP_CLI") if key in os.environ}, **env}
+            "SPIRITSCOUT_CHROME_CDP_URL", "SPIRITSCOUT_CHROME_MCP_CLI",
+            "SPIRITSCOUT_CHROME_EXECUTABLE") if key in os.environ}, **env}
     return McpStdioClient(spec.name, command=command,
                           args=list(spec.args or []),
                           env=env, timeout=timeout)
