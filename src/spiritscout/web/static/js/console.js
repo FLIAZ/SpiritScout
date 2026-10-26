@@ -584,7 +584,7 @@ const autogrow = (el, min, max) => {
 };
 const homeSync = () => {
   $("#c-go").classList.toggle("ready", !!$("#c-mission").value.trim() && !!$("#c-mode").value);
-  autogrow($("#c-mission"), 52, 300);
+  autogrow($("#c-mission"), 160, 360);
 };
 const missionModeHints = {
   src: "评估已授权的网站或资产，验证漏洞并生成报告。",
@@ -593,14 +593,23 @@ const missionModeHints = {
 };
 $("#c-mode").onchange = () => {
   $("#c-mode-hint").textContent = missionModeHints[$("#c-mode").value] || "先选择任务类型，再填写目标与要求。";
+  document.querySelectorAll('input[name="home-mode"]').forEach(input => {
+    input.checked = input.value === $("#c-mode").value;
+  });
   selxSync($("#c-mode"));
   homeSync();
 };
+document.querySelectorAll('input[name="home-mode"]').forEach(input => {
+  input.addEventListener("change", () => {
+    $("#c-mode").value = input.value;
+    $("#c-mode").onchange();
+  });
+});
 $("#c-mission").addEventListener("input", homeSync);
 homeSync();
 document.querySelectorAll(".chip-s").forEach(b => b.onclick = () => {
   if (b.dataset.mode) { $("#c-mode").value = b.dataset.mode; $("#c-mode").onchange(); }
-  const t = b.textContent.trim();
+  const t = b.dataset.mission || b.textContent.trim();
   $("#c-mission").value = t.includes("example.com")
     ? t : `${t}：`;
   homeSync();
@@ -639,7 +648,7 @@ async function launchMission(payload, files = []) {
     const mode = $("#c-mode").value;
     if (!mode) {
       toast("请先选择任务类型", true);
-      ($("#c-mode").closest(".selx")?.querySelector(".selx-btn") || $("#c-mode")).focus();
+      (document.querySelector('input[name="home-mode"]') || $("#c-mode")).focus();
       return;
     }
     payload = { ...payload, mode };
