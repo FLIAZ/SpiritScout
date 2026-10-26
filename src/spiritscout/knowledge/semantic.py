@@ -1,15 +1,4 @@
-"""知识库语义检索：Chroma 向量库 + 可配置 embedding（3.5：Chroma 用于语义召回）。
-
-embedding 两种 provider（KnowledgeConfig）：
-- ``hash``：本地确定性哈希嵌入（ASCII 词 + CJK 二元组的签名哈希投影），
-  离线可用、零外部依赖 —— 工程权衡 默认不依赖任何云端/本地模型服务，
-  语义能力弱于真实 embedding 模型，仅作召回增强；
-- ``openai_compatible``：OpenAI 兼容 ``/embeddings`` 接口（base_url+api_key+
-  model 配置即接入云端推理，与系统模型接入约束一致）。
-
-Chroma 为可选依赖（pip install spiritscout[chroma]）；未安装时语义检索显式
-报 ConfigurationError 并给出安装指引（不静默降级为关键词检索）。
-"""
+"""知识库向量检索：Chroma 存储与可配置的 embedding。"""
 
 from __future__ import annotations
 
