@@ -1,15 +1,94 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from spiritscout.agents.master.agent import MasterAgent
 from spiritscout.agents.master.dag import TaskDAG
+from spiritscout.core.exceptions import SpiritScoutError
 from spiritscout.core.models import AgentType, TaskStatus
 
 
 class MasterReviewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_steering_keeps_observing_after_three_decisions_and_refill(self) -> None:
+        master = object.__new__(MasterAgent)
+        master.ctx = SimpleNamespace(audit=Mock(), ring=Mock())
+        master._STEER_INTERVAL = 0.001
+        ids = ["first"]
+        observations = []
+        enough = asyncio.Event()
+
+        def digest(task_ids: list[str]) -> dict:
+            observations.append(list(task_ids))
+            return {"tasks": [{"agent": "ctf_web", "turn": len(observations)}]}
+
+        async def decide(progress: dict, queue: object) -> list:
+            if len(observations) == 3:
+                ids.append("refill")
+            if len(observations) >= 5:
+                enough.set()
+            return []
+
+        master._progress_digest = digest
+        master._llm_steer = AsyncMock(side_effect=decide)
+        watcher = asyncio.create_task(master._steering_watch(ids))
+        try:
+            await asyncio.wait_for(enough.wait(), 1)
+            self.assertGreaterEqual(master._llm_steer.await_count, 5)
+            self.assertIn("refill", observations[-1])
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
+    async def test_reference_only_plan_dispatches_complete_original_challenge(self) -> None:
+        original = {"id": "e1-01", "title": "真实赛题", "description": "完整题面" * 100,
+                    "url": "http://challenge.test", "attachments": [{"path": "sample.bin"}],
+                    "flag_count": 2, "custom_rule": {"new_format": True}}
+        master = object.__new__(MasterAgent)
+        master.agent_id = "master-test"
+        master.ctx = SimpleNamespace(
+            audit=Mock(), pause_gate=None, plan_override=None, enable_llm_planning=True,
+            agents={AgentType.CTF_WEB: object()},
+            tactic_map={"CTF-WEB": (AgentType.CTF_WEB, "ctf_solve")},
+            extra={"mode_prompt": "动态规划", "competition_context": {"challenges": [original]}})
+        master._llm_plan = AsyncMock(return_value={"dag_nodes": [
+            {"tactic": "CTF-WEB", "challenge_id": "e1-01", "title": "首批开工"}]})
+        master._ensure_business_gate = lambda nodes: nodes
+        master._write_dag_snapshot = Mock()
+        result = await master._meta_plan({
+            "target": "https://bench.test", "round_no": 0, "dag": TaskDAG().to_dict()})
+        task = result["tasks_dispatched"][0]["task"]
+        self.assertEqual(task["target"], original["url"])
+        self.assertEqual(task["payload"]["challenge"], original)
+        task["payload"]["challenge"]["attachments"][0]["path"] = "changed"
+        self.assertEqual(original["attachments"][0]["path"], "sample.bin")
+
+    def test_unknown_challenge_reference_is_rejected_and_legacy_plan_still_works(self) -> None:
+        master = object.__new__(MasterAgent)
+        master.ctx = SimpleNamespace(extra={})
+        with self.assertRaisesRegex(SpiritScoutError, "不在当前赛题清单"):
+            master._resolve_plan_challenges([{"tactic": "CTF-WEB", "challenge_id": "wrong"}])
+        legacy = [{"tactic": "CTF-WEB", "meta": {"challenge": {"id": "legacy"}}}]
+        self.assertEqual(master._resolve_plan_challenges(legacy), legacy)
+
+    async def test_invalid_target_returns_reason_for_model_replanning(self) -> None:
+        master = object.__new__(MasterAgent)
+        master.agent_id = "master-test"
+        master.ctx = SimpleNamespace(
+            audit=Mock(), pause_gate=None, plan_override=None,
+            enable_llm_planning=True, agents={}, tactic_map={},
+            extra={"mode_prompt": "按任务规则动态规划"})
+        master._llm_plan = AsyncMock(return_value={"dag_nodes": [
+            {"tactic": "TA0043", "target": "http://10.0.100.58, https://bench.test"}]})
+        master._ensure_business_gate = lambda nodes: nodes
+        master._write_dag_snapshot = Mock()
+        result = await master._meta_plan({
+            "target": "https://bench.test", "round_no": 0, "dag": TaskDAG().to_dict()})
+        self.assertEqual(result["tasks_dispatched"], [])
+        self.assertIn("target 必须是单个目标", master.ctx.extra["last_plan_result"]["rejected"])
+
     async def test_competition_with_pending_unsolved_skips_review_llm(self) -> None:
         dag = TaskDAG()
         dag.add_node(
