@@ -1,7 +1,7 @@
 /* 会话档案：按需分页读取持久化数据；请求世代隔离会话切换和检索竞争。 */
 const SessionArchive = (() => {
-  const categories = [["all", "全部档案"], ["fact", "有据事实"], ["evidence", "原始证据"],
-    ["finding", "待核验发现"], ["hypothesis", "推测与缺口"], ["asset", "资产记录"], ["file", "文件产出"], ["outcome", "交付结论"]];
+  const categories = [["all", "全部档案"], ["fact", "事实记录"], ["evidence", "原始证据"],
+    ["finding", "待核验发现"], ["hypothesis", "推测与缺口"], ["asset", "资产记录"], ["file", "文件"], ["outcome", "任务结论"]];
   let session = null, kind = "all", query = "", items = [], selected = null;
   let counts = {}, total = 0, more = false, generation = 0, loading = false, lastLoad = 0, timer;
   const label = key => categories.find(c => c[0] === key)?.[1] || key;
@@ -32,9 +32,9 @@ const SessionArchive = (() => {
       ${item.version ? `<dt>记录版本</dt><dd>v${esc(item.version)}</dd>` : ""}
       <dt>更新时间</dt><dd>${esc(formatTime(item.updated_at))}</dd>
       ${item.kind === "file" ? `<dt>文件大小</dt><dd>${esc(fmtSize(item.size) || "0 B")}</dd>` : ""}</dl>
-      ${refs.length ? `<section class="archive-sources"><h5>证据链 <span>${refs.length}</span></h5>${refs.map(ref => `<div class="archive-source"><code>${esc(ref.id || "证据")}</code><p>${esc(ref.caption)}</p>${ref.note ? `<small>${esc(ref.note)}</small>` : ""}${ref.record_id ? `<small>黑板记录 ${esc(ref.record_id)}</small>` : ""}</div>`).join("")}</section>` : item.kind !== "file" ? '<p class="archive-note">没有附带证据引用，请结合来源核验。</p>' : ""}
-      ${item.record_id ? `<details class="archive-history" data-layer="${esc(item.layer)}" data-record="${esc(item.record_id)}"><summary>版本历史 · 仅供回溯</summary><p>展开后读取。历史记录不能直接作为当前事实。</p><div class="archive-history-list"></div></details>` : ""}
-      ${item.kind === "file" ? `<a class="btn archive-download" download href="/api/sessions/${encodeURIComponent(session)}/artifacts/download?path=${encodeURIComponent(item.path)}">下载文件 ↗</a>` : ""}`;
+      ${refs.length ? `<section class="archive-sources"><h5>引用来源 <span>${refs.length}</span></h5>${refs.map(ref => `<div class="archive-source"><code>${esc(ref.id || "证据")}</code><p>${esc(ref.caption)}</p>${ref.note ? `<small>${esc(ref.note)}</small>` : ""}${ref.record_id ? `<small>黑板记录 ${esc(ref.record_id)}</small>` : ""}</div>`).join("")}</section>` : item.kind !== "file" ? '<p class="archive-note">没有附带证据引用，请结合来源核验。</p>' : ""}
+      ${item.record_id ? `<details class="archive-history" data-layer="${esc(item.layer)}" data-record="${esc(item.record_id)}"><summary>版本历史</summary><p>历史版本仅供参考，使用前需复核。</p><div class="archive-history-list"></div></details>` : ""}
+      ${item.kind === "file" ? `<a class="btn archive-download" download href="/api/sessions/${encodeURIComponent(session)}/artifacts/download?path=${encodeURIComponent(item.path)}">下载文件</a>` : ""}`;
   }
   function formatTime(value) {
     const date = new Date(typeof value === "number" ? value * 1000 : value);
@@ -47,7 +47,7 @@ const SessionArchive = (() => {
       <span class="archive-kind" data-kind="${esc(item.kind)}">${esc(label(item.kind))}</span><span class="archive-row-status">${esc(item.status)}</span>
       <strong>${esc(item.title)}</strong>${item.target || item.text !== item.title ? `<span class="archive-row-text">${esc(item.target || item.text)}</span>` : ""}
       <span class="archive-row-foot"><span>${esc(item.source || item.layer || "会话产出")}</span><span>${item.refs?.length ? `${item.refs.length} 条证据` : esc(formatTime(item.updated_at))}</span></span></button>`).join("") ||
-      `<div class="archive-empty"><span class="archive-empty-mark" aria-hidden="true">◇</span><h4>${query ? "没有匹配的档案" : "这里将保存本次会话的积累"}</h4><p>${query ? "试试其他关键词，或切换分类。" : "已保存的证据、发现与文件会自动出现在这里。"}</p></div>`;
+      `<div class="archive-empty"><h4>${query ? "没有匹配的档案" : "暂无会话记录"}</h4><p>${query ? "试试其他关键词，或切换分类。" : "本会话保存的发现、证据和文件会显示在这里。"}</p></div>`;
     const root = $("#archive-list");
     if (root.dataset.content !== html) { root.innerHTML = html; root.dataset.content = html; }
     $("#archive-more").hidden = !more;
