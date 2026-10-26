@@ -98,8 +98,8 @@ class CacheEfficiencyTests(unittest.IsolatedAsyncioTestCase):
         update = memory.prepare(decision_messages("稳定契约", latest, max_chars=100))
         patch_rows = [row for row in json.loads(update[-1]["content"])["patch"]
                       if row["path"].startswith("/world_state/")]
-        self.assertEqual(patch_rows, [{"op": "replace", "path": "/world_state/user_context/statements",
-                                       "value": latest["world_state"]["user_context"]["statements"]}])
+        self.assertEqual(patch_rows, [{"op": "add", "path": "/world_state/user_context/statements/-",
+                                       "value": latest["world_state"]["user_context"]["statements"][-1]}])
         memory.commit("很长的助手观察" * 40000)
         rebased = memory.prepare(decision_messages("稳定契约", latest, max_chars=100))
         self.assertEqual(len(rebased), 2)
