@@ -6,6 +6,8 @@
 
 <img width="1606" height="838" alt="Benchmark.jpg" src="https://github.com/user-attachments/assets/f5cea640-aa57-40d2-9d21-919960aadd64" />
 
+> tsecbench跑分记录（截止10.23,配合deepseek-v4.1-flash)
+
 ## 主要功能
 
 - **会话与任务**：按模式启动任务，运行中可发送消息、补充附件或暂停。会话记录
