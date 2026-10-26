@@ -30,7 +30,7 @@ class Subscription:
     pattern: str
     handler: EventHandler
     sub_id: str = ""
-    seen_event_ids: set[str] = field(default_factory=set)  # 事件幂等去重（6.9）
+    seen_event_ids: set[str] = field(default_factory=set)  # 事件幂等去重
     seen_order: deque[str] = field(default_factory=deque)  # 去重窗口内的事件顺序（有界淘汰）
 
     def matches(self, topic: str) -> bool:
@@ -38,11 +38,11 @@ class Subscription:
 
 
 def remember_event(sub: Subscription, event_id: str) -> bool:
-    """事件幂等判定与登记（6.9）：首次见返回 True，重复返回 False。
+    """事件幂等判定与登记：首次见返回 True，重复返回 False。
 
-    窗口有上限：登记超出窗口时淘汰最旧记录——去重语义对近期重放仍成立，
-    但集合不随会话时长无界增长（与各总线后端同口径）。
-    """
+        窗口有上限：登记超出窗口时淘汰最旧记录——去重语义对近期重放仍成立，
+        但集合不随会话时长无界增长（与各总线后端同口径）。
+        """
     if event_id in sub.seen_event_ids:
         return False
     sub.seen_order.append(event_id)
