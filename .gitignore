@@ -48,3 +48,8 @@ configs/models.yaml
 /SESSION_VISIBILITY_2026-10-16.md
 /TOOL_FAILURE_FIX_2026-10-16.md
 /TOOL_PARAMETERS_2026-10-16.md
+
+# 本地抓取的目标页面和登录快照
+/home.html
+/login_sms.yml
+/login_snapshot.yml
