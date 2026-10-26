@@ -1,8 +1,4 @@
-"""状态面板渲染与审计导出（4.7）。
-
-面板为纯文本（CLI 场景；Web 面板为 + 适配决策 A5），
-数据全部来自黑板 SQLite 与审计 JSONL，只读不写。
-"""
+"""运行状态面板与审计导出。"""
 
 from __future__ import annotations
 
