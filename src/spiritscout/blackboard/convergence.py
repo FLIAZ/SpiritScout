@@ -1,10 +1,4 @@
-"""结果汇聚引擎（设计书 4.2.2）：统一采集 → 去重 → 冲突校验 → 聚合视图。
-
-- 全局去重：不同子 Agent 发现的重复资产/漏洞按 dedup_key 合并，保留最完整验证结果；
-- 冲突校验：同 dedup_key 不同结论 → 标记冲突；结论不在这层裁决——有新
-  实证就交回模型核验（鉴真）重判，否则保留既有载体（6.1）；
-- 数据聚合：按资产/漏洞类型/危害等级多维聚合，形成全局统一视图，供主 Agent 决策。
-"""
+"""汇总黑板记录，执行去重、冲突检查并生成视图。"""
 
 from __future__ import annotations
 
@@ -137,7 +131,7 @@ class ConvergenceEngine:
     # ------------------------------------------------------------ 全局视图
 
     def aggregate_round_view(self, round_no: int) -> dict[str, Any]:
-        """轮次结束后的全局汇聚视图，提交主 Agent 决策（4.2.2）。"""
+        """轮次结束后的全局汇聚视图，提交主 Agent 决策。"""
         assets = self._bb.query(BlackboardLayer.ASSET, limit=10000)
         vulns = self._bb.query(BlackboardLayer.VULN, limit=10000)
         creds = self._bb.query(BlackboardLayer.CREDENTIAL, limit=10000)
