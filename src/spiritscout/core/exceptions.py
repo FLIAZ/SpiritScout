@@ -16,7 +16,7 @@ class ScopeViolation(SpiritScoutError):
 
 
 class PolicyViolation(SpiritScoutError):
-    """违反分模式策略或平台红线（如 CTF 模式调用端口扫描）。"""
+    """违反分模式策略或平台红线（如 SRC 模式执行未经审批的危险动作）。"""
 
 
 class BudgetExceeded(SpiritScoutError):
