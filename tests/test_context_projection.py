@@ -35,6 +35,21 @@ class ContextProjectionTests(unittest.TestCase):
         payload = {"constraints": "不得丢弃" * 1000}
         self.assertEqual(json.loads(compact_json(payload, max_chars=100)), payload)
 
+    def test_competition_tasks_and_platform_receipts_survive_soft_budget(self) -> None:
+        """规划器必须拿到完整题目 ID 与已完成预检，不能裁成单字符。"""
+        protected = {
+            "competition_context": {"challenges": [
+                {"id": f"e1-{i:02d}", "title": "独立题目", "url": "",
+                 "description": "赛题事实" * 100, "platform": "benchmark"}
+                for i in range(1, 64)]},
+            "platform_facts": [{"action": "precheck", "ok": True,
+                                "detail": '{"status":"ok"}'}],
+            "world_state": {"user_context": "完整任务规则" * 1000},
+        }
+        result = json.loads(compact_json({**protected, "observations": "旧响应" * 1000}, 8000))
+        for key, value in protected.items():
+            self.assertEqual(result[key], value)
+
     def test_boundary_rules_and_user_originals_are_protected_at_any_length(self) -> None:
         rules = "授权规则\n" * 10000 + "末尾禁止生产数据"
         statements = [{"kind": "answer", "answer": "后续用户原话\n" * 4000}]
