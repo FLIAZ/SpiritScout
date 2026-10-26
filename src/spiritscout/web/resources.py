@@ -6,9 +6,16 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StrictBool,
+    ValidationError,
+)
 
 from spiritscout.core.exceptions import SpiritScoutError
 from spiritscout.resources.assistant import ResourceAssistant, validate_skill
@@ -18,6 +25,14 @@ from spiritscout.resources.store import ResourceStore, redact_credentials, valid
 class ResourceChange(BaseModel):
     model_config = ConfigDict(extra="forbid")
     data: dict[str, Any]
+    expected_version: int = Field(default=0, ge=0)
+
+
+class ExaSettingsChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    api_key_value: SecretStr | None = None
+    enabled: StrictBool = True
+    clear_key: StrictBool = False
     expected_version: int = Field(default=0, ge=0)
 
 
@@ -67,6 +82,44 @@ def mount_resources(
             409 if isinstance(exc, SpiritScoutError) else 422,
             str(exc)[:600],
         )
+
+    def exa_settings_view() -> dict[str, Any]:
+        from spiritscout.tools.web_search import effective_search
+
+        row = next((item for item in store.settings("search") if item["id"] == "exa"), None)
+        selected, key = effective_search(cfg.search, store)
+        stored = bool(row and row["data"].get("api_key"))
+        return {"version": row["version"] if row else 0, "enabled": selected.enabled,
+                "key_configured": bool(key), "stored_key": stored,
+                "key_source": "saved" if stored else "environment" if key else "none",
+                "allowed_modes": ["src", "ctf"], "competition_allowed": False,
+                "billing_policy": "free_first_paid_only_for_blockers"}
+
+    @app.get("/api/resources/search/exa")
+    def exa_settings() -> dict[str, Any]:
+        return exa_settings_view()
+
+    @app.put("/api/resources/search/exa")
+    async def save_exa_settings(request: Request) -> dict[str, Any]:
+        # 单独捕获校验错误并移除 input，避免非法载荷将密钥原文回显。
+        try:
+            payload = ExaSettingsChange.model_validate(await request.json())
+            value = payload.api_key_value.get_secret_value().strip() if payload.api_key_value else ""
+            if len(value) > 4096 or any(ord(char) < 32 for char in value):
+                raise ValueError("密钥格式不正确，请粘贴 Exa 控制台生成的 API Key")
+            if payload.clear_key and value:
+                raise ValueError("清除密钥时不能同时填写新密钥")
+            row = next((item for item in store.settings("search") if item["id"] == "exa"), None)
+            data = dict(row["data"] if row else {})
+            if payload.clear_key:
+                data.pop("api_key", None)
+            elif value:
+                data["api_key"] = value
+            data["enabled"] = payload.enabled
+            store.save("search", "exa", data, payload.expected_version)
+            return exa_settings_view()
+        except (ValueError, TypeError, SpiritScoutError) as exc:
+            raise fail(exc) from exc
 
     @app.get("/api/resources/mcp")
     def mcp_list() -> dict[str, Any]:
