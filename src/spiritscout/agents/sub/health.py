@@ -1,16 +1,4 @@
-"""分支健康度管理器（设计书 4.3.1 / 6.5）。
-
-健康度得分 = 0.3×进展分 + 0.3×价值分 − 0.2×失败惩罚 − 0.2×风险分
-- 失败惩罚：连续失败次数的指数惩罚；
-- 风险分（6.5：探测频率、流量特征的暴露风险， 完整化）由 RiskAssessor
-  综合三路信号：工具/步骤申报风险（risk_delta 累计）、滑动窗口探测频率、
-  防护拦截信号（WAF/403/429 计数）；
-- 自动终止低于阈值的路线，释放资源给高评分路线；
-- 相似度高于阈值的冗余路线自动合并；
-- 记录 token/工具调用成本，作为剪枝量化依据（AWE 资源治理，3.2.4-15）。
-
-系数为可配置项，默认值即设计书公式系数。
-"""
+"""根据进展、价值、失败和风险评估路线，记录成本并处理剪枝与合并。"""
 
 from __future__ import annotations
 
@@ -112,7 +100,7 @@ class BranchHealthManager:
         return set(route_name.lower().replace("_", " ").split())
 
     def should_merge(self, a: RouteState, b: RouteState) -> bool:
-        """Jaccard 相似度 > 0.6 → 冗余路线合并（4.3.1）。"""
+        """Jaccard 相似度 > 0.6 → 冗余路线合并。"""
         sa, sb = self.signature(a.name), self.signature(b.name)
         if not sa or not sb:
             return False
