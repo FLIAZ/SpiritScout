@@ -25,6 +25,12 @@ class UsageCall(BaseModel):
     model: str = ""
     mode: str = ""
     call_id: str = ""
+    runtime_version: str = ""
+    patch_optimization_enabled: bool | None = None
+    sdk_attempts: int | None = Field(default=None, ge=0)
+    unreported_attempts: int | None = Field(default=None, ge=0)
+    reported_attempt_input_tokens: int | None = Field(default=None, ge=0)
+    reported_attempt_output_tokens: int | None = Field(default=None, ge=0)
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
     cached_input_tokens: int | None = Field(default=None, ge=0)
