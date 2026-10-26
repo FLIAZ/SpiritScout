@@ -1,19 +1,21 @@
 /* 资源管理对话拥有独立历史；目录、检索和变更不会派发安全测试。 */
 const ResourceConsole = (() => {
   const states = new Map(); let editor = null, poll;
-  const titles = {mcp:['工具接入','MCP 管理','接入工具，把每一次配置看清楚。'],skill:['参考知识','Skill 管理','留下可复用的知识，让方法保持开放。']};
+  const titles = {mcp:['MCP 管理','添加工具服务器，或编辑已有连接。'],skill:['Skill 管理','添加和管理智能体可查阅的参考知识。']};
   const stateFor = kind => {if(!states.has(kind)) states.set(kind,{items:[],offset:0,q:'',generation:0});return states.get(kind);};
   const root = kind => $(`#view-${kind}`);
   function shell(kind) {
-    const [eyebrow,title,description]=titles[kind],el=root(kind);if(el.dataset.ready)return;el.dataset.ready='yes';
-    el.innerHTML=`<header class="resource-head"><div><span class="resource-eyebrow">${eyebrow}</span><h2>${title}</h2><p>${description}</p></div><div class="resource-head-actions"><button class="btn" data-refresh>刷新</button><button class="btn primary" data-new>手动添加</button></div></header>
+    const [title,description]=titles[kind],el=root(kind);if(el.dataset.ready)return;el.dataset.ready='yes';
+    el.innerHTML=`<header class="resource-head"><div><h2>${title}</h2><p>${description}</p></div><div class="resource-head-actions"><button class="btn" data-refresh>刷新</button><button class="btn primary" data-new>手动添加</button></div></header>
+      ${kind==='mcp'?'<div data-exa-settings></div>':''}
       <div class="resource-layout"><section class="resource-catalog" aria-label="${title}目录"><label class="resource-search">检索已配置资源<input type="search" data-search placeholder="输入关键词…" maxlength="200"></label><div class="resource-list-status" role="status"></div><div class="resource-list"></div><button class="btn resource-more" hidden>加载更多</button></section>
-      <section class="resource-chat" aria-label="${title}专属管理对话"><header><span class="resource-dot"></span><div><b>资源助手</b><small>独立对话 · 先查看变更，再确认执行</small></div></header><div class="resource-chat-log" aria-live="polite"></div><div class="resource-proposals"></div><form class="resource-chat-form"><label class="sr-only" for="resource-message-${kind}">向${title}助手描述需求</label><textarea id="resource-message-${kind}" placeholder="${kind==='mcp'?'例如：帮我配置一个只读浏览器 MCP，请先给出安装方案':'例如：添加一份关于接口权限边界的参考技能'}" rows="3" maxlength="16000"></textarea><div><small>请勿在聊天中粘贴密钥</small><button class="btn primary" type="submit">发送</button></div><p class="resource-chat-status" role="status"></p></form></section></div>`;
-    el.querySelector('[data-refresh]').onclick=()=>{load(kind);loadChat(kind);};
+      <section class="resource-chat" aria-label="${title}专属管理对话"><header><div><b>资源助手</b><small>变更需确认后执行</small></div></header><div class="resource-chat-log" aria-live="polite"></div><div class="resource-proposals"></div><form class="resource-chat-form"><label class="sr-only" for="resource-message-${kind}">向${title}助手描述需求</label><textarea id="resource-message-${kind}" placeholder="${kind==='mcp'?'例如：帮我配置一个只读浏览器 MCP，请先给出安装方案':'例如：添加一份关于接口权限边界的参考技能'}" rows="3" maxlength="16000"></textarea><div><small>请勿在聊天中粘贴密钥</small><button class="btn primary" type="submit">发送</button></div><p class="resource-chat-status" role="status"></p></form></section></div>`;
+    if(kind==='mcp')ExaSettings.mount(el.querySelector('[data-exa-settings]'));
+    el.querySelector('[data-refresh]').onclick=()=>{load(kind);loadChat(kind);if(kind==='mcp')ExaSettings.load();};
     el.querySelector('[data-new]').onclick=()=>edit(kind);
     let timer;el.querySelector('[data-search]').oninput=e=>{const s=stateFor(kind);s.q=e.target.value.trim();s.generation++;clearTimeout(timer);timer=setTimeout(()=>load(kind),250);};
     el.querySelector('.resource-more').onclick=()=>load(kind,true);
-    el.querySelector('form').onsubmit=e=>send(kind,e);
+    el.querySelector('.resource-chat-form').onsubmit=e=>send(kind,e);
   }
   async function load(kind,append=false) {
     const s=stateFor(kind),version=++s.generation,status=root(kind).querySelector('.resource-list-status');
@@ -54,15 +56,15 @@ const ResourceConsole = (() => {
     const el=root(kind),log=el.querySelector('.resource-chat-log'),signature=JSON.stringify(data);if(el.dataset.chatSignature===signature)return;el.dataset.chatSignature=signature;
     const follow=log.scrollHeight-log.scrollTop-log.clientHeight<40;
     const usage=data.usage_total;if(usage)el.querySelector('.resource-chat header small').textContent=`独立对话 · 累计 ${Number(usage.used_tokens||0).toLocaleString('zh-CN')} token · ${usage.calls||0} 次调用`;
-    log.innerHTML=data.messages.map(m=>`<div class="resource-message ${m.role==='user'?'user':'assistant'}"><small>${m.role==='user'?'你':'资源助手'} · ${esc(new Date(m.created_at*1000).toLocaleString('zh-CN',{hour12:false}))}</small><p>${esc(m.content)}</p></div>`).join('')||'<div class="resource-chat-welcome"><span>先描述需求</span><h3>把接入配置，交给对话。</h3><p>告诉我你想接入的工具或参考技能。我会整理待确认变更，并询问缺少的信息。</p></div>';
+    log.innerHTML=data.messages.map(m=>`<div class="resource-message ${m.role==='user'?'user':'assistant'}"><small>${m.role==='user'?'你':'资源助手'} · ${esc(new Date(m.created_at*1000).toLocaleString('zh-CN',{hour12:false}))}</small><p>${esc(m.content)}</p></div>`).join('')||'<div class="resource-chat-welcome"><h3>描述配置需求</h3><p>描述要添加的工具或技能。执行前会列出待确认的变更。</p></div>';
     if(follow)log.scrollTop=log.scrollHeight;
-    const proposals=el.querySelector('.resource-proposals');proposals.innerHTML=(data.proposals||[]).map(p=>`<details class="resource-proposal" ${['pending','applying'].includes(p.state)?'open':''}><summary>${esc(({pending:'待确认变更',applying:'正在安装与配置',completed:'变更已完成',failed:'执行失败',interrupted:'执行已中断'})[p.state]||p.state)}</summary><pre>${esc(JSON.stringify(p.proposal,null,2))}</pre>${p.result?`<p>${esc(p.result)}</p>`:''}${['pending','failed','interrupted'].includes(p.state)?`<button class="btn primary" data-apply="${esc(p.id)}">查看后应用此变更</button>`:''}</details>`).join('');
-    proposals.querySelectorAll('[data-apply]').forEach(b=>b.onclick=async()=>{if(!b.dataset.confirmed){b.dataset.confirmed='yes';b.textContent='确认执行上述安装与配置';return;}b.disabled=true;try{await api(`/api/resources/proposals/${b.dataset.apply}/apply`,{method:'POST',body:JSON.stringify({confirm:true})});loadChat(kind);}catch(e){toast(e.message,true);b.disabled=false;}});
+    const proposals=el.querySelector('.resource-proposals');proposals.innerHTML=(data.proposals||[]).map(p=>`<details class="resource-proposal" ${['pending','applying'].includes(p.state)?'open':''}><summary>${esc(({pending:'待确认变更',applying:'正在安装与配置',completed:'变更已完成',failed:'执行失败',interrupted:'执行已中断'})[p.state]||p.state)}</summary><pre>${esc(JSON.stringify(p.proposal,null,2))}</pre>${p.result?`<p>${esc(p.result)}</p>`:''}${['pending','failed','interrupted'].includes(p.state)?`<button class="btn primary" data-apply="${esc(p.id)}">应用变更</button>`:''}</details>`).join('');
+    proposals.querySelectorAll('[data-apply]').forEach(b=>b.onclick=async()=>{if(!b.dataset.confirmed){b.dataset.confirmed='yes';b.textContent='确认安装与配置';return;}b.disabled=true;try{await api(`/api/resources/proposals/${b.dataset.apply}/apply`,{method:'POST',body:JSON.stringify({confirm:true})});loadChat(kind);}catch(e){toast(e.message,true);b.disabled=false;}});
     if((data.proposals||[]).some(p=>p.state==='completed'))load(kind);
   }
   async function loadChat(kind) {try{const data=await api(`/api/resources/${kind}/chat`);if(S.view===kind)renderChat(kind,data);}catch(e){root(kind).querySelector('.resource-chat-status').textContent=`管理对话读取失败：${e.message}`;}}
-  async function send(kind,event) {event.preventDefault();const form=event.currentTarget,input=form.querySelector('textarea'),text=input.value.trim();if(!text)return;const button=form.querySelector('button');button.disabled=true;const status=form.querySelector('.resource-chat-status');status.textContent='资源助手正在整理需求…';try{const result=await api(`/api/resources/${kind}/chat`,{method:'POST',body:JSON.stringify({message:text})});if(input.value.trim()===text)input.value='';if(S.view===kind)renderChat(kind,result);status.textContent=result.usage?`本次 ${result.usage.input_tokens+result.usage.output_tokens} token · ${result.usage.model}`:'';}catch(e){status.textContent=`处理失败：${e.message}。输入已保留，可重试。`;loadChat(kind);}finally{button.disabled=false;}}
-  function open(kind) {clearInterval(poll);shell(kind);load(kind);loadChat(kind);poll=setInterval(()=>{if(S.view!==kind){clearInterval(poll);return;}loadChat(kind);},2500);}
+  async function send(kind,event) {event.preventDefault();const form=event.currentTarget,input=form.querySelector('textarea'),text=input.value.trim();if(!text)return;const button=form.querySelector('button');button.disabled=true;const status=form.querySelector('.resource-chat-status');status.textContent='正在处理…';try{const result=await api(`/api/resources/${kind}/chat`,{method:'POST',body:JSON.stringify({message:text})});if(input.value.trim()===text)input.value='';if(S.view===kind)renderChat(kind,result);status.textContent=result.usage?`本次 ${result.usage.input_tokens+result.usage.output_tokens} token · ${result.usage.model}`:'';}catch(e){status.textContent=`处理失败：${e.message}。输入已保留，可重试。`;loadChat(kind);}finally{button.disabled=false;}}
+  function open(kind) {clearInterval(poll);shell(kind);load(kind);loadChat(kind);if(kind==='mcp')ExaSettings.load();poll=setInterval(()=>{if(S.view!==kind){clearInterval(poll);return;}loadChat(kind);},2500);}
   document.querySelectorAll('[data-resource]').forEach(button=>button.onclick=()=>{S.cur=null;show(button.dataset.resource);renderSessions();});
   $('#resource-save').onclick=save;
   $('#resource-editor').addEventListener('close',()=>{$('#resource-env').value='';$('#resource-headers').value='';});
