@@ -1,5 +1,4 @@
 "use strict";
-"use strict";
 /* ================= 基础 ================= */
 const $ = s => document.querySelector(s);
 const S = { view: "home", cur: null, tab: "chat", sessions: [], state: null,
@@ -108,6 +107,7 @@ $("#btn-logout").onclick = async () => {
 const VIEWS = { home: "#view-home", session: "#view-session", dash: "#view-dash",
                 agents: "#view-agents", models: "#view-models", mcp:"#view-mcp", skill:"#view-skill", projects:"#view-projects", exp:"#view-exp" };
 function show(view) {
+  if(view!=="mcp" && typeof ExaSettings!=="undefined") ExaSettings.clear();
   S.view = view;
   for (const [k, sel] of Object.entries(VIEWS)) $(sel).hidden = k !== view;
   document.querySelectorAll(".side > nav button").forEach(b =>
@@ -192,7 +192,7 @@ function sessionItemHtml(s) {
         <span class="name" title="${esc(s.title)}">${esc(s.title)}</span></div>
       <div class="s">${esc(s.target || s.session_id)} · <span class="mono">${esc(s.session_id.slice(5, 13))}</span></div>
       <div class="ops">
-        <button data-act="rename" title="重命名">✎</button>
+        <button data-act="rename" title="重命名" aria-label="重命名"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 3 5 5-12 12-6 1 1-6L16 3ZM14 5l5 5"/></svg></button>
         <button data-act="del" class="danger" title="删除会话">✕</button>
       </div>
     </div>`;
