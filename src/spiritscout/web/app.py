@@ -1,17 +1,10 @@
-"""FastAPI 应用工厂（Web 控制台）。
+"""FastAPI 控制台：会话、配置、状态快照、SSE 和静态页面。
 
-路由面：会话 CRUD（创建=启动）、数据面快照（黑板八层/任务路线/漏洞/Flag/
-拓扑）、SSE 事件流、报告读取与下载、审计导出、无构建单页前端。
-授权模型：Web 交互式在场即声明——打开控制台创建会话本身即构成
-授权确认（G1），Authorization.human_confirmed 照常落审计；对话框保留
-「仅限已授权目标」显著提示，不设勾选摩擦。
-模式参数/赛制规则冲突由 launch.prepare_launch 校验 → 422（单一事实源）。
-空范围的唯一权威门在 runtime（ScopeViolation → 会话落 failed），
-Web 不另设前置副本，避免两套门槛漂移。
-"""
+启动请求由 launch.prepare_launch 校验，运行期测试边界由模型结合用户上下文维护。"""
 
 from __future__ import annotations
 
+import copy
 import json
 import shutil
 import sqlite3
@@ -56,7 +49,7 @@ from spiritscout.core.models import BlackboardLayer, RunMode
 from spiritscout.launch import LaunchRequest, prepare_launch
 from spiritscout.web import agentcfg, modelcfg, vault
 from spiritscout.web import auth as web_auth
-from spiritscout.web.events import read_audit_page, stream_audit
+from spiritscout.web.events import read_activity_page, read_audit_page, stream_audit
 from spiritscout.web.sessions import (
     TERMINAL_STATES,
     Session,
@@ -112,6 +105,13 @@ class QuestionAnswerPayload(BaseModel):
                 and not self.add_targets:
             raise ValueError("请选择选项或填写答复")
         return self
+
+
+class AgentSideSessionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    actor: str = Field(min_length=1, max_length=120)
+    task_id: str = Field(min_length=1, max_length=120)
+    mission: str = Field(min_length=1, max_length=4000)
 
 
 class SessionCreatePayload(BaseModel):
@@ -218,10 +218,12 @@ def _read_state(session: Session) -> dict[str, Any]:
                 "task_id": t.get("task_id"), "task_type": t.get("task_type"),
                 "agent_type": t.get("agent_type"), "status": t.get("status"),
                 "round_no": t.get("round_no"),
+                "challenge_id": str(((t.get("payload") or {}).get("challenge") or {}).get("id") or ""),
                 "result_summary": str(t.get("result_summary") or "")[:200],
                 "parent_dag_node": t.get("parent_dag_node"),
                 "routes": [
-                    {"name": r.get("name"), "status": r.get("status"),
+                    {"route_id": r.get("route_id"),
+                     "name": r.get("name"), "status": r.get("status"),
                      "health": r.get("health"), "progress": r.get("progress"),
                      "value_score": r.get("value_score"),
                      "risk_score": r.get("risk_score"),
@@ -241,7 +243,8 @@ def _read_state(session: Session) -> dict[str, Any]:
                 "steps": sum(int(r.get("steps_executed") or 0)
                              for r in data.get("routes", [])),
                 "routes": [
-                    {"name": r.get("name"), "status": r.get("status"),
+                    {"route_id": r.get("route_id"),
+                     "name": r.get("name"), "status": r.get("status"),
                      "progress": r.get("progress"),
                      "note": (r.get("notes") or [""])[-1][:200]}
                     for r in data.get("routes", [])
@@ -291,7 +294,7 @@ def _read_state(session: Session) -> dict[str, Any]:
         for rec in topology_records:
             d = rec["data"]
             if isinstance(d, dict) and d.get("kind") == "finding":
-                findings.append(d)
+                findings.append({**d, "finding_id": rec["record_id"]})
         findings.sort(key=lambda d: float(d.get("ts") or 0))
         state["findings"] = findings[-80:]
         if session.flags_path.exists():
@@ -551,6 +554,32 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             raise HTTPException(422, str(exc)) from exc
         return {**session.brief(), "request": session.request}
 
+    @app.post("/api/sessions/{session_id}/agent-sessions", status_code=201)
+    async def create_agent_session(session_id: str, payload: AgentSideSessionPayload) -> dict[str, Any]:
+        from spiritscout.web.workbench import side_session_source
+
+        parent = _require(session_id)
+        try:
+            context = side_session_source(parent, payload.actor, payload.task_id)
+            mission = payload.mission.strip()
+            if not mission:
+                raise SpiritScoutError("请填写旁路任务")
+            plan = copy.deepcopy(parent.plan or manager._rebuild_plan(parent))
+            if plan is None:
+                raise SpiritScoutError("无法恢复原会话授权，请先恢复原会话")
+            if plan.authorization.mode.value != parent.mode:
+                raise SpiritScoutError("原会话模式与授权不一致，无法创建旁路")
+            plan.mission, plan.mode_auto, plan.needs_mode_routing = mission, False, False
+            request = {**copy.deepcopy(parent.launch_request), "mode": parent.mode,
+                       "mode_auto": False, "mission": mission, "target": parent.launch_request.get("target") or parent.target,
+                       "project_id": parent.project_id,
+                       "title": "旁路 · " + mission[:60], "side_agent": context["agent"],
+                       "side_context": context, "standing_rules": parent.standing_rules, "no_llm": False}
+            session = await manager.create(request, plan)
+        except (SpiritScoutError, ValueError, KeyError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return {**session.brief(), "request": session.request}
+
     # ------------------------------------------------------------ Agent 编队
 
     def _agents_view() -> dict[str, Any]:
@@ -603,6 +632,17 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         detail = session.brief()
         detail["request"] = session.request
         return detail
+
+    @app.get("/api/sessions/{session_id}/conversation")
+    def agent_conversation(session_id: str) -> dict[str, Any]:
+        """旁路栏只读取对话与待办，不重建主会话黑板快照。"""
+        session = _require(session_id)
+        if not session.request.get("side_agent"):
+            raise HTTPException(422, "该会话不是子 Agent 旁路会话")
+        return {"session": session.brief(include_summary=False),
+                "messages": copy.deepcopy(session.dialogue_history),
+                "pending_approvals": session.approvals.view(),
+                "pending_questions": session.questions.view()}
 
     @app.patch("/api/sessions/{session_id}")
     async def patch_session(session_id: str,
@@ -713,8 +753,10 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
 
     @app.get("/api/sessions/{session_id}/audit-page")
     def session_audit_page(session_id: str, before: int | None = Query(None, ge=0),
-                           limit: int = Query(160, ge=1, le=250)) -> dict[str, Any]:
-        return read_audit_page(_require(session_id).audit_path, before=before, limit=limit)
+                           limit: int = Query(160, ge=1, le=250),
+                           activity: bool = False) -> dict[str, Any]:
+        reader = read_activity_page if activity else read_audit_page
+        return reader(_require(session_id).audit_path, before=before, limit=limit)
 
     @app.get("/api/sessions/{session_id}/events")
     async def session_events(session_id: str, request: Request) -> StreamingResponse:
@@ -778,40 +820,19 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             raise HTTPException(409, f"待确认项不存在或已裁决: {approval_id}")
         return {"approval_id": approval_id, "allow": allow}
 
+    from spiritscout.web.dashboard import DashboardReader
+
+    dashboard_reader = DashboardReader()
+
     @app.get("/api/dashboard")
-    def dashboard_data() -> dict[str, Any]:
-        """仪表盘聚合数据：跨会话 token 消耗、资产总览、关键发现。"""
-        sessions = manager.list()
-        total_tokens = 0
-        total_cost = 0.0
-        running = 0
-        per_model = {}
-        daily = {}
-        for sess in sessions:
-            mu = sess.model_usage()
-            t = mu.get("used_tokens", 0)
-            c = mu.get("used_usd", 0.0)
-            total_tokens += t
-            total_cost += c
-            if sess.status == "running":
-                running += 1
-            for m, mt in (mu.get("per_model_tokens") or {}).items():
-                per_model[m] = per_model.get(m, 0) + mt
-            for ev in mu.get("call_series", []):
-                day = time.strftime("%Y-%m-%d", time.gmtime(ev.get("ts", 0)))
-                daily[day] = daily.get(day, 0) + ev.get("tokens", 0)
+    def dashboard_data(period: str = Query("today", pattern="^(hour|today|7d|30d|all)$")) -> dict[str, Any]:
+        """北京时间的执行、成果、费用与缓存总览；只读，不干预调度。"""
         from spiritscout.knowledge.experience import experience_db_path, read_recent
 
-        return {
-            "total_tokens": total_tokens,
-            "total_cost": round(total_cost, 4),
-            "total_sessions": len(sessions),
-            "running": running,
-            "per_model": per_model,
-            "daily": dict(sorted(daily.items())),
-            "experience": read_recent(
-                experience_db_path(cfg.experience.root, cfg.workspace.root), limit=8),
-        }
+        data = dashboard_reader.build(manager.list(), period=period)
+        data["experience"] = read_recent(
+            experience_db_path(cfg.experience.root, cfg.workspace.root), limit=8)
+        return data
 
     @app.get("/api/experience")
     def experience_page(q: str = "", tag: str = "",
@@ -993,8 +1014,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         # 拓扑图/状态面展示用：历史意见（收件箱是消费语义，另一份不可变留档）
         session.opinions.append({"text": content, "ts": time.time()})
         del session.opinions[:-8]
-        # 对话史随发随落：运行中被直达通道共读，终态后续传以史末尾为
-        # 这一轮的输入——灵枢应答始终带着此前全部往来
+        # 保存消息后再通知执行通道，确保续传可恢复对话。
         manager._persist(session)
         AuditLogger(session.audit_path).log(
             "user.message", "user", {"content": content})
