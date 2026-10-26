@@ -180,6 +180,12 @@ def get_profile(agent: AgentType | str) -> AgentProfile:
 
 
 def agent_system_prompt(agent: AgentType | str, *, allow_search: bool = True) -> str:
+    common, role = agent_prompt_parts(agent, allow_search=allow_search)
+    return role + common
+
+
+def agent_prompt_parts(agent: AgentType | str, *, allow_search: bool = True) -> tuple[str, str]:
+    """返回通用契约和角色说明；旧入口仍按原顺序拼接，已有提示词不变。"""
     profile = get_profile(agent)
     workflow = " → ".join(profile.workflow)
     tools = "、".join(profile.display_tools)
@@ -194,7 +200,7 @@ def agent_system_prompt(agent: AgentType | str, *, allow_search: bool = True) ->
                    if not allow_search else SEARCH_GUIDANCE if profile.allows_tool("web_search") else
                    "遇到知识或版本信息缺口，可把关键词和待查证问题交给具备 web_search 工具的专项 Agent 检索。"
                    if profile.key == AgentType.MASTER else "")
-    return (
+    role = (
         f"你是灵枢（SpiritScout）智能体集群的「{profile.name}」（{profile.key.value}）。"
         f"职责：{profile.duty}。\n"
         f"专业思维：{profile.mindset}\n"
@@ -202,6 +208,8 @@ def agent_system_prompt(agent: AgentType | str, *, allow_search: bool = True) ->
         f"可用工具面：{tools}。只使用当前实际提供的工具，不声称已执行"
         f"未调用的工具。\n"
         f"{probe}{search_note}\n"
+    )
+    common = (
         "输出只包含当前阶段需要的决策和证据引用；不复述已给出的任务、授权、"
         "业务背景或整段工具返回。简单参数选择和无异常响应判断简洁完成，"
         "遇到矛盾或高价值证据再深入推理；无新事实时明确指出缺口，避免重复生成相同计划。"
@@ -230,6 +238,7 @@ def agent_system_prompt(agent: AgentType | str, *, allow_search: bool = True) ->
         "authorization.approved_by_user。禁止破坏性操作，所有结论都必须能"
         "追溯到可复现证据。"
     )
+    return common, role
 
 
 def public_roster() -> list[dict[str, object]]:
