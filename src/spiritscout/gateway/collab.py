@@ -1,25 +1,7 @@
-"""多模型协作模式（4.9.3 六种 / 6.10 决策算法）。
+"""多模型投票、辩论、级联及角色路由。
 
-路由（registry.route）与主备切换（gateway.chat 故障链）为  已实现的两种；
-本模块补齐其余四种：
-
-- **投票 vote**（4.9.3-2）：关键判定（漏洞收录 / Flag 有效性 / 高危定级等
-  不可逆高影响判定，6.10）由 ≥vote_min_models 个**不同**模型独立判定，
-  一致才通过，分歧降级复核（review）。
-  护栏（4.9.5）：投票结果仅作规则引擎的输入之一，不直接改变裁决状态；
-  模型数不足时返回 review 并留痕（显式降级，不静默放行）。
-- **辩论 debate**（4.9.3-3）：重大分歧（高危定级、复杂利用链可行性）由两个
-  模型背对背论证（首轮互不见面，次轮可见对方论点反驳），收敛即采纳；
-  不收敛引入第三方仲裁模型，仲裁仍不确定 → review（人工）。
-- **级联 cascade**（4.9.3-4 / 6.10）：便宜模型先答，置信度低于阈值
-  （cascade_confidence_threshold，默认 0.8）升级旗舰模型复判。
-- **异构角色 chat_for_role**（4.9.3-6）：规划/执行/核验三角色固定走
-  各自档位（旗舰推理 / 快速 / 严谨），与 4.9.2 路由表联动。
-
-工程取舍：**顺序调用而非并发**。投票/辩论属低频高影响判定（6.10 限定适用
-范围），顺序执行换取确定性（审计可重放）与限流友好；延迟在 6.4 全局决策
-<10s 预算内可接受。
-"""
+投票使用不同模型独立判断；分歧或模型不足时返回 review。调用顺序执行，
+避免同时占用多个端点；协作结果由调用方处理，不直接改变漏洞状态。"""
 
 from __future__ import annotations
 
@@ -60,7 +42,7 @@ class JudgeResult:
 
 @dataclass
 class VoteResult:
-    """投票模式结果（4.9.3-2）。"""
+    """投票模式结果。"""
 
     decision: str                    # 一致结论；分歧 → "review"
     agreed: bool
@@ -74,7 +56,7 @@ class VoteResult:
 
 @dataclass
 class DebateResult:
-    """辩论模式结果（4.9.3-3）。"""
+    """辩论模式结果。"""
 
     decision: str
     converged: bool                  # 两方自行收敛（未动用仲裁）
@@ -85,7 +67,7 @@ class DebateResult:
 
 @dataclass
 class CascadeResult:
-    """级联模式结果（4.9.3-4）。"""
+    """级联模式结果。"""
 
     response: ChatResponse           # 最终采用的应答
     escalated: bool
@@ -132,7 +114,7 @@ class CollabGateway:
         self.registry = gateway.registry
         self.cfg = gateway.config
 
-    # ------------------------------------------------------------ 投票（4.9.3-2）
+    # ------------------------------------------------------------ 投票
 
     async def vote(
         self,
@@ -174,7 +156,7 @@ class CollabGateway:
         })
         return result
 
-    # ------------------------------------------------------------ 辩论（4.9.3-3）
+    # ------------------------------------------------------------ 辩论
 
     async def debate(
         self,
@@ -239,7 +221,7 @@ class CollabGateway:
             "models": [side_a.model, side_b.model]})
         return result
 
-    # ------------------------------------------------------------ 级联（4.9.3-4）
+    # ------------------------------------------------------------ 级联
 
     async def cascade(
         self,
@@ -278,7 +260,7 @@ class CollabGateway:
         return CascadeResult(response=final, escalated=True, confidence=confidence,
                              first_model=first.model, final_model=flagship.model)
 
-    # ------------------------------------------------------------ 异构角色（4.9.3-6）
+    # ------------------------------------------------------------ 异构角色
 
     async def chat_for_role(
         self, role: str, messages: list[dict[str, str]], **kw: Any
