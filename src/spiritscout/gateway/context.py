@@ -4,15 +4,41 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 from typing import Any
 
 from spiritscout.core.models import BlackboardLayer
+
+
+def estimate_input_tokens(messages: list[dict[str, Any]],
+                          tools: list[dict[str, Any]] | None = None) -> int:
+    """离线保守估算文本、思考和工具声明；不是供应商计费 token 数。
+
+    ASCII 按三字符一 token，非 ASCII 按 UTF-8 字节数的一半估算，
+    另留协议开销。无需下载分词器；窗口压力判断使用估值，账单只用服务端用量。
+    """
+    text = json.dumps({"messages": messages, "tools": tools or []},
+                      ensure_ascii=False, separators=(",", ":"), default=str)
+    ascii_chars = sum(character.isascii() for character in text)
+    non_ascii_bytes = len(text.encode("utf-8")) - ascii_chars
+    return math.ceil(ascii_chars / 3 + non_ascii_bytes / 2) + len(messages) * 8 + 32
+
+
+def input_window_budget(context_window: int, reserved_output: int = 0) -> int | None:
+    """按声明容量留出输出和整理空间；未知容量不伪装成某模型的真实窗口。"""
+    if context_window <= 0:
+        return None
+    reserve = min(max(reserved_output, 4096), context_window // 2)
+    headroom = min(65536, context_window // 10)
+    return max(1, min(int(context_window * 0.8), context_window - reserve - headroom))
 
 # 这些字段可以超过软预算，不能为了缩短输入而丢掉授权、任务或用户回答。
 _PROTECTED = {"constraints", "task_intent", "用户答复", "scope", "rules", "mission",
               "target", "available_tactics", "shared_context", "business_context",
               "reference_skills", "world_state", "project_rules", "user_context",
-              "authorization", "testing_rules", "user_replies"}
+              "authorization", "testing_rules", "user_replies",
+              "competition_context", "platform_facts", "灵枢当前指令",
+              "active_tasks", "steering_status", "competition_status"}
 
 
 def compact_json(payload: dict[str, Any], max_chars: int = 8000) -> str:
@@ -94,13 +120,9 @@ def business_digest(context: dict[str, Any], *, version: int | None = None) -> d
 
 
 def blackboard_findings(blackboard: Any) -> dict[str, Any]:
-    """本会话实时成果投影：资产/线索/漏洞的计数与抽样（子 Agent 与旁路共用）。
+    """汇总资产、线索和漏洞的数量与样本，供子 Agent 和旁路会话使用。
 
-    子 Agent 此前只拿到业务上下文与用户答复，看不到其他分支已探到的资产、
-    线索与漏洞，容易重复劳动或在「黑板里没有可用信息」上误判（2026-10-16
-    复盘：post_exploit 拿着用户给的账号却报「暂无凭据证据」）。这里只回传
-    事实与选样，硬上限防 token；未展示不代表不存在。
-    """
+    各类记录有读取与抽样上限；样本不包含全部黑板数据。"""
     assets = blackboard.query(BlackboardLayer.ASSET, limit=500)
     by_type: dict[str, int] = {}
     samples: dict[str, list[str]] = {"endpoint": [], "service": [], "url": []}
@@ -186,11 +208,40 @@ def compact_history(messages: list[dict[str, Any]], max_chars: int = 48000) -> N
         if i < 2 or i >= len(messages) - 2 or i in recent_users:
             continue
         content = message.get("content")
-        if (message.get("role") not in {"assistant", "tool"}
+        if (message.get("_context_contract") or message.get("role") not in {"assistant", "tool"}
                 or not isinstance(content, str) or len(content) < 800):
             continue
         # 只压缩观察正文；函数名、调用 ID 和参数仍完整保留。
         message["content"] = content[:400] + "\n[早期观察已节选；需要细节时查对应执行记录]\n" + content[-250:]
+
+
+def compact_history_tokens(messages: list[dict[str, Any]], max_tokens: int, *,
+                           tools: list[dict[str, Any]] | None = None) -> bool:
+    """真正有窗口压力才整理旧观察，工具声明/参数/思考也计入输入。
+
+    保留末尾完整工具往返、用户声明及契约。无法缩小到阈值时诚实交给调用端，
+    不删除授权或拆散工具调用；返回值只报告是否实际改写过历史。
+    """
+    if estimate_input_tokens(messages, tools) <= max_tokens:
+        return False
+    # 高水位触发后整理到低水位，避免每新增一条结果就再次破坏缓存前缀。
+    target_tokens = max(1, int(max_tokens * 0.6))
+    last_assistant = next((i for i in range(len(messages) - 1, -1, -1)
+                           if messages[i].get("role") == "assistant"), len(messages))
+    changed = False
+    for index, message in enumerate(messages):
+        if index < 2 or index >= last_assistant or message.get("_context_contract"):
+            continue
+        content = message.get("content")
+        if (message.get("role") not in {"assistant", "tool"}
+                or not isinstance(content, str) or len(content) <= 800):
+            continue
+        message["content"] = (content[:400]
+                              + "\n[早期观察已节选；完整内容见执行记录]\n" + content[-250:])
+        changed = True
+        if estimate_input_tokens(messages, tools) <= target_tokens:
+            break
+    return changed
 
 
 def decision_messages(system: str, payload: dict[str, Any], max_chars: int = 8000) -> list[dict[str, Any]]:
@@ -222,6 +273,30 @@ def decision_messages(system: str, payload: dict[str, Any], max_chars: int = 800
     return messages
 
 
+def append_instruction_events(state: dict[str, Any], records: list[dict[str, Any]], *,
+                              consumer_key: str) -> None:
+    """指令及回执按变化追加，已发出的请求前缀不因下一轮临时注入而改变。"""
+    previous = state.get("instruction_state") or {}
+    current = {}
+    for record in records:
+        current[record["id"]] = {
+            k: record[k] for k in ("id", "agent", "task_id", "hint", "rationale") if k in record}
+        feedback = (record.get("feedback") or {}).get(consumer_key)
+        if feedback:
+            current[record["id"]]["feedback"] = dict(feedback)
+    changed = [v for k, v in current.items() if previous.get(k) != v]
+    removed = sorted(previous.keys() - current.keys())
+    if changed or removed:
+        state["messages"].append({"role": "user", "content":
+            "灵枢任务指令事件：同一 ID 以最新状态为准，失效 ID 不再执行；"
+            "completed 表示已回报完成，不再重复执行；未变化的其他指令继续有效。"
+            "优先调整实际操作，用 steering_feedback "
+            "回报计划、完成证据或受阻原因，实际操作遵守用户授权与比赛规则。\n"
+            + json.dumps({"灵枢当前指令": changed, "失效指令": removed},
+                         ensure_ascii=False, separators=(",", ":"), sort_keys=True)})
+    state["instruction_state"] = current
+
+
 class DecisionMemory:
     """同阶段追加式决策：完整现场只发送一次，随后发送可还原的数据补丁。"""
 
@@ -231,17 +306,31 @@ class DecisionMemory:
         "历史 assistant 是旧决策，不是新增事实；仍需根据当前完整现场独立判断并输出原约定的完整 JSON。"
     )
 
-    def __init__(self, soft_chars: int = 48000) -> None:
+    def __init__(self, soft_chars: int = 256000) -> None:
         self.soft_chars = soft_chars
         self.messages: list[dict[str, Any]] = []
         self.snapshot: dict[str, Any] = {}
         self.system = ""
         self.pending: tuple[list[dict[str, Any]], dict[str, Any], str] | None = None
+        self.segment_changed = False
+        self.segment_info: dict[str, Any] = {}
+        self.journal: Any = None
+        self.checkpoint_key = ""
 
     @staticmethod
     def patch(old: Any, new: Any, path: str = "") -> list[dict[str, Any]]:
         if old == new:
             return []
+        if isinstance(old, list) and isinstance(new, list):
+            # 数组追加或某一项状态变化不应重发整份历史。
+            changes = []
+            for index in range(min(len(old), len(new))):
+                changes.extend(DecisionMemory.patch(old[index], new[index], path + f"/{index}"))
+            changes.extend({"op": "remove", "path": path + f"/{index}"}
+                           for index in range(len(old) - 1, len(new) - 1, -1))
+            changes.extend({"op": "add", "path": path + "/-", "value": value}
+                           for value in new[len(old):])
+            return changes
         if not isinstance(old, dict) or not isinstance(new, dict):
             return [{"op": "replace", "path": path, "value": new}]
         changes = []
@@ -255,7 +344,8 @@ class DecisionMemory:
                 changes.extend(DecisionMemory.patch(old[key], new[key], child))
         return changes
 
-    def prepare(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def prepare(self, messages: list[dict[str, Any]], *,
+                max_input_tokens: int | None = None) -> list[dict[str, Any]]:
         system = "\n".join(m["content"] for m in messages if m.get("role") == "system")
         snapshot: dict[str, Any] = {}
         for message in messages:
@@ -272,18 +362,32 @@ class DecisionMemory:
         else:
             prepared = []
         # 达到上下文软窗口时，用真实最新现场重新建段；不限制回合、不沿用旧授权。
-        if not prepared or len(serialize(prepared)) > max(self.soft_chars, len(serialize(snapshot)) * 3):
+        pressure = (estimate_input_tokens(prepared) > max_input_tokens
+                    if max_input_tokens is not None else len(serialize(prepared)) > max(
+                        self.soft_chars, len(serialize(snapshot)) * 3))
+        self.segment_changed = not prepared or pressure
+        if self.segment_changed:
+            self.segment_info = {"reason": "initial" if not self.messages else
+                                 "contract_changed" if system != self.system else "context_window",
+                                 "snapshot_chars": len(serialize(snapshot)),
+                                 "previous_chars": len(serialize(self.messages)),
+                                 "estimated_input_tokens": estimate_input_tokens(prepared),
+                                 "max_input_tokens": max_input_tokens}
             prepared = [{"role": "system", "content": system + self.note},
                         {"role": "user", "content": serialize({"snapshot": snapshot})}]
         self.pending = (prepared, copy.deepcopy(snapshot), system)
         return copy.deepcopy(prepared)
 
-    def commit(self, content: str) -> None:
+    def commit(self, content: str, *, reasoning: str = "") -> None:
         if self.pending is None:
             return
         messages, self.snapshot, self.system = self.pending
-        self.messages = [*messages, {"role": "assistant", "content": content}]
+        self.messages = copy.deepcopy([*messages, {"role": "assistant", "content": content,
+                                     **({"reasoning_content": reasoning} if reasoning else {})}])
         self.pending = None
+        if self.journal is not None:
+            self.journal.checkpoint("decision_memory", self.checkpoint_key, "committed", {
+                "messages": self.messages, "snapshot": self.snapshot, "system": self.system})
 
 
 def decision_memory(owner: Any, key: str) -> DecisionMemory:
@@ -293,7 +397,26 @@ def decision_memory(owner: Any, key: str) -> DecisionMemory:
         memories = {}
         owner._decision_memories = memories
     if key not in memories:
-        if len(memories) >= 128:
-            memories.pop(next(iter(memories)))
-        memories[key] = DecisionMemory()
-    return memories[key]
+        journal = getattr(getattr(owner, "ctx", None), "journal", None)
+        memory = DecisionMemory()
+        if callable(getattr(journal, "latest_checkpoint", None)):
+            # 会话数据库隔离会话；类型隔离 Agent，key 已含任务/路线/阶段。
+            checkpoint_key = f"{type(owner).__name__}:{key}"
+            saved = journal.latest_checkpoint("decision_memory", checkpoint_key)
+            state = saved.get("state") if isinstance(saved, dict) else None
+            if (isinstance(state, dict) and isinstance(state.get("messages"), list)
+                    and isinstance(state.get("snapshot"), dict) and isinstance(state.get("system"), str)):
+                memory.messages = copy.deepcopy(state["messages"])
+                memory.snapshot = copy.deepcopy(state["snapshot"])
+                memory.system = state["system"]
+            memory.journal, memory.checkpoint_key = journal, checkpoint_key
+            # 只淘汰已提交且可从磁盘恢复的记忆；无持久化时不能悄悄丢上下文。
+            if len(memories) >= 128:
+                victim = next((k for k, m in memories.items()
+                               if m.pending is None and m.journal is not None), None)
+                if victim is not None:
+                    memories.pop(victim)
+        memories[key] = memory
+    memory = memories.pop(key)
+    memories[key] = memory
+    return memory
