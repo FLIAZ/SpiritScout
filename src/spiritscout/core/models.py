@@ -1,10 +1,4 @@
-"""核心数据模型（pydantic v2）。
-
-对应设计书：
-- 4.8.1 黑板 8 层（目标与授权/资产/侦察线索/漏洞/凭据/拓扑/任务状态/经验反馈）
-- 4.3.2 漏洞核验状态机（候选→初筛→复核→误报→合规→收录/拒收）
-- 4.1.1 DAG 任务图谱与多轮迭代
-"""
+"""授权、黑板记录、漏洞、任务和事件的数据模型。"""
 
 from __future__ import annotations
 
@@ -23,10 +17,10 @@ def utcnow() -> datetime:
 
 
 class RunMode(str, enum.Enum):
-    """运行模式（设计书 2.2 模式化拓扑）。"""
+    """运行模式。"""
 
     SRC = "src"                # 常规渗透模式
-    CTF = "ctf"                # CTF 专项模式（不启用端口扫描）
+    CTF = "ctf"                # CTF 专项模式（所有工具操作自动审批）
     COMPETITION = "competition"  # 智能渗透赛模式（赛制自适应）
 
 
@@ -91,7 +85,7 @@ class AgentType(str, enum.Enum):
 
 
 class BlackboardLayer(str, enum.Enum):
-    """黑板 8 层（4.8.1）。"""
+    """黑板 8 层。"""
 
     TARGET_AUTH = "target_auth"    # 目标与授权层
     ASSET = "asset"                # 资产层
@@ -122,8 +116,8 @@ class Scope(BaseModel):
     max_requests_per_second: float = 10.0
     allow_sensitive_actions: bool = Field(
         default=False,
-        description="启动时声明的敏感操作意向（仅作声明留痕——G5 即时审批不可"
-                    "由启动参数免审，动作触发时仍需用户逐类确认）",
+        description="启动时声明的敏感操作意向（仅作声明留痕）；SRC 的危险"
+                    "动作仍逐次审批，CTF 与智能体 competition 模式所有工具操作全自动预授权",
     )
     local_analysis: bool = Field(
         default=False,
@@ -276,7 +270,7 @@ class RouteState(BaseModel):
 
 
 class FlagCandidate(BaseModel):
-    """CTF Flag 候选（4.4.6）。"""
+    """CTF Flag 候选。"""
 
     flag_id: str
     challenge_id: str
