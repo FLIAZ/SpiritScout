@@ -2,6 +2,7 @@
 
 ## 2026-10-26
 
+- 修复可操作浏览器入口重定向：使用相对 Location，避免从宿主 10011 端口跳转到容器内部 6080 端口，也兼容自定义发布端口。
 - 修复 Windows CI 的 Chrome MCP 测试：按文件身份比较长短路径别名，显式以 UTF-8 读取中文审计日志，避免依赖本机默认编码。
 - 命令行帮助与错误输出统一使用 UTF-8，修复英文 Windows 将中文重定向到日志时的编码异常；增加 cp1252 环境回归测试。
 - 完成 Windows/Linux/macOS 部署兼容优化：新增通用 `deploy.py` 与 Windows PowerShell 启动器，macOS 停止/重启兼容 lsof；Windows 使用不干扰 SQLite 的原生运行锁，适配虚拟环境工具路径、npm/npx JS 入口、Chrome 标准安装目录及平台进程清理。
