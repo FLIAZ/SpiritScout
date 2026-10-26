@@ -1,4 +1,4 @@
-/* ================= 设计令牌：作战台基调（暖灰纸感 + 单一信号色 + 发丝线） ================= */
+/* ================= 主题变量 ================= */
 :root {
   --bg: #f2f1ed; --surface: #faf9f6; --surface-2: #e9e7e1;
   --ink: #211f1b; --ink-2: #5c594f; --ink-3: #8f8b80;
@@ -11,7 +11,6 @@
   --violet: #6d5f94; --violet-soft: rgba(109,95,148,.08);
   --agent-1: #5b7d9e; --agent-2: #a0674a; --agent-3: #5f8a6e; --agent-4: #97824c;
   --agent-5: #96647e; --agent-6: #5f7d5f; --agent-7: #726a9e; --agent-8: #a05a56;
-  --glow-1: #f0dcc0; --glow-2: #e8dbc4; --glow-3: #dcdccf; --glow-4: #edd2bc;
   --shadow: none;
   --shadow-raise: 0 1px 3px rgba(20,18,12,.08);
   --radius: 6px;
@@ -31,7 +30,6 @@
     --violet: #9c8cc4; --violet-soft: rgba(156,140,196,.1);
     --agent-1: #7fa0c0; --agent-2: #c08267; --agent-3: #7fa88e; --agent-4: #b89d63;
     --agent-5: #b583a0; --agent-6: #7fa07f; --agent-7: #948cc2; --agent-8: #c07e79;
-    --glow-1: #443623; --glow-2: #3e3524; --glow-3: #31332d; --glow-4: #412f22;
     --shadow: none;
     --shadow-raise: 0 2px 6px rgba(0,0,0,.35);
     color-scheme: dark;
@@ -49,7 +47,6 @@
   --violet: #9c8cc4; --violet-soft: rgba(156,140,196,.1);
   --agent-1: #7fa0c0; --agent-2: #c08267; --agent-3: #7fa88e; --agent-4: #b89d63;
   --agent-5: #b583a0; --agent-6: #7fa07f; --agent-7: #948cc2; --agent-8: #c07e79;
-  --glow-1: #443623; --glow-2: #3e3524; --glow-3: #31332d; --glow-4: #412f22;
   --shadow: none;
   --shadow-raise: 0 2px 6px rgba(0,0,0,.35);
   color-scheme: dark;
@@ -79,11 +76,7 @@ code, .mono { font-family: var(--mono); font-size: .92em; }
 #app { display: grid; grid-template-columns: 236px 1fr; min-height: 100vh; }
 .side {
   min-width: 0;
-  /* 温柔氛围同语系：顶部一缕蜜杏渐入面板，向下归于素面 */
-  background: linear-gradient(172deg,
-    color-mix(in srgb, var(--glow-1) 20%, var(--surface)) 0%,
-    color-mix(in srgb, var(--glow-2) 10%, var(--surface)) 46%,
-    var(--surface) 100%);
+  background: var(--surface);
   border-right: 1px solid var(--line);
   display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh;
   z-index: 2;
