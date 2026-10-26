@@ -1,14 +1,4 @@
-"""赛制自适应调度器 + 赛况监控（设计书 4.5.2 / 4.5.3 / 6.7）。
-
-- Jeopardy：按 6.7 公式动态排题，高分且可并行优先；
-- AWD：攻击/防守双线任务队列 + 「得分速率 × 失分速率 × 剩余时间」动态换防；
-- 靶场渗透赛：复用常规渗透链路，提交切换为赛方接口（装配层职责）；
-- 赛况监控：可插拔榜单拉取器，输出排名/速率事件。
-
-6.7 任务优先级公式：
-    任务优先级 = 赛题分值 × 突破成功率预估 × 时间衰减系数 ÷ 资源消耗预估
-（系数可配置）
-"""
+"""竞赛规则适配、任务排序与赛况监控。"""
 
 from __future__ import annotations
 
@@ -94,7 +84,7 @@ class CompetitionEngine:
         return history * max(card.route_health, 0.05)
 
     def priority(self, card: ChallengeCard, now: float | None = None) -> float:
-        """任务优先级 = 分值 × 成功率 × 时间衰减 ÷ 资源消耗（6.7）。"""
+        """任务优先级 = 分值 × 成功率 × 时间衰减 ÷ 资源消耗。"""
         if card.solved:
             return 0.0
         cost = max(card.estimated_cost, 0.01)
@@ -117,7 +107,7 @@ class CompetitionEngine:
         return selected
 
     def mark_solved(self, cards: list[ChallengeCard], challenge_id: str) -> None:
-        """Flag 提交成功 → 标记完成，释放资源转向其他赛题（4.5.2）。"""
+        """Flag 提交成功 → 标记完成，释放资源转向其他赛题。"""
         for card in cards:
             if card.challenge_id == challenge_id:
                 card.solved = True
@@ -128,10 +118,10 @@ class CompetitionEngine:
 
     def awd_rebalance(self, score_delta: float, loss_delta: float,
                       now: float | None = None) -> float:
-        """按「得分速率 × 失分速率 × 剩余时间」调整防守资源配比（5.3.3）。
+        """按「得分速率 × 失分速率 × 剩余时间」调整防守资源配比。
 
-        失分速率上升 → 防守配比上调；得分停滞且失分为零 → 资源压向攻击线。
-        """
+                失分速率上升 → 防守配比上调；得分停滞且失分为零 → 资源压向攻击线。
+                """
         self.awd.attack_score_rate = max(score_delta, 0.0)
         self.awd.defend_loss_rate = max(loss_delta, 0.0)
         total = self.awd.attack_score_rate + self.awd.defend_loss_rate
@@ -156,7 +146,7 @@ class CompetitionEngine:
     # ------------------------------------------------------------ 赛况监控
 
     async def poll_scoreboard(self, fetcher: ScoreboardFetcher) -> dict[str, Any]:
-        """赛况实时监控骨架（4.5.3）：排名/分数/解题状态 → 事件。"""
+        """赛况实时监控骨架：排名/分数/解题状态 → 事件。"""
         try:
             board = await fetcher()
         except Exception as exc:  # noqa: BLE001 —— 榜单故障不阻断比赛
@@ -177,7 +167,7 @@ class CompetitionEngine:
 
     def should_converge(self, cards: list[ChallengeCard],
                         now: float | None = None) -> tuple[bool, str]:
-        """所有赛题完成或时间窗口结束 → 收敛（5.2.3-4）。"""
+        """所有赛题完成或时间窗口结束 → 收敛。"""
         if all(c.solved for c in cards):
             return True, "全部赛题已完成"
         if self.rules.contest_type != ContestType.AWD and self.time_decay(now) <= self.w.time_decay_grace + 1e-9:
