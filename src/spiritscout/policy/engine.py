@@ -1,12 +1,6 @@
-"""策略引擎：分模式能力边界 + 工具风险门 + 平台红线规则（模型是建议者、规则是裁决者）。
+"""工具策略与分模式审批。
 
-合规自查映射：
-- G2 CTF 模式禁端口扫描（硬约束 C7）；
-- G3 禁 DoS（DESTRUCTIVE 级工具不注册/一律拒绝）；
-- G5 危险语义动作逐次审批（删除文件/反弹 shell/WebShell 上传/容器逃逸/
-  爆破；普通写入类动作如实留痕但不打断）；
--  平台红线（如 bytesrc auto_test_allowed=false → 阻断自动探测）。
-"""
+CTF、智能体模式自动授权并记录操作；SRC 模式按工具风险与动作类别审批。"""
 
 from __future__ import annotations
 
@@ -18,12 +12,13 @@ from spiritscout.core.exceptions import PolicyViolation
 from spiritscout.core.models import RunMode
 from spiritscout.policy.scope import ScopeGuard
 from spiritscout.tools.invocation import current_invocation
+from spiritscout.tools.search_policy import is_search_tool
 from spiritscout.tools.spec import ActionCategory, RiskLevel, ToolSpec
 
 # 各模式禁用的工具类别（G2）
 _MODE_FORBIDDEN_TOOLS: dict[RunMode, set[str]] = {
     RunMode.SRC: set(),
-    RunMode.CTF: {"port_scan", "nmap", "masscan"},   # CTF 模式不启用端口扫描（4.4）
+    RunMode.CTF: set(),                              # CTF 全自动授权，能力由题目与工具目录决定
     RunMode.COMPETITION: set(),                       # 由赛制规则动态追加
 }
 
@@ -64,15 +59,20 @@ class PolicyEngine:
         self.guard = guard
         self.platform_rule = platform_rule or PlatformRule()
         self.audit = audit or NullAuditLogger()
-        # 高风险动作即时确认门（G5 交互形态）：None=无交互面，敏感动作直接拒绝
+        # SRC 高风险动作即时确认门：None=无交互面，敏感动作直接拒绝
         self.approval_gate = approval_gate
         self.forbidden_tools: set[str] = set(_MODE_FORBIDDEN_TOOLS.get(mode, set()))
+
+    @property
+    def automatic_approval(self) -> bool:
+        """CTF 与智能体模式在工具审批层逐次自动放行。"""
+        return self.mode in {RunMode.CTF, RunMode.COMPETITION}
 
     # ------------------------------------------------------------ 工具门
 
     @staticmethod
     def requires_approval(spec: ToolSpec, action: str | None) -> bool:
-        """本次调用是否需要即时请示用户（G5 收窄后的唯一判据）。
+        """本次调用在 SRC 模式下是否需要即时请示用户。
 
         - 模型已声明行为类别：只看类别是否属危险语义——删除文件/反弹 shell/
           WebShell 上传/容器逃逸/爆破逐次审批，其余声明（含 intrusive_write）
@@ -86,8 +86,23 @@ class PolicyEngine:
         return spec.risk == RiskLevel.INTRUSIVE and not spec.action_required
 
     async def ensure_tool_allowed(self, spec: ToolSpec, action: str | None = None) -> None:
-        """危险语义动作逐次审批，只授权当前调用；不向会话级动作集合写入许可。"""
+        """CTF / 智能体模式自动授权并记账，SRC 危险动作即时审批。"""
         act = action or spec.name
+        if self.mode == RunMode.COMPETITION and (spec.internet_search or is_search_tool(spec.name)):
+            self._deny("智能体模式禁止公开网页搜索，不允许访问 Exa 等外部搜索服务")
+        if self.automatic_approval:
+            # 模式已预授权所有命令；读取、敏感和破坏性能力都记录本次调用，
+            # 不创建人工待办，也不伪造经过人工确认的记录。
+            context = current_invocation.get()
+            self.audit.log("policy.auto_approved", "policy_engine", {
+                "mode": self.mode.value, "tool": spec.name, "action": act,
+                "invocation_id": context.invocation_id if context else "",
+                "params_digest": context.params_digest if context else "",
+                "reason": "CTF 模式全自动操作预授权" if self.mode == RunMode.CTF
+                          else "智能体模式全自动操作预授权"})
+            if context is not None and context.record_approval is not None:
+                context.record_approval(act, True)
+            return
         granted = False
         if (
             spec.risk != RiskLevel.DESTRUCTIVE
@@ -112,6 +127,10 @@ class PolicyEngine:
     def check_tool(self, spec: ToolSpec, action: str | None = None, *,
                    invocation_approved: bool = False) -> None:
         """工具调用前硬校验。任何违规 → PolicyViolation（拒绝执行）。"""
+        if self.mode == RunMode.COMPETITION and (spec.internet_search or is_search_tool(spec.name)):
+            self._deny("智能体模式禁止公开网页搜索")
+        if self.automatic_approval:
+            return
         if spec.risk == RiskLevel.DESTRUCTIVE:
             self._deny(f"破坏性工具一律禁止: {spec.name}（G3 禁 DoS）")
         if spec.name in self.forbidden_tools:
