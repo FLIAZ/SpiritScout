@@ -13,25 +13,26 @@ async function loadAgents() {
             ${S.agents.models.map(m => `<option value="${esc(m.model)}" data-prov="${esc(m.provider || "")}" ${m.model === bound ? "selected" : ""}>${esc(m.model)}</option>`).join("")}
             ${S.agents.models.length ? "" : `<option value="" disabled>（「模型」页还没有启用模型）</option>`}
           </select>
-        </div>` : `<div class="bind-note">${available ? "确定性只读角色，不调用模型" : "尚未装配，不参与任务调度"}</div>`;
+        </div>` : `<div class="bind-note">${available ? "此角色不调用模型" : "尚未装配，不参与任务调度"}</div>`;
       return `<div class="card acard ${available ? "" : "planned"}">
         <div class="h"><b>${esc(a.name)}</b><span class="en">${esc(a.key)}</span>
           <span class="tag ${available ? "green" : "orange"}" style="margin-left:auto">${available ? "可运行" : "规划中"}</span></div>
         <div class="duty">${esc(a.duty)}</div>
         <div class="meta-row">${(a.modes || []).map(m => `<span class="tag blue">${esc(MODE_CN[m] || m)}</span>`).join("")}</div>
-        <div class="mindset">${esc(a.mindset || "")}</div>
-        <ol>${(a.workflow || []).map(step => `<li>${esc(step)}</li>`).join("")}</ol>
-        <div class="tools">${(a.tools || []).map(tool => `<span class="tag">${esc(tool)}</span>`).join("")}</div>
+        <details class="agent-profile-details"><summary>角色说明与工具</summary>
+          <p class="mindset">${esc(a.mindset || "")}</p>
+          <ol>${(a.workflow || []).map(step => `<li>${esc(step)}</li>`).join("")}</ol>
+          <div class="tools">${(a.tools || []).map(tool => `<span class="tag">${esc(tool)}</span>`).join("")}</div>
+        </details>
         ${bind}
       </div>`;
     }).join("");
-    // 统一保存：改动先在卡片上标脏，页头一键提交/还原——逐卡点保存已废弃
+    // 比较已保存值，集中保存修改。
     const dirtySels = () => [...g.querySelectorAll("select[data-agent]")]
       .filter(sel => sel.value !== sel.dataset.orig);
     const refreshBindBar = () => {
       const n = dirtySels().length;
       $("#bind-save").hidden = n === 0;
-      // 按钮可用性由这里统一裁决：保存成功/失败后的复位都走这，不再手工翻 disabled
       $("#bind-save-btn").disabled = n === 0;
       $("#bind-save-btn").textContent = n ? `保存指派（${n} 处修改）` : "保存指派";
     };
@@ -127,7 +128,7 @@ async function loadModels() {
     if (!pv.providers.length) {
       box.innerHTML = `<div class="mempty">${M_ICONS.hub}
         <div class="t">还没有供应商</div>
-        <div class="s">供应商 = 一个 API 地址 + 一把密钥。添加后点「获取模型列表」从云端勾选启用；<br>服务未提供模型列表时，在供应商里手动填模型 ID。</div>
+        <div class="s">添加供应商后可获取模型列表，也可手动添加模型 ID。</div>
         <button class="btn primary" data-pact="add">+ 添加供应商</button></div>`;
       return;
     }
@@ -171,7 +172,7 @@ function namingRender() {
         <button type="button" data-nm="down" data-i="${i}" ${i === chain.length - 1 ? "disabled" : ""} title="后移">↓</button>
         <button type="button" class="danger" data-nm="del" data-i="${i}" title="移出候选链">✕</button>
       </span></li>`).join("")
-    || `<li class="nb-empty">未配置——命名跟随编队页灵枢指派的模型。</li>`;
+    || `<li class="nb-empty">未配置，使用灵枢的模型。</li>`;
   // 候选池：注册表全量模型（带供应商标识），点击即按先后顺序入链
   $("#naming-pool").innerHTML = registry.map(m => {
     const on = chain.includes(m.model);
@@ -681,6 +682,7 @@ $("#rc-confirm").onclick = async () => {
 
 /* ================= 启动 ================= */
 (async function boot() {
+  AgentSideChat.init();
   AgentWorkbench.init();
   try { S.agents = await api("/api/agents"); } catch {}
   fetch("/openapi.json").then(r => r.json()).then(j => { $("#ver").textContent = "v" + (j.info?.version || ""); }).catch(() => {});
