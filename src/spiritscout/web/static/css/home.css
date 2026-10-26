@@ -1,0 +1,103 @@
+/* 首页只保留一个视觉重心：模式选择与任务输入。 */
+#view-home {
+  --home-panel: color-mix(in srgb, var(--surface) 65%, white);
+  --home-shadow: 0 20px 65px -35px rgba(75, 57, 29, .26), 0 2px 6px rgba(75, 57, 29, .035);
+  max-width: 900px; min-height: calc(100svh - 62px); padding: clamp(24px, 5.5vh, 72px) 18px 0;
+  position: relative; isolation: isolate;
+}
+main:has(> #view-home:not([hidden])) {
+  background: radial-gradient(ellipse at 72% 12%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 65%);
+}
+#view-home .hero { text-align: left; margin-bottom: 32px; }
+.home-eyebrow { display: flex; align-items: center; gap: 9px; color: var(--ink-2); margin: 0 0 18px; font-size: 12px; letter-spacing: .1em; }
+.home-eyebrow > span { width: 20px; height: 2px; background: var(--accent); }
+#view-home .lead { font-size: clamp(32px, 3.5vw, 48px); line-height: 1.42; font-weight: 650; letter-spacing: -.04em; }
+#view-home .lead-em { padding: 0 3px; font-family: "STKaiti", "KaiTi", "Kaiti SC", "FangSong", serif; font-weight: 700; font-size: 1.13em; background-image: linear-gradient(115deg, var(--accent-strong), var(--accent) 52%, var(--gold)); }
+.home-intro { margin: 14px 0 0; color: var(--ink-2); font-size: 14px; }
+.home-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0 0 18px; padding: 0; border: 0; min-width: 0; }
+.home-modes legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.home-mode-card { position: relative; display: flex; align-items: center; gap: 12px; padding: 19px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--home-panel); cursor: pointer; transition: border-color .16s, background .16s, box-shadow .16s; min-width: 0; }
+.home-mode-card input { position: absolute; opacity: 0; width: 1px; height: 1px; padding: 0; }
+.home-mode-card:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+.home-mode-card:has(input:checked) { background: color-mix(in srgb, var(--accent) 7%, var(--home-panel)); border-color: var(--accent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent); }
+.home-mode-card:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 4px; }
+.mode-symbol { display: grid; place-items: center; color: var(--accent-ink); flex: none; }
+.mode-symbol svg { width: 24px; height: 24px; }
+.mode-copy { display: grid; gap: 4px; min-width: 0; }
+.mode-copy strong { font-size: 13px; font-weight: 650; }
+.mode-copy small { font-size: 11px; color: var(--ink-2); }
+.mode-check { margin-left: auto; width: 13px; height: 13px; border: 1px solid var(--line-strong); border-radius: 50%; flex: none; }
+input:checked ~ .mode-check { border: 4px solid var(--accent); background: var(--home-panel); }
+#view-home .composer { padding: 0; border-radius: 17px; border-color: color-mix(in srgb, var(--accent) 16%, var(--line)); background: var(--home-panel); box-shadow: var(--home-shadow); overflow: visible; transition: border-color .16s, box-shadow .16s; }
+#view-home .composer:focus-within { border-color: color-mix(in srgb, var(--accent) 65%, var(--line)); box-shadow: var(--home-shadow), 0 0 0 3px var(--accent-soft); }
+#view-home .mission-settings { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; padding: 20px 24px 0; border: 0; gap: 8px 16px; }
+#view-home .home-mission-label { color: var(--ink); font-size: 13px; font-weight: 600; flex: none; }
+#view-home .mission-settings p { flex: 1 1 240px; text-align: right; color: var(--ink-2); font-size: 11px; }
+#view-home .composer textarea { display: block; padding: 20px 24px 14px; min-height: 160px; max-height: 360px; border-radius: 0; font-size: 15px; line-height: 1.85; }
+#view-home .composer textarea::placeholder { color: var(--ink-3); }
+#view-home .composer .bar { margin: 0 14px; padding: 12px 6px 14px; border-top: 1px solid var(--line); gap: 12px; }
+#view-home .bar-left { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+#view-home #c-project { max-width: 200px; }
+#view-home .bar-left .selx { width: auto; min-width: 110px; max-width: 210px; }
+#view-home .bar-left .selx-btn { background: transparent; border-color: transparent; font-size: 12px; }
+#view-home #c-project-new { border-color: transparent; background: transparent; color: var(--ink-2); font-weight: 400; }
+#view-home #c-project-new:hover { background: var(--surface-2); color: var(--ink); }
+#view-home #home-attach { width: 34px; height: 34px; border: 0; background: transparent; color: var(--ink-2); border-radius: 8px; }
+#view-home #home-attach:hover { color: var(--accent-ink); background: var(--accent-soft); }
+#view-home #c-go { width: auto; height: 38px; padding: 0 15px; gap: 11px; border-radius: 9px; background: var(--surface-2); color: var(--ink-2); opacity: 1; font-size: 12px; font-weight: 600; }
+#view-home #c-go.ready { background: var(--accent-strong); color: #fff; box-shadow: 0 3px 9px color-mix(in srgb, var(--accent) 20%, transparent); }
+#view-home #c-go:disabled { opacity: .5; box-shadow: none; }
+#view-home #c-go svg { width: 16px; height: 16px; }
+#view-home .comp-files:not(:empty) { padding: 0 24px 12px; }
+.home-examples { display: flex; align-items: baseline; gap: 18px; margin: 22px 4px 0; }
+.home-examples > span { color: var(--ink-3); font-size: 11px; flex: none; }
+#view-home .suggestions { justify-content: flex-start; gap: 8px 18px; margin: 0; }
+#view-home .chip-s { display: inline-flex; align-items: center; gap: 12px; padding: 3px 0; font-size: 12px; background: none; border: 0; border-radius: 2px; }
+#view-home .chip-s span { color: var(--ink-3); transition: transform .16s; }
+#view-home .chip-s:hover span { transform: translate(2px, -2px); color: var(--accent-ink); }
+#view-home .notice { margin: 32px 4px 0; padding: 0; color: var(--ink-3); font-size: 11px; }
+#view-home .resource-shortcuts { margin: auto 0 0; padding: 24px 4px 14px; border: 0; gap: 24px; }
+#view-home .resource-shortcuts button { font-size: 12px; }
+#view-home .resource-shortcuts b { font-weight: 500; }
+#view-home button:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+:root[data-theme="dark"] #view-home { --home-panel: #1b1d21; --home-shadow: 0 18px 60px -28px rgba(0, 0, 0, .5); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) #view-home { --home-panel: #1b1d21; --home-shadow: 0 18px 60px -28px rgba(0, 0, 0, .5); } }
+@media (max-width: 1100px) { .home-mode-card { padding: 16px 12px; gap: 9px; } .mode-check { display: none; } }
+@media (max-width: 860px) {
+  #view-home { min-height: auto; padding: 28px 8px 0; }
+  #view-home .hero { margin-bottom: 24px; }
+  #view-home .lead { font-size: 38px; }
+  #view-home .resource-shortcuts { margin-top: 22px; }
+}
+@media (max-width: 560px) {
+  #view-home { padding: 20px 0 0; }
+  #view-home .lead { font-size: 32px; }
+  .home-modes { grid-template-columns: 1fr; gap: 8px; margin-bottom: 14px; }
+  .home-mode-card { padding: 12px 14px; gap: 13px; }
+  .mode-copy { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; }
+  .mode-copy strong { font-size: 12px; }
+  .mode-check { display: block; }
+  .mode-symbol svg { width: 20px; height: 20px; }
+  #view-home .mission-settings { padding: 17px 17px 0; }
+  #view-home .mission-settings p { flex-basis: 100%; text-align: left; }
+  #view-home .composer textarea { padding-inline: 17px; }
+  #view-home .composer .bar { margin-inline: 10px; align-items: flex-end; }
+  #view-home .bar-left { gap: 4px; }
+  #view-home .bar-left .selx { min-width: 85px; max-width: 130px; }
+  #view-home #c-project-new { padding-inline: 3px; }
+  #view-home #c-go { padding-inline: 11px; gap: 7px; }
+  .home-examples { display: grid; gap: 8px; }
+  #view-home .suggestions { gap: 10px 16px; }
+}
+@media (prefers-reduced-motion: reduce) { #view-home *, #view-home *::before { transition: none !important; animation: none !important; } }
+#view-home .composer textarea::placeholder,
+#view-home .home-examples > span,
+#view-home .notice { color: var(--ink-2); }
+:root[data-theme="dark"] #view-home #c-go.ready { background: var(--accent); color: #211b14; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) #view-home #c-go.ready { background: var(--accent); color: #211b14; } }
+@media (max-width: 860px) { #app { grid-template-rows: auto 1fr; } }
+
+/* 宽屏只加宽任务区，标题始终位于上方。 */
+@media (min-width: 1600px) {
+  #view-home { max-width: 1080px; padding-top: clamp(48px, 6vh, 88px); }
+}
