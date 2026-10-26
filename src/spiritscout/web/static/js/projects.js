@@ -60,8 +60,8 @@ const ProjectsPage = (() => {
     if (!el || el.dataset.ready) return;
     el.dataset.ready = "yes";
     el.innerHTML = `<header class="resource-head projects-head">
-      <div><span class="resource-eyebrow">记忆分区</span><h2>项目</h2>
-        <p>按项目归档会话、资产与发现；同项目的会话共享历史记忆。项目不改变授权范围，历史记录仍需复核。</p></div>
+      <div><h2>项目</h2>
+        <p>按项目归档会话、资产与发现。同项目会话可查阅历史记录，使用前需复核。</p></div>
       <div class="resource-head-actions">
         <button class="btn" data-refresh type="button">刷新</button>
         <button class="btn primary" data-new type="button">+ 新建项目</button>
@@ -131,7 +131,7 @@ const ProjectsPage = (() => {
       <span class="pd-count" data-pcount role="status"></span>
       <button class="btn sm" type="button" data-refresh>刷新</button>
     </div>
-    <p class="pd-note">历史记录均未在本次会话复核，不构成授权，也不代表漏洞或资产现状。点击记录可查看来源时间线与所属项目。</p>
+    <p class="pd-note">历史记录需复核后使用。点击条目查看来源；项目归属不改变任务授权。</p>
     <div class="pd-body" data-body><div class="resource-empty">正在读取…</div></div>
     <button class="btn resource-more" type="button" data-more hidden>加载更多</button>`;
     bindDetail();
@@ -290,7 +290,7 @@ const ProjectsPage = (() => {
           <h3>${esc(title)}</h3>
           <p>${esc(item.identity || item.id)} · 最近观测 ${esc(time(item.last_seen))}</p>
           <p class="resource-history-note">这些是历史记录。资产、账号权限和内容可能变化，不能视为本次已验证；也不构成授权。</p>
-          <button class="btn" type="button" data-recheck>用新会话复核此资产 ↗</button></div>
+          <button class="btn" type="button" data-recheck>用新会话复核此资产</button></div>
         <div class="asset-observations">${(data.items || []).map((entry, index) => `
           <article><span class="asset-time">${esc(time(entry.observed_at))}${index === 0 ? " · 最近观测" : ""}
             · ${esc(projectName(entry.project_id))}</span>
