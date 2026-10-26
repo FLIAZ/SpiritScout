@@ -1,9 +1,4 @@
-"""Redis Pub/Sub 总线后端（设计书 7 技术栈：NATS + Redis Pub/Sub）。
-
-需外部 Redis 服务；语义与 inprocess 后端一致。事件以 JSON 序列化，
-订阅侧做幂等去重。Redis 优先级语义弱于进程内队列，按到达顺序派发
-（高优先级事件由消费方队列自行排序）。
-"""
+"""Redis Pub/Sub 事件总线后端。"""
 
 from __future__ import annotations
 
@@ -173,7 +168,7 @@ class RedisBus(EventBus):
             for sub in list(self._subs.values()):
                 if not sub.matches(event.topic):
                     continue
-                # 事件幂等：同一订阅者对重复 event_id 不重复执行（6.9），
+                # 事件幂等：同一订阅者对重复 event_id 不重复执行，
                 # 去重窗口有界（长会话内存不随事件数增长）
                 if not remember_event(sub, event.event_id):
                     continue
