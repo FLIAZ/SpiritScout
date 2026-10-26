@@ -1,15 +1,6 @@
-"""模型后端：LiteLLM（真实云端）+ Mock（确定性测试后端）。
+"""模型协议适配：LiteLLM 端点与离线 Mock。
 
-统一能力面（Agent 工具环的地基）：
-- 原生工具调用：``tools`` 传 OpenAI 形态函数 schema，响应归一化为
-  ``tool_calls``（``{"id", "name", "arguments"(dict), "raw"(str)}``）；
-- 流式增量：``on_delta(kind, text)`` 回调（kind ∈ text/reasoning/tool_call/reset），
-  chat_completions 与 anthropic_messages 协议支持；responses 协议仅非流式。
-
-Mock 后端用于启动冒烟与离线演练（G10：研发验证不触碰真实 API）：
-- 规则化应答：按 system prompt 中的角色标记返回确定性 JSON；
-- 支持故障注入（fail_times），验证主备切换（4.9.3-5）。
-"""
+统一工具调用返回结构和流式增量回调；Mock 支持固定应答与故障注入。"""
 
 from __future__ import annotations
 
@@ -23,6 +14,7 @@ from collections.abc import Callable
 from typing import Any
 
 from spiritscout.config.settings import ModelEntry
+from spiritscout.gateway.attempts import current_attempt_trace, tracked_request
 
 # 流式增量回调：(kind, text) -> None | Awaitable[None]
 DeltaCallback = Callable[[str, str], Any]
@@ -302,7 +294,7 @@ class LiteLLMBackend(ChatBackend):
 
         requested_at = time.perf_counter()
         try:
-            resp = await litellm.acompletion(**kwargs)
+            resp = await tracked_request(litellm.acompletion, **kwargs)
         except Exception as exc:
             # 端点能力差异回退重试一次：stream_options 不被支持（部分兼容层）、
             # response_format 不被支持（推理模型/国产兼容层）。重试是显式降级，
@@ -323,7 +315,7 @@ class LiteLLMBackend(ChatBackend):
                     reasoning_effort=reasoning_effort)
             if not retried:
                 raise
-            resp = await litellm.acompletion(**kwargs)
+            resp = await tracked_request(litellm.acompletion, **kwargs)
 
         if streaming:
             try:
@@ -391,6 +383,8 @@ class LiteLLMBackend(ChatBackend):
         async for chunk in stream:
             if getattr(chunk, "usage", None):
                 usage = chunk.usage
+                if (trace := current_attempt_trace.get()) is not None:
+                    trace.usage(usage)
             choices = getattr(chunk, "choices", None) or []
             if not choices:
                 continue
@@ -428,6 +422,8 @@ class LiteLLMBackend(ChatBackend):
                     await emit_delta(on_delta, "tool_call", json.dumps(
                         {"index": idx, "name": slot["name"], "fragment": str(frag)},
                         ensure_ascii=False))
+        if (trace := current_attempt_trace.get()) is not None:
+            trace.finish("completed")
         # 还原 OpenAI 工具调用外层结构，统一交给 normalize_tool_calls 解析
         # （分片累积出的是扁平槽位；name/arguments 的解析与报错只此一处）
         ordered = [
@@ -531,7 +527,7 @@ class LiteLLMBackend(ChatBackend):
             kwargs["reasoning"] = {"effort": reasoning_effort}
             kwargs.pop("temperature", None)  # 推理档与采样温度互斥
 
-        resp = await litellm.aresponses(**kwargs)
+        resp = await tracked_request(litellm.aresponses, **kwargs)
         # 响应结构：output items（message/reasoning/function_call…），文本在
         # message 项的 content output_text 块；output_text 为便捷聚合属性
         content = str(getattr(resp, "output_text", "") or "")
@@ -619,14 +615,9 @@ class LiteLLMBackend(ChatBackend):
 
     @staticmethod
     def _routed_model_name(model: str, base_url: str, *, anthropic: bool) -> str:
-        """发给 litellm 的模型名：带协议前缀才有可路由的供应商。
+        """补齐 LiteLLM 协议前缀。
 
-        Anthropic 协议走 anthropic/ 前缀；其余带自定义 base_url 的端点一律
-        openai/ 前缀（自定义端点即 OpenAI 兼容传输）。此前 openai/ 前缀只认
-        openai_compatible 一种字面值——手写 YAML 带其它 provider 值的条目会
-        以裸模型名落进 litellm，解析不出供应商即终端刷红字横幅且调用必败。
-        无 base_url 的裸名保持原样：留给 litellm 按模型名原生路由。
-        """
+        Anthropic 使用 anthropic/；自定义 base_url 使用 openai/；其余模型名保持原样。"""
         if anthropic:
             return model if model.startswith("anthropic/") else f"anthropic/{model}"
         if base_url and not model.startswith(("openai/", "anthropic/")):
