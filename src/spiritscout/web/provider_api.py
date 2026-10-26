@@ -1,14 +1,6 @@
-"""供应商端点的模型列表拉取（Web「模型」页：获取模型列表）。
+"""用户请求时读取供应商模型列表。
 
-各家模型列表接口以 2026-10 官方文档逐一核实：OpenAI 兼容协议统一为
-``GET {base}/models``（DeepSeek/Kimi/MiniMax/硅基流动/千帆/阶跃/OpenAI/
-xAI/Groq/Mistral/OpenRouter/Ollama）；Anthropic 协议为
-``GET {base}/v1/models``（默认只返回 20 条，取全量需带 limit 参数）；
-阿里百炼的模型列表在 DashScope 原生路径 ``{origin}/api/v1/models``。
-方舟 plan 端点、腾讯混元等未提供公开的模型列表接口——拉不到不是异常，
-如实回报试过的地址与错误，用户改用手动填模型 ID 即可（同一入口）。
-本模块只做一次显式外呼（用户点击触发），不缓存、不重试。
-"""
+按供应商协议选择接口；不重试、不缓存，失败时返回已尝试的地址和错误。"""
 
 from __future__ import annotations
 
