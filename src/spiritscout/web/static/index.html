@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>灵枢 SpiritScout</title>
-<link rel="stylesheet" href="/static/css/base.css?v=20261022-admin-auth">
-<link rel="stylesheet" href="/static/css/views.css?v=20261022-history-window">
-<link rel="stylesheet" href="/static/css/deliverables.css?v=20261021-scope-memory">
-<link rel="stylesheet" href="/static/css/resources.css?v=20261021-scope-memory">
-<link rel="stylesheet" href="/static/css/projects.css?v=20261021-scope-memory">
+<link rel="stylesheet" href="/static/css/base.css?v=20261026-brand">
+<link rel="stylesheet" href="/static/css/dashboard.css?v=20261026-brand">
+<link rel="stylesheet" href="/static/css/views.css?v=20261026-brand">
+<link rel="stylesheet" href="/static/css/deliverables.css?v=20261026-brand">
+<link rel="stylesheet" href="/static/css/resources.css?v=20261026-brand">
+<link rel="stylesheet" href="/static/css/projects.css?v=20261026-brand">
 </head>
 <body>
-<div class="aurora" aria-hidden="true"></div>
 <div id="app">
   <aside class="side">
     <button id="mobile-sessions-toggle" class="btn sm" type="button" aria-expanded="false" aria-controls="sess-list">会话列表</button>
@@ -21,25 +21,25 @@
     </div>
     <nav>
       <button data-nav="home" class="on">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5"/></svg>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M8 6h12M8 12h12M8 18h12M3 6h.01M3 12h.01M3 18h.01"/></svg>
         任务
       </button>
       <button data-nav="dash">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 4v3M5.6 6.6l2.1 2.1M3 13h3M18.4 6.6l-2.1 2.1M21 13h-3"/><path d="M5 19a7 7 0 0 1 14 0"/><path d="M9.5 19a2.5 2.5 0 0 1 5 0"/></svg>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 4v16h16M8 16v-4M13 16V8M18 16V5"/></svg>
         仪表盘
       </button>
       <button data-nav="agents">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="8" cy="8" r="3"/><circle cx="16.5" cy="9.5" r="2.5"/><path d="M3.5 19c.6-3 2.6-4.5 4.5-4.5s3.9 1.5 4.5 4.5M13.5 19c.4-2.2 1.7-3.4 3-3.4s2.6 1.2 3 3.4"/></svg>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="3"/><circle cx="16.5" cy="9.5" r="2.5"/><path d="M3.5 19c.6-3 2.6-4.5 4.5-4.5s3.9 1.5 4.5 4.5M13.5 19c.4-2.2 1.7-3.4 3-3.4s2.6 1.2 3 3.4"/></svg>
         编队
       </button>
       <button data-nav="models">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="3.5" y="3.5" width="17" height="7" rx="2"/><rect x="3.5" y="13.5" width="17" height="7" rx="2"/><circle cx="7.5" cy="7" r="1" fill="currentColor"/><circle cx="7.5" cy="17" r="1" fill="currentColor"/></svg>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true" focusable="false"><rect x="3.5" y="3.5" width="17" height="7" rx="2"/><rect x="3.5" y="13.5" width="17" height="7" rx="2"/><circle cx="7.5" cy="7" r="1" fill="currentColor"/><circle cx="7.5" cy="17" r="1" fill="currentColor"/></svg>
         模型
       </button>
-      <button data-nav="mcp"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="7" cy="7" r="2.5"/><circle cx="17" cy="7" r="2.5"/><circle cx="7" cy="17" r="2.5"/><circle cx="17" cy="17" r="2.5"/><path d="M9.5 7h5M9.5 17h5M7 9.5v5M17 9.5v5"/></svg> MCP 管理</button>
-      <button data-nav="skill"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4l8 8-8 8-8-8z"/></svg> Skill 管理</button>
-      <button data-nav="projects"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.4l2 2h7.6A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/></svg> 项目</button>
-      <button data-nav="exp"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5l7 7.5-7 7.5-7-7.5z"/></svg> 经验提炼</button>
+      <button data-nav="mcp"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M8 3v5M16 3v5M6 8h12v3a6 6 0 0 1-12 0V8ZM12 17v4"/></svg> MCP 管理</button>
+      <button data-nav="skill"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 5h6a3 3 0 0 1 3 3v13a4 4 0 0 0-4-2H4V5ZM13 8a3 3 0 0 1 3-3h4v14h-3a4 4 0 0 0-4 2"/></svg> Skill 管理</button>
+      <button data-nav="projects"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.4l2 2h7.6A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/></svg> 项目</button>
+      <button data-nav="exp"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 3h12v18l-6-4-6 4V3ZM9 7h6M9 11h6"/></svg> 经验提炼</button>
     </nav>
     <div class="side-label">会话 <button id="btn-new" title="新建任务">+ 新任务</button></div>
     <div id="sess-list"></div>
@@ -56,24 +56,23 @@
     <!-- 空态：任务下达（输入框常驻页底） -->
     <section id="view-home">
       <div class="hero">
-        <p class="eyebrow">SpiritScout · Mission Console</p>
-        <p class="lead">下达任务，剩下的交给<span class="lead-em">灵枢</span></p>
+        <h2 class="lead">下达任务，剩下的交给<span class="lead-em">灵枢</span></h2>
       </div>
       <div class="card composer">
         <div class="mission-settings">
-          <label for="c-mode">任务需求<select id="c-mode" required>
+          <label for="c-mode">任务模式<select id="c-mode" required>
             <option value="" selected disabled>请选择任务类型</option>
             <option value="src">SRC 渗透测试</option>
             <option value="ctf">CTF 解题</option>
             <option value="competition">智能渗透赛 / 智能体靶场</option>
           </select></label>
-          <p id="c-mode-hint">先选择任务类型，再填写目标与要求。</p>
+          <p id="c-mode-hint">选择模式后填写目标与任务要求。</p>
         </div>
         <textarea id="c-mission" placeholder="描述目标与授权范围。例如：评估 https://example.com 的商品浏览与搜索流程"></textarea>
         <div class="comp-files" id="home-files"></div>
         <div class="bar">
           <div class="bar-left">
-            <button class="icon-btn" id="home-attach" type="button" title="上传题目附件（随任务一起交给灵枢）" aria-label="上传附件">
+            <button class="icon-btn" id="home-attach" type="button" title="上传题目附件" aria-label="上传附件">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </button>
             <input type="file" id="home-file" multiple hidden>
@@ -90,12 +89,12 @@
       </div>
       <p class="notice">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
-        仅限已获得书面授权的目标与赛事。发起会话即视为授权确认，全部动作留痕于审计日志。
+        仅用于已获授权的目标和赛事。操作记录保存在审计日志中。
       </p>
       <div class="resource-shortcuts" aria-label="共享资源入口">
-        <button type="button" data-resource="mcp"><b>MCP 接入</b><span>用自然语言安装与配置工具 ↗</span></button>
-        <button type="button" data-resource="skill"><b>Skill 技能</b><span>管理参考知识与适用条件 ↗</span></button>
-        <button type="button" data-project><b>项目分区</b><span>按项目归档资产与发现，跨会话共享记忆 ↗</span></button>
+        <button type="button" data-resource="mcp"><b>MCP 管理</b></button>
+        <button type="button" data-resource="skill"><b>Skill 管理</b></button>
+        <button type="button" data-project><b>项目</b></button>
       </div>
     </section>
 
@@ -104,7 +103,7 @@
       <div class="sess-head">
         <div style="min-width:0">
           <div class="title-row"><h2 id="s-title"></h2>
-            <button id="op-rename" title="重命名会话">✎</button></div>
+            <button id="op-rename" title="重命名会话" aria-label="重命名会话"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 3 5 5-12 12-6 1 1-6L16 3ZM14 5l5 5"/></svg></button></div>
           <div class="meta" id="s-meta"></div>
           <div id="s-challenge-progress" class="challenge-counter" role="status" hidden></div>
         </div>
@@ -119,15 +118,31 @@
         <button data-tab="vulns">漏洞</button>
         <button data-tab="flags">Flag</button>
         <button data-tab="events">事件</button>
-        <button data-tab="deliverables">产出与事实</button>
+        <button data-tab="deliverables">记录与文件</button>
         <button data-tab="report">报告</button>
       </div>
       <div id="tab-area">
-        <div id="tab-chat"><aside id="session-observer" class="session-observer" aria-label="执行实况与消耗"></aside><div class="trace-wrap">
+        <div id="tab-chat"><aside class="session-rail" aria-label="实况与子 Agent 旁路会话">
+          <nav id="agent-chat-tabs" aria-label="切换实况或子 Agent 会话"></nav>
+          <div id="session-observer" class="session-observer" aria-label="执行实况与消耗"></div>
+          <section id="agent-side-chat" hidden aria-label="子 Agent 旁路对话">
+            <header class="side-chat-head"><strong data-side-name></strong><button class="btn sm" type="button" data-side-expand hidden>展开会话</button></header>
+            <label class="side-chat-task">来源任务<select data-side-task aria-label="旁路会话来源任务"></select></label>
+            <div class="side-chat-messages" role="log" aria-label="旁路消息记录" tabindex="0"></div>
+            <div data-side-pending></div><p data-side-status role="status"></p><p data-side-error role="alert"></p>
+            <form class="side-chat-compose"><textarea rows="3" maxlength="4000" aria-label="给子 Agent 发消息" placeholder="输入消息或任务要求…" required></textarea><button class="btn primary" type="submit">发送</button></form>
+          </section>
+        </aside><div class="trace-wrap">
           <section id="agent-workbench" class="agent-workbench" aria-label="子 Agent 工作台">
-            <button class="aw-toggle" type="button" aria-expanded="true" aria-controls="aw-content"><span><b>子 Agent 工作台</b><small>实时分析 · 执行反馈 · 产出</small></span><span class="aw-count">0 个实例</span></button>
-            <div id="aw-content" class="aw-content">
+            <button class="aw-toggle" type="button" aria-expanded="false" aria-controls="aw-content"><span><b>子 Agent 工作台</b><small>查看任务、工具调用和回复</small></span><span class="aw-count">0 个实例</span></button>
+            <div id="aw-content" class="aw-content" hidden>
             <div class="aw-agents" role="group" aria-label="选择子 Agent 实例"></div>
+            <div class="aw-toolbar">
+              <div class="aw-focus"><strong data-aw-name>等待派发</strong><small data-aw-target></small></div>
+              <label class="aw-task-label">任务<select data-aw-task aria-label="筛选子 Agent 任务"><option value="">全部任务</option></select></label>
+              <button class="btn sm" type="button" data-aw-follow aria-pressed="true">跟随最新</button>
+              <button class="btn sm" type="button" data-aw-side hidden>右侧旁路对话</button>
+            </div>
             <div class="aw-pane" role="region" aria-label="子 Agent 分析与反馈" tabindex="0"></div>
             </div>
           </section>
@@ -146,9 +161,8 @@
         <div id="tab-flags" hidden></div>
         <div id="tab-events" hidden><div class="events" id="events"></div></div>
         <div id="tab-deliverables" hidden>
-          <section class="archive" aria-label="会话产出与事实">
-            <header class="archive-head"><div><span class="archive-eyebrow">会话档案 · 持续沉淀</span>
-              <h3>把发现，留成依据。</h3><p>集中保存产出，沿证据追溯每一条结论。</p></div>
+          <section class="archive" aria-label="会话记录与文件">
+            <header class="archive-head"><div><h3>会话记录与文件</h3><p>查看发现、证据和文件，或导出筛选结果。</p></div>
               <div class="archive-actions"><span id="archive-sync" role="status">等待读取</span>
                 <button class="btn sm" id="archive-export" type="button">导出当前结果</button>
                 <button class="btn sm" id="archive-refresh" type="button">刷新</button></div></header>
@@ -156,8 +170,8 @@
               <aside class="archive-rail"><label for="archive-search">检索档案</label>
                 <input id="archive-search" type="search" placeholder="内容、来源或目标…" maxlength="200">
                 <nav id="archive-filters" aria-label="档案分类"></nav>
-                <p class="archive-note">事实保留证据引用；推测与待核验发现单独标记。文件来自本会话的产出与报告目录。</p></aside>
-              <div class="archive-main"><div class="archive-list-head"><strong id="archive-count">档案</strong><span>来源可追溯</span></div>
+                <p class="archive-note">记录按类型分类，文件来自本会话的产出与报告目录。</p></aside>
+              <div class="archive-main"><div class="archive-list-head"><strong id="archive-count">档案</strong></div>
                 <div id="archive-error" role="alert" hidden></div>
                 <div id="archive-list" aria-label="档案条目"></div>
                 <button class="btn archive-more" id="archive-more" type="button" hidden>加载更多</button></div>
@@ -177,7 +191,7 @@
           <div class="comp-files" id="comp-files"></div>
           <textarea id="comp-input" rows="1" placeholder="给灵枢提意见、补充线索或上传附件…"></textarea>
           <div class="comp-bar">
-            <button class="icon-btn" id="comp-attach" type="button" title="上传附件（灵枢会知会各智能体去分析）" aria-label="上传附件">
+            <button class="icon-btn" id="comp-attach" type="button" title="上传附件" aria-label="上传附件">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </button>
             <input type="file" id="comp-file" multiple hidden>
@@ -193,7 +207,7 @@
       <div class="models-head">
         <div>
           <h2 style="margin:0 0 4px;font-size:19px">仪表盘</h2>
-          <span class="muted" style="font-size:12.5px">全部会话的累计消耗与态势总览；点击明细行进入对应会话。</span>
+          <span class="muted" style="font-size:12.5px">执行进展、确认成果与近期消耗 · 统一按北京时间统计</span>
         </div>
       </div>
       <div id="dash-body"></div>
@@ -204,7 +218,7 @@
       <div class="models-head">
         <div>
           <h2 style="margin:0 0 4px;font-size:19px">编队</h2>
-          <span class="muted" style="font-size:12.5px">查看实际装配角色、工作法与工具边界。只有可运行角色支持模型指派；规划中角色不会参与调度。</span>
+          <span class="muted" style="font-size:12.5px">查看角色和可用工具，为已启用角色指派模型。</span>
         </div>
         <div class="bind-save" id="bind-save" hidden>
           <button class="btn sm" id="bind-revert">还原</button>
@@ -223,14 +237,14 @@
       <div class="models-head">
         <div>
           <h2 style="margin:0;font-size:22px;font-weight:700;letter-spacing:-.01em">模型</h2>
-          <div class="msub">供应商 = 一个 API 地址 + 一把密钥；模型挂在供应商之下，编队按模型 ID 指派。</div>
+          <div class="msub">先添加供应商，再配置模型。角色指派在「编队」页设置。</div>
           <div class="mpath" id="models-path"></div>
         </div>
         <button class="btn primary" id="p-add">+ 添加供应商</button>
       </div>
       <section class="naming-box" aria-label="会话自动命名候选链">
         <div class="nb-text"><b>会话自动命名</b>
-          <span>新会话标题的候选链：按序尝试，前面的调不动自动换下一个。留空则跟随编队页灵枢指派。</span></div>
+          <span>按顺序尝试命名模型。留空时使用灵枢的模型。</span></div>
         <ol class="nb-chain" id="naming-chain"></ol>
         <div class="nb-pool" id="naming-pool"
              aria-label="候选模型池：按点击先后顺序加入候选链"></div>
@@ -255,8 +269,8 @@
     <div class="pp-main">
       <h3 id="p-dlg-title" style="margin:0">添加供应商</h3>
       <p class="muted" style="font-size:12px;margin:8px 0 0;line-height:1.7">
-        一个供应商 = 一个 API 地址 + 一把密钥，它下面的模型共用这套接入信息。
-        保存后点「获取模型列表」从云端勾选启用；服务未提供模型列表时用「手动添加模型」。</p>
+        同一供应商下的模型共用 API 地址与密钥。
+        保存后可获取模型列表，或手动添加模型 ID。</p>
       <div class="dlg-grid">
         <div class="dlg-sec">接入</div>
         <label><span>供应商名 *</span><input id="p-name" placeholder="自取，如 ark / deepseek"></label>
@@ -266,7 +280,7 @@
         </select></label>
         <label class="wide"><span>API 地址 *</span><input id="p-baseurl" placeholder="https://api.example.com/v1"></label>
         <div class="dlg-sec">密钥</div>
-        <label class="wide"><span>API Key</span><input id="p-keyval" type="password" placeholder="加密保存在本机，不会明文写入任何文件" autocomplete="new-password"></label>
+        <label class="wide"><span>API Key</span><input id="p-keyval" type="password" placeholder="密钥加密保存在本机" autocomplete="new-password"></label>
         <div id="p-keystat" class="muted" style="grid-column:1/-1;font-size:11.5px"></div>
       </div>
       <div class="dlg-ops" style="margin-top:auto">
@@ -333,7 +347,7 @@
 <dialog id="mv-dlg">
   <h3 style="margin:0">移动会话到项目</h3>
   <p class="muted" style="font-size:12px;margin:10px 0 0;line-height:1.75">
-    项目只是记忆分区，不改变本次任务的授权范围。移动后，已经注入本会话的历史项目记忆不会即时重载；后续观测会归入新项目。</p>
+    移动后，新记录归入目标项目；当前会话已读取的历史记忆保持不变。授权范围不变。</p>
   <div class="dlg-grid"><label class="wide"><span>目标项目</span><select id="mv-project"></select></label></div>
   <div class="dlg-ops">
     <button class="btn" id="mv-cancel">取消</button>
@@ -343,23 +357,28 @@
 
 <div id="toasts"></div>
 
-<script src="/static/js/polling.js?v=20261021-scope-memory"></script>
-<script src="/static/js/core.js?v=20261022-admin-auth"></script>
-<script src="/static/js/observer.js?v=20261022-history-window"></script>
-<script src="/static/js/deliverables.js?v=20261021-scope-memory"></script>
-<script src="/static/js/tool-parameters.js?v=20261021-scope-memory"></script>
-<script src="/static/js/markdown.js?v=20261021-scope-memory"></script>
-<script src="/static/js/agent-workbench.js?v=20261022-history-window"></script>
-<script src="/static/js/experience.js?v=20261021-scope-memory"></script>
-<script src="/static/js/projects.js?v=20261021-scope-memory"></script>
-<script src="/static/js/session-history.js?v=20261022-history-window"></script>
-<script src="/static/js/views.js?v=20261022-history-window"></script>
-<script src="/static/js/console.js?v=20261022-open-contest"></script>
+<script src="/static/js/polling.js?v=20261026-brand"></script>
+<script src="/static/js/core.js?v=20261026-brand"></script>
+<script src="/static/js/observer.js?v=20261026-brand"></script>
+<script src="/static/js/deliverables.js?v=20261026-brand"></script>
+<script src="/static/js/tool-parameters.js?v=20261026-brand"></script>
+<script src="/static/js/markdown.js?v=20261026-brand"></script>
+<script src="/static/js/agent-side-chat.js?v=20261026-brand"></script>
+<script src="/static/js/agent-workbench.js?v=20261026-brand"></script>
+<script src="/static/js/experience.js?v=20261026-brand"></script>
+<script src="/static/js/projects.js?v=20261026-brand"></script>
+<script src="/static/js/session-history.js?v=20261026-brand"></script>
+<script src="/static/js/topology.js?v=20261026-brand"></script>
+<script src="/static/js/task-trace.js?v=20261026-brand"></script>
+<script src="/static/js/dashboard.js?v=20261026-brand"></script>
+<script src="/static/js/views.js?v=20261026-brand"></script>
+<script src="/static/js/console.js?v=20261026-brand"></script>
 <dialog id="resource-editor"><form method="dialog"><div class="resource-editor-head"><h3 id="resource-editor-title">资源配置</h3><button class="btn sm" aria-label="关闭" value="cancel">关闭</button></div></form>
 <label>标识<input id="resource-key" autocomplete="off" placeholder="唯一名称"></label>
 <label>配置内容（JSON）<textarea id="resource-json" rows="15" spellcheck="false"></textarea></label>
 <div id="resource-secrets"><label>环境变量（JSON，可留空保持原值）<input id="resource-env" type="password" autocomplete="new-password" placeholder='{"API_KEY":"…"}'></label><label>请求头（JSON，可留空保持原值）<input id="resource-headers" type="password" autocomplete="new-password" placeholder='{"Authorization":"Bearer …"}'></label></div>
 <p class="muted">密钥只通过专用字段填写。聊天中不要粘贴密钥；保存的 MCP 接入对新会话生效。</p><div id="resource-save-error" role="alert"></div><button type="button" class="btn primary" id="resource-save">保存配置</button></dialog>
-<script src="/static/js/resources.js?v=20261021-scope-memory"></script>
+<script src="/static/js/exa-settings.js?v=20261026-brand"></script>
+<script src="/static/js/resources.js?v=20261026-brand"></script>
 </body>
 </html>
