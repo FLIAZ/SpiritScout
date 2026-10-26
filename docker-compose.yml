@@ -6,8 +6,8 @@
 #   docker compose logs -f
 #   docker compose down
 #
-# 与本地 Python 部署并存：共用同一份源码与 .spiritscout/ 数据目录，
-# 同一时间只启动一个实例监听同一端口。
+# 默认使用镜像源码、Linux 数据卷；旧版 bind 数据请先 python deploy.py migrate。
+# 源码开发：docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 services:
   browser:
     profiles: [src-browser]
@@ -21,7 +21,7 @@ services:
       SPIRITSCOUT_ADMIN_PASSWORD: "${SPIRITSCOUT_ADMIN_PASSWORD:-}"
       SPIRITSCOUT_SERVER_PASSWORD: "${SPIRITSCOUT_SERVER_PASSWORD:-}"
     ports:
-      - "127.0.0.1:10011:6080"
+      - "127.0.0.1:${SPIRITSCOUT_BROWSER_PORT:-10011}:6080"
     volumes:
       - browser-profile:/profile
     # Chromium 以普通用户运行，允许创建其内部沙箱所需的命名空间。
@@ -44,11 +44,12 @@ services:
         # 1 = 安装 CTF 工具箱（pwntools/z3/scapy/binwalk/sqlmap 等），体积更大
         INSTALL_TOOLKIT: ${INSTALL_TOOLKIT:-0}
     image: spiritscout:local
-    container_name: spiritscout
     restart: unless-stopped
+    stop_grace_period: 60s
+    shm_size: "1gb"
     ports:
       # 只发布到宿主机回环，不对外暴露
-      - "127.0.0.1:10010:10010"
+      - "127.0.0.1:${SPIRITSCOUT_PORT:-10010}:10010"
     environment:
       # 非回环地址需要配置管理员凭据，保留旧版密码变量兼容。
       SPIRITSCOUT_ADMIN_USERNAME: "${SPIRITSCOUT_ADMIN_USERNAME:-spiritscout}"
@@ -59,13 +60,13 @@ services:
       SPIRITSCOUT_WEB__HOST: "0.0.0.0"
       # 仅 SRC 使用；智能体/CTF 使用独立无头浏览器。
       SPIRITSCOUT_CHROME_CDP_URL: "${SPIRITSCOUT_CHROME_CDP_URL:-http://browser:9223}"
-    dns:
-      - 223.5.5.5
-      - 119.29.29.29
+    extra_hosts:
+      # Docker Desktop 内置此别名；Linux Engine 也能通过它访问宿主 CDP。
+      - "host.docker.internal:host-gateway"
     volumes:
-      # 源码与运行数据（.spiritscout/ 会话、审计、报告）都留在宿主机
-      # z 为项目目录设置共享容器标签，兼容 Fedora SELinux Enforcing。
-      - ./:/app:z
+      # Linux 文件系统上的 SQLite/锁，避免 Windows/macOS 共享目录的锁与性能差异。
+      - spiritscout-data:/app/.spiritscout
+      - spiritscout-config:/app/configs
     working_dir: /app
     # bwrap 需要在容器内创建用户/挂载命名空间
     security_opt:
@@ -85,3 +86,5 @@ services:
       - "10010"
 volumes:
   browser-profile:
+  spiritscout-data:
+  spiritscout-config:

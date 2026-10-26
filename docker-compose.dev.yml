@@ -1,0 +1,8 @@
+# 显式开发覆盖：保留默认端口/权限，用宿主源码、配置和工作区替换镜像内容。
+# Fedora 的 :z 只重标记当前项目目录，不要求关闭 SELinux。
+services:
+  spiritscout:
+    volumes:
+      - ./:/app:z
+      - ./.spiritscout:/app/.spiritscout:z
+      - ./configs:/app/configs:z

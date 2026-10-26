@@ -38,28 +38,38 @@ CTF 和智能体模式自动审批。
 
 ### Docker
 
-需要 Docker 和 Docker Compose。
+Windows、Linux、macOS 均可通过 Docker 运行完整功能。需要 Linux 容器模式、
+Docker Compose 2.20+；Windows/macOS 使用 Docker Desktop，Linux 使用 Docker Engine。
+镜像未固定 CPU 架构。本次完成 Windows 与 amd64 Linux 验证，macOS/ARM64 未实测。
 
 ```bash
 git clone https://github.com/FLIAZ/SpiritScout.git
 cd SpiritScout
-cp .env.example .env
+python deploy.py up
 ```
 
-先修改 `.env` 中的管理员用户名和密码，再启动：
+通用部署入口会检查 Docker、首次创建 `.env` 并生成随机管理员密码，构建并等待服务健康。
+Windows 可将 `python` 换成 `py -3`，Linux/macOS 可换成 `python3`。
+在项目 `.env` 中查看凭据，打开 <http://127.0.0.1:10010> 登录。
+
+不使用 Python 部署入口时，也可手动复制 `.env.example` 为 `.env`，设置强密码后执行：
 
 ```bash
 docker compose up -d --build
 ```
 
-打开 <http://127.0.0.1:10010>，使用刚设置的账号登录。
 镜像包含 Chromium 和 bubblewrap；CTF 工具箱需要在 `.env` 中设置 `INSTALL_TOOLKIT=1` 后构建。
 
-查看日志用 `docker compose logs -f`，停止用 `docker compose down`。
+查看日志用 `python deploy.py logs`，停止用 `python deploy.py down`（保留数据卷）。
+SRC 人工接管浏览器用 `python deploy.py up --browser`。
+默认使用镜像内源码，配置和运行数据保存在独立 Docker 卷。
+**旧版部署升级前先停服迁移**，见 [升级与数据迁移](docs/部署与配置.md#升级与数据迁移)。
 
 ### 本地运行
 
-需要 Linux、Python 3.11+ 和 bubblewrap。浏览器工具还需要 Node.js 22+、Chromium 或 Google Chrome。
+原生控制台支持 Windows、Linux、macOS；完整 shell/Python 沙箱执行需要 Linux 与
+bubblewrap，Windows/macOS 推荐使用上面的 Docker 部署。原生浏览器工具需要
+Node.js 22+、Chromium 或 Google Chrome；Windows/macOS 的标准 Chrome 安装位置会自动识别。
 
 ```bash
 git clone https://github.com/FLIAZ/SpiritScout.git
@@ -68,7 +78,7 @@ python3 -m venv .venv
 .venv/bin/pip install -e '.[toolkit]'
 ```
 
-安装 bubblewrap（按发行版选一个）：
+Linux 安装 bubblewrap（按发行版选一个）：
 
 ```bash
 sudo apt install bubblewrap   # Debian / Ubuntu
@@ -78,6 +88,17 @@ sudo dnf install bubblewrap   # Fedora
 ```bash
 ./launch.sh
 ```
+
+Windows 原生控制台使用 PowerShell：
+
+```powershell
+py -3 -m venv .venv
+.venv\Scripts\python.exe -m pip install -e .
+.\launch.ps1
+```
+
+macOS/Linux 使用上面的 `.venv/bin/python` 与 `launch.sh`。各平台的虚拟环境不要混用；
+Windows 原生与 WSL 如需同时开发，应使用不同工作副本或虚拟环境目录。
 
 打开 <http://127.0.0.1:8000>。默认在前台运行，按 `Ctrl+C` 停止。
 可以用 `./launch.sh --port 10010` 修改端口。需要远程访问时，先配置
@@ -97,7 +118,8 @@ CTF 和智能体模式使用会话独立的无头浏览器。SRC 可以连接已
 也可以启用项目提供的浏览器容器，遇到登录或验证码时手动接管。
 配置方法见 [浏览器说明](docs/部署与配置.md#浏览器)。
 
-会话、审计和报告默认保存在 `.spiritscout/`。API Key 加密保存在本机，
+原生部署的会话、审计和报告保存在 `.spiritscout/`，Docker 部署保存在对应数据卷。
+API Key 加密保存在部署工作区，
 模型调用和付费搜索产生的费用由所接入的服务收取。仪表盘中的费用是估算值，
 缓存命中率取自供应商返回的用量，具体扣费以供应商账单为准。
 

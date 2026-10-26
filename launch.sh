@@ -10,10 +10,33 @@ shopt -s nullglob
 
 PORT="${WEBCONSOLE_PORT:-8000}"
 
-if [ ! -x .venv/bin/python ]; then
-  echo "缺少虚拟环境：先执行 python3 -m venv .venv && .venv/bin/pip install -e '.[toolkit]'" >&2
-  exit 1
-fi
+case "${1:-start}" in
+  help|-h|--help|stop) ;;
+  *)
+    if [ ! -x .venv/bin/python ]; then
+      echo "缺少虚拟环境：先执行 python3 -m venv .venv，再执行 .venv/bin/python -m pip install -e ." >&2
+      exit 1
+    fi
+    ;;
+esac
+
+# macOS 没有 ss / GNU grep -P，使用系统 lsof；不把未校验端口拼入匹配式。
+listening_pid() {
+  local port="$1"
+  if ! [[ "$port" =~ ^[0-9]{1,5}$ ]] || [ "$((10#$port))" -lt 1 ] || [ "$((10#$port))" -gt 65535 ]; then
+    echo "端口必须为 1–65535" >&2
+    return 1
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -tlnp 2>/dev/null | grep -E ":${port}[[:space:]]" \
+      | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -1 || true
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1 || true
+  else
+    echo "找不到 ss 或 lsof，无法定位监听进程；请使用 Ctrl+C 停止前台控制台" >&2
+    return 1
+  fi
+}
 
 # 停止控制台：按端口找 PID，先礼（SIGTERM 等 lifespan 收尾）后兵（超时强杀）
 stop_console() {
@@ -29,8 +52,7 @@ stop_console() {
   fi
   local pid
   # || true：端口空闲时 grep 无匹配会以非零收尾，set -e 会静默退出
-  pid=$(ss -tlnp 2>/dev/null | grep -E ":${port}[[:space:]]" \
-        | grep -oP 'pid=\K[0-9]+' | head -1 || true)
+  pid=$(listening_pid "$port")
   if [ -z "$pid" ]; then
     echo "控制台未在运行（端口 ${port}）"
     return 0
@@ -89,7 +111,7 @@ USAGE
     done
     stop_console restart "${port:-$PORT}" "$force"
     for i in $(seq 1 50); do          # 端口释放要片刻：确认空闲再起，避免撞地址
-      ss -tln 2>/dev/null | grep -E ":${port:-$PORT}[[:space:]]" >/dev/null || break
+      [ -n "$(listening_pid "${port:-$PORT}")" ] || break
       sleep 0.1
     done
     args=()

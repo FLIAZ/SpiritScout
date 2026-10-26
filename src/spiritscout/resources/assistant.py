@@ -7,7 +7,6 @@ import json
 import os
 import re
 import shutil
-import signal
 import sqlite3
 import time
 from typing import Any
@@ -20,6 +19,11 @@ from spiritscout.config.settings import load_model_config
 from spiritscout.gateway import ModelGateway, ModelRegistry
 from spiritscout.gateway.backends import extract_json
 from spiritscout.gateway.usage import read_usage
+from spiritscout.platform_support import (
+    kill_process_tree,
+    node_cli_command,
+    process_options,
+)
 from spiritscout.resources.store import ResourceStore, redact_credentials, validate_mcp
 from spiritscout.web import agentcfg, vault
 
@@ -380,6 +384,7 @@ class ResourceAssistant:
         npm = shutil.which("npm")
         if not npm:
             raise ValueError("宿主机未安装 npm，请先安装 Node.js/npm")
+        npm_command = node_cli_command("npm")
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.get(
                 self.cfg.resources.npm_registry.rstrip("/")
@@ -412,11 +417,13 @@ class ResourceAssistant:
             "http_proxy",
             "https_proxy",
             "no_proxy",
+            "SystemRoot", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "USERPROFILE",
+            "APPDATA", "LOCALAPPDATA",
         ):
             if name in os.environ:
                 env[name] = os.environ[name]
         process = await asyncio.create_subprocess_exec(
-            npm,
+            *npm_command,
             "install",
             "--prefix",
             str(destination),
@@ -428,7 +435,7 @@ class ResourceAssistant:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             env=env,
-            start_new_session=True,
+            **process_options(),
         )
         tail = bytearray()
 
@@ -454,7 +461,7 @@ class ResourceAssistant:
                 )
         finally:
             if process.returncode is None:
-                os.killpg(process.pid, signal.SIGKILL)
+                kill_process_tree(process)
                 await process.wait()
             output_task.cancel()
             await asyncio.gather(output_task, return_exceptions=True)

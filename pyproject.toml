@@ -21,6 +21,7 @@ dependencies = [
     "uvicorn>=0.30",
     "cryptography>=42",    # 密钥库加密（Fernet）
     "mcp>=1.20,<2",        # 外部 MCP 工具服务器客户端（ida/yakit 等接入）
+    "tzdata>=2025.1",      # Windows/精简镜像也能解析 IANA 时区（仪表盘北京时间）
 ]
 
 [project.optional-dependencies]

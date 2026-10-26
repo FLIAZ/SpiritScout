@@ -21,6 +21,8 @@ __pycache__/
 .env
 .env.*
 !.env.example
+configs/models.yaml
+configs/agent_models.yaml
 
 # 编辑器与日志
 .idea/

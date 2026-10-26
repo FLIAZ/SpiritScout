@@ -43,7 +43,7 @@ class ChromeEndpointTests(unittest.TestCase):
                 argv = command("http://unavailable:9223", env)
             self.assertIn("--headless", argv)
             self.assertIn("--isolated", argv)
-            self.assertEqual(argv[argv.index("--executable-path") + 1], "/installed/chromium")
+            self.assertEqual(Path(argv[argv.index("--executable-path") + 1]), Path("/installed/chromium"))
             self.assertNotIn("--cdp-endpoint", argv)
             self.assertNotIn("--user-data-dir", argv)
 
@@ -70,7 +70,7 @@ class ChromeEndpointTests(unittest.TestCase):
 
     def test_default_wsl_gateway_comes_from_its_own_route(self) -> None:
         def exists(path):
-            return str(path) != "/.dockerenv"
+            return path.as_posix() != "/.dockerenv"
 
         def read(path):
             if "osrelease" in str(path):
