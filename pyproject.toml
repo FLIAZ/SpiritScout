@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spiritscout"
-version = "0.1.0"
+dynamic = ["version"]
 description = "灵探（SpiritScout）渗透测试智能体系统 —— 主Agent集中决策 + 环形子Agent集群 + 黑板架构 + 漏洞全链路核验"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -50,6 +50,9 @@ spiritscout = "spiritscout.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "spiritscout.__version__"}
 
 [tool.setuptools.package-data]
 # 运行期按 __file__ 相对路径读取的非代码资产：控制台前端、知识库种子、
