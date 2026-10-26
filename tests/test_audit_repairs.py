@@ -291,8 +291,10 @@ print('isolated')
             # 同名脚本产物与默认日志按题隔离，互不覆盖
             self.assertEqual((root / "sandbox" / "e1-01" / "marker").read_text(), "A\n")
             self.assertEqual((root / "sandbox" / "e1-02" / "marker").read_text(), "B\n")
-            self.assertTrue((root / "sandbox" / "e1-01" / "last_output.log").exists())
-            self.assertTrue((root / "sandbox" / "e1-02" / "last_output.log").exists())
+            for result in (first, second):
+                output = Path(result.parsed["output_file"])
+                self.assertTrue(output.exists())
+                self.assertEqual(output.parent, Path(result.parsed["workdir"]))
 
 
 class AuditHTTPTests(unittest.IsolatedAsyncioTestCase):
