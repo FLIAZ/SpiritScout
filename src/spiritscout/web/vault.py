@@ -1,15 +1,7 @@
-"""模型密钥保管库：加密落盘的本地密钥库（SQLite + Fernet）。
+"""本机密钥库：SQLite 保存 Fernet 密文。
 
-成熟自托管系统的通行做法——密钥加密存储于应用数据库，主密钥独立保管：
-- 密文：Fernet（cryptography 标准实现，AES-128-CBC + HMAC 完整性校验）；
-- 主密钥：工作区 ``vault.key``（首次写入自动生成，权限 0600）；
-  无人值守部署可用环境变量 ``SPIRITSCOUT_VAULT_KEY`` 注入（Fernet 格式）；
-- 数据库：工作区 ``vault.db``（SQLite，secrets 表：供应商名主键 + 密文 + 时间）。
-
-安全边界：明文密钥只在本进程内存中短暂存在（解析后的 ModelEntry），
-API 永不回传、审计不含值；``models.yaml`` 不落密钥（占位符也不用）。
-密钥库条目按供应商名注入注册表——同一供应商下的模型共用一条密钥记录。
-"""
+主密钥从 SPIRITSCOUT_VAULT_KEY 读取，或首次写入 vault.key（权限 0600）。
+供应商名是记录主键；API 和审计不包含明文密钥。"""
 
 from __future__ import annotations
 
