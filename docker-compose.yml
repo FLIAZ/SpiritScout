@@ -2,12 +2,38 @@
 #
 #   cp .env.example .env      # 先填管理密码
 #   docker compose up -d --build
+#   docker compose --profile src-browser up -d --build --wait  # SRC 可操作浏览器
 #   docker compose logs -f
 #   docker compose down
 #
 # 与本地 Python 部署并存：共用同一份源码与 .spiritscout/ 数据目录，
 # 同一时间只启动一个实例监听同一端口。
 services:
+  browser:
+    profiles: [src-browser]
+    build: ./deploy/browser
+    image: spiritscout-browser:local
+    restart: unless-stopped
+    stop_grace_period: 30s
+    shm_size: "1gb"
+    environment:
+      SPIRITSCOUT_ADMIN_USERNAME: "${SPIRITSCOUT_ADMIN_USERNAME:-spiritscout}"
+      SPIRITSCOUT_ADMIN_PASSWORD: "${SPIRITSCOUT_ADMIN_PASSWORD:-}"
+      SPIRITSCOUT_SERVER_PASSWORD: "${SPIRITSCOUT_SERVER_PASSWORD:-}"
+    ports:
+      - "127.0.0.1:10011:6080"
+    volumes:
+      - browser-profile:/profile
+    # Chromium 以普通用户运行，允许创建其内部沙箱所需的命名空间。
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:9223/json/version"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
   spiritscout:
     build:
       context: .
@@ -24,22 +50,22 @@ services:
       # 只发布到宿主机回环，不对外暴露
       - "127.0.0.1:10010:10010"
     environment:
-      # 容器内绑定非回环地址，程序要求至少配置一个管理员凭据：
-      # 优先 ADMIN_USERNAME/ADMIN_PASSWORD，旧版 SERVER_PASSWORD 仍兼容。
+      # 非回环地址需要配置管理员凭据，保留旧版密码变量兼容。
       SPIRITSCOUT_ADMIN_USERNAME: "${SPIRITSCOUT_ADMIN_USERNAME:-spiritscout}"
       SPIRITSCOUT_ADMIN_PASSWORD: "${SPIRITSCOUT_ADMIN_PASSWORD:-}"
       SPIRITSCOUT_SERVER_PASSWORD: "${SPIRITSCOUT_SERVER_PASSWORD:-}"
+      EXA_API_KEY: "${EXA_API_KEY:-}"
       SPIRITSCOUT_WEB__PORT: "10010"
       SPIRITSCOUT_WEB__HOST: "0.0.0.0"
-      # 留空自动解析 Windows 网关；指定时填该运行环境可达的 CDP 地址。
-      SPIRITSCOUT_CHROME_CDP_URL: "${SPIRITSCOUT_CHROME_CDP_URL:-}"
-    # 绕过本机代理 TUN 的 fake-ip DNS，直连国内公网真实 IP
+      # 仅 SRC 使用；智能体/CTF 使用独立无头浏览器。
+      SPIRITSCOUT_CHROME_CDP_URL: "${SPIRITSCOUT_CHROME_CDP_URL:-http://browser:9223}"
     dns:
       - 223.5.5.5
       - 119.29.29.29
     volumes:
       # 源码与运行数据（.spiritscout/ 会话、审计、报告）都留在宿主机
-      - ./:/app
+      # z 为项目目录设置共享容器标签，兼容 Fedora SELinux Enforcing。
+      - ./:/app:z
     working_dir: /app
     # bwrap 需要在容器内创建用户/挂载命名空间
     security_opt:
@@ -57,3 +83,5 @@ services:
       - 0.0.0.0
       - --port
       - "10010"
+volumes:
+  browser-profile:
