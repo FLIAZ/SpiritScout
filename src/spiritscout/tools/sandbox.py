@@ -1,27 +1,8 @@
-"""沙箱执行工具（sandbox_exec）：bubblewrap 隔离下运行 shell 命令 / Python 脚本。
+"""通过 bubblewrap 执行 shell 和 Python。
 
-CTF 解题需要真实动手能力——协议交互（WebSocket/socket）、数据计算、
-脚本化构造请求，http_probe 一条 HTTP 通道远远不够。本工具给子 Agent
-一双在受控沙箱里干活的手。
-
-隔离边界（bwrap，最小权限）：
-- 文件系统整机只读挂载；用户主目录与 /usr/local（宿主私有安装层）
-  以 tmpfs 遮蔽——~/.ssh、密钥库、浏览器数据、手工安装的工具在沙箱内
-  都不可见；工具库来自项目自带 .venv（只读回挂，pwntools/pycryptodome/
-  PIL/sympy/z3/scapy 等封装于项目内，不依赖用户系统安装），另加会话
-  产物目录；会话控制目录隐藏、附件只读；/usr/bin、/bin 保留为发行版基础层（python 解释器、coreutils、
-  binutils 等操作系统组件），项目工具以 PATH 首位覆盖同名系统命令；
-- 工作目录跨调用持久——``workspace_root/sandbox`` 即会话工作区内的固定
-  工作目录（HOME 与 cwd 都指向它）：脚本与产物统一落这里，同一会话的
-  后续调用与附件分析工具都能继续使用；/tmp 为每次运行的 tmpfs，不持久；
-- 环境变量清零后仅注入 PATH/HOME/LANG/PYTHONPATH；HOME 指向工作目录
-  （脚本写 ~ 不会碰到真实主目录）；
-- 进程组独立 + 超时强杀；输出流式读取限幅（脚本无限输出也不会撑爆内存）。
-
-网络保持放行（CTF 赛题交互必需）。测试边界与其他工具一致，
-由模型结合用户原文上下文维护，不做后端禁打匹配；调用仍保留审批与审计。
-bwrap 不可用时明确报错，不静默降级为宿主直跑。
-"""
+宿主文件系统只读，用户目录和控制目录遮蔽；附件只读，会话 sandbox 目录可写并持久化。
+每次调用使用独立 tmpfs /tmp，清理环境变量，并限制运行时间和输出。网络保持可用。
+bwrap 不可用时返回错误，不直接在宿主执行。"""
 
 from __future__ import annotations
 
