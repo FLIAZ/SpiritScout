@@ -21,7 +21,7 @@ from spiritscout.core.exceptions import (
     SpiritScoutError,
     ToolExecutionError,
 )
-from spiritscout.core.models import AgentType
+from spiritscout.core.models import AgentType, RunMode
 from spiritscout.tools.executor import ToolExecutor
 from spiritscout.tools.invocation import (
     InvocationContext,
@@ -29,6 +29,7 @@ from spiritscout.tools.invocation import (
     current_invocation,
 )
 from spiritscout.tools.journal import ExecutionJournal
+from spiritscout.tools.search_policy import is_search_tool
 from spiritscout.tools.spec import (
     ActionCategory,
     RiskLevel,
@@ -177,7 +178,8 @@ class ToolRegistry:
                 return ToolResult(tool=name, ok=False, error=reason, returncode=-4)
         if self.policy is not None:
             try:
-                if self.policy.requires_approval(spec, action):
+                if (not self.policy.automatic_approval
+                        and self.policy.requires_approval(spec, action)):
                     transition("awaiting_approval")
                 await self.policy.ensure_tool_allowed(
                     spec, action=action)
@@ -234,6 +236,10 @@ class AgentToolView:
         self.audit = audit or registry.audit
 
     def allows(self, name: str) -> bool:
+        if getattr(self._registry.policy, "mode", None) == RunMode.COMPETITION:
+            spec = self._registry._specs.get(name)
+            if is_search_tool(name) or (spec is not None and spec.internet_search):
+                return False
         if self.profile.allows_tool(name):
             return True
         if self.profile.key in {AgentType.MASTER, AgentType.SECRETARY, AgentType.REPORT}:
