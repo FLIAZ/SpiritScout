@@ -1,8 +1,4 @@
-"""NATS 总线后端（设计书 7 技术栈：NATS 高性能环形消息总线）。
-
-需外部 NATS 服务；主题映射为 NATS subject（spiritscout.bb.asset 等），
-原生支持 ``*`` 通配订阅。
-"""
+"""NATS 事件总线后端。"""
 
 from __future__ import annotations
 
