@@ -1,8 +1,4 @@
-"""环形数据总线（设计书 4.2.1 / 6.3 / 4.8.2 事件通道）。
-
-适配器决策 A1：EventBus 抽象 + inprocess（默认）/ redis / nats 三后端，
-配置一键切换，语义一致（主题分区、优先级、流量控制、幂等事件）。
-"""
+"""事件总线与异步消息分发。"""
 
 from spiritscout.bus.base import EventBus, Subscription
 from spiritscout.bus.inprocess import InProcessBus
