@@ -1,12 +1,9 @@
-"""DAG 任务图谱（设计书 4.1.1 / 6.2.4-1：动态、非刚性，支持边探索边补节点）。
-
-Incalmo 反面教材（附录A §2.10）：刚性任务图会在早期侦察停滞（0 发现）。
-本实现：节点可运行时增删、依赖满足即就绪、失败可回退重排（MazeRunner 对标）。
-"""
+"""支持运行时增删节点、依赖检查和失败重排的任务 DAG。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 from spiritscout.core.exceptions import SpiritScoutError
 from spiritscout.core.ids import new_id
@@ -61,6 +58,24 @@ class TaskDAG:
 
     def upsert_from_plan(self, plan_nodes: list[dict], round_no: int) -> PlanUpsertResult:
         """在副本中校验整批变更，成功后才原子应用节点和重绑定的依赖。"""
+        # target 是单目标字段，格式错误应回传规划器，不能当主机发往网络。
+        for spec in plan_nodes:
+            meta = spec.get("meta") if isinstance(spec.get("meta"), dict) else {}
+            for target in (spec.get("target"), meta.get("target")):
+                if target is None or target == "":
+                    continue
+                valid = isinstance(target, str) and not any(c.isspace() for c in target.strip())
+                if valid:
+                    try:
+                        parsed = urlsplit(target if "://" in target else "//" + target)
+                        host = parsed.hostname or ""
+                        valid = not any(c in host for c in ",;，；、")
+                    except ValueError:
+                        valid = False
+                if not valid:
+                    raise SpiritScoutError(
+                        f"规划错误：节点「{spec.get('tactic', '')}」的 target 必须是单个目标，"
+                        "不能包含地址列表或未编码空白；多个目标请拆成独立节点")
         staged = TaskDAG.from_dict(self.to_dict())
         created, skipped = staged._upsert_from_plan(plan_nodes, round_no)
         for nid, node in staged._nodes.items():
@@ -108,6 +123,8 @@ class TaskDAG:
                 })
                 continue
             meta = dict(spec["meta"]) if isinstance(spec.get("meta"), dict) else {}
+            if isinstance(spec.get("continue_from"), dict):
+                meta["continue_from"] = dict(spec["continue_from"])
             # 规划节点可指定本节点的测试目标（多域 SRC 按域拆节点）；
             # 留空则派发时沿用会话目标。
             target = str(spec.get("target") or "").strip()
