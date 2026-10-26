@@ -35,6 +35,14 @@ class UsageCall(BaseModel):
     request_bytes: int | None = Field(default=None, ge=0)
     reused_prefix_bytes: int | None = Field(default=None, ge=0)
     new_suffix_bytes: int | None = Field(default=None, ge=0)
+    context_parts: dict[str, int] = Field(default_factory=dict)
+    cache_scope: str = ""
+    task_id: str = ""
+    route_id: str = ""
+    estimated_cost_cny_min: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    estimated_cost_cny_max: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    pricing_version: str = ""
+    pricing_period: str = ""
 
 
 class UsageSnapshot(BaseModel):
