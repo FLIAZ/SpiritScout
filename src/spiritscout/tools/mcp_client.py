@@ -65,6 +65,13 @@ def _resolve_command(command: str) -> str:
     解析为项目根下绝对路径；其余原样交给 PATH（npx、docker 等）。"""
     if not command or Path(command).is_absolute():
         return command
+    normalized = command.replace("\\", "/")
+    if sys.platform == "win32" and normalized.startswith(".venv/bin/"):
+        name = normalized.removeprefix(".venv/bin/")
+        for suffix in ("", ".exe", ".cmd"):
+            script = _project_root() / ".venv" / "Scripts" / (name + suffix)
+            if script.is_file():
+                return str(script)
     candidate = _project_root() / command
     return str(candidate) if candidate.exists() else command
 

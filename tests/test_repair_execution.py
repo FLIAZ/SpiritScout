@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import socket
 import ssl
 import tempfile
@@ -397,4 +398,6 @@ class ConnectionRegressionTests(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(transport=transport) as client:
             response = await client.get("http://[::ffff:127.0.0.1]/")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(seen, ["::ffff:127.0.0.1"])
+        # httpx/不同 Python 版本可能使用十六进制或混合表示，比较地址语义。
+        self.assertEqual([ipaddress.ip_address(host) for host in seen],
+                         [ipaddress.ip_address("::ffff:127.0.0.1")])

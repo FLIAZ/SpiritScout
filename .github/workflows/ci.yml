@@ -27,10 +27,57 @@ jobs:
           node-version: "22"
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[test]'
-      - run: python -m ruff check src/spiritscout tests
+      - run: python -m ruff check src/spiritscout tests deploy.py deploy
       - run: python -m compileall -q src/spiritscout tests
       - run: python -m unittest discover -s tests -v
       - name: Check browser scripts
         run: |
           for file in src/spiritscout/web/static/js/*.js; do node --check "$file" || exit; done
           for file in tests/test_*.js; do node "$file" || exit; done
+
+  native-platforms:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+    env:
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
+      PYTHON_DOTENV_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: python -m pip install -e '.[test]'
+      - run: python -m unittest discover -s tests -p test_platform_support.py -v
+      - run: python -m unittest discover -s tests -p test_deployment.py -v
+      - run: python -m unittest discover -s tests -p test_chrome_mcp.py -v
+      - run: python -m spiritscout --help
+
+  docker-build:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha,scope=app-${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=app-${{ matrix.platform }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: deploy/browser
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha,scope=browser-${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=browser-${{ matrix.platform }}

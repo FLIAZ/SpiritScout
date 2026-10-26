@@ -6,9 +6,12 @@ import ipaddress
 import os
 import shutil
 import socket
+import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
+
+from spiritscout.platform_support import chrome_executable, node_cli_command
 
 MCP_PACKAGE = "@playwright/mcp@0.0.83"
 PACKAGED_CLI = Path("/opt/chrome-mcp/node_modules/@playwright/mcp/cli.js")
@@ -65,17 +68,19 @@ def command(endpoint: str, env: dict[str, str]) -> list[str]:
         npx = shutil.which("npx")
         if npx is None:
             raise ValueError("找不到 npx，请安装 Node.js 22+，或使用已内置 Chrome MCP 的 Docker 镜像")
-        prefix = [npx, "--yes", MCP_PACKAGE]
+        prefix = [*node_cli_command("npx"), "--yes", MCP_PACKAGE]
     output = Path(env["SPIRITSCOUT_CHROME_OUTPUT_DIR"]) if env.get("SPIRITSCOUT_CHROME_OUTPUT_DIR") else (
         Path.cwd() / ".tools" / "chrome-mcp" / "output")
     output.mkdir(parents=True, exist_ok=True)
+    temporary = output / "tmp"
+    temporary.mkdir(exist_ok=True)
+    for key in ("TMPDIR", "TEMP", "TMP"):
+        env[key] = str(temporary.resolve())
     env.setdefault("npm_config_cache", str(Path.cwd() / ".tools" / "chrome-mcp" / "npm-cache"))
     mode = env.get("SPIRITSCOUT_CHROME_MODE", "cdp")
     if mode == "headless":
         # 使用本机已安装浏览器；配置目录由 MCP 隔离，不读取用户 Chrome 登录态。
-        executable = env.get("SPIRITSCOUT_CHROME_EXECUTABLE", "") or next(
-            (found for name in ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable")
-             if (found := shutil.which(name))), "")
+        executable = chrome_executable(env)
         connection = ["--headless", "--isolated"]
         if executable:
             connection += ["--executable-path", executable]
@@ -95,6 +100,9 @@ def main() -> int:
         endpoint = ("" if env.get("SPIRITSCOUT_CHROME_MODE") == "headless" else
                     cdp_endpoint(env.get("SPIRITSCOUT_CHROME_CDP_URL", "")))
         argv = command(endpoint, env)
+        if sys.platform == "win32":
+            # Windows CRT exec 不会自动引用带空格路径；subprocess 按 argv 正确编码。
+            return subprocess.call(argv, env=env)
         # stdout 只承载 MCP 协议；替换进程后由原有 MCP 生命周期负责回收连接。
         os.execvpe(argv[0], argv, env)
     except (OSError, ValueError) as exc:
