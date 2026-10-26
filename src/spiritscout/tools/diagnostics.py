@@ -17,6 +17,11 @@ def browser_failure(tool: str, text: str) -> dict[str, str]:
     if not tool.startswith("browser_"):
         return {}
     lower = text.lower()
+    if ("econnrefused" in lower or "connection refused" in lower) and (
+            "websocket url" in lower or "initializeserver" in lower or "cdp" in lower):
+        return {"failure_kind": "browser_connection_unavailable",
+                "failure_summary": "浏览器调试连接不可用（CDP 连接被拒绝），尚未访问题目页面；"
+                                   "请检查调试浏览器进程和连接地址。"}
     reasons = [
         ("element is outside of the viewport", "target_outside_viewport",
          "目标元素已找到，但位于可视区域外；自动滚动后仍无法点击。"),
@@ -56,6 +61,8 @@ def chrome_tool_guidance(tool: str) -> str:
         return " 此连接复用用户的可见浏览器；结束测试时保留浏览器及配置档案，只关闭本次新建的测试标签。"
     if tool in {"browser_navigate", "browser_cookie_list", "browser_cookie_get"}:
         return (" 此连接操作用户可见的现有浏览器，与用户共享页面和登录态。"
+                "Docker 启用 src-browser profile 时，浏览器操作页在部署主机的 10011 端口；"
+                "若配置了外部浏览器，用户应在那个浏览器窗口操作。"
                 "若需要用户登录、输入验证码或拖动滑块，使用 ask_user 说明具体页面和操作，"
                 "等待用户答复期间不要继续操作该页面；答复后重新读取页面或 Cookie 验证结果，"
                 "不要假定登录成功，不代替用户破解验证码。多条路线不要同时操作同一标签。"
