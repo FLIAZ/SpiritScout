@@ -255,12 +255,15 @@ async def http_probe(
         "final_url": final_url,
         "redirect_chain": redirect_chain,
     }
-    # 范围标注（不拦截）：最终落点在授权白名单之外时告知模型——是否继续
-    # 测试该目标由它向用户提问确认（ask_user），用户放行后标注消失
+    # 列表只记录初始地址与用户扩围，无法穷尽任务规则授权的动态目标。
+    # 仅报告未匹配事实；是否真正扩围由模型结合上下文判断。
     if not guard.is_allowed(final_url):
         parsed["scope_note"] = (
-            "最终响应来自当前授权范围之外（未拦截）。继续测试该目标前先用 "
-            "ask_user 向用户确认，用户同意后系统会将其加入本会话范围。")
+            "最终响应地址未匹配初始范围列表或用户扩围记录（未拦截）。"
+            "这不代表该目标未经授权：请结合用户原话、项目规则和后续答复判断；"
+            "若已授权测试平台下发的题目靶机，其返回地址属于该任务范围，无需重复确认。"
+            "仅在目标确实超出已有授权或边界不清时用 ask_user 确认。"
+            "危险操作仍须按独立审批通道处理。")
     return ToolResult(
         tool="http_probe", ok=True, returncode=0,
         stdout=body, parsed=parsed,
