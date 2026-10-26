@@ -9,7 +9,7 @@ const SessionHistory = (() => {
     const root = $("#trace-history");
     if (!root) return;
     root.querySelector("[data-history-status]").textContent = message ||
-      `${past ? "历史记录" : "最近记录"} · 本页 ${page?.items.length || 0} 条${page?.has_more ? " · 可向前翻页" : ""}`;
+      `${past ? "历史记录" : "最近记录"} · 本页 ${page?.activity_count ?? page?.items.length ?? 0} 项活动${page?.has_more ? " · 可向前翻页" : ""}`;
     root.querySelector('[data-history="older"]').disabled = busy || !page?.has_more;
     root.querySelector('[data-history="newer"]').disabled = busy || !trail.length;
     root.querySelector('[data-history="latest"]').disabled = busy;
@@ -50,7 +50,7 @@ const SessionHistory = (() => {
     controls("正在读取记录…");
     traceReset(); ToolParameters.reset(session); $("#events").replaceChildren();
     try {
-      const suffix = before === null ? "" : `?before=${before}`;
+      const suffix = `?activity=true${before === null ? "" : `&before=${before}`}`;
       const result = await api(`/api/sessions/${session}/audit-page${suffix}`, {signal: controller.signal});
       if (!active(session, token)) return;
       let deadline = performance.now() + 6;
