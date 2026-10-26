@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="880" viewBox="0 0 1120 880" role="img" aria-labelledby="title desc">
+<title id="title">灵枢架构</title>
+<desc id="desc">控制台经会话管理与运行时进入灵枢调度，按模式派发 SRC 或 CTF 子任务。各角色共用模型网关、工具、共享状态与知识资源，结果汇总为报告。</desc>
+<defs>
+  <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 1 1 L 8 5 L 1 9" fill="none" stroke="#8492a6" stroke-width="1.5"/></marker>
+</defs>
+<style>
+ text { font-family: "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", sans-serif; }
+ .title { font-size: 26px; font-weight: 700; fill: #182337; }
+ .label { font-size: 14px; font-weight: 600; fill: #64748b; letter-spacing: 1px; }
+ .name { font-size: 18px; font-weight: 600; fill: #23334a; }
+ .note { font-size: 14px; fill: #627188; }
+ .small { font-size: 13px; fill: #627188; }
+ .line { fill: none; stroke: #8492a6; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+</style>
+<rect width="1120" height="880" rx="20" fill="#f7f9fc"/>
+<text x="40" y="52" class="title">灵枢 / SpiritScout</text>
+<text x="40" y="80" class="note">任务调度与执行</text>
+
+<text x="40" y="117" class="label" text-anchor="start">接入</text>
+<rect x="40" y="136" width="320" height="80" rx="12" fill="#fff" stroke="#dce3ec"/>
+<text x="60" y="168" class="name" text-anchor="start">Web 控制台</text>
+<text x="60" y="194" class="note" text-anchor="start">任务、消息、附件与执行记录</text>
+<rect x="400" y="136" width="320" height="80" rx="12" fill="#fff" stroke="#dce3ec"/>
+<text x="420" y="168" class="name" text-anchor="start">会话管理</text>
+<text x="420" y="194" class="note" text-anchor="start">FastAPI · SSE · 状态保存</text>
+<rect x="760" y="136" width="320" height="80" rx="12" fill="#fff" stroke="#dce3ec"/>
+<text x="780" y="168" class="name" text-anchor="start">运行时</text>
+<text x="780" y="194" class="note" text-anchor="start">按所选模式准备角色与工具</text>
+<path d="M 362 176 H 395" class="line" marker-end="url(#arrow)"/>
+<path d="M 722 176 H 755" class="line" marker-end="url(#arrow)"/>
+<rect x="40" y="248" width="1040" height="300" rx="16" fill="#eef3fa" stroke="#dde5f0"/>
+<text x="64" y="278" class="label" text-anchor="start">编排与执行</text>
+<rect x="330" y="296" width="460" height="78" rx="12" fill="#fff8eb" stroke="#e6d0a3"/>
+<text x="560" y="327" class="name" text-anchor="middle">灵枢 · 主 Agent</text>
+<text x="560" y="352" class="note" text-anchor="middle">规划依赖任务、分派工作、根据结果调整安排</text>
+<path d="M 920 216 V 236 H 560 V 291" class="line" marker-end="url(#arrow)"/>
+<rect x="64" y="424" width="470" height="96" rx="12" fill="#fff" stroke="#dce3ec"/>
+<text x="86" y="455" class="name" text-anchor="start">SRC 子 Agent</text>
+<text x="86" y="481" class="note" text-anchor="start">侦察 / Web / 主机 / 业务</text>
+<text x="86" y="503" class="small" text-anchor="start">候选漏洞 → 鉴真独立复测</text>
+<rect x="586" y="424" width="470" height="96" rx="12" fill="#fff" stroke="#dce3ec"/>
+<text x="608" y="455" class="name" text-anchor="start">CTF 子 Agent</text>
+<text x="608" y="481" class="note" text-anchor="start">Web / Pwn / 逆向 / 密码 / 杂项</text>
+<text x="608" y="503" class="small" text-anchor="start">解题结果 → Flag 登记与提交</text>
+<path d="M 560 374 V 400 H 299 V 419" class="line" marker-end="url(#arrow)"/>
+<path d="M 560 400 H 821 V 419" class="line" marker-end="url(#arrow)"/>
+<text x="1064" y="398" class="small" text-anchor="end">按模式派发</text>
+<path d="M 560 548 V 579" class="line" stroke-dasharray="5 5"/>
+<text x="577" y="573" class="small" text-anchor="start">各角色按需使用</text>
+<path d="M 160 591 H 960" class="line" stroke-dasharray="5 5"/>
+<path d="M 160 591 V 615" class="line" marker-end="url(#arrow)" stroke-dasharray="5 5"/>
+<path d="M 426 591 V 615" class="line" marker-end="url(#arrow)" stroke-dasharray="5 5"/>
+<path d="M 693 591 V 615" class="line" marker-end="url(#arrow)" stroke-dasharray="5 5"/>
+<path d="M 960 591 V 615" class="line" marker-end="url(#arrow)" stroke-dasharray="5 5"/>
+<text x="40" y="580" class="label" text-anchor="start">共用模块</text>
+<rect x="40" y="620" width="240" height="110" rx="12" fill="#fff" stroke="#dce3ec"/>
+<text x="58" y="653" class="name" text-anchor="start">模型网关</text>
+<text x="58" y="681" class="note" text-anchor="start">角色模型 / 主备切换</text>
+<text x="58" y="706" class="note" text-anchor="start">上下文缓存 / 用量统计</text>
+<rect x="306" y="620" width="240" height="110" rx="12" fill="#fff" stroke="#dce3ec"/>
+<text x="324" y="653" class="name" text-anchor="start">工具执行</text>
+<text x="324" y="681" class="note" text-anchor="start">角色权限 / 审批 / 审计</text>
+<text x="324" y="706" class="note" text-anchor="start">内置工具 / 沙箱 / MCP</text>
+<rect x="573" y="620" width="240" height="110" rx="12" fill="#fff" stroke="#dce3ec"/>
+<text x="591" y="653" class="name" text-anchor="start">共享状态</text>
+<text x="591" y="681" class="note" text-anchor="start">黑板 / 尝试台账</text>
+<text x="591" y="706" class="note" text-anchor="start">事件总线</text>
+<rect x="840" y="620" width="240" height="110" rx="12" fill="#fff" stroke="#dce3ec"/>
+<text x="858" y="653" class="name" text-anchor="start">知识与资源</text>
+<text x="858" y="681" class="note" text-anchor="start">知识库 / 经验库</text>
+<text x="858" y="706" class="note" text-anchor="start">项目记忆 / Skill</text>
+<rect x="40" y="770" width="1040" height="70" rx="12" fill="#edf2f7" stroke="#dce3ec"/>
+<text x="62" y="798" class="label" text-anchor="start">会话产物</text>
+<text x="62" y="822" class="note" text-anchor="start">报告 / WriteUp / 附件</text>
+<path d="M 382 786 V 824 M 733 786 V 824" stroke="#ced8e5"/>
+<text x="408" y="798" class="label" text-anchor="start">执行记录</text>
+<text x="408" y="822" class="note" text-anchor="start">审计 / 工具输出 / 模型用量</text>
+<text x="760" y="798" class="label" text-anchor="start">本地存储</text>
+<text x="760" y="822" class="note" text-anchor="start">.spiritscout/ · SQLite / 文件</text>
+</svg>
