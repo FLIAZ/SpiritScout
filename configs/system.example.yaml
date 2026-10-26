@@ -46,6 +46,14 @@ executor:                      # 工具执行器（CLI/Docker/MCP 三态）
   docker_tmpfs: "/tmp:rw,noexec,nosuid,size=64m"
   docker_user: ""              # 空 = 镜像默认用户；可配 "65534:65534" 降权
 
+search:                        # 公开技术资料检索（Exa）；由模型决定何时检索
+  enabled: false               # 设置 EXA_API_KEY 后启用；不影响已有 MCP 搜索
+  api_url: https://api.exa.ai/search
+  api_key_env: EXA_API_KEY      # 只填环境变量名，不把密钥写入配置/提示词
+  timeout_seconds: 25
+  cache_ttl_seconds: 21600      # 默认 6 小时；模型可用 refresh 主动更新
+  cache_max_entries: 2000       # 跨会话共享；重启后仍可命中
+
 knowledge:                     # 五库 + 两经验库
   sqlite_path: .spiritscout/knowledge.db
   chroma_path: .spiritscout/chroma
@@ -54,13 +62,13 @@ knowledge:                     # 五库 + 两经验库
   embedding_api_key: ""        # 启用远端 embedding 时可设为 ${EMBEDDING_API_KEY}
   embedding_model: ""
 
-experience:                    # 经验库（跨会话自我进化）：收尾提炼 + 开工召回
+experience:                    # 共享经验库：会话结束后提炼，开工时检索
   root: ""                     # 空=跟随工作区；Web 控制台自动指向共享目录
-  distill_timeout_seconds: 45  # 收尾提炼单次 LLM 硬顶（秒），仅终态路径使用
+  distill_timeout_seconds: 45  # 经验提炼调用的超时时间（秒）
   recall_limit: 6              # 会话开工注入的经验条数上限
 
 report:
-  template: src_standard       # 报告模板（4.6.2）
+  template: src_standard       # 报告模板
   output_format: markdown
   output_dir: .spiritscout/reports
 
@@ -86,8 +94,8 @@ mcp_servers:
     default_risk: readonly
     risk_by_action: true
     scope_enforcement: required
-  - name: chrome                 # 可见 Chrome / 指纹浏览器：复用已有 CDP 链路
-    enabled: false               # 已有 chrome-mcp-kit 时启用；普通无头浏览器与它择一
+  - name: chrome                 # SRC 连接可选浏览器容器或外部 CDP；CTF/智能体使用独立无头浏览器
+    enabled: false               # 启用后按任务模式选择连接方式，与独立 playwright 配置择一
     command: python
     args: ["-m", "spiritscout.tools.chrome_mcp"]
     default_risk: readonly
