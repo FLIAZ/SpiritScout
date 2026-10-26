@@ -5,11 +5,13 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
 import sqlite3
 import time
+from collections import OrderedDict
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -70,6 +72,7 @@ class ExecutionJournal:
     def __init__(self, blackboard: Blackboard, workspace: Path, run_id: str):
         self.blackboard = blackboard
         self.run_id = run_id
+        self._checkpoint_heads: OrderedDict[tuple[str, str], tuple[int, int, list]] = OrderedDict()
         self.workspace = workspace.resolve()
         workspace.mkdir(parents=True, exist_ok=True)
         key_path = workspace / "execution.key"
@@ -249,8 +252,18 @@ class ExecutionJournal:
                          "WHERE run_id=? AND status='running'", (status, time.time(), self.run_id))
 
     def checkpoint(self, scope: str, key: str, phase: str, state: dict[str, Any]) -> int:
-        """检查点与其事件原子提交。只保存，不自动执行其中的工具或 DAG 节点。"""
-        encrypted = self._encrypt(state)
+        """原子写入检查点；对话追加写增量，定期快照限制恢复链长度。"""
+        head_key = (scope, key)
+        head = self._checkpoint_heads.get(head_key)
+        messages = state.get("messages")
+        version, depth, payload = 1, 0, state
+        if (scope in {"ctf_conversation", "decision_memory"} and isinstance(messages, list)
+                and head is not None and head[1] < 31
+                and len(messages) >= len(head[2]) and messages[:len(head[2])] == head[2]):
+            version, depth = 2, head[1] + 1
+            payload = {"base_checkpoint": head[0], "tail": messages[len(head[2]):],
+                       "state": {k: v for k, v in state.items() if k != "messages"}}
+        encrypted = self._encrypt(payload)
         now = time.time()
         with self.blackboard.transaction() as conn:
             event = conn.execute("INSERT INTO runtime_events(invocation_id,kind,payload,created_at)"
@@ -258,22 +271,49 @@ class ExecutionJournal:
                                  (json.dumps({"scope": scope, "phase": phase}), now))
             result = conn.execute("INSERT INTO runtime_checkpoints(run_id,scope,checkpoint_key,"
                                   "phase,schema_version,last_event_id,state_cipher,created_at) "
-                                  "VALUES(?,?,?,?,1,?,?,?)",
-                                  (self.run_id, scope, key, phase, event.lastrowid, encrypted, now))
-            return int(result.lastrowid)
+                                  "VALUES(?,?,?,?,?,?,?,?)",
+                                  (self.run_id, scope, key, phase, version, event.lastrowid, encrypted, now))
+            checkpoint_id = int(result.lastrowid)
+        if scope in {"ctf_conversation", "decision_memory"} and isinstance(messages, list):
+            self._checkpoint_heads.pop(head_key, None)
+            self._checkpoint_heads[head_key] = (checkpoint_id, depth, copy.deepcopy(messages))
+            if len(self._checkpoint_heads) > 32:
+                self._checkpoint_heads.popitem(last=False)
+        return checkpoint_id
 
     def latest_checkpoint(self, scope: str, key: str) -> dict[str, Any] | None:
+        """读取旧快照或新增量链；调用者始终拿到完整原文，不自动执行工具。"""
         with self.blackboard.transaction() as conn:
             row = conn.execute("SELECT * FROM runtime_checkpoints WHERE scope=? AND "
                                "checkpoint_key=? ORDER BY checkpoint_id DESC LIMIT 1",
                                (scope, key)).fetchone()
-        if row is None:
-            return None
-        if row["schema_version"] != 1:
-            raise ConfigurationError("不支持的检查点版本，未恢复执行")
-        result = dict(row)
+            if row is None:
+                return None
+            result = dict(row)
+            tails: list[list] = []
+            while row["schema_version"] == 2:
+                delta = json.loads(self._cipher.decrypt(row["state_cipher"]))
+                base = delta.get("base_checkpoint")
+                if (type(base) is not int or base >= row["checkpoint_id"]
+                        or not isinstance(delta.get("tail"), list) or len(tails) >= 31):
+                    raise ConfigurationError("无效的对话检查点增量链，未恢复执行")
+                if not tails:
+                    latest_state = delta["state"]
+                tails.append(delta["tail"])
+                row = conn.execute("SELECT * FROM runtime_checkpoints WHERE checkpoint_id=? "
+                                   "AND scope=? AND checkpoint_key=?", (base, scope, key)).fetchone()
+                if row is None:
+                    raise ConfigurationError("对话检查点基线缺失，未恢复执行")
+            if row["schema_version"] != 1:
+                raise ConfigurationError("不支持的检查点版本，未恢复执行")
+            state = json.loads(self._cipher.decrypt(row["state_cipher"]))
+            if tails:
+                messages = state["messages"]
+                for tail in reversed(tails):
+                    messages.extend(tail)
+                state = {**latest_state, "messages": messages}
         result.pop("state_cipher")
-        result["state"] = json.loads(self._cipher.decrypt(row["state_cipher"]))
+        result["state"] = state
         return result
 
     def planning_context(self, view: dict[str, Any]) -> dict[str, Any]:
