@@ -42,6 +42,14 @@ executor:                      # 工具执行器（CLI/Docker/MCP 三态）
   docker_tmpfs: "/tmp:rw,noexec,nosuid,size=64m"
   docker_user: ""              # 空 = 镜像默认用户；可配 "65534:65534" 降权
 
+search:                        # 公开技术资料检索（Exa）；由模型决定何时检索
+  enabled: false               # 设置 EXA_API_KEY 后启用；不影响已有 MCP 搜索
+  api_url: https://api.exa.ai/search
+  api_key_env: EXA_API_KEY      # 只填环境变量名，不把密钥写入配置/提示词
+  timeout_seconds: 25
+  cache_ttl_seconds: 21600      # 默认 6 小时；模型可用 refresh 主动更新
+  cache_max_entries: 2000       # 跨会话共享；重启后仍可命中
+
 knowledge:                     # 五库 + 两经验库
   sqlite_path: .spiritscout/knowledge.db
   chroma_path: .spiritscout/chroma
@@ -99,7 +107,7 @@ mcp_servers:
     default_risk: readonly        # 普通浏览器操作不按工具能力判危险
     risk_by_action: true          # 模型声明本次实际行为，危险操作执行前逐次审批
     scope_enforcement: required   # 模型结合用户上下文判断导航边界
-  - name: chrome                  # chrome-mcp-kit：复用 Windows 浏览器及登录态
+  - name: chrome                  # SRC 连接可选浏览器容器或外部 CDP；CTF/智能体使用独立无头浏览器
     transport: stdio
     command: python
     args: ["-m", "spiritscout.tools.chrome_mcp"]
