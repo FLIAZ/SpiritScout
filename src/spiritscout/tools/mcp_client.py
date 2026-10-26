@@ -17,12 +17,13 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.types import Implementation
 
+from spiritscout import __version__
 from spiritscout.config.settings import McpServerConfig
 from spiritscout.tools.spec import RiskLevel
 
 _HANDSHAKE_TIMEOUT = 60.0        # 握手：子进程冷启动 + initialize + tools/list
 _SESSION_READ_TIMEOUT = 3600.0   # 会话级默认读超时（单次调用超时另行覆盖）
-_CLIENT_INFO = Implementation(name="spiritscout", version="0.1.0")
+_CLIENT_INFO = Implementation(name="spiritscout", version=__version__)
 
 
 def resolve_mcp_risk(server: McpServerConfig, tool: dict[str, Any]) -> RiskLevel:
