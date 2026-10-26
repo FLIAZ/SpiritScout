@@ -30,7 +30,7 @@ ENV PYTHONUNBUFFERED=1 \
 # bubblewrap：沙箱运行时；git/curl/procps：MCP 接入与排障常用
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      bubblewrap ca-certificates curl git procps libstdc++6 \
+      bubblewrap ca-certificates curl git procps libstdc++6 chromium \
  && rm -rf /var/lib/apt/lists/*
 
 RUN python -m venv /opt/venv \
