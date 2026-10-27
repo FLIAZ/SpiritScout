@@ -30,21 +30,22 @@
 | 浏览器与工具 | 接入 MCP、Skill 和 shell/Python 沙箱；SRC 可复用登录态并人工处理验证码 |
 | 模型与用量 | 配置供应商、编队与模型，查看费用估算、Token、端点返回的输入缓存用量 |
 
-<details>
-<summary>查看历史跑分记录 · tsecbench（2026-10-23）</summary>
+----
 
-原记录使用 DeepSeek v4.1 Flash，保留原图供参考。
+历史跑分记录 · tsecbench（2026-10-23）
+
+原记录使用 DeepSeek v4.1 Flash，供参考
 
 <img width="1606" height="838" alt="tsecbench 历史跑分记录" src="https://github.com/user-attachments/assets/f5cea640-aa57-40d2-9d21-919960aadd64" />
 
-</details>
+
 
 ## 快速开始
 
-### Docker · 推荐的完整运行方式
+### Docker · 推荐
 
 需要 **Linux 容器模式**和 **Docker Compose 2.20+**。Windows 使用 Docker Desktop，
-Linux 使用 Docker Engine；macOS/ARM64 保留兼容路径，本次未实测。
+Linux 使用 Docker Engine；macOS/ARM64 的兼容待开发
 
 ```bash
 git clone https://github.com/FLIAZ/SpiritScout.git
@@ -67,11 +68,14 @@ python deploy.py down     # 停服，保留数据卷
 ```
 
 镜像包含 Chromium 和 bubblewrap。CTF 工具箱按需在 `.env` 设置 `INSTALL_TOOLKIT=1` 后重建。
-默认使用镜像源码及独立数据卷；**旧版挂载部署升级前先停服迁移**，不要直接删除数据卷。
+默认使用镜像源码及独立数据卷；旧版挂载部署升级前先停服迁移，不要直接删除数据卷。
 
+
+### Docker Compose部署
 <details>
-<summary>直接使用 Docker Compose</summary>
+ <summary> 点击展开 </summary>
 
+ 
 复制 `.env.example` 为 `.env`，设置管理员用户名和强密码，再启动：
 
 ```bash
@@ -79,11 +83,13 @@ docker compose up -d --build --wait
 ```
 
 源码开发覆盖、管理员恢复、反向代理、数据迁移与备份见 [部署与配置](docs/部署与配置.md)。
-
 </details>
 
+
+
+###  Linux / Windows 本地运行
 <details>
-<summary>原生运行 · Linux / Windows 控制台</summary>
+ <summary> 点击展开 </summary>
 
 需要 Python 3.11+。原生浏览器工具另需 Node.js 22+ 和 Chromium/Chrome，
 也可通过 `SPIRITSCOUT_CHROME_EXECUTABLE` 指定路径。
@@ -112,6 +118,7 @@ shell/Python 沙箱需要 Linux 与 bubblewrap。Windows/macOS 原生控制台�
 完整工具链，建议使用 Docker。Windows、WSL、Linux 的虚拟环境不要混用。
 
 </details>
+
 
 ### 配置模型并开始任务
 
@@ -222,19 +229,19 @@ CTF/智能体模式使用会话独立的无头浏览器，SRC 可连接已有浏
 ## 致谢
 
 <details>
-<summary>知识库、参考项目、MCP 与技能源</summary>
+<summary>知识库、参考项目、MCP 与SKILL源</summary>
 
 ### 知识库数据来源
 
-- [PayloadsAllTheThings](https://github.com/swisskyrepo/PayloadsAllTheThings)（MIT）——载荷与方法论主体来源，按本项目条目结构重写并补充靶场实测验证
-- [NoorQureshi/security-skills](https://github.com/NoorQureshi/security-skills)（MIT）——206 条安全技能（Web/云/AD/移动/逆向/社工），原样接入供智能体检索
+- [PayloadsAllTheThings](https://github.com/swisskyrepo/PayloadsAllTheThings)（MIT）
+- [NoorQureshi/security-skills](https://github.com/NoorQureshi/security-skills)（MIT）
 
 ### 参考项目
 
-- [carlospolop/HackTricks](https://github.com/carlospolop/HackTricks)（CC BY-NC-SA）——方法论思路参考
-- [OWASP WSTG](https://github.com/OWASP/wstg)（CC BY-SA-4.0）——测试标准思路参考
-- [GTFOBins](https://github.com/GTFOBins/GTFOBins.github.io)（GPL-3.0）——Unix 二进制利用思路参考
-- [VoltAgent/awesome-agent-skills](https://github.com/VoltAgent/awesome-agent-skills)（MIT）——智能体技能目录（1000+ 条）
+- [carlospolop/HackTricks](https://github.com/carlospolop/HackTricks)（CC BY-NC-SA）
+- [OWASP WSTG](https://github.com/OWASP/wstg)（CC BY-SA-4.0）
+- [GTFOBins](https://github.com/GTFOBins/GTFOBins.github.io)（GPL-3.0）
+- [VoltAgent/awesome-agent-skills](https://github.com/VoltAgent/awesome-agent-skills)（MIT）
 
 ### 项目使用的 MCP 服务器
 
@@ -250,11 +257,11 @@ CTF/智能体模式使用会话独立的无头浏览器，SRC 可连接已有浏
 | shodan-mcp | MIT | 资产情报（出网至第三方服务） |
 | virustotal-mcp | MIT | 文件 / 域名情报（VirusTotal 官方托管端点） |
 
-### 技能源
+### SKILL源
 
-- [obra/superpowers](https://github.com/obra/superpowers)（MIT）——通用工程方法论技能集
-- [anthropics/skills](https://github.com/anthropics/skills)——SKILL.md 格式规范参考（无 LICENSE，仅格式参考，内容未使用）
-- [VoltAgent/awesome-agent-skills](https://github.com/VoltAgent/awesome-agent-skills)（MIT）——智能体技能目录（1000+ 条）
+- [obra/superpowers](https://github.com/obra/superpowers)
+- [anthropics/skills](https://github.com/anthropics/skills)
+- [VoltAgent/awesome-agent-skills](https://github.com/VoltAgent/awesome-agent-skills)
 
 </details>
 
