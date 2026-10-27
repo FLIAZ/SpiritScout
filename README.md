@@ -231,7 +231,7 @@ CTF/智能体模式使用会话独立的无头浏览器，SRC 可连接已有浏
 ## 致谢
 
 <details>
-<summary>知识库、参考项目、MCP 与SKILL源</summary>
+<summary>知识库、参考项目、MCP 、SKILL源及用户</summary>
 
 ### 知识库数据来源
 
@@ -265,7 +265,7 @@ CTF/智能体模式使用会话独立的无头浏览器，SRC 可连接已有浏
 - [anthropics/skills](https://github.com/anthropics/skills)
 - [VoltAgent/awesome-agent-skills](https://github.com/VoltAgent/awesome-agent-skills)
 
-</details>
+
 
 ### 用户
 
@@ -273,6 +273,8 @@ CTF/智能体模式使用会话独立的无头浏览器，SRC 可连接已有浏
 - [@BProbie](https://github.com/BProbie)：修正文档格式
 - [@k1ne](https://github.com/k1ne7)：多平台兼容功能
 - [@neko](https://github.com/neko-11451)：对登录页的前端美化
+
+</details>
 
 ## Star History
 
