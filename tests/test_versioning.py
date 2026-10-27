@@ -20,6 +20,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class VersioningTests(unittest.TestCase):
+    def test_documentation_displays_runtime_version(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        index = (ROOT / "docs/README.md").read_text(encoding="utf-8")
+        self.assertIn(f"version-v{__version__}-", readme)
+        self.assertRegex(readme, r"当前代码版本.*?v" + re.escape(__version__))
+        self.assertIn(f"当前代码版本：`{__version__}`", index)
+
     def test_package_metadata_reads_runtime_version(self) -> None:
         config = tomllib.loads((ROOT / "pyproject.toml").read_text())
         self.assertRegex(__version__, r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
