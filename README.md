@@ -6,7 +6,9 @@
 
 在网页下达任务，让 Agent 协作执行，查看过程、证据与产物。
 
-[![Version](https://img.shields.io/badge/version-v0.12.7-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
+**简体中文 · [English](README_EN.md)**
+
+[![Version](https://img.shields.io/badge/version-v0.12.9-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
 
 [快速开始](#快速开始) · [能力与模式](#能力与模式) · [架构](#架构) · [部署指南](docs/部署与配置.md) · [参与贡献](CONTRIBUTING.md)
 
@@ -153,7 +155,7 @@ CTF/智能体模式使用会话独立的无头浏览器，SRC 可连接已有浏
 
 ## 文档与贡献
 
-当前代码版本 **v0.12.7**。版本唯一来源、递增规则和历史版本说明见 [版本管理](CONTRIBUTING.md#版本管理)。
+当前代码版本 **v0.12.9**。版本唯一来源、递增规则和历史版本说明见 [版本管理](CONTRIBUTING.md#版本管理)。
 
 | 我想了解 | 阅读入口 |
 | --- | --- |

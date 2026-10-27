@@ -26,6 +26,11 @@ class VersioningTests(unittest.TestCase):
         self.assertIn(f"version-v{__version__}-", readme)
         self.assertRegex(readme, r"当前代码版本.*?v" + re.escape(__version__))
         self.assertIn(f"当前代码版本：`{__version__}`", index)
+        english = (ROOT / "README_EN.md").read_text(encoding="utf-8")
+        self.assertIn(f"version-v{__version__}-", english)
+        self.assertIn(f"Current code version: **v{__version__}**", english)
+        self.assertIn("[English](README_EN.md)", readme)
+        self.assertIn("[简体中文](README.md)", english)
 
     def test_package_metadata_reads_runtime_version(self) -> None:
         config = tomllib.loads((ROOT / "pyproject.toml").read_text())
