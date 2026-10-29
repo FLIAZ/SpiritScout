@@ -84,7 +84,7 @@ const SessionHistory = (() => {
     return head < queue.length ? new Promise(resolve => waiters.push(resolve)) : Promise.resolve();
   }
   function identity(row) {
-    if (row.dataset.taskId) return JSON.stringify([row.dataset.agent, row.dataset.taskId]);
+    if (row.dataset.taskId) return JSON.stringify([row.dataset.agent, row.dataset.taskId, row.dataset.stepKey || row.dataset.taskPart || "task"]);
     return JSON.stringify([row.dataset.agent, row.dataset.taskId, row.dataset.eventTs, row.dataset.historyId]);
   }
   function position() {
@@ -94,12 +94,12 @@ const SessionHistory = (() => {
     return row ? {key:identity(row), offset:row.getBoundingClientRect().top - top} : null;
   }
   async function redraw(session, token, {anchor = null, follow = true, observe = false} = {}) {
-    const opened = new Set(), tools = new Set();
+    const opened = new Set(), closed = new Set(), tools = new Set();
     const toolKey = el => el.dataset.stepKey || el.dataset.toolKey || el.dataset.id;
     const detailKey = (row, el, i) => `${identity(row)}:${toolKey(el.closest?.('.tl-act') || el) || i}:${el.className}`;
     for (const row of box().children) {
       row.querySelectorAll("details").forEach((el, i) => {
-        if (el.open) opened.add(detailKey(row, el, i));
+        (el.open ? opened : closed).add(detailKey(row, el, i));
       });
       row.querySelectorAll(".tl-act.open").forEach(el => tools.add(`${identity(row)}:${toolKey(el)}`));
     }
@@ -132,6 +132,7 @@ const SessionHistory = (() => {
     for (const row of box().children) {
       row.querySelectorAll("details").forEach((el, i) => {
         if (opened.has(detailKey(row, el, i))) el.open = true;
+        else if (closed.has(detailKey(row, el, i))) el.open = false;
       });
       row.querySelectorAll(".tl-act").forEach(el => {
         if (!tools.has(`${identity(row)}:${toolKey(el)}`)) return;

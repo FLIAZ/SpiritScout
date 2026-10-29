@@ -202,7 +202,9 @@ class SecretaryRepairTests(unittest.IsolatedAsyncioTestCase):
             secretary = SimpleNamespace(chat=AsyncMock(return_value=SimpleNamespace(content=json.dumps({"suggestions": [
                 {"summary": "verify", "evidence_refs": ["topology:fact@1"]}]}))))
             async def decide(messages, **kwargs):
-                advice = json.loads(messages[-1]["content"])["advice"]
+                payload = next(json.loads(m["content"]) for m in messages
+                               if m["role"] == "user" and "snapshot" in json.loads(m["content"]))
+                advice = payload["snapshot"]["advice"]
                 return SimpleNamespace(finish_reason="stop", content=json.dumps({"continue_iteration": True, "dag_nodes": [],
                     "advice_decisions": [{"id": advice["suggestions"][0]["id"], "verdict": "rejected", "reason": "已有覆盖"}]}))
             master = object.__new__(MasterAgent)

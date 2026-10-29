@@ -6,11 +6,11 @@
 <title>灵枢 SpiritScout</title>
 <link rel="stylesheet" href="/static/css/base.css?v=20261026-home">
 <link rel="stylesheet" href="/static/css/dashboard.css?v=20261026-scroll">
-<link rel="stylesheet" href="/static/css/views.css?v=20261026-process">
+<link rel="stylesheet" href="/static/css/views.css?v=20261029-storage">
 <link rel="stylesheet" href="/static/css/deliverables.css?v=20261026-scroll">
-<link rel="stylesheet" href="/static/css/resources.css?v=20261026-scroll">
+<link rel="stylesheet" href="/static/css/resources.css?v=20261028-mcp">
 <link rel="stylesheet" href="/static/css/projects.css?v=20261026-scroll">
-<link rel="stylesheet" href="/static/css/home.css?v=20261026-stacked">
+<link rel="stylesheet" href="/static/css/home.css?v=20261029-answer-card">
 </head>
 <body>
 <div id="app">
@@ -47,6 +47,7 @@
     <div class="side-foot">
       <span id="ver"></span>
       <span class="side-actions">
+        <button id="btn-storage">清理存储</button>
         <button id="btn-logout">退出</button>
         <button id="btn-theme">主题</button>
       </span>
@@ -87,6 +88,12 @@
           <p id="c-mode-hint">选择模式后填写目标与任务要求。</p>
         </div>
         <textarea id="c-mission" aria-describedby="c-mode-hint" placeholder="写下目标地址、题目描述或测试要求…"></textarea>
+        <label id="c-multiple-answers-option" class="answer-option" hidden>
+          <input type="checkbox" id="c-multiple-answers" aria-labelledby="answer-option-title" aria-describedby="answer-option-hint">
+          <span class="answer-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="12" height="14" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-2M8 12h4m-4 4h4"/></svg></span>
+          <span class="answer-option-copy"><span class="answer-option-heading"><strong id="answer-option-title">多答案题目</strong><span class="answer-option-status" aria-hidden="true"><span class="answer-option-off">未开启</span><span class="answer-option-on">已开启</span></span></span><small id="answer-option-hint">开启后解出全部答案再结束；默认取得一个答案即完成。</small></span>
+          <span class="answer-option-switch" aria-hidden="true"></span>
+        </label>
         <div class="comp-files" id="home-files"></div>
         <div class="bar">
           <div class="bar-left">
@@ -238,13 +245,16 @@
       <div class="models-head">
         <div>
           <h2 style="margin:0 0 4px;font-size:19px">编队</h2>
-          <span class="muted" style="font-size:12.5px">查看角色和可用工具，为已启用角色指派模型。</span>
+          <span class="muted" style="font-size:12.5px">查看角色和可用工具，为已启用角色指派模型，修改后自动保存。</span>
         </div>
-        <div class="bind-save" id="bind-save" hidden>
-          <button class="btn sm" id="bind-revert">还原</button>
-          <button class="btn primary sm" id="bind-save-btn">保存指派</button>
+        <div class="bind-all">
+          <select id="bind-all-model" aria-label="应用到所有角色的模型" disabled>
+            <option value="">选择统一使用的模型</option>
+          </select>
+          <button class="btn primary sm" id="bind-all-apply" disabled>应用到所有角色</button>
         </div>
       </div>
+      <p class="bind-status muted" id="bind-status" role="status" aria-live="polite">修改后自动保存，对新任务生效</p>
       <div class="agents-grid" id="agents-grid"></div>
     </section>
 
@@ -375,11 +385,26 @@
   </div>
 </dialog>
 
+<dialog id="storage-dlg" aria-labelledby="storage-title">
+  <div class="storage-head"><h3 id="storage-title">会话存储与清理</h3><button type="button" class="btn sm" id="storage-close">关闭</button></div>
+  <p class="muted" id="storage-total">正在统计占用…</p>
+  <label class="storage-session">选择会话<select id="storage-select" aria-label="选择要清理的会话" disabled></select></label>
+  <div id="storage-details"></div>
+  <div class="storage-options">
+    <label><input type="checkbox" id="storage-database" checked> 精简并收缩数据库</label>
+    <p class="muted">清理已投递事件、最近 64 个版本以外的 DAG 历史和无依赖的旧检查点。保留当前状态、最新恢复链及其他事实历史。</p>
+    <label><input type="checkbox" id="storage-caches" checked> 清理依赖下载缓存</label>
+    <p class="muted">仅清理沙箱中的 pip、uv、npm 下载缓存，后续可能重新下载。保留脚本、安装的依赖、浏览器登录态、附件、报告、Flag 和执行记录。</p>
+  </div>
+  <p id="storage-status" role="status" aria-live="polite"></p>
+  <div class="dlg-ops"><button type="button" class="btn" id="storage-refresh">重新扫描</button><button type="button" class="btn primary" id="storage-clean" disabled>确认清理所选内容</button></div>
+</dialog>
+
 <div id="toasts"></div>
 
 <script src="/static/js/polling.js?v=20261026-scroll"></script>
-<script src="/static/js/core.js?v=20261026-scroll"></script>
-<script src="/static/js/observer.js?v=20261026-scroll"></script>
+<script src="/static/js/core.js?v=20261029-model-label"></script>
+<script src="/static/js/observer.js?v=20261029-model-label"></script>
 <script src="/static/js/deliverables.js?v=20261026-scroll"></script>
 <script src="/static/js/tool-parameters.js?v=20261026-scroll"></script>
 <script src="/static/js/markdown.js?v=20261026-scroll"></script>
@@ -387,18 +412,22 @@
 <script src="/static/js/agent-workbench.js?v=20261026-scroll"></script>
 <script src="/static/js/experience.js?v=20261026-scroll"></script>
 <script src="/static/js/projects.js?v=20261026-scroll"></script>
-<script src="/static/js/session-history.js?v=20261026-process"></script>
-<script src="/static/js/topology.js?v=20261026-scroll"></script>
-<script src="/static/js/task-trace.js?v=20261026-process"></script>
-<script src="/static/js/dashboard.js?v=20261026-scroll"></script>
-<script src="/static/js/views.js?v=20261026-process"></script>
-<script src="/static/js/console.js?v=20261026-home"></script>
+<script src="/static/js/session-history.js?v=20261028-step-timeline"></script>
+<script src="/static/js/topology.js?v=20261029-dual-graph"></script>
+<script src="/static/js/dual-topology.js?v=20261029-dual-graph"></script>
+<script src="/static/js/task-trace.js?v=20261029-logical-routes"></script>
+<script src="/static/js/dashboard.js?v=20261029-model-label"></script>
+<script src="/static/js/storage.js?v=20261029-storage"></script>
+<script src="/static/js/views.js?v=20261029-storage"></script>
+<script src="/static/js/console.js?v=20261029-answer-option"></script>
 <dialog id="resource-editor"><form method="dialog"><div class="resource-editor-head"><h3 id="resource-editor-title">资源配置</h3><button class="btn sm" aria-label="关闭" value="cancel">关闭</button></div></form>
 <label>标识<input id="resource-key" autocomplete="off" placeholder="唯一名称"></label>
 <label>配置内容（JSON）<textarea id="resource-json" rows="15" spellcheck="false"></textarea></label>
 <div id="resource-secrets"><label>环境变量（JSON，可留空保持原值）<input id="resource-env" type="password" autocomplete="new-password" placeholder='{"API_KEY":"…"}'></label><label>请求头（JSON，可留空保持原值）<input id="resource-headers" type="password" autocomplete="new-password" placeholder='{"Authorization":"Bearer …"}'></label></div>
 <p class="muted">密钥只通过专用字段填写。聊天中不要粘贴密钥；保存的 MCP 接入对新会话生效。</p><div id="resource-save-error" role="alert"></div><button type="button" class="btn primary" id="resource-save">保存配置</button></dialog>
 <script src="/static/js/exa-settings.js?v=20261026-scroll"></script>
-<script src="/static/js/resources.js?v=20261026-scroll"></script>
+<script src="/static/js/skill-markdown-editor.js?v=20261028-edit"></script>
+<script src="/static/js/skill-browser.js?v=20261028-edit"></script>
+<script src="/static/js/resources.js?v=20261028-mcp"></script>
 </body>
 </html>

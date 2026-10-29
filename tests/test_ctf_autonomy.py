@@ -43,7 +43,8 @@ class CTFAutonomyTests(unittest.IsolatedAsyncioTestCase):
                     patch('spiritscout.runtime._foreground_finished'):
                 result = await asyncio.wait_for(run_ctf_engagement(
                     cfg=SimpleNamespace(), models=[], authorization=SimpleNamespace(mode=RunMode.CTF),
-                    challenges=[{'id': 'c1'}], report_path=report), timeout=0.5)
+                    # 多题报告在此验证；单题后台报告由 test_standalone_answers 覆盖。
+                    challenges=[{'id': 'c1'}, {'id': 'c2'}], report_path=report), timeout=0.5)
                 schedule.assert_called_once()
                 self.assertFalse(pending.done())
                 self.assertEqual(result.run_summary['experience_distill']['status'], 'queued')

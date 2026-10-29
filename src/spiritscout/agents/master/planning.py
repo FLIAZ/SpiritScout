@@ -350,6 +350,9 @@ class MasterPlanning:
 
     def _ctf_flags_pending(self, view: dict[str, Any]) -> bool:
         """CTF/渗透赛语境且 Flag 尚未收录：硬收敛门让位于 LLM 复盘。"""
+        manager = (getattr(self.ctx, "extra", None) or {}).get("flag_manager")
+        if getattr(manager, "local_only", False):
+            return not bool(manager.completed_ids())
         flags = view.get("flags")
         return bool(flags) and not flags.get("accepted")
 
@@ -435,7 +438,7 @@ class MasterPlanning:
                             "\"continue_from\": {\"task_id\": str, \"route_id\": str}（可选）}], "
                             "\"retry_challenges\": [{\"id\": str, \"reason\": str}], "
                             "\"retain_instances\": [需跨节点保留现场的赛题ID], "
-                            "\"defer_challenges\": [{\"id\": str, \"reason\": str}], "
+                            "\"defer_challenges\": [{\"id\": str, \"reason\": str, \"cancel_running\": bool, \"release_instance\": bool}], "
                             "\"recheck_after_seconds\": 正数（可选，等待后复查）}。"
                             "competition_context 提供赛方规则原文与实际题目清单；"
                             "不得按赛制名称假定计分、轮次、提交或完成条件。"
@@ -453,14 +456,14 @@ class MasterPlanning:
                             "先补尚未尝试的未完成题；首轮扫完后，为空位安排未完成题的回访。"
                             "在途/待发题不重复，已完成题不重建；回访用唯一 tactic@序号，"
                             "暂缓题同时返回 retry_challenges:[{id,reason}] 解除暂缓。"
-                            "retain_instances 可声明跨节点保留实例，避免登录态、文件和取证进展因关闭重开丢失；"
+                            "未完成实例默认跨节点保留；retain_instances 保留旧协议兼容。暂缓默认只停止新增派工，cancel_running=true 才中断在途工作；release_instance=true 才释放实例并结束同题工作。"
                             "若继续既有调查，可从 conversation_refs 选择 continue_from 继承原对话；"
                             "要独立重试则省略。只有同题、同模型协议且实例回执一致的历史可继承，"
                             "历史工具不自动执行，当前任务与授权优先。"
                             "本次无新增节点时，相同现场不会被计时器反复询问；"
                             "若需定时复查而非等新事实，返回 recheck_after_seconds。"
-                            "需换题释放名额时用 defer_challenges，不能一边保留一边强开超过平台容量。"
-                            "待发节点因保留实例占满名额时，只需明确暂缓待换出的题，避免重复创建待发节点。"
+                            "确需换题释放名额时用 defer_challenges 并明确 release_instance=true；reason 比较已有进展、重建代价与后续题实际机会，不能仅因耗时长就释放。"
+                            "实例占满名额时可接力推进既有题或明确释放，避免重复创建待发节点。"
                             "剩余都是回访题时，优先复用已运行实例和断点，给执行者实质验证的目标；"
                             "不要因换节点或战术名就重新做已经验证的探测。"
                             "spending 是得分未变化区间的实际消耗；投入增长而没有新证据时调整执行方式，"
@@ -647,7 +650,7 @@ class MasterPlanning:
         from spiritscout.agents.secretary import Secretary, secretary_snapshot
 
         try:
-            advice = await Secretary(gateway, self.ctx.audit).advise(
+            advice = await Secretary(gateway, self.ctx.audit, blackboard=self.ctx.blackboard).advise(
                 secretary_snapshot(self.ctx.blackboard, payload), data)
             if not advice["suggestions"]:
                 return data
@@ -659,7 +662,7 @@ class MasterPlanning:
                 {"role": "user", "content": compact_json({
                     "task": payload, "draft": data, "advice": advice,
                     "world_state": self._world_state()}, 16000)},
-            ], audit=self.ctx.audit, actor=self.agent_id, task_type="meta_planning", response_format="json")
+            ], audit=self.ctx.audit, actor=self.agent_id, memory=decision_memory(self, "advice"), task_type="meta_planning", response_format="json")
             final = extract_json(response.content)
             if not isinstance(final, dict):
                 raise TypeError("灵枢未返回有效决策")
@@ -721,7 +724,7 @@ class MasterPlanning:
                             "\"target\": str（可选）, \"depends_on\": [依赖战术名，可空；"
                             "填 tactic 不要填标题], \"challenge_id\": "
                             "str（赛题节点必填，引用清单 id，不复写题面或完整赛题对象）}], "
-                            "\"defer_challenges\": [{\"id\": str, \"reason\": str}], "
+                            "\"defer_challenges\": [{\"id\": str, \"reason\": str, \"cancel_running\": bool, \"release_instance\": bool}], "
                             "\"retry_challenges\": [{\"id\": str, \"reason\": str}], "
                             "\"retain_instances\": [需跨节点保留现场的赛题ID]}。"
                             "target 只填新节点针对的单个授权目标（URL/主机名/CIDR，从 "
@@ -741,7 +744,9 @@ class MasterPlanning:
                             "停摆」属基础设施问题而非无解题空间——应继续迭代重试。"
                             "本题未配置提交接口时（flags.submit_enabled=false），"
                             "submitted/accepted 恒为 0 属正常：Flag 已提取即战果，"
-                            "由用户人工提交，不要为提交状态发起新节点。"
+                            "不要为提交状态发起新节点。flags.local_only=true 时无需提交接口，"
+                            "是否多答案只以用户配置 flags.multiple_answers 为准，不自行判断；"
+                            "false 时登记有证据的一个答案即完成，true 时须登记全部答案并确认完成。"
                             "新节点按可核验交付物描述——title 写清要产出什么、完成"
                             "判据是什么，不写动作步骤。"
                             "若 Flag/核心目标未收且仍有未试过的思路，"
@@ -750,20 +755,15 @@ class MasterPlanning:
                             "不要让卡题重攻排在它们前面）；"
                             "停止应依据用户目标与比赛规则的真实终止条件。比赛尚未结束且仍有待解题时，"
                             "本轮无得分、已扫完一轮或自己先前声明的重试次数都不是结束依据；"
-                            "应轮转回访、利用断点换思路。仅在目标完成、用户叫停、规则时限已到，"
+                            "应复用现场换思路或安排接力推进。仅在目标完成、用户叫停、规则时限已到，"
                             "或有可核验证据证明全局已无法继续时才停止，并给出对应事实。"
-                            "竞赛/靶场语境下，若某题反复尝试仍无新增有效信息、"
-                            "关键前提缺失，或继续投入的预期得分效率明显低于其他"
-                            "未完成题，可把该题放入 defer_challenges；系统会停止"
-                            "该题后续派发并关闭平台容器。暂缓原因简要保留已验证事实、"
-                            "证据位置和阻塞点，接着按列表顺序推进后续未尝试题。"
-                            "后续题首轮扫完、容易题已完成后，主动用 retry_challenges"
-                            "解除暂缓，并给出复用断点的回访节点；即使没有新线索也应"
-                            "回访，不等待用户催促。新线索、阻塞解除或用户明确要求"
-                            "同样可作为回访依据。"
-                            "不要按固定轮数机械暂缓，也不要为暂缓题写长篇复盘。"
-                            "换节点不等于应重置实例；跨节点取证时用 retain_instances 保留现场，"
-                            "需要换题或结束该目标时释放。已有失败证据应由后续节点复用。"
+                            "未得分或耗时较长不等于无进展；优先保留有新证据、阶段突破或"
+                            "正在验证假设的实例，重复失败时换方法或安排接力。defer_challenges"
+                            "默认只暂停新增派工，cancel_running=true 才取消在途工作；"
+                            "确需释放名额时显式 release_instance=true，先收口工作再关实例。"
+                            "reason 比较现场进展、重建代价和后续题机会；不能为轮换而轮换。"
+                            "retry_challenges 解除暂缓，优先复用实例和断点，说明本次方法变化"
+                            "或回访依据，不机械重复已失败路径。不设置固定时长或回合顶。"
                             "spending 展示得分未变化区间的实际消耗，据此调整方法，避免同质重复派发；"
                             "没有供应商证据不要断言余额正常。"
                             "questions 可选（至多 2 条）：仅当继续迭代必须依赖"
@@ -936,10 +936,7 @@ class MasterPlanning:
             f"用户任务意图（合约范围与目标由用户口述如下，你据此自行决策"
             f"并下发任务给子 Agent）：\n「{mission}」\n"
             if mission else "")
-        rules = self._rules()
-        rules_block = (f"用户既定执行规则（全程严格遵守，与其冲突的临时判断"
-                       f"以规则为准）：\n「{rules}」\n"
-                       if rules else "")
+        rules_block = "用户既定规则保存在黑板，按规则引用读取原文后决策。\n" if self._rules() else ""
         exp_block = self._recent_experience()
         exp_block = (f"实战经验（前几次会话积累的参考事实与信号，非步骤；"
                      f"采纳自行判断）：\n{exp_block}\n"
@@ -975,4 +972,4 @@ class MasterPlanning:
         from spiritscout.gateway.world_state import snapshot
 
         guard = getattr(getattr(self.ctx, "policy", None), "guard", None)
-        return snapshot(guard=guard, blackboard=getattr(self.ctx, "blackboard", None))
+        return snapshot(guard=guard, blackboard=getattr(self.ctx, "blackboard", None), references=True)

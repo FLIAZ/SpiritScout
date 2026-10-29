@@ -1,102 +1,91 @@
-"""审计投影展示真实步骤、产出及其进入后续上下文的关系。"""
+"""图直接投影持久化事实，执行日志不制造节点或因果。"""
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
-from spiritscout.web.process_graph import project_process, read_process_graph
+from spiritscout.blackboard import Blackboard
+from spiritscout.core.models import BlackboardLayer
+from spiritscout.web.process_graph import project_blackboard, rules_text
 
 
 class ProcessGraphTests(unittest.TestCase):
-    def test_projection_is_bounded_cached_and_does_not_duplicate_dispatch_receipts(self) -> None:
+    def test_only_blackboard_facts_rules_and_explicit_evidence_links(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'audit.jsonl'
-            events = [{'seq': i, 'actor': 'a', 'type': 'agent.turn', 'detail': {
-                'task_id': 't', 'route_id': 'r', 'turn': i}} for i in range(1, 501)]
-            path.write_text(''.join(json.dumps(e) + '\n' for e in events))
-            graph = read_process_graph(path)
-            self.assertTrue(graph['has_more'])
-            self.assertEqual(len(graph['nodes']), 320)
-            with patch('spiritscout.web.process_graph.read_activity_page', side_effect=AssertionError):
-                graph['nodes'].clear()
-                self.assertEqual(len(read_process_graph(path)['nodes']), 320)
-        graph = project_process([
-            {'seq': 1, 'actor': 'a', 'type': 'agent.tool_call', 'detail': {
-                'task_id': 't', 'route_id': 'r', 'calls': [{'id': 'internal', 'name': 'investigate'}]}},
-            {'seq': 2, 'actor': 'a', 'type': 'agent.turn', 'detail': {
-                'task_id': 't', 'route_id': 'r', 'turn': 1}},
-            {'seq': 3, 'actor': 'a', 'type': 'agent.tool_result', 'detail': {
-                'task_id': 't', 'route_id': 'r', 'id': 'internal', 'ok': True, 'note': '调度摘要'}},
-        ])
-        self.assertEqual(len(graph['nodes']), 1)
+            bb = Blackboard(Path(tmp) / 'bb.db')
+            self.addCleanup(bb.close)
+            bb.write(BlackboardLayer.TASK_STATE, 'step', {'title': '开始扫描'})
+            bb.write(BlackboardLayer.TOPOLOGY, 'reply', {'kind': 'reply', 'text': '已写输出产物'})
+            bb.write(BlackboardLayer.TARGET_AUTH, 'user-context', {'standing_rules': '仅测试 A' * 10000})
+            bb.write(BlackboardLayer.ASSET, 'asset', {'value': 'https://fixture.test/login'})
+            bb.write(BlackboardLayer.TOPOLOGY, 'fact', {'kind': 'finding', 'text': '表单需要登录',
+                     'evidence_refs': ['asset', 'response.log'], 'output_file': 'response.log'})
+            graph = project_blackboard(bb)
+            self.assertEqual(len(graph['nodes']), 3)
+            self.assertEqual({n['kind'] for n in graph['nodes']}, {'finding', 'rule'})
+            self.assertEqual(len(graph['edges']), 1)
+            asset = next(n for n in graph['nodes'] if n['record_id'] == 'asset')
+            self.assertEqual(asset['reference_type'], 'assets')
+            fact = next(n for n in graph['nodes'] if n['record_id'] == 'fact')
+            self.assertIn('response.log', fact['body'])
+            self.assertEqual(fact['reference_type'], '')
+            self.assertIn('provenance', fact)
+            self.assertNotIn('仅测试 A', str(graph))
+            self.assertNotIn('step', {node['record_id'] for node in graph['nodes']})
 
-    def test_results_feed_next_turn_without_inventing_parallel_tasks(self) -> None:
-        events = []
+    def test_business_facts_and_evidence_exclude_workflow_steps_and_hypotheses(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bb = Blackboard(Path(tmp) / 'bb.db')
+            self.addCleanup(bb.close)
+            bb.write(BlackboardLayer.TOPOLOGY, 'business-context', {
+                'facts': [{'statement': '登录表单存在', 'evidence_refs': ['E1']}],
+                'evidence': [{'id': 'E1', 'url': 'https://fixture.test/login'}],
+                'workflows': [{'name': '登录', 'steps': ['打开', '提交']}],
+                'hypotheses': [{'statement': '可能存在越权'}]})
+            graph = project_blackboard(bb)
+            self.assertEqual({n['kind'] for n in graph['nodes']}, {'finding', 'evidence'})
+            self.assertEqual(len(graph['edges']), 1)
+            self.assertNotIn('可能存在越权', str(graph))
+            self.assertNotIn('提交', str(graph))
 
-        def add(kind: str, **detail) -> None:
-            events.append({'seq': len(events) + 1, 'actor': 'web-a', 'type': kind,
-                           'detail': {'task_id': 't', 'route_id': 'r', **detail}})
+    def test_ambiguous_ids_do_not_invent_evidence_edges(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bb = Blackboard(Path(tmp) / 'bb.db')
+            self.addCleanup(bb.close)
+            bb.write(BlackboardLayer.ASSET, 'same', {'value': '入口'})
+            bb.write(BlackboardLayer.RECON_CLUE, 'same', {'value': '线索'})
+            bb.write(BlackboardLayer.TOPOLOGY, 'fact', {'kind': 'finding', 'text': '结论',
+                     'evidence_refs': ['same']})
+            self.assertFalse(project_blackboard(bb)['edges'])
 
-        add('agent.turn', turn=1)
-        add('agent.tool_call', turn=1, calls=[{'id': 'c1', 'name': 'http_request'}])
-        add('agent.tool_result', id='c1', name='http_request', ok=True, result='入口响应')
-        add('agent.turn', turn=2)
-        add('agent.tool_call', turn=2, calls=[{'id': 'c2', 'name': 'shell'}])
-        add('agent.tool_result', id='c2', name='shell', ok=True, result='证据', output_file='out.log')
-        add('agent.turn', turn=3)
-        graph = project_process(events)
-        nodes = graph['nodes']
-        steps = [n for n in nodes if n['kind'] == 'step']
-        outputs = [n for n in nodes if n['kind'] == 'observation']
-        artifact = next(n for n in nodes if n['kind'] == 'artifact')
-        self.assertEqual(len(steps), 3)
-        self.assertEqual({n['task_id'] for n in nodes}, {'t'})
-        self.assertIn({'source': outputs[0]['id'], 'target': steps[1]['id'],
-                       'kind': 'context'}, graph['edges'])
-        self.assertIn({'source': artifact['id'], 'target': steps[2]['id'],
-                       'kind': 'context'}, graph['edges'])
+    def test_structured_response_is_reference_and_versioned_fact_link_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bb = Blackboard(Path(tmp) / 'bb.db')
+            self.addCleanup(bb.close)
+            bb.write(BlackboardLayer.RECON_CLUE, 'response', {
+                'value': 'https://fixture.test/api', 'detail': {'status_code': 403}})
+            bb.write(BlackboardLayer.TOPOLOGY, 'observed', {'kind': 'finding', 'text': '普通成员被拒绝'})
+            row = bb.read_versioned(BlackboardLayer.TOPOLOGY, 'observed')
+            bb.write(BlackboardLayer.TOPOLOGY, 'derived', {
+                'kind': 'finding', 'text': '管理接口存在权限边界',
+                'evidence_refs': [f'topology:observed@{row[1]}']})
+            graph = project_blackboard(bb)
+            response = next(n for n in graph['nodes'] if n['record_id'] == 'response')
+            self.assertEqual(response['reference_type'], 'evidence')
+            self.assertEqual(response['title'], 'https://fixture.test/api')
+            self.assertEqual(len(graph['edges']), 1)
 
-    def test_ambiguous_old_events_are_not_attached_to_another_task(self) -> None:
-        events = [{'actor': 'same', 'seq': i, 'type': 'agent.turn',
-                   'detail': {'task_id': t, 'route_id': t, 'route': 'solve', 'turn': 1}}
-                  for i, t in enumerate(['a', 'b'])]
-        events.append({'actor': 'same', 'seq': 3, 'type': 'agent.note',
-                       'detail': {'route': 'solve', 'text': '未知归属'}})
-        graph = project_process(events)
-        self.assertEqual(len(graph['nodes']), 2)
-        self.assertFalse(graph['edges'])
-
-    def test_failed_results_are_observations_not_verified_findings(self) -> None:
-        graph = project_process([
-            {'seq': 1, 'actor': 'a', 'type': 'agent.turn',
-             'detail': {'task_id': 't', 'route_id': 'r', 'turn': 1}},
-            {'seq': 2, 'actor': 'a', 'type': 'agent.tool_result',
-             'detail': {'task_id': 't', 'route_id': 'r', 'ok': False, 'result': '<script>fail</script>'}},
-            {'seq': 3, 'actor': 'a', 'type': 'agent.delta',
-             'detail': {'task_id': 't', 'route_id': 'r', 'turn': 1,
-                        'kind': 'reasoning', 'text': '不展示内部思考'}},
-        ])
-        self.assertEqual(graph['nodes'][-1]['status'], 'failed')
-        self.assertEqual(graph['nodes'][-1]['kind'], 'observation')
-        self.assertNotIn('不展示内部思考', str(graph))
-
-    def test_late_results_enter_next_context_without_rewinding_active_turn(self) -> None:
-        base = {'task_id': 't', 'route_id': 'r'}
-        details = [
-            ('agent.turn', {'turn': 1}),
-            ('agent.tool_call', {'turn': 1, 'calls': [{'id': 'late', 'name': 'shell'}]}),
-            ('agent.turn', {'turn': 2}),
-            ('agent.tool_result', {'turn': 1, 'id': 'late', 'name': 'shell', 'result': '迟到结果'}),
-            ('agent.turn', {'turn': 3}),
-            ('task.cancelled', {}),
-        ]
-        graph = project_process([{'seq': i, 'actor': 'a', 'type': kind,
-                                  'detail': {**base, **detail}}
-                                 for i, (kind, detail) in enumerate(details)])
-        result = next(n for n in graph['nodes'] if n['kind'] == 'observation')
-        last = next(n for n in graph['nodes'] if n['kind'] == 'step' and n['turn'] == 3)
-        self.assertIn({'source': result['id'], 'target': last['id'], 'kind': 'context'}, graph['edges'])
-        self.assertEqual(last['status'], 'cancelled')
+    def test_rule_content_is_readable_and_empty_templates_are_not_nodes(self) -> None:
+        self.assertEqual(rules_text({'kind': 'rule', 'content': '保持会话，遇到登录等我操作'}),
+                         '保持会话，遇到登录等我操作')
+        text = rules_text({'auth_id': 'auth', 'target_description': 'https://fixture.test',
+                           'scope': {'allowed_urls': [], 'allowed_domains': [], 'testing_rules': ''}})
+        self.assertEqual(text, '授权目标：https://fixture.test')
+        self.assertEqual(rules_text({'mission': '', 'standing_rules': '', 'statements': []}), '')
+        self.assertIn('用户输入：继续调查', rules_text({'statements': [{'kind': 'message', 'text': '继续调查'}]}))
+        with tempfile.TemporaryDirectory() as tmp:
+            bb = Blackboard(Path(tmp) / 'bb.db')
+            self.addCleanup(bb.close)
+            bb.write(BlackboardLayer.TARGET_AUTH, 'empty', {'mission': '', 'standing_rules': '', 'statements': []})
+            self.assertEqual(project_blackboard(bb)['nodes'], [])

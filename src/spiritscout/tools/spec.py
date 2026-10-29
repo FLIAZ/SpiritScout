@@ -66,6 +66,7 @@ class ToolSpec:
     # 仅宿主可信配置赋值，远端工具描述不能授予角色权限。
     allowed_agents: tuple[str, ...] = ()
     internet_search: bool = False  # 宿主声明的公开网页搜索能力
+    reuse_ttl_seconds: float = 0.0  # 仅宿主明确声明无状态只读工具可短时复用
 
 
 @dataclass
@@ -82,6 +83,8 @@ class ToolResult:
     attempts: int = 1
     rolled_back: bool = False  # 回滚保护触发标记
     invocation_id: str = ""
+    source_invocation_id: str = ""
+    reuse: str = ""
     execution_status: str = ""
     effect_status: str = "none"
 

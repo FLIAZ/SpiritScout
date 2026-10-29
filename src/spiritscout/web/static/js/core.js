@@ -8,6 +8,22 @@ const S = { view: "home", cur: null, tab: "chat", sessions: [], state: null,
             projects: [] };
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
+// 内部模型标识用于路由和统计分组；展示时独立还原，不修改原始主键。
+function modelDisplayName(reference, provider = "") {
+  const value = String(reference ?? "");
+  if (value.startsWith("@") && value.length < 16384 && /^@[A-Za-z0-9_-]+$/.test(value)) {
+    try {
+      const base64 = value.slice(1).replace(/-/g, "+").replace(/_/g, "/");
+      const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+      const pair = JSON.parse(new TextDecoder("utf-8", {fatal:true}).decode(bytes));
+      if (Array.isArray(pair) && pair.length === 2 && pair.every(item => typeof item === "string" && item.length)) {
+        return `${pair[0]} / ${pair[1]}`;
+      }
+    } catch { /* 普通旧模型名或损坏标识按原文保留，避免误认供应商。 */ }
+  }
+  return provider ? `${provider} / ${value}` : value;
+}
+
 async function api(path, opt = {}) {
   const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opt });
   if (r.status === 401 && !String(path).startsWith("/api/auth/")) {

@@ -38,6 +38,7 @@ executor:                      # 工具执行器（CLI/Docker/MCP 三态）
   docker_image: kalilinux/kali-rolling:latest
   default_timeout_seconds: 300
   max_output_chars: 20000      # 输出窗口截断（防上下文污染）
+  http_max_body_bytes: 8388608  # HTTP 解压后正文下载上限（8 MiB），独立于模型预览
   ctf_network_isolation: true  # CTF 模式网络隔离（硬约束）
   docker_memory_mb: 512        # Docker 沙箱加固：资源硬限额
   docker_cpus: 1.0

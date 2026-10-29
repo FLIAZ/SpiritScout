@@ -127,10 +127,10 @@ def _build_argv(workspace: Path, rundir: Path, inner: list[str], *,
     # 整个控制目录不可见，只开放约定的产物目录；同样覆盖位于 /tmp
     # 或主目录之外的工作区，不能仅靠遮蔽 execution.key 保护数据库。
     argv += ["--tmpfs", str(workspace), "--bind", str(rundir), str(rundir)]
-    for name in ("attachments", "artifacts"):
+    for name in ("attachments", "artifacts", "http-responses"):
         directory = workspace / name
         if directory.is_dir():
-            argv += ["--ro-bind" if name == "attachments" else "--bind",
+            argv += ["--bind" if name == "artifacts" else "--ro-bind",
                      str(directory), str(directory)]
     # 空控制目录本身也只读，不能伪造同名控制文件；不递归改变产物挂载。
     argv += ["--remount-ro", str(workspace)]

@@ -52,6 +52,34 @@ class Fixture(BaseHTTPRequestHandler):
 
 
 class VerifierTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reading_source_keeps_original_execution_and_is_not_independent_control(self) -> None:
+        from spiritscout.tools.http_responses import SPEC, http_response_read
+
+        self.tools.register_builtin("http_response_read", http_response_read, SPEC)
+        self.ctx.builtin_ctx["workspace_root"] = self.tmp.name
+
+        async def respond(messages, **kwargs):
+            results = [json.loads(m["content"]) for m in messages if m["role"] == "tool"]
+            calls = []
+            if not results:
+                calls = [{"id": "fetch", "name": "http_probe", "arguments": {"url": self.url + "/record/2"}}]
+            elif len(results) == 1:
+                calls = [{"id": "read", "name": "http_response_read",
+                          "arguments": {"body_ref": results[0]["parsed"]["body_ref"]}}]
+            if calls:
+                return ChatResponse(cost_usd=0, latency_ms=0, content="取得实际证据", model="fixture",
+                                    prompt_tokens=1, completion_tokens=1, tool_calls=calls)
+            self.assertEqual(results[0]["execution_id"], results[1]["execution_id"])
+            proof = {"execution_id": results[1]["execution_id"], "quote": "other-user-record:fixture-only"}
+            return ChatResponse(cost_usd=0, latency_ms=0, model="fixture", prompt_tokens=1, completion_tokens=1,
+                content=json.dumps({"verdict": "confirmed", "reason": "读取记录", "harm": "读取其他用户资料",
+                                    "rule_quote": RULE, "evidence": [proof], "controls": [proof]}))
+
+        self.gateway.chat.side_effect = respond
+        result = await VerifierAgent(self.ctx).review(self.candidate(), dict(self.rules))
+        self.assertEqual(result["verdict"], "inconclusive")
+        self.assertEqual(len(Fixture.hits), 1)
+
     async def asyncSetUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.bb = Blackboard(Path(self.tmp.name) / "bb.db")
@@ -111,13 +139,16 @@ class VerifierTests(unittest.IsolatedAsyncioTestCase):
             seen.append([dict(message) for message in messages])
             if len(seen) == 1:
                 initial = json.loads(messages[1]["content"])["world_state"]
-                self.assertEqual(initial["authorization"]["testing_rules"], rules)
-                self.assertEqual(initial["project_rules"], project_rule)
+                ref = initial["authorization"]["testing_rules"]["blackboard_ref"]
+                self.assertEqual(self.bb.read(BlackboardLayer(ref["layer"]), ref["record_id"])["content"], rules)
+                ref = initial["project_rules"]["blackboard_ref"]
+                self.assertEqual(self.bb.read(BlackboardLayer(ref["layer"]), ref["record_id"])["content"], project_rule)
                 world_state.record_user_statement(self.bb, second)
                 return await original(messages, **kwargs)
             fragment = messages[-1]["content"]
             update = json.loads(fragment.split("\n", 1)[1].rsplit("\n", 1)[0])
-            self.assertEqual(update["user_context"]["statements"], [first, second])
+            ref = update["user_context"]["blackboard_ref"]
+            self.assertEqual(self.bb.read(BlackboardLayer(ref["layer"]), ref["record_id"])["statements"], [first, second])
             return ChatResponse(cost_usd=0, latency_ms=0, content=json.dumps({
                 "verdict": "out_of_rules", "reason": "用户项目规则不收录演示租户", "rule_quote": project_rule}),
                 model="fixture", prompt_tokens=1, completion_tokens=1)

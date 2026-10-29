@@ -55,3 +55,7 @@ configs/models.yaml
 /home.html
 /login_sms.yml
 /login_snapshot.yml
+
+# 维护者本机的独立 Docker 验证项目；协作者无需下载，不随仓库分发
+/ctfy-docker/
+/tsecbench-docker/

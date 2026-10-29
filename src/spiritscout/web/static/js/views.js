@@ -392,6 +392,7 @@ function renderSessionHead() {
     ${running ? `<button class="btn danger sm" id="op-stop">停止</button>` : ""}
     <a class="btn sm" href="/api/sessions/${S.cur}/report/download" download>下载报告</a>
     <a class="btn sm" href="/api/sessions/${S.cur}/audit/download" download>导出审计</a>
+    <button class="btn sm" id="op-storage">清理存储</button>
     <button class="btn danger sm" id="op-del" ${running ? "disabled" : ""}>删除</button>`;
   if (running) $("#op-pause").onclick = async () => {
     const url = `/api/sessions/${S.cur}/${s.paused ? "resume" : "pause"}`;
@@ -403,6 +404,7 @@ function renderSessionHead() {
     try { await api(`/api/sessions/${S.cur}/stop`, { method: "POST", body: "{}" });
       toast("已发送停止"); refreshState(); } catch (e) { toast(e.message, true); }
   };
+  $("#op-storage").onclick = () => SessionStorage.open(S.cur);
   $("#op-del").onclick = (ev) => armDelete(ev.currentTarget, S.cur);
 }
 
@@ -438,17 +440,6 @@ function renderChips() {
 }
 
 /* ================= 拓扑画布 ================= */
-function topoModel() {
-  const tp = (S.state && S.state.topology) || { dag_nodes: [], tasks: [] };
-  const nodes = (tp.dag_nodes || []).map(n => ({...n})), tasks = tp.tasks || [];
-  const cardsOf = n => {
-    const ids = new Set(n.task_ids || []);
-    return tasks.filter(t => ids.has(t.task_id) || t.parent_dag_node === n.node_id);
-  };
-  const orphans = tasks.filter(t =>
-    !nodes.some(n => (n.task_ids || []).includes(t.task_id) || t.parent_dag_node === n.node_id));
-  return { nodes, cardsOf, orphans };
-}
 const nodeStatus = s => ({ done: "done", completed: "done", active: "active",
                            running: "active" }[String(s || "").toLowerCase()] || "pending");
 
@@ -480,9 +471,11 @@ function topoApplyView(box, v) {
   if (stage) stage.style.transform = `translate(${v.tx}px, ${v.ty}px) scale(${v.s})`;
 }
 function topoFit(box, w, h) {
-  const vw = Math.max(box.clientWidth, 240), vh = Math.max(box.clientHeight, 240);
+  const live = box.querySelector("#topo-live");
+  const reserved = live ? live.offsetTop + live.offsetHeight + 12 : 0;
+  const vw = Math.max(box.clientWidth, 240), vh = Math.max(box.clientHeight - reserved, 180);
   const s = Math.min(vw / (w + 28), vh / (h + 28), 1.2);
-  return { s, tx: (vw - w * s) / 2, ty: (vh - h * s) / 2 };
+  return { s, tx: (vw - w * s) / 2, ty: reserved + (vh - h * s) / 2 };
 }
 function topoZoom(box, k) {
   const v = S.topoView;
@@ -495,407 +488,95 @@ function topoZoom(box, k) {
   topoApplyView(box, v);
 }
 
+function renderTopoActivity() {
+  const panel = $("#topo-live");
+  if (!panel || !S.state) return;
+  const summaries = typeof TaskTrace !== "undefined" ? TaskTrace.progressSnapshot() : [];
+  const rows = TopologyLayout.activity(S.state, summaries);
+  const status = S.state.session?.status || "created";
+  const labels = {running:"执行中",done:"已完成",completed:"已完成",failed:"失败",cancelled:"已停止",stopped:"已停止",interrupted:"已中断",pruned:"已暂缓"};
+  const hasFacts = S.topoGraph?.nodes.some(node=>node.kind==="finding");
+  panel.innerHTML = `<header><b>${TERMINAL.has(status) ? "最后推进情况" : "当前推进"}</b><span>${esc(labels[status] || status)}</span></header>
+    ${rows.length ? rows.map(row=>`<div class="topo-live-row"><strong>${esc(actorName(row.actor || ""))} · ${esc(labels[row.status] || row.status || "执行中")}</strong><p>${esc(row.text || "尚未收到阶段说明。")}</p></div>`).join("") : '<p>尚未收到子任务进展，初始化与执行记录见会话页。</p>'}
+    ${!hasFacts ? '<small>尚未发布有依据的产出事实；正在执行不代表没有推进。</small>' : ''}`;
+}
+
+async function loadTopoRules(record, offset = 0) {
+  const session=S.cur, key=JSON.stringify([session,record.record_id,record.version]);
+  S.topoRuleCache ||= new Map();
+  let cached=S.topoRuleCache.get(key);
+  const panel=$("#topo-detail");
+  if (!offset && cached) {
+    const target=panel?.querySelector(".topo-rule-content");
+    if(target) target.textContent=cached.text || "该记录未包含用户规则或任务原话。";
+  } else {
+    try {
+      const data=await api(`/api/sessions/${encodeURIComponent(session)}/topology/rules?record_id=${encodeURIComponent(record.record_id)}&offset=${offset}`);
+      if(S.cur!==session || panel?._curId!==record.id) return;
+      if(offset && cached?.version!==data.version) throw new Error("规则已更新，请重新打开记录");
+      cached={text:(offset ? cached?.text || "" : "")+data.text,next:data.next_offset,version:data.version};
+      S.topoRuleCache.set(key,cached);
+      panel.querySelector(".topo-rule-content").textContent=cached.text || "该记录未包含用户规则或任务原话。";
+    } catch(error) {
+      if(S.cur===session && panel?._curId===record.id) panel.querySelector(".topo-rule-content").textContent=`读取失败：${error.message}`;
+      return;
+    }
+  }
+  if(panel?._curId===record.id) {
+    const more=panel.querySelector("[data-rules-more]");
+    if(more) {more.hidden=cached?.next == null;more.onclick=()=>loadTopoRules(record,cached.next);}
+  }
+}
+
 function drawTopo() {
   const box = $("#topo");
   if (!S.state) { box.innerHTML = ""; return; }
-  const { nodes, cardsOf, orphans } = topoModel();
-  const running = !TERMINAL.has(S.state.session.status);
-  // 督导台账（灵枢实时给子 Agent 的方向建议），任务卡据此挂提示芯片
-  const ring = S.state.ring || { attempts: 0, steering: {} };
-  const taskCard = t => {
-    const tot = t.routes_total || 0, done = t.routes_done || 0;
-    const pct = tot ? Math.round(done / tot * 100) : (t.status === "done" ? 100 : 0);
-    const stCls = t.status === "done" ? "green" : t.status === "failed" ? "red" : "blue";
-    const steer = (ring.task_steering || {})[t.task_id] || (ring.steering || {})[t.agent_type];
-    const steerStatus = steer ? [...new Set(Object.values(steer.feedback || {})
-      .filter(f => f.task_id === t.task_id).map(f => STEERING_STATUS_CN[f.status] || f.status))].join(" / ") : "";
-    return `<div class="tcard" data-agent="${esc(t.agent_type || "")}" data-task="${esc(t.task_id || "")}">
-      <div class="row1"><span class="who">${esc(agentName(t.agent_type))}</span>
-        <span class="what" title="${esc(TASK_CN[t.task_type] || t.task_type || "")}">${esc(TASK_CN[t.task_type] || t.task_type || "")}</span>
-        <span class="tag ${stCls} st">${esc(t.status || "")}</span></div>
-      ${tot ? `<div class="prog ${done === tot ? "done" : ""}"><i style="width:${pct}%"></i></div>` : ""}
-      <div class="steps">${tot ? `路线 ${done}/${tot} · ` : ""}步骤 ${t.steps || 0}</div>
-      ${steer ? `<div class="steer-chip" title="${esc(steer.rationale || "")}">灵枢（${esc(steerStatus || "待接收")}）：${esc(steer.hint || "")}</div>` : ""}
-    </div>`;
-  };
-
-  // 先收集节点和来源边，全部就绪后统一计算横向层级。
-  const depthIndex = new Map(nodes.map(n => [n.node_id, 0]));
-  const ORPHAN = "__orphan__";
-  if (orphans.length) {
-    depthIndex.set(ORPHAN, 0);
-  }
-  // 路由分支层：每个任务的路线作为子分支节点挂在其后（推理摘要并入分支）
-  const routeMeta = new Map();
-  const digestFor = agentType => {
-    for (const [k, v] of S.think) {
-      if (String(k).replace(/-[0-9a-f]{8,}$/i, "").replace(/-/g, "_") === agentType)
-        return (v.tail || "").replace(/\s+/g, " ").slice(-150);
-    }
-    return "";
-  };
-  const routesAll = [];
-  const routeSeen = new Map();
-  [...nodes, ...(orphans.length ? [{node_id: ORPHAN, task_ids: orphans.map(t => t.task_id)}] : [])].forEach(n => {
-    cardsOf(n).forEach(t => {
-      ((t && t.routes) || []).forEach(r => {
-        const key = JSON.stringify([n.node_id, t.task_id, r.route_id || r.name || ""]);
-        const prev = routeSeen.get(key);
-        if (prev) {
-          prev.status = prev.status === "done" ? "done" : r.status;
-          prev.progress = Math.max(prev.progress || 0, r.progress || 0);
-          if (r.note) prev.note = r.note;
-        } else {
-          const item = { parent: n.node_id, agent: t.agent_type,
-                         task_id: t.task_id, route_id: r.route_id,
-                         name: r.name, status: r.status,
-                         progress: r.progress, note: r.note };
-          routeSeen.set(key, item);
-          routesAll.push(item);
-        }
-      });
-    });
-  });
-  if (routesAll.length) {
-    routesAll.forEach(r => {
-      const id = `__route_${JSON.stringify([r.parent, r.task_id, r.route_id || r.name || ""])}`;
-      depthIndex.set(id, 0);
-      routeMeta.set(id, r);
-      nodes.push({ node_id: id, title: r.name || "路线",
-                   tactic: `${Math.round((r.progress || 0) * 100)}%`,
-                   status: r.status === "running" ? "running" : r.status,
-                   depends_on: [] });
-    });
-  }
-
-  // 发现优先连接到来源路线；路线不在图上时只接受唯一的任务或轮次来源。
-  const findings = (S.state && S.state.findings) || [];
-  // 展示上限：防画布刷屏；被折叠的数量写进图例，台账仍在发现组详情
-  const uniqAssets = [...new Map(
-    findings.filter(f => f.type === "asset")
-            .map(f => [String(f.url || f.text || ""), f])).values()];
-  const dispFindings = [
-    ...uniqAssets.slice(-12),
-    ...findings.filter(f => f.type === "note").slice(-10),
-    ...findings.filter(f => f.type === "flag").slice(-4),
-  ].sort((a, b) => (a.ts || 0) - (b.ts || 0));
-  const foldedFindings = Math.max(0, findings.length - dispFindings.length);
-  const uniqueRoute = candidates => candidates.length === 1 ? candidates[0][0] : "";
-  const producerOf = f => {
-    if (f.parent_finding_id) {
-      const index = dispFindings.findIndex(x => x.finding_id === f.parent_finding_id);
-      if (index >= 0) return FNODE(index);
-    }
-    const candidates = [...routeMeta].filter(([, r]) =>
-      (!f.task_id || r.task_id === f.task_id) &&
-      (!f.parent_dag_node || r.parent === f.parent_dag_node) &&
-      (!f.agent || r.agent === f.agent) &&
-      (f.route_id ? r.route_id === f.route_id : f.route && r.name === f.route));
-    const route = uniqueRoute(candidates);
-    if (route) return route;
-    if (f.task_id) {
-      const owners = nodes.filter(n => cardsOf(n).some(t => t.task_id === f.task_id));
-      if (owners.length === 1) return owners[0].node_id;
-      if (orphans.some(t => t.task_id === f.task_id)) return ORPHAN;
-    }
-    if (f.parent_dag_node && depthIndex.has(f.parent_dag_node)) return f.parent_dag_node;
-    // 旧记录只有轮次时，必须唯一匹配，不能随意挂到同轮其他任务。
-    const owners = nodes.filter(n => n.round_created === f.round && f.round != null);
-    return owners.length === 1 ? owners[0].node_id : "";
-  };
-  const FNODE = i => `__finding_${dispFindings[i].finding_id || JSON.stringify([dispFindings[i].task_id, dispFindings[i].agent, dispFindings[i].route, dispFindings[i].type, dispFindings[i].url, dispFindings[i].text, dispFindings[i].ts])}`;
-  if (dispFindings.length) {
-    dispFindings.forEach((f, i) => {
-      const id = FNODE(i);
-      depthIndex.set(id, 0);
-      const kind = ({ note: "笔记", flag: "Flag", asset: "入口" })[f.type]
-        || f.type || "发现";
-      nodes.push({ node_id: id,
-                   title: String(f.url || f.text || "").slice(0, 90),
-                   tactic: f.round ? `${kind} · R${f.round}` : kind,
-                   status: f.type === "flag" ? "done" : "running",
-                   depends_on: [] });
-    });
-  }
-  // 过程投影与调度 DAG 分层：观察/产物是独立节点，随后进入下一步上下文。
-  const process = S.state.topology?.process || {nodes:[],edges:[]};
-  const processMeta = new Map((process.nodes || []).map(n=>[n.id,n]));
-  const processEdges = new Map();
-  const processKinds = {step:"执行步骤",observation:"工具观察",finding:"发现记录",artifact:"输出产物"};
-  for(const p of processMeta.values()) {
-    depthIndex.set(p.id,0);
-    const dependencies=(process.edges || []).filter(e=>e.target === p.id && processMeta.has(e.source));
-    let parent="";
-    if(!dependencies.length) {
-      const candidates=[...routeMeta].filter(([,r])=>r.task_id === p.task_id && r.route_id === p.route_id);
-      if(candidates.length === 1) parent=candidates[0][0];
-    }
-    nodes.push({node_id:p.id,title:p.kind === "step" && p.body ? p.body.replace(/\s+/g," ").slice(0,90) : p.title,
-      tactic:processKinds[p.kind] || "执行记录",status:p.status,
-      depends_on:dependencies.length ? dependencies.map(e=>e.source) : parent ? [parent] : []});
-    for(const e of dependencies) processEdges.set(JSON.stringify([e.source,e.target]),e.kind);
-  }
-  S.topoProcess=processMeta;
-  const ids = [...depthIndex.keys()];
-  if (!ids.length) {
-    box.innerHTML = `<div class="empty-note">等待灵枢规划——任务拓扑将在此实时展开</div>`;
-    renderApprovals();
-    renderQuestions();
-    return;
-  }
-  const nodeOf = new Map(nodes.map(n => [n.node_id, n]));
-  const preds = new Map(ids.map(id => [id, []])), succs = new Map(ids.map(id => [id, []]));
-  for (const n of nodes) {
-    if (!depthIndex.has(n.node_id)) continue;
-    for (const dep of (n.depends_on || [])) {
-      if (!depthIndex.has(dep)) continue;
-      preds.get(n.node_id).push(dep);
-      succs.get(dep).push(n.node_id);
-    }
-  }
-  // 路由分支连线：路线节点 ← 产生它的任务节点
-  routesAll.forEach(r => {
-    const id = `__route_${JSON.stringify([r.parent, r.task_id, r.route_id || r.name || ""])}`;
-    if (depthIndex.has(r.parent)) {
-      preds.get(id).push(r.parent);
-      succs.get(r.parent).push(id);
-    }
-  });
-  // 只按已知出处连线；未知出处的旧发现作为独立根节点保留。
-  dispFindings.forEach((f, i) => {
-    const src = producerOf(f), id = FNODE(i);
-    if (src && src !== id && depthIndex.has(src)) {
-      preds.get(id).push(src);
-      succs.get(src).push(id);
-    }
-  });
-  const graph = TopologyLayout.layers(ids, preds);
-  const layerIds = graph.columns;
-  graph.depth.forEach((d, id) => depthIndex.set(id, d));
-  topoReorder(layerIds, preds, succs);
-
-  const expanded = S.topoExpand || {};
-  const cardHtml = n => {
-    if (String(n.node_id).startsWith("__route_")) {
-      const r = routeMeta.get(n.node_id) || {};
-      const pct = Math.round((r.progress || 0) * 100);
-      const st = nodeStatus(r.status);
-      const digest = digestFor(r.agent);
-      const isExp = expanded[n.node_id];
-      return `<div class="tnode bnode" data-node="${esc(n.node_id)}" style="visibility:hidden">
-        <div class="tact"><span class="dot ${st}"></span><b title="${esc(r.name || "")}">${esc(agentName(r.agent))} · ${esc(r.name || "")}</b>
-          <span class="tac">${pct}%</span></div>
-        <div class="prog ${pct === 100 ? "done" : ""}"><i style="width:${pct}%"></i></div>
-        ${r.note ? `<div class="rt-note">${esc(isExp ? r.note : (r.note || "").slice(0, 120))}</div>` : ""}
-        ${digest ? `<div class="mind-digest">${esc(digest)}</div>` : ""}
-      </div>`;
-    }
-    const st = nodeStatus(n.status);
-    return `<div class="tnode ${st === "active" ? "active" : ""}" data-node="${esc(n.node_id)}"
-      style="visibility:hidden">
-      <div class="tact"><span class="dot ${st}"></span><b title="${esc(n.title || n.tactic)}">${esc(n.title || n.tactic)}</b>
-        <span class="tac" title="${esc(n.tactic || "")}">${esc(n.tactic || "")}</span></div>
-      <div class="tcards">${cardsOf(n).map(taskCard).join("")}</div></div>`;
-  };
-  const orphanCard = `<div class="tnode" data-node="${ORPHAN}" style="visibility:hidden">
-      <div class="tact"><span class="dot ${running ? "active" : "done"}"></span><b>下发任务</b></div>
-      <div class="tcards">${orphans.map(taskCard).join("")}</div></div>`;
-  const steerItems = [...Object.entries(ring.steering || {}),
-    ...Object.values(ring.task_steering || {}).map(v => [v.agent, v])];
-  const opinions = (S.state && S.state.user_opinions) || [];
-  const latestOp = opinions.length ? opinions[opinions.length - 1] : null;
-  const replies = (S.state && S.state.master_replies) || [];
-  const latestReply = replies.length ? replies[replies.length - 1] : null;
-  const unodeHtml = (latestOp || latestReply) ? `<div class="unode" id="topo-unode" style="visibility:hidden">
-      <b>你<span class="utag">意见 ${opinions.length}</span></b>
-      ${latestOp ? `<div class="txt">${esc(latestOp.text || "")}</div>` : ""}
-      ${latestReply ? `<div class="reply-txt" title="${esc(latestReply.text || "")}">灵枢：${esc(latestReply.text || "")}</div>` : ""}
-      <small>消息直达灵枢并转达执行中的智能体</small></div>` : "";
-
-  // 节点详情的数据源随图一并留存（点击路线/发现/孤儿节点时取用）
-  S.topoRouteMeta = routeMeta;
-  S.topoFindings = new Map(dispFindings.map((f, i) => [FNODE(i), f]));
-  S.topoOrphans = orphans;
-  box.innerHTML = `<div id="topo-stage">
-      <svg class="edges"></svg>
-      ${unodeHtml}
-      <div class="hub ${running ? "live" : ""}" id="topo-hub" style="visibility:hidden"><b>灵枢</b><small>主 Agent · 集中决策</small></div>
-      ${ids.filter(id => id !== ORPHAN).map(id => cardHtml(nodeOf.get(id))).join("")}
-      ${orphans.length ? orphanCard : ""}
-    </div>
-    <div class="topo-tools">
-      <button id="topo-zin" title="放大">＋</button>
-      <button id="topo-zout" title="缩小">－</button>
-      <button id="topo-fit" title="适应窗口">⤢</button>
-    </div>
-    <div class="topo-hint">滚轮缩放 · 拖拽平移 · 双击复位 · 点击节点看详情${processMeta.size ? ` · ${processMeta.size} 个过程节点（实线：产出，虚线：进入后续上下文或执行先后）` : ""}${process.has_more ? " · 展示最近过程，更早记录见会话历史" : ""}${foldedFindings > 0 ? ` · 黑板 ${findings.length} 条发现（展示最近 ${dispFindings.length} 条）` : ""}</div>
-    <div class="topo-detail" id="topo-detail" hidden>
-      <div class="td-head"><b id="td-title"></b>
-        <button class="td-close" id="td-close">×</button></div>
-      <div class="td-body" id="td-body"></div>
-    </div>`;
-  renderApprovals();
-  renderQuestions();
-
-  // ---- 先隐藏渲染量高，再按层堆叠定位（节点高度随路线卡片数变化）
-  const stage = box.querySelector("#topo-stage");
-  const hubEl = box.querySelector("#topo-hub");
-  const unodeEl = box.querySelector("#topo-unode");
-  const elOf = new Map(ids.map(id =>
-    [id, stage.querySelector(`[data-node="${CSS.escape(id)}"]`)]));
-  const heights = new Map(ids.map(id => [id, elOf.get(id).offsetHeight]));
-  const hubH = hubEl.offsetHeight, hubW = hubEl.offsetWidth;
-  const unW = unodeEl ? unodeEl.offsetWidth : 0;
-  const unH = unodeEl ? unodeEl.offsetHeight : 0;
-  const unX = TOPO_GEO.PAD;
-  const hubXpos = unX + unW + (unodeEl ? 26 : 0);   // 意见节点占灵枢左侧
-  const layout = TopologyLayout.positions(layerIds, preds, heights, TOPO_GEO.GAP_Y, TOPO_GEO.PAD);
-  const totalH = layout.height - TOPO_GEO.PAD * 2;
-  const centerY = TOPO_GEO.PAD + totalH / 2;
-  const xOf = new Map(), yOf = layout.y;
-  let cx = hubXpos + hubW + TOPO_GEO.HUB_GAP;
-  layerIds.forEach(arr => {
-    for (const id of arr) xOf.set(id, cx);
-    cx += TOPO_GEO.NODE_W + TOPO_GEO.GAP_X;
-  });
-  const stageW = cx - TOPO_GEO.GAP_X + TOPO_GEO.PAD;
-  const stageH = totalH + TOPO_GEO.PAD * 2;
-  for (const id of ids) {
-    const el = elOf.get(id);
-    el.style.transform = `translate(${xOf.get(id)}px, ${yOf.get(id)}px)`;
-    el.style.visibility = "";
-  }
-  hubEl.style.transform =
-    `translate(${hubXpos}px, ${centerY - hubH / 2}px)`;
-  if (unodeEl) {
-    unodeEl.style.transform = `translate(${unX}px, ${centerY - unH / 2}px)`;
-    unodeEl.style.visibility = "";
-  }
-  hubEl.style.visibility = "";
-  stage.style.width = stageW + "px";
-  stage.style.height = stageH + "px";
-
-  // ---- 连线：源右缘 → 目标左缘，水平三次贝塞尔（缩放随画布同步）
-  const svg = stage.querySelector("svg.edges");
-  svg.setAttribute("width", stageW);
-  svg.setAttribute("height", stageH);
-  svg.setAttribute("viewBox", `0 0 ${stageW} ${stageH}`);
-  const hubX = hubXpos + hubW, hubY = centerY;
-  const link = (x1, y1, x2, y2, cls, title = "") => {
-    const dx = Math.max(30, (x2 - x1) * 0.42);
-    return `<path class="${cls}" d="M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}">${title ? `<title>${esc(title)}</title>` : ""}</path>`;
-  };
-  const midY = id => yOf.get(id) + heights.get(id) / 2;
-  let paths = "";
-  if (unodeEl) {
-    // 你 → 灵枢：意见流入决策环
-    paths += link(unX + unW, hubY, hubXpos, hubY, "user-edge");
-  }
-  for (const n of nodes) {
-    const id = n.node_id;
-    if (!xOf.has(id)) continue;
-    const st = nodeStatus(n.status);
-    const deps = preds.get(id) || [];
-    if (!deps.length) paths += link(hubX, hubY, xOf.get(id), midY(id), st);
-    for (const d of deps) {
-      const kind=processEdges.get(JSON.stringify([d,id]));
-      paths += link(xOf.get(d) + TOPO_GEO.NODE_W, midY(d), xOf.get(id), midY(id),
-        kind === "context" || kind === "sequence" ? "context-edge" : st,
-        kind === "context" ? "该观察或产物已在后续步骤前产生；进入后续上下文，不代表已验证因果" :
-          kind === "sequence" ? "同一路线的执行先后" : kind === "produces" ? "此步骤产生的观察或产物" : "");
-    }
-  }
-  if (orphans.length) {
-    paths += link(hubX, hubY, xOf.get(ORPHAN), midY(ORPHAN), running ? "active" : "done");
-  }
-  // 督导连线：灵枢 → 建议所指向的角色任务节点（悬停看完整建议）
-  for (const [agent, v] of steerItems) {
-    const el = v.task_id
-      ? stage.querySelector(`.tcard[data-task="${CSS.escape(v.task_id)}"]`)
-      : stage.querySelector(`.tcard[data-agent="${CSS.escape(agent)}"]`);
-    const tn = el && el.closest("[data-node]");
-    const nid = tn && tn.dataset.node;
-    if (nid && xOf.has(nid)) {
-      paths += link(hubX, hubY, xOf.get(nid), midY(nid), "steer-edge",
-                    `灵枢 → ${agentName(agent)}：${v.hint || ""}`);
-    }
-  }
-  svg.innerHTML = paths;
-
-  // ---- 视图：首次进入自动适应，此后保留用户平移/缩放
-  if (!S.topoView) {
-    S.topoView = topoFit(box, stageW, stageH);
-    if(processMeta.size && S.topoView.s<0.35) {
-      const latest=[...processMeta.keys()].at(-1);
-      S.topoView={s:0.65,tx:box.clientWidth/2-((xOf.get(latest) || 0)+TOPO_GEO.NODE_W/2)*0.65,
-        ty:box.clientHeight/2-midY(latest)*0.65};
-    }
-  } else if(S.topoViewport) {
-    S.topoView.tx+=(box.clientWidth-S.topoViewport.width)/2;
-    S.topoView.ty+=(box.clientHeight-S.topoViewport.height)/2;
-  }
-  S.topoViewport={width:box.clientWidth,height:box.clientHeight};
-  topoApplyView(box, S.topoView);
-  box.querySelector("#topo-zin").onclick = () => topoZoom(box, 1.25);
-  box.querySelector("#topo-zout").onclick = () => topoZoom(box, 0.8);
-  box.querySelector("#topo-fit").onclick = () => {
-    S.topoView = topoFit(box, stageW, stageH);
-    topoApplyView(box, S.topoView);
-  };
+  const routes = typeof TaskTrace !== "undefined" ? TaskTrace.routeSnapshot() : [];
+  DualTopology.render(S.state, routes);
+  renderTopoActivity(); renderApprovals(); renderQuestions();
 }
 
-/* 画布手势：滚轮以指针为中心缩放、按住拖拽平移、双击复位（绑定一次） */
-(function bindTopoGestures() {
-  const box = $("#topo");
-  box.addEventListener("wheel", (ev) => {
-    if (!S.topoView || S.tab !== "topo") return;
-    ev.preventDefault();
-    const r = box.getBoundingClientRect();
-    const mx = ev.clientX - r.left, my = ev.clientY - r.top, v = S.topoView;
-    const ns = Math.min(2.4, Math.max(0.3, v.s * Math.exp(-ev.deltaY * 0.0015)));
-    v.tx = mx - (mx - v.tx) * (ns / v.s);
-    v.ty = my - (my - v.ty) * (ns / v.s);
-    v.s = ns;
-    topoApplyView(box, v);
-  }, { passive: false });
-  let drag = null;
-  let downPos = null;
-  let downTarget = null;
-  box.addEventListener("pointerdown", (ev) => {
-    if (ev.button !== 0 || !S.topoView || ev.target.closest("button, input, textarea, select, a")) return;
-    ev.preventDefault();
-    downPos = { x: ev.clientX, y: ev.clientY };
-    downTarget = ev.target.closest("[data-node]");
-    drag = { x: ev.clientX, y: ev.clientY, tx: S.topoView.tx, ty: S.topoView.ty };
-    box.setPointerCapture(ev.pointerId);
-    box.classList.add("grabbing");
-  });
-  box.addEventListener("pointermove", (ev) => {
-    if (!drag) return;
-    S.topoView.tx = drag.tx + ev.clientX - drag.x;
-    S.topoView.ty = drag.ty + ev.clientY - drag.y;
-    topoApplyView(box, S.topoView);
-  });
-  const stop = (ev) => {
-    if (downPos && ev && ev.type === "pointerup") {
-      const dx = Math.abs(ev.clientX - downPos.x);
-      const dy = Math.abs(ev.clientY - downPos.y);
-      if (dx < 6 && dy < 6 && downTarget) {
-        const id = downTarget.dataset.node;
-        if (id) showNodeDetail(id, downTarget);
-      }
-    }
-    drag = null; downPos = null; downTarget = null;
-    box.classList.remove("grabbing");
-  };
-  box.addEventListener("pointerup", stop);
-  box.addEventListener("pointercancel", stop);
-  box.addEventListener("dblclick", (ev) => {
-    if (ev.target.closest(".topo-tools")) return;
-    S.topoView = null;
-    drawTopo();
-  });
-})();
+function topoFocus(id) { DualTopology.focus(id); }
+
+function topoCollection(group) {
+  S.topoQueries ||= {}; S.topoPages ||= {};
+  const query = S.topoQueries[group.id] || "";
+  const items = group.members.filter(n => `${n.title} ${n.body || ""}`.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
+  const page = Math.min(S.topoPages[group.id] || 0, Math.max(0, Math.ceil(items.length / 20) - 1));
+  S.topoPages[group.id] = page;
+  const rows = items.slice(page * 20, page * 20 + 20);
+  return `<label class="topo-search-label">筛选资料<input data-topo-search type="search" value="${esc(query)}" placeholder="输入地址、标题或记录内容"></label>
+    <div class="topo-collection-list">${rows.map(n => `<button data-topo-record="${esc(n.id)}"><b>${esc(n.title)}</b><small>${esc(n.actor || "原始记录")} · ${esc(n.record_id || "")}</small></button>`).join("") || '<p class="td-note">没有匹配的资料</p>'}</div>
+    <div class="topo-pagination"><button data-topo-page="-1" ${page === 0 ? "disabled" : ""}>上一页</button><span>${items.length ? page*20+1 : 0}–${Math.min((page+1)*20, items.length)} / ${items.length}</span><button data-topo-page="1" ${(page+1)*20 >= items.length ? "disabled" : ""}>下一页</button></div>`;
+}
+
+function topoRecordDetail(p) {
+  if(p.kind==="exploration") {
+    const states={open:"待探索",running:"探索中",blocked:"受阻",supported:"有支持",refuted:"已反驳",exhausted:"已走不通",closed:"已结束"};
+    const relations=(S.topoGraph?.edges || []).filter(e=>e.source===p.id || e.target===p.id);
+    const ids=[...new Set(relations.map(e=>e.source===p.id ? e.target : e.source))];
+    return `<p class="td-note">${esc(states[p.state] || p.state)} · 探索记录，状态由 Agent 维护。</p>
+      <p class="td-note topo-fact-text">${esc(p.title)}</p>${p.reason ? `<p class="td-note">原因：${esc(p.reason)}</p>` : ""}
+      <div class="topo-related"><b>资产、父探索与产出</b>${ids.map(id=>`<button data-topo-record="${esc(id)}">${esc(S.topoProcess.get(id)?.title || id)}</button>`).join("") || '<p>尚无显式关联</p>'}</div>
+      <details class="topo-original"><summary>完整探索记录</summary><pre>${esc(p.body || "")}</pre></details>`;
+  }
+  if(p.kind==="milestone") return `<p class="td-note">路线推进说明；属于 Agent 当时的观察与计划，不自动代表已验证事实。</p><p class="td-note topo-rule-content">${esc(p.body)}</p>`;
+  if(p.kind==="rule") return '<p class="td-note topo-rule-content">正在读取原文…</p><button class="btn sm" data-rules-more hidden>继续读取原文</button>';
+  const source = p.provenance?.producer || {};
+  const origins = [source.agent_id || p.actor, source.tool_name, source.step_id].filter(Boolean);
+  const relations = (S.topoGraph?.edges || []).flatMap(e => e.references).filter(e => e.target === p.id || e.source === p.id
+    || p.relation && e.record_id === p.record_id);
+  const related = [...new Set(relations.flatMap(e => e.source === p.id ? [e.target] : e.target === p.id ? [e.source] : [e.source,e.target]))];
+  const collection = S.topoGraph?.groups.find(g => g.members.some(n => n.id === p.id));
+  const assetRelations = [...(S.topoProcess?.values() || [])].filter(n=>n.relation &&
+    [n.source_ref,n.target_ref].includes(`${p.layer}:${p.record_id}`));
+  return `${collection ? `<button class="topo-back" data-topo-record="${esc(collection.id)}">← 返回${esc(collection.title)}</button>` : ""}<div class="td-agent">${esc(origins.join(" · ") || "未记录来源")}</div>
+    <p class="td-note topo-fact-text">${esc(p.title)}</p>
+    ${assetRelations.length ? `<div class="topo-related"><b>资产关系与依据</b>${assetRelations.map(n=>`<button data-topo-record="${esc(n.id)}">${esc(n.title)}</button>`).join("")}</div>` : ''}
+    ${related.length ? `<div class="topo-related"><b>明确引用的关联记录</b>${related.map(id => `<button data-topo-record="${esc(id)}">${esc(S.topoProcess?.get(id)?.title || id)}</button>`).join("")}</div>` : '<p class="td-note">暂无明确的事实依赖关系。</p>'}
+    <details class="topo-original"><summary>查看完整记录与来源</summary><p class="td-note">${esc(p.layer || "")} · ${esc(p.record_id || "")} · v${esc(String(p.version || ""))}</p><pre>${esc(p.body || "规则原文保存在黑板，按引用读取。")}</pre></details>`;
+}
+
 window.addEventListener("resize", () => { if (S.tab === "topo" && S.state) drawTopo(); });
 
 /* ================= 任务/漏洞/Flag ================= */
@@ -911,7 +592,7 @@ function showNodeDetail(nodeId) {
   const panel = $("#topo-detail");
   if (!panel) return;
   if (panel.hidden === false && panel._curId === nodeId) {
-    panel.hidden = true; panel._curId = null; return;
+    panel.hidden = true; panel._curId = null; topoFocus(null); return;
   }
   panel._curId = nodeId;
   panel.hidden = false;
@@ -932,9 +613,7 @@ function showNodeDetail(nodeId) {
     const p=S.topoProcess?.get(nodeId);
     if(p) {
       title=p.title;
-      body=`<div class="td-task"><div class="td-agent">第 ${esc(String(p.turn))} 步 · ${esc(p.route || p.route_id)} · ${esc(p.task_id)}</div>
-        <div class="td-note" style="white-space:pre-wrap">${esc(p.body || "尚无公开进展说明")}</div>
-        <div class="td-empty">工具观察仅记录返回；发现记录由 Agent 提出，均保留审计出处 #${esc(String(p.seq || ""))}。</div></div>`;
+      body = p.kind === "collection" ? topoCollection(p) : topoRecordDetail(p);
     }
   } else if (nodeId.startsWith("__route_")) {
     // 路线分支节点：执行现场全量呈现（agent / 状态 / 进度 / 最新笔记）
@@ -977,7 +656,23 @@ function showNodeDetail(nodeId) {
   }
   $("#td-title").textContent = title;
   $("#td-body").innerHTML = body;
-  panel.querySelector("#td-close").onclick = () => { panel.hidden = true; };
+  topoFocus(nodeId);
+  const record=S.topoProcess?.get(nodeId);
+  if(record?.kind==="rule") loadTopoRules(record);
+  panel.querySelector("#td-close").onclick = () => { panel.hidden = true; panel._curId = null; topoFocus(null); };
+  panel.querySelectorAll("[data-topo-record]").forEach(button => {
+    button.onclick = () => {panel._curId = null;showNodeDetail(button.dataset.topoRecord);};
+  });
+  panel.querySelectorAll("[data-topo-page]").forEach(button => {
+    button.onclick = () => {S.topoPages[nodeId] += Number(button.dataset.topoPage);panel._curId=null;showNodeDetail(nodeId);};
+  });
+  const search = panel.querySelector("[data-topo-search]");
+  if (search) search.oninput = () => {
+    const position = search.selectionStart;
+    S.topoQueries[nodeId] = search.value; S.topoPages[nodeId] = 0;
+    panel._curId = null; showNodeDetail(nodeId);
+    const fresh = panel.querySelector("[data-topo-search]");fresh.focus();fresh.setSelectionRange(position, position);
+  };
 }
 
 let vulnPageSession = null, vulnOffset = 0, vulnRows = null, vulnLoading = false, vulnGeneration = 0;
@@ -1131,6 +826,9 @@ function argBrief(name, args) {
   args = args && typeof args === "object" ? args : {};
   if (args._redacted) return "正在读取参数";
   const one = v => String(v ?? "").replace(/\s+/g, " ").trim();
+  if (name === "skill_open") return one(args.skill_id);
+  if (name === "skill_read") return `${one(args.skill_id)} / ${one(args.path)}`;
+  if (name === "skill_search") return one(args.query || args.domain || "浏览技能目录");
   if (name === "http_request") {
     let target = one(args.path || args.url || "/");
     try { if (/^https?:\/\//i.test(target)) target = new URL(target).pathname + new URL(target).search; } catch {}
@@ -1334,14 +1032,14 @@ function tracePush(e, {observe = true} = {}) {
       traceAppend(e, `<div class="m">捕获 Flag · ${esc(d.value_preview || "")}</div>`, "tl-flag");
       break;
     case "model.started":
-      traceAppend(e, `<div class="m">${esc(actorName(actor))} · 正在调用 ${esc(d.model || "模型")} · ${esc(SessionObserver.toolName(d.task_type || "任务决策"))}</div>`, "tl-sys");
+      traceAppend(e, `<div class="m">${esc(actorName(actor))} · 正在调用 ${esc(modelDisplayName(d.model_key || d.model || "模型", d.provider_ref))} · ${esc(SessionObserver.toolName(d.task_type || "任务决策"))}</div>`, "tl-sys");
       break;
     case "model.call": {
       // 调用收尾即定格 Markdown：文本流已结束，不等下一次回合边界
       // （否则纯推理续轮/会话收尾前的流式正文会一直保持原文）
       traceFinishThinking(traceTurn(actor));
       const n = SessionObserver.usageFor(e, S.state);
-      const row = traceAppend(e, `<div class="m"><strong>${esc(d.model || "模型")} 已返回</strong> · <span class="model-tokens">${n == null ? "单次用量未记录" : `${Number(n).toLocaleString("zh-CN")} token`}</span> · ${(Number(d.latency_ms || 0) / 1000).toFixed(1)} 秒${d.task_type ? ` · ${esc(d.task_type)}` : ""}</div>`, "tl-sys tl-model");
+      const row = traceAppend(e, `<div class="m"><strong>${esc(modelDisplayName(d.model_key || d.model || "模型", d.provider_ref))} 已返回</strong> · <span class="model-tokens">${n == null ? "单次用量未记录" : `${Number(n).toLocaleString("zh-CN")} token`}</span> · ${(Number(d.latency_ms || 0) / 1000).toFixed(1)} 秒${d.task_type ? ` · ${esc(d.task_type)}` : ""}</div>`, "tl-sys tl-model");
       row.dataset.callTs = e.ts || "";
       break;
     }
@@ -1558,7 +1256,14 @@ async function loadReport() {
   const box = $("#tab-report");
   box.innerHTML = `<div class="empty-note">加载中…</div>`;
   try {
-    const d = await api(`/api/sessions/${S.cur}/report`);
+    const session = S.cur;
+    const d = await api(`/api/sessions/${session}/report`);
+    if(S.cur!==session) return;
+    if(d.status && d.status!=="done" && !d.markdown) {
+      box.innerHTML=`<div class="empty-note">${d.status==="failed" ? `报告生成失败：${esc(d.error || "未知错误")}` : "答案调查已结束，报告正在后台生成；经验提炼同时进行。"}</div>`;
+      if(d.status!=="failed") setTimeout(()=>{if(S.cur===session && S.tab==="report") loadReport();},2000);
+      return;
+    }
     box.innerHTML = `<div class="card report">${mdRender(d.markdown)}</div>`;
   } catch (e) {
     box.innerHTML = `<div class="empty-note">${esc(e.message)}</div>`;

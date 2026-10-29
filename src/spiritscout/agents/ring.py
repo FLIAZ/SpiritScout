@@ -7,6 +7,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from spiritscout.core.attempts import AttemptLedger, exact_key
 from spiritscout.core.audit import AuditLogger, NullAuditLogger
 
 # 判定「无产出」的价值阈值：低于此值的已完成尝试对同伴构成避让信号
@@ -14,11 +15,9 @@ ZERO_OUTCOME = 0.1
 
 
 def attempt_key(method: str, url: str, params: dict[str, Any] | None = None) -> str:
-    """探测尝试的归一化键：方法 + URL + 参数形状（键=值截断，排序去序）。"""
-    shape = ""
-    if params:
-        shape = "|".join(sorted(f"{k}={str(v)[:32]}" for k, v in params.items()))[:200]
-    return f"{method.upper()} {url} [{shape}]"
+    """完整方法、目标与参数的摘要键；仅表达精确相同，不推断意图。"""
+    return exact_key(method.upper(), url, params)
+
 
 
 class RingLedger:
@@ -27,6 +26,7 @@ class RingLedger:
     def __init__(self, audit: AuditLogger | None = None):
         self._audit = audit or NullAuditLogger()
         self._attempts: dict[str, dict] = {}
+        self.exact = AttemptLedger()
         self._steering: dict[str, dict] = {}       # agent_key → 最新督导建议
         self._task_steering: dict[str, dict] = {}
         self._steer_sequence = 0
@@ -37,11 +37,7 @@ class RingLedger:
         return self._attempts.get(key)
 
     def should_avoid(self, key: str, *, agent_id: str) -> dict | None:
-        """同伴已完成的无产出尝试 → 避让（返回登记条目）；否则 None。
-
-        同一 Agent 自己的历史尝试不触发避让（其路线内去重自行负责）；
-        有产出的尝试不避让（有价值痕迹值得各自复核）。
-        """
+        """兼容的低价值历史查询；结果只供参考，执行入口不据此跳过整个步骤。"""
         rec = self._attempts.get(key)
         if rec is None or rec["agent_id"] == agent_id:
             return None
@@ -117,6 +113,7 @@ class RingLedger:
         """当前台账快照（/state 折入，前端呈现共享与督导状态）。"""
         return {
             "attempts": len(self._attempts),
+            "exact_attempts": self.exact.snapshot(),
             # 先复制再遍历（/state 在线程池执行，避开并发登记/写督导）
             "steering": {k: {**v, "feedback": dict(v["feedback"])}
                          for k, v in self._steering.copy().items()},

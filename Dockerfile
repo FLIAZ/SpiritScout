@@ -31,7 +31,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean \
  && apt-get -o Acquire::Retries=3 update \
  && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
-      python3 python3-venv bubblewrap ca-certificates curl git procps libstdc++6 chromium tini \
+      python3 python3-venv bubblewrap ca-certificates curl git procps libstdc++6 libarchive13 chromium tini \
  && rm -rf /var/lib/apt/lists/*
 
 RUN /usr/bin/python3 -m venv /opt/venv \

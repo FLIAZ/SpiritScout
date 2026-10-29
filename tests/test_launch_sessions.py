@@ -80,6 +80,16 @@ class LaunchRoutingTests(unittest.TestCase):
         self.assertEqual(plan.authorization.mode, RunMode.COMPETITION)
         self.assertEqual(plan.rules.contest_type.value, "jeopardy")
 
+    def test_src_mission_without_url_or_uploads_can_launch(self) -> None:
+        mission = "审计本地项目的登录逻辑，先梳理认证流程"
+        plan = prepare_launch(LaunchRequest(mode=RunMode.SRC, mission=mission))
+        self.assertEqual(plan.authorization.mode, RunMode.SRC)
+        self.assertFalse(plan.needs_mode_routing)
+        self.assertEqual(plan.target, "")
+        self.assertEqual(plan.mission, mission)
+        self.assertFalse(plan.authorization.scope.allowed_urls)
+        self.assertFalse(plan.authorization.scope.allowed_domains)
+
     def test_src_target_falls_back_to_authorized_scope(self) -> None:
         """续传合并进 extra_scope 的授权目标要成为工作入口，不能是 CTF 占位符。"""
         plan = prepare_launch(LaunchRequest(

@@ -1,4 +1,4 @@
-/* 资源工作台：左侧目录、右侧管理对话；紫色只标记待确认变更。 */
+/* 资源工作台：目录与管理对话；紫色只标记待确认变更。 */
 .resource-page {max-width:1440px;margin:0 auto;}.resource-head {display:flex;justify-content:space-between;align-items:center;gap:20px;margin:12px 0 20px;}.resource-eyebrow {font:11px var(--mono);letter-spacing:.12em;color:var(--ink-2);}.resource-head h2 {font-size:22px;margin:0 0 6px;}.resource-head p {font-size:13px;color:var(--ink-2);}.resource-head-actions {display:flex;gap:8px;flex-wrap:wrap;}
 .resource-layout {display:grid;grid-template-columns:minmax(280px,.9fr) minmax(340px,1.1fr);border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--surface);min-height:480px;}.resource-catalog {min-width:0;padding:20px;border-right:1px solid var(--line);}.resource-search {display:block;font-size:12px;color:var(--ink-2);}.resource-search input {width:100%;margin:8px 0;}.resource-list-status {font:11px/1.7 var(--mono);color:var(--ink-2);min-height:30px;}.resource-list {max-height:640px;overflow:auto;}.resource-item {position:relative;border-bottom:1px solid var(--line);padding:4px 0;}.resource-select {border:0;background:transparent;color:var(--ink);width:100%;padding:15px 70px 15px 8px;text-align:left;cursor:pointer;}.resource-select:hover {background:var(--surface-2);}.resource-select strong {display:block;font-size:13px;margin:10px 0 6px;overflow-wrap:anywhere;}.resource-select p {margin:0 0 8px;color:var(--ink-2);font-size:12px;line-height:1.7;overflow-wrap:anywhere;}.resource-select small {font:10px/1.6 var(--mono);color:var(--ink-2);overflow-wrap:anywhere;}.resource-badge {font-size:10px;padding:3px 7px;border:1px solid var(--line);border-radius:4px;color:var(--ink-2);}.resource-badge.changed {color:var(--violet);border-color:var(--violet);}.resource-toggle {position:absolute;right:4px;top:18px;}.resource-more {width:100%;margin-top:14px;}
 .resource-chat {min-width:0;display:flex;flex-direction:column;max-height:780px;}.resource-chat>header {display:flex;gap:12px;align-items:center;padding:18px 22px;border-bottom:1px solid var(--line);}.resource-chat header b {font-size:13px;}.resource-chat header small {display:block;font-size:11px;color:var(--ink-2);margin-top:5px;}.resource-dot {height:9px;width:9px;background:var(--violet);border-radius:50%;}.resource-chat-log {flex:1;min-height:180px;overflow:auto;padding:20px;}.resource-chat-welcome {padding:20px 0;}.resource-chat-welcome>span {font-size:11px;color:var(--violet);}.resource-chat-welcome h3 {font-size:16px;margin:0 0 8px;}.resource-chat-welcome p {font-size:13px;line-height:1.8;color:var(--ink-2);}.resource-message {padding:14px 16px;border-left:2px solid var(--line);margin-bottom:18px;}.resource-message.user {background:var(--surface-2);border-left-color:var(--accent);}.resource-message small {font-size:10px;color:var(--ink-2);}.resource-message p {white-space:pre-wrap;font-size:13px;line-height:1.9;margin:8px 0 0;overflow-wrap:anywhere;}.resource-proposals {max-height:290px;overflow:auto;padding:0 20px;}.resource-proposal {border:1px solid var(--line);border-left:3px solid var(--violet);border-radius:8px;padding:12px;margin-bottom:14px;font-size:12px;}.resource-proposal summary {cursor:pointer;font-weight:600;}.resource-proposal pre {white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.7 var(--mono);max-height:280px;overflow:auto;}.resource-chat-form {padding:16px 20px;border-top:1px solid var(--line);}.resource-chat-form textarea {width:100%;resize:vertical;min-height:76px;}.resource-chat-form>div {display:flex;justify-content:space-between;align-items:center;margin-top:10px;gap:10px;}.resource-chat-form small,.resource-chat-status {font-size:11px;color:var(--ink-2);}.resource-chat-status {margin:8px 0 0;overflow-wrap:anywhere;}.resource-empty {padding:50px 16px;color:var(--ink-2);font-size:13px;line-height:1.8;}.resource-history-note {border-left:2px solid var(--warn);padding-left:12px;}.asset-observations article {padding:20px 0;border-bottom:1px solid var(--line);}.asset-time {display:block;font:11px var(--mono);color:var(--accent-ink);margin-bottom:8px;}.asset-observations small {font:10px var(--mono);color:var(--ink-2);overflow-wrap:anywhere;}
@@ -30,3 +30,110 @@
 .exa-guide { border-left:1px solid var(--line); padding:24px; background:var(--surface-2); }.exa-guide h3 { font-size:14px; margin:0 0 12px; }
 .exa-guide ol { padding-left:19px; margin:0; }.exa-guide li { padding:4px 0; font-size:12px; line-height:1.9; color:var(--ink-2); }.exa-guide p { font-size:11px; line-height:1.8; color:var(--ink-2); margin:14px 0 10px; }.exa-guide a { font-size:12px; color:var(--accent-ink); }
 @media(max-width:700px) { .exa-settings { grid-template-columns:1fr; }.exa-config,.exa-guide { padding:18px; }.exa-guide { border-left:0; border-top:1px solid var(--line); } }
+
+/* 压缩包导入说明与逐包结果。 */
+.resource-import-help {margin:-8px 0 14px;font-size:12px;line-height:1.8;color:var(--ink-2);}
+.resource-import-status {white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.8;margin:0 0 14px;}
+.resource-import-status:empty {display:none;}
+
+/* 技能目录：状态分组为主导航，组合条件与记录摘要保持同一阅读宽度。 */
+.skill-status-groups {display:flex;gap:24px;border-bottom:1px solid var(--line);margin-bottom:20px;}
+.skill-status-groups button {display:flex;align-items:center;gap:10px;border:0;border-bottom:3px solid transparent;background:transparent;color:var(--ink-2);padding:2px 2px 13px;font-size:15px;font-weight:600;cursor:pointer;}
+.skill-status-groups button b {font:11px var(--mono);background:var(--surface-2);border:1px solid var(--line);border-radius:5px;padding:3px 7px;min-width:28px;text-align:center;}
+.skill-status-groups button[aria-pressed="true"] {border-bottom-color:var(--accent);color:var(--accent-ink);}
+.skill-status-groups button[aria-pressed="true"] b {border-color:var(--accent);color:var(--accent-ink);}
+.skill-filters {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;}
+.skill-filters label {display:flex;flex-direction:column;gap:7px;font-size:11px;color:var(--ink-2);min-width:0;}
+.skill-filters :is(select,input) {width:100%;min-width:0;height:36px;font-size:12px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink);padding:6px 8px;box-sizing:border-box;}
+.skill-filter-footer {display:flex;align-items:center;justify-content:space-between;gap:12px;margin:12px 0 20px;}
+.skill-filter-footer span {font-size:11px;line-height:1.7;color:var(--ink-2);}
+.skill-filter-footer button {flex-shrink:0;}
+:is(#view-skill,#view-mcp) .resource-select p {display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;}
+:is(#view-skill,#view-mcp) :is(button,input,textarea,select):focus-visible {outline:2px solid var(--accent);outline-offset:3px;}
+@media(max-width:600px){.skill-status-groups {gap:20px;margin-bottom:16px;}.skill-filters {grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 10px;}.skill-filters :is(select,input) {height:40px;}.skill-filter-footer {align-items:flex-start;}}
+
+/* MCP 与 Skill 首页共用卡片目录；单项分别进入配置或文件浏览。 */
+:is(#view-skill,#view-mcp) .resource-layout {display:block;border:0;background:transparent;overflow:visible;}
+:is(#view-skill,#view-mcp) .resource-catalog {padding:0;border:0;}
+:is(#view-skill,#view-mcp) .skill-filters {grid-template-columns:repeat(6,minmax(0,1fr));}
+:is(#view-skill,#view-mcp) .resource-list {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;max-height:none;overflow:visible;}
+:is(#view-skill,#view-mcp) .resource-item {display:flex;flex-direction:column;min-width:0;border:1px solid var(--line);border-radius:10px;background:var(--surface);padding:0;overflow:hidden;}
+:is(#view-skill,#view-mcp) .resource-item:hover {border-color:var(--accent);}
+:is(#view-skill,#view-mcp) .resource-select {flex:1;padding:20px;text-align:left;}
+:is(#view-skill,#view-mcp) .resource-select strong {font-size:15px;margin:13px 0 9px;}
+:is(#view-skill,#view-mcp) .resource-select small {display:block;line-height:1.9;}
+:is(#view-skill,#view-mcp) .resource-empty {grid-column:1/-1;text-align:center;border:1px dashed var(--line);border-radius:10px;}
+:is(#view-skill,#view-mcp) .skill-switch {position:static;display:flex;align-items:center;gap:10px;align-self:flex-start;margin:0 20px 18px;border:0;background:transparent;padding:5px 0;color:var(--ink-2);font-size:12px;cursor:pointer;min-height:32px;}
+.skill-switch-track {display:inline-flex;align-items:center;width:38px;height:22px;padding:3px;background:var(--ink-2);border:1px solid var(--line);border-radius:20px;box-sizing:border-box;}
+.skill-switch-track>span {display:block;width:14px;height:14px;background:#fff;border-radius:50%;box-shadow:0 1px 3px #0003;transform:translateX(0);transition:transform .16s ease;}
+.skill-switch[aria-checked="true"] .skill-switch-track {background:#23834f;border-color:#23834f;}
+.skill-switch[aria-checked="true"] .skill-switch-track>span {transform:translateX(16px);}
+.skill-switch[aria-checked="true"] {color:var(--ink);}
+.skill-switch:disabled {opacity:.6;cursor:wait;}
+.skill-assistant {margin-top:24px;border:1px solid var(--line);border-radius:10px;background:var(--surface);}
+.skill-assistant>summary {padding:17px 20px;color:var(--ink-2);font-size:13px;cursor:pointer;}
+:is(#view-skill,#view-mcp) .skill-assistant .resource-chat {position:static;max-height:600px;}
+#skill-browser {width:min(1200px,calc(100vw - 32px));height:min(850px,90dvh);max-width:none;max-height:90dvh;padding:0;border:1px solid var(--line);border-radius:12px;background:var(--surface);color:var(--ink);overflow:hidden;}
+#skill-browser::backdrop {background:#0007;}
+.skill-browser-header {display:flex;justify-content:space-between;align-items:center;gap:20px;padding:20px 24px;border-bottom:1px solid var(--line);}
+.skill-browser-header p {font-size:11px;color:var(--ink-2);margin:0 0 5px;}
+.skill-browser-header h2 {font-size:20px;margin:0 0 6px;overflow-wrap:anywhere;}
+.skill-browser-header small {font:11px var(--mono);color:var(--ink-2);}
+.skill-browser-header>div:last-child {display:flex;gap:8px;flex-shrink:0;}
+.skill-browser-workspace {display:grid;grid-template-columns:260px minmax(0,1fr);height:calc(100% - 115px);}
+.skill-browser-tree {overflow:auto;border-right:1px solid var(--line);padding:16px 10px;background:var(--surface-2);font:12px/1.8 var(--mono);}
+.skill-browser-tree ul {list-style:none;padding:0 0 0 13px;margin:4px 0;}
+.skill-browser-tree summary {padding:7px 5px;cursor:pointer;overflow-wrap:anywhere;}
+.skill-browser-tree button {display:flex;gap:8px;width:100%;border:0;border-radius:5px;background:transparent;color:var(--ink-2);font:inherit;text-align:left;padding:7px 6px;cursor:pointer;overflow-wrap:anywhere;}
+.skill-browser-tree button[aria-current="true"] {color:var(--accent-ink);background:var(--surface);}
+.skill-browser-tree button:hover {color:var(--accent-ink);}
+.skill-browser-document {display:flex;flex-direction:column;min-width:0;min-height:0;}
+.skill-browser-document>header {display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid var(--line);padding:12px 20px;}
+.skill-browser-document>header p {font:12px/1.6 var(--mono);overflow-wrap:anywhere;margin:0;}
+.skill-browser-document>header button {flex-shrink:0;}
+.skill-browser-content {overflow:auto;padding:24px 30px;flex:1;font-size:14px;line-height:1.9;overflow-wrap:anywhere;}
+.skill-browser-content>pre {white-space:pre-wrap;font:12px/1.9 var(--mono);}
+.skill-browser-content h1 {font-size:25px;}.skill-browser-content h2 {font-size:21px;}.skill-browser-content h3 {font-size:17px;}
+.skill-browser-content pre {overflow:auto;padding:14px;background:var(--surface-2);border-radius:7px;}
+.skill-browser-content table {display:block;max-width:100%;overflow:auto;border-collapse:collapse;}
+.skill-browser-content td {padding:8px 12px;border:1px solid var(--line);}
+.skill-browser-content a,.skill-file-link {color:var(--accent-ink);text-decoration:underline;text-underline-offset:3px;}
+.skill-file-link {border:0;background:transparent;padding:0;font:inherit;cursor:pointer;text-align:left;}
+#skill-browser :is(button,summary,[tabindex]):focus-visible {outline:2px solid var(--accent);outline-offset:2px;}
+@media(max-width:1100px){:is(#view-skill,#view-mcp) .skill-filters {grid-template-columns:repeat(3,minmax(0,1fr));}:is(#view-skill,#view-mcp) .resource-list {grid-template-columns:repeat(2,minmax(0,1fr));}}
+@media(max-width:600px){:is(#view-skill,#view-mcp) .skill-filters {grid-template-columns:repeat(2,minmax(0,1fr));}:is(#view-skill,#view-mcp) .resource-list {grid-template-columns:1fr;}#skill-browser {width:calc(100vw - 16px);height:94dvh;max-height:94dvh;}.skill-browser-header {padding:14px;align-items:flex-start;}.skill-browser-header h2 {font-size:16px;}.skill-browser-header>div:last-child {flex-direction:column;}.skill-browser-workspace {grid-template-columns:1fr;grid-template-rows:minmax(100px,25%) minmax(0,1fr);height:calc(100% - 120px);}.skill-browser-tree {border-right:0;border-bottom:1px solid var(--line);padding:8px 12px;}.skill-browser-content {padding:16px;}.skill-browser-document>header {padding:10px 12px;}}
+@media(prefers-reduced-motion:reduce){.skill-switch-track>span {transition:none;}}
+.skill-card-actions {display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 20px 14px;}
+:is(#view-skill,#view-mcp) .skill-card-actions .skill-switch {margin:0;}
+.skill-delete {border:0;background:transparent;color:var(--ink-2);font-size:12px;padding:7px 0;cursor:pointer;}
+.skill-delete:hover {color:var(--bad);text-decoration:underline;text-underline-offset:3px;}
+.skill-delete:disabled {opacity:.6;cursor:wait;}
+
+/* Markdown 所见即所得编辑：结构块可直接修改，源码与渲染共享同一草稿。 */
+.skill-file-actions {display:flex;gap:7px;align-items:center;justify-content:flex-end;flex-wrap:wrap;}
+.skill-editor-bar {border-bottom:1px solid var(--line);padding:9px 20px;background:var(--surface-2);}
+.skill-editor-bar[hidden],.skill-editor-format[hidden] {display:none;}
+.skill-editor-format {display:flex;gap:7px;align-items:center;flex-wrap:wrap;}
+.skill-editor-format small {font-size:11px;color:var(--ink-2);}
+.skill-editor-bar [role="status"] {font-size:11px;line-height:1.8;color:var(--ink-2);margin:6px 0 0;overflow-wrap:anywhere;}
+.skill-editor-bar [role="status"].error {color:var(--bad);}
+.skill-writing .skill-md-block {position:relative;}
+.skill-writing [contenteditable="true"] {cursor:text;border-radius:4px;min-height:1.5em;outline:none;}
+.skill-writing [contenteditable="true"]:focus {outline:2px solid var(--accent);outline-offset:5px;}
+.skill-writing .skill-md-block>p {white-space:pre-wrap;}
+.skill-writing .skill-md-block :is(ul,ol) {margin-top:0;margin-bottom:0;padding-left:24px;}
+.skill-writing .skill-md-block:has(ul,ol) {margin:5px 0;}
+.skill-writing blockquote {margin-left:0;padding-left:16px;border-left:3px solid var(--line);}
+.skill-writing table th {text-align:left;padding:8px 12px;border:1px solid var(--line);background:var(--surface-2);}
+.skill-source-editor {display:block;box-sizing:border-box;width:100%;min-height:100%;resize:vertical;white-space:pre;font:12px/1.9 var(--mono);color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:14px;}
+.skill-browser-content:has(.skill-source-editor) {padding:14px;}
+@media(max-width:700px){.skill-browser-document>header {align-items:flex-start;flex-direction:column;gap:8px;}.skill-file-actions {justify-content:flex-start;}.skill-editor-bar {padding:9px 12px;}.skill-editor-format small {flex-basis:100%;}}
+
+/* MCP 与 Skill 共用目录卡片；Exa 及资源助手按需展开。 */
+.mcp-agent-scope {margin-top:6px;}
+.mcp-search-settings {margin-bottom:20px;}
+.mcp-search-settings .exa-settings {margin:0;border:0;border-radius:0;}
+
+#view-mcp .skill-filters {grid-template-columns:repeat(4,minmax(0,1fr));}
+@media(max-width:1100px){#view-mcp .skill-filters {grid-template-columns:repeat(3,minmax(0,1fr));}}
+@media(max-width:600px){#view-mcp .skill-filters {grid-template-columns:repeat(2,minmax(0,1fr));}}

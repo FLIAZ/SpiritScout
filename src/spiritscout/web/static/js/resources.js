@@ -1,53 +1,182 @@
 /* 资源管理对话拥有独立历史；目录、检索和变更不会派发安全测试。 */
 const ResourceConsole = (() => {
-  const states = new Map(); let editor = null, poll;
+  const states = new Map(); let editor = null, poll, inspecting = 0;
   const titles = {mcp:['MCP 管理','添加工具服务器，或编辑已有连接。'],skill:['Skill 管理','添加和管理智能体可查阅的参考知识。']};
-  const stateFor = kind => {if(!states.has(kind)) states.set(kind,{items:[],offset:0,q:'',generation:0});return states.get(kind);};
+  const stateFor = kind => {if(!states.has(kind)) states.set(kind,{items:[],offset:0,q:'',generation:0,filters:kind==='skill'?skillDefaults():mcpDefaults(),counts:{enabled:0,disabled:0}});return states.get(kind);};
   const root = kind => $(`#view-${kind}`);
+  function skillDefaults() {return {enabled:true,domain:'',source:'',added_from:'',added_to:'',date_state:'all',sort:'added_desc'};}
+  function skillQuery(s,offset=0) {
+    const params=new URLSearchParams({q:s.q,offset:String(offset),limit:'40'});
+    for(const [key,value] of Object.entries(s.filters))if(value!=='')params.set(key,String(value));
+    return params;
+  }
+  function skillControlsHtml() {
+    return `<div class="skill-status-groups" role="group" aria-label="启用状态">
+      <button type="button" data-skill-enabled="true" aria-pressed="true"><span>已启用</span><b data-count-enabled>0</b></button>
+      <button type="button" data-skill-enabled="false" aria-pressed="false"><span>未启用</span><b data-count-disabled>0</b></button></div>
+      <div class="skill-filters" aria-label="技能筛选">
+      <label>类型<select data-skill-filter="domain"><option value="">全部类型</option></select></label>
+      <label>来源<select data-skill-filter="source"><option value="">全部来源</option><option value="builtin">内置参考</option><option value="archive">压缩包导入</option><option value="manual">手动／助手添加</option></select></label>
+      <label>时间记录<select data-skill-filter="date_state"><option value="all">全部时间</option><option value="known">已记录时间</option><option value="unknown">时间未知</option></select></label>
+      <label>导入／添加起始日<input type="date" data-skill-filter="added_from"></label>
+      <label>导入／添加截止日<input type="date" data-skill-filter="added_to"></label>
+      <label>排序<select data-skill-filter="sort"><option value="added_desc">最近导入／添加</option><option value="added_asc">最早导入／添加</option><option value="updated_desc">最近修改</option><option value="name_asc">名称 A–Z</option></select></label>
+      </div><div class="skill-filter-footer"><span>日期按北京时间筛选；历史记录可能没有时间。</span><button type="button" class="btn sm" data-skill-reset>清除筛选</button></div>`;
+  }
+  function skillMeta(d) {
+    const source=({builtin:'内置参考',archive:'压缩包导入',manual:'手动／助手添加'})[d.source_kind]||'自定义';
+    const date=d.created_at==null?'时间未知':new Date(d.created_at*1000).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
+    return `${d.domain||'custom'} · ${source} · ${date}`;
+  }
+  function syncSkillControls(s,result) {
+    const el=root('skill');s.counts=result.counts||s.counts;
+    el.querySelector('[data-count-enabled]').textContent=s.counts.enabled;
+    el.querySelector('[data-count-disabled]').textContent=s.counts.disabled;
+    const select=el.querySelector('[data-skill-filter="domain"]'),domains=[...(result.facets?.domains||[])];
+    if(s.filters.domain&&!domains.includes(s.filters.domain))domains.push(s.filters.domain);
+    const signature=JSON.stringify(domains);
+    if(select.dataset.domains!==signature){select.dataset.domains=signature;select.innerHTML='<option value="">全部类型</option>'+domains.map(domain=>`<option value="${esc(domain)}">${esc(domain)}</option>`).join('');}
+    select.value=s.filters.domain;
+    if(typeof selxSync==='function')el.querySelectorAll('[data-skill-filter]').forEach(field=>{if(field.tagName==='SELECT')selxSync(field);});
+  }
+  function mcpDefaults() {return {enabled:true,transport:'',source:'',risk:'',agent:'',added_from:'',added_to:'',date_state:'all',sort:'added_desc'};}
+  function mcpControlsHtml() {
+    return skillControlsHtml().replaceAll('data-skill-', 'data-mcp-')
+      .replace('技能筛选','MCP 筛选')
+      .replace('<label>类型<select data-mcp-filter="domain"><option value="">全部类型</option></select></label>',
+        '<label>传输类型<select data-mcp-filter="transport"><option value="">全部类型</option><option value="stdio">STDIO · 本地命令</option><option value="http">HTTP · 流式连接</option><option value="sse">SSE · 事件流</option></select></label>')
+      .replace('<option value="builtin">内置参考</option><option value="archive">压缩包导入</option><option value="manual">手动／助手添加</option>',
+        '<option value="config">配置文件</option><option value="managed">管理页保存</option>')
+      .replace('<label>时间记录', '<label>风险等级<select data-mcp-filter="risk"><option value="">全部风险</option><option value="readonly">只读</option><option value="intrusive">侵入性</option><option value="destructive">破坏性</option></select></label><label>适用 Agent<select data-mcp-filter="agent"><option value="">全部 Agent</option><option value="default">沿用角色默认范围</option></select></label><label>时间记录')
+      .replaceAll('导入／添加','添加');
+  }
+  function mcpConnection(data) {
+    if(data.transport==='stdio')return data.command||'尚未配置命令';
+    try {const url=new URL(data.url);url.username='';url.password='';url.search='';url.hash='';return url.toString();}
+    catch {return '尚未配置地址';}
+  }
+  function mcpMeta(item) {
+    const data=item.data,risk=({readonly:'只读',intrusive:'侵入性',destructive:'破坏性'})[data.default_risk]||data.default_risk;
+    const date=skillMeta({source_kind:'manual',created_at:item.created_at}).split(' · ').pop();
+    return `${item.origin==='config'?'配置文件':'管理页保存'} · ${risk} · ${date}`;
+  }
+  function syncMcpControls(s,result) {
+    const el=root('mcp');s.counts=result.counts||s.counts;
+    el.querySelector('[data-count-enabled]').textContent=s.counts.enabled;
+    el.querySelector('[data-count-disabled]').textContent=s.counts.disabled;
+    const select=el.querySelector('[data-mcp-filter="agent"]'),agents=[...(result.facets?.agents||[])];
+    if(s.filters.agent&&s.filters.agent!=='default'&&!agents.includes(s.filters.agent))agents.push(s.filters.agent);
+    select.innerHTML='<option value="">全部 Agent</option><option value="default">沿用角色默认范围</option>'+agents.map(role=>`<option value="${esc(role)}">${esc(role)}</option>`).join('');
+    select.value=s.filters.agent;
+    if(typeof selxSync==='function')el.querySelectorAll('[data-mcp-filter]').forEach(field=>{if(field.tagName==='SELECT')selxSync(field);});
+  }
   function shell(kind) {
     const [title,description]=titles[kind],el=root(kind);if(el.dataset.ready)return;el.dataset.ready='yes';
-    el.innerHTML=`<header class="resource-head"><div><h2>${title}</h2><p>${description}</p></div><div class="resource-head-actions"><button class="btn" data-refresh>刷新</button><button class="btn primary" data-new>手动添加</button></div></header>
-      ${kind==='mcp'?'<div data-exa-settings></div>':''}
-      <div class="resource-layout"><section class="resource-catalog" aria-label="${title}目录"><label class="resource-search">检索已配置资源<input type="search" data-search placeholder="输入关键词…" maxlength="200"></label><div class="resource-list-status" role="status"></div><div class="resource-list"></div><button class="btn resource-more" hidden>加载更多</button></section>
-      <section class="resource-chat" aria-label="${title}专属管理对话"><header><div><b>资源助手</b><small>变更需确认后执行</small></div></header><div class="resource-chat-log" aria-live="polite"></div><div class="resource-proposals"></div><form class="resource-chat-form"><label class="sr-only" for="resource-message-${kind}">向${title}助手描述需求</label><textarea id="resource-message-${kind}" placeholder="${kind==='mcp'?'例如：帮我配置一个只读浏览器 MCP，请先给出安装方案':'例如：添加一份关于接口权限边界的参考技能'}" rows="3" maxlength="16000"></textarea><div><small>请勿在聊天中粘贴密钥</small><button class="btn primary" type="submit">发送</button></div><p class="resource-chat-status" role="status"></p></form></section></div>`;
+    el.innerHTML=`<header class="resource-head"><div><h2>${title}</h2><p>${description}</p></div><div class="resource-head-actions">${kind==='skill'?'<button class="btn" data-import>导入压缩包</button><input type="file" data-archives hidden multiple accept=".zip,.tar,.tar.gz,.tgz,.tar.bz2,.tbz2,.tar.xz,.txz,.rar,.7z,.tar.zst,.tzst">':''}<button class="btn" data-refresh>刷新</button><button class="btn primary" data-new>手动添加</button></div></header>
+      ${kind==='skill'?'<p class="resource-import-help" id="skill-import-help">支持 ZIP、TAR、RAR、7z 等；可多选，每包最多 20 MiB，须包含 SKILL.md。只导入文本资料。</p><p class="resource-import-status" role="status"></p>':''}
+      <div class="resource-layout"><section class="resource-catalog" aria-label="${title}目录">${kind==='skill'?skillControlsHtml():mcpControlsHtml()}<label class="resource-search">${kind==='skill'?'搜索名称、描述或类型':'搜索名称、命令、地址或 Agent'}<input type="search" data-search placeholder="输入关键词…" maxlength="200"></label><div class="resource-list-status" role="status"></div><div class="resource-list"></div><button class="btn resource-more" hidden>加载更多</button></section>
+      ${kind==='mcp'?'<details class="skill-assistant mcp-search-settings"><summary>搜索服务 · Exa 配置</summary><div data-exa-settings></div></details>':''}<details class="skill-assistant"><summary>资源助手 · 对话添加和管理 ${kind==='skill'?'Skill':'MCP'}</summary><section class="resource-chat" aria-label="${title}专属管理对话"><header><div><b>资源助手</b><small>变更需确认后执行</small></div></header><div class="resource-chat-log" aria-live="polite"></div><div class="resource-proposals"></div><form class="resource-chat-form"><label class="sr-only" for="resource-message-${kind}">向${title}助手描述需求</label><textarea id="resource-message-${kind}" placeholder="${kind==='mcp'?'例如：帮我配置一个只读浏览器 MCP，请先给出安装方案':'例如：添加一份关于接口权限边界的参考技能'}" rows="3" maxlength="16000"></textarea><div><small>请勿在聊天中粘贴密钥</small><button class="btn primary" type="submit">发送</button></div><p class="resource-chat-status" role="status"></p></form></section></details></div>`;
     if(kind==='mcp')ExaSettings.mount(el.querySelector('[data-exa-settings]'));
     el.querySelector('[data-refresh]').onclick=()=>{load(kind);loadChat(kind);if(kind==='mcp')ExaSettings.load();};
     el.querySelector('[data-new]').onclick=()=>edit(kind);
+    if(kind==='skill'){
+      const input=el.querySelector('[data-archives]'),button=el.querySelector('[data-import]');
+      button.setAttribute('aria-describedby','skill-import-help');
+      button.onclick=()=>input.click();input.onchange=()=>importArchives(input);
+    }
+    {
+      const prefix=kind==='skill'?'skill':'mcp';
+      const setGroup=enabled=>{const s=stateFor(kind);s.filters.enabled=enabled;
+        el.querySelectorAll(`[data-${prefix}-enabled]`).forEach(b=>b.setAttribute('aria-pressed',String((b.getAttribute(`data-${prefix}-enabled`)==='true')===enabled)));};
+      el.querySelectorAll(`[data-${prefix}-enabled]`).forEach(b=>b.onclick=()=>{setGroup(b.getAttribute(`data-${prefix}-enabled`)==='true');load(kind);});
+      el.querySelectorAll(`[data-${prefix}-filter]`).forEach(field=>field.onchange=()=>{
+        const s=stateFor(kind),key=field.getAttribute(`data-${prefix}-filter`);s.filters[key]=field.value;
+        if(key==='date_state'&&field.value==='unknown'){
+          s.filters.added_from='';s.filters.added_to='';
+          el.querySelector(`[data-${prefix}-filter="added_from"]`).value='';el.querySelector(`[data-${prefix}-filter="added_to"]`).value='';
+        }else if(key.startsWith('added_')&&field.value&&s.filters.date_state==='unknown'){
+          s.filters.date_state='all';el.querySelector(`[data-${prefix}-filter="date_state"]`).value='all';
+        }
+        load(kind);
+      });
+      el.querySelector(`[data-${prefix}-reset]`).onclick=()=>{
+        const s=stateFor(kind),enabled=s.filters.enabled;s.filters=kind==='skill'?skillDefaults():mcpDefaults();s.filters.enabled=enabled;s.q='';
+        el.querySelector('[data-search]').value='';el.querySelectorAll(`[data-${prefix}-filter]`).forEach(field=>field.value=s.filters[field.getAttribute(`data-${prefix}-filter`)]);load(kind);
+      };
+    }
     let timer;el.querySelector('[data-search]').oninput=e=>{const s=stateFor(kind);s.q=e.target.value.trim();s.generation++;clearTimeout(timer);timer=setTimeout(()=>load(kind),250);};
     el.querySelector('.resource-more').onclick=()=>load(kind,true);
     el.querySelector('.resource-chat-form').onsubmit=e=>send(kind,e);
   }
+  async function importArchives(input) {
+    const files=Array.from(input.files||[]);if(!files.length)return;
+    const el=root('skill'),button=el.querySelector('[data-import]'),status=el.querySelector('.resource-import-status');
+    button.disabled=true;input.disabled=true;let imported=0;const messages=[];
+    try{
+      for(const [index,file] of files.entries()){
+        status.textContent=`正在导入 ${index+1}/${files.length}：${file.name}`;
+        try{
+          if(file.size>20*1024*1024)throw new Error('压缩包不得超过 20 MiB');
+          const result=await api('/api/resources/skills/import',{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:file});
+          imported+=result.items.length;
+          messages.push(`${file.name}：已导入 ${result.items.map(item=>item.skill_id).join('、')}`,...(result.warnings||[]));
+        }catch(e){messages.push(`${file.name}：导入失败，${e.message}`);}
+      }
+      if(imported)await load('skill');
+      status.textContent=messages.join('\n');
+    }finally{button.disabled=false;input.disabled=false;input.value='';}
+  }
   async function load(kind,append=false) {
     const s=stateFor(kind),version=++s.generation,status=root(kind).querySelector('.resource-list-status');
     status.textContent='正在读取…';
+    if(!append){s.items=[];s.more=false;root(kind).querySelector('.resource-list').innerHTML='<div class="resource-empty">正在读取目录…</div>';root(kind).querySelector('.resource-more').hidden=true;}
     try{
+      if(s.filters.added_from&&s.filters.added_to&&s.filters.added_from>s.filters.added_to)throw new Error('起始日期不能晚于截止日期');
       const offset=append?s.items.length:0;
       const path=`/api/resources/${kind==='skill'?'skills':'mcp'}`;
-      const result=await api(path+'?'+new URLSearchParams({q:s.q,offset:String(offset),limit:'40'}));
+      const result=await api(path+'?'+skillQuery(s,offset));
       if(version!==s.generation)return;
-      let rows=result.items||[];if(kind==='mcp'&&s.q)rows=rows.filter(x=>JSON.stringify(x.data).toLowerCase().includes(s.q.toLowerCase()));
+      const rows=result.items||[];
       s.items=append?[...s.items,...rows]:rows;s.more=result.has_more;s.total=result.total??rows.length;
-      status.textContent=`${s.total} 条记录${kind==='mcp'?' · 保存后新会话生效':''}`;render(kind);
-    }catch(e){status.textContent=`读取失败：${e.message}。点击刷新重试。`;}
+      if(kind==='skill')syncSkillControls(s,result);else syncMcpControls(s,result);
+      status.textContent=`${s.filters.enabled?'已启用':'未启用'} · ${s.total} 条匹配，已显示 ${s.items.length} 条${kind==='mcp'?' · 变更新启动会话生效':''}`;render(kind);
+    }catch(e){if(version===s.generation)status.textContent=`读取失败：${e.message}。调整筛选或点击刷新重试。`;}
   }
   function render(kind) {
     const s=stateFor(kind),list=root(kind).querySelector('.resource-list');
     list.innerHTML=s.items.map((item,i)=>{
       const d=kind==='mcp'?item.data:item;
       const title=kind==='mcp'?d.name:d.skill_id;
-      const badge=d.enabled?'已启用':'已停用';
-      const subtitle=kind==='mcp'?`${d.transport} · ${d.command||d.url||'尚未配置地址'}`:d.description||'尚无描述';
-      return `<article class="resource-item"><button class="resource-select" data-select="${i}"><span class="resource-badge">${esc(badge)}</span><strong>${esc(title)}</strong><p>${esc(subtitle)}</p><small>${esc(kind==='mcp'?`配置版本 ${item.version} · ${d.default_risk} · ${d.allowed_agents?.length?d.allowed_agents.join(', '):'沿用角色默认范围'}`:`${d.domain||'未分类'} · ${d.origin==='builtin'?'内置参考':'自定义'} · v${d.version}`)}</small></button><button class="btn sm resource-toggle" data-toggle="${i}">${d.enabled?'停用':'启用'}</button></article>`;
-    }).join('')||`<div class="resource-empty">还没有匹配记录<p>可更换关键词，或从资源助手对话开始配置。</p></div>`;
-    list.querySelectorAll('[data-select]').forEach(b=>b.onclick=()=>edit(kind,s.items[+b.dataset.select]));
+      const badge=kind==='skill'?(d.domain||'custom'):d.transport.toUpperCase();
+      const subtitle=kind==='mcp'?mcpConnection(d):d.description||'尚无描述';
+      const label=kind==='skill'?'技能':'MCP';
+      return `<article class="resource-item"><button class="resource-select" data-select="${i}"><span class="resource-badge">${esc(badge)}</span><strong>${esc(title)}</strong><p>${esc(subtitle)}</p><small>${esc(kind==='mcp'?mcpMeta(item):skillMeta(d))}</small>${kind==='mcp'?`<small class="mcp-agent-scope">${esc(d.allowed_agents?.length?d.allowed_agents.join('、'):'沿用角色默认范围')}</small>`:''}</button><div class="skill-card-actions"><button class="skill-switch resource-toggle" type="button" role="switch" aria-checked="${!!d.enabled}" aria-label="启用${label} ${esc(title)}" data-toggle="${i}"><span class="skill-switch-track" aria-hidden="true"><span></span></span><span>${d.enabled?'已启用':'未启用'}</span></button><button type="button" class="skill-delete" data-delete="${i}" aria-label="删除${label} ${esc(title)}">删除</button></div></article>`;
+    }).join('')||`<div class="resource-empty">当前没有${s.filters.enabled?'已启用':'未启用'}的匹配${kind==='skill'?'技能':'MCP'}<p>可切换分组、调整条件或清除筛选。</p></div>`;
+    list.querySelectorAll('[data-select]').forEach(b=>b.onclick=()=>kind==='skill'?inspectSkill(s.items[+b.dataset.select]):edit(kind,s.items[+b.dataset.select]));
     list.querySelectorAll('[data-toggle]').forEach(b=>b.onclick=async()=>{const item=s.items[+b.dataset.toggle],d=kind==='mcp'?item.data:item;b.disabled=true;try{await api(`/api/resources/${kind==='mcp'?'mcp':'skills'}/${encodeURIComponent(kind==='mcp'?item.id:d.skill_id)}`,{method:'PUT',body:JSON.stringify({data:{enabled:!d.enabled},expected_version:item.version??d.version})});load(kind);}catch(e){toast(e.message,true);b.disabled=false;}});
+    list.querySelectorAll('[data-delete]').forEach(button=>button.onclick=async()=>{
+      const item=s.items[+button.dataset.delete],name=kind==='skill'?item.skill_id:item.id;
+      if(!confirm(kind==='skill'?`删除 Skill「${name}」？删除后将从目录和后续参考检索中移除。`:`删除 MCP「${name}」？新启动的会话将不再连接，运行中的会话不受影响。不会卸载本地程序。`))return;
+      button.disabled=true;
+      try{await api(`/api/resources/${kind==='skill'?'skills':'mcp'}/${encodeURIComponent(name)}?expected_version=${item.version}`,{method:'DELETE'});toast(`${kind==='skill'?'Skill':'MCP'} 已删除`);await load(kind);}
+      catch(e){toast(e.message,true);button.disabled=false;}
+    });
     root(kind).querySelector('.resource-more').hidden=!s.more;
   }
+  async function inspectSkill(item) {
+    const generation=++inspecting;
+    try{
+      const data=await api('/api/resources/skills/'+encodeURIComponent(item.skill_id));
+      if(generation===inspecting&&S.view==='skill')SkillBrowser.open(data,item=>edit('skill',item),()=>load('skill'));
+    }catch(e){if(generation===inspecting)toast(e.message,true);}
+  }
   async function edit(kind,item) {
-    let data=kind==='mcp'?item?.data:null;
+    let data=null;
+    if(kind==='mcp'&&item){try{item=await api('/api/resources/mcp/'+encodeURIComponent(item.id)+'/config');data=item.data;}catch(e){toast(e.message,true);return;}}
     if(kind==='skill'&&item){try{data=await api('/api/resources/skills/'+encodeURIComponent(item.skill_id));}catch(e){toast(e.message,true);return;}}
-    editor={kind,version:item?.version||0};$('#resource-editor-title').textContent=kind==='mcp'?'MCP 接入配置':'Skill 参考知识';$('#resource-key').value=kind==='mcp'?item?.id||'':item?.skill_id||'';$('#resource-key').disabled=!!item;
-    const clean=Object.fromEntries(Object.entries(data||{}).filter(([key])=>!['id','version','origin','env_keys','headers_keys','name','skill_id'].includes(key)));
+    editor={kind,version:data?.version??item?.version??0};$('#resource-editor-title').textContent=kind==='mcp'?'MCP 接入配置':'Skill 参考知识';$('#resource-key').value=kind==='mcp'?item?.id||'':item?.skill_id||'';$('#resource-key').disabled=!!item;
+    const clean=Object.fromEntries(Object.entries(data||{}).filter(([key])=>!['id','version','origin','env_keys','headers_keys','name','skill_id','created_at','updated_at','source_kind'].includes(key)));
+    if(kind==='skill'&&data?.files)delete clean.body;
     $('#resource-json').value=JSON.stringify(data?clean:kind==='mcp'?{transport:'stdio',command:'',args:[],enabled:true,default_risk:'intrusive',risk_by_action:false,allowed_agents:[]}:{description:'',domain:'custom',body:'适用条件：\n参考事实：\n证据与注意事项：',enabled:true},null,2);
     $('#resource-env').value='';$('#resource-headers').value='';$('#resource-secrets').hidden=kind!=='mcp';$('#resource-save-error').textContent='';$('#resource-editor').showModal();
   }

@@ -2,12 +2,43 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
-from spiritscout.tools.diagnostics import browser_failure, clean_tool_text
+from spiritscout.tools.diagnostics import (
+    browser_failure,
+    clean_tool_text,
+    compact_mcp_text,
+)
 
 
 class BrowserDiagnosticTests(unittest.TestCase):
+    def test_long_failure_keeps_late_diagnostic_and_full_evidence(self) -> None:
+        text = "launch flags " * 2000 + "\nFATAL Socket path too long: /a/b/SingletonSocket"
+        with tempfile.TemporaryDirectory() as temp:
+            summary, metadata = compact_mcp_text("browser_tabs", text, failed=True, output_dir=Path(temp))
+            self.assertLess(len(summary), 500)
+            self.assertEqual(metadata["failure_kind"], "browser_temp_path_too_long")
+            self.assertEqual(Path(metadata["raw_output_path"]).read_text(), text)
+
+    def test_large_success_retains_both_ends_and_retrievable_original(self) -> None:
+        text = "start\n" + "data " * 5000 + "\nimportant tail"
+        with tempfile.TemporaryDirectory() as temp:
+            summary, metadata = compact_mcp_text("custom_tool", text, failed=False, output_dir=Path(temp))
+            self.assertIn("start", summary)
+            self.assertIn("important tail", summary)
+            self.assertLess(len(summary), 5500)
+            self.assertEqual(Path(metadata["raw_output_path"]).read_text(), text)
+
+    def test_small_results_are_not_rewritten_or_stored(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            summary, metadata = compact_mcp_text("browser_snapshot", "ref=e17 button 登录", failed=False,
+                                                output_dir=Path(temp) / "unused")
+            self.assertEqual(summary, "ref=e17 button 登录")
+            self.assertEqual(metadata, {})
+            self.assertFalse((Path(temp) / "unused").exists())
+
     def test_missing_cdp_is_distinct_from_target_site_failure(self) -> None:
         result = browser_failure("browser_navigate", "async initializeServer: "
             "connect ECONNREFUSED 127.0.0.1:9223\nretrieving websocket url")

@@ -1,0 +1,22 @@
+"use strict";
+// 文件树按层级渲染，包内链接只能定位到已保存的文件。
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const source = fs.readFileSync(path.join(__dirname, '../src/spiritscout/web/static/js/skill-browser.js'), 'utf8');
+const context = vm.createContext({URL, Map, esc:value=>String(value).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))});
+vm.runInContext(source.slice(source.indexOf('  function fileTree'), source.indexOf('  function mount')), context);
+context.files = {'SKILL.md':'root','references/nested/detail.md':'# Detail','scripts/test.py':'print(1)','<unsafe>.md':'data'};
+const tree = vm.runInContext('fileTree(files)', context);
+assert.match(tree, /<details open><summary>.*references/);
+assert.match(tree, /data-skill-file="references\/nested\/detail.md"/);
+assert.match(tree, /&lt;unsafe&gt;\.md/);
+assert.doesNotMatch(tree, /<unsafe>/);
+assert.equal(vm.runInContext("resolveFile('references/nested/detail.md','SKILL.md',files)", context), 'references/nested/detail.md');
+assert.equal(vm.runInContext("resolveFile('../../SKILL.md#intro','references/nested/detail.md',files)", context), 'SKILL.md');
+assert.equal(vm.runInContext("resolveFile('javascript:alert(1)','SKILL.md',files)", context), null);
+assert.equal(vm.runInContext("resolveFile('https://evil.test/SKILL.md','SKILL.md',files)", context), null);
+assert.equal(vm.runInContext("resolveFile('/etc/passwd','SKILL.md',files)", context), null);
+assert.equal(vm.runInContext("resolveFile('missing.md','SKILL.md',files)", context), null);
+console.log('skill browser: nested tree, safe paths, escaped names and internal Markdown links passed');

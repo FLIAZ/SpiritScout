@@ -21,6 +21,7 @@ from spiritscout.core.models import (
 )
 from spiritscout.gateway import chat_decision
 from spiritscout.gateway.backends import extract_json
+from spiritscout.gateway.context import decision_memory
 
 
 class MasterCoordination:
@@ -258,7 +259,7 @@ class MasterCoordination:
 
     async def _apply_competition_decisions(
             self, dag: TaskDAG, decision: dict[str, Any]) -> None:
-        """执行模型给出的暂缓/重试裁定；后端只校验 id 并操作资源。"""
+        """执行模型给出的派工暂缓、在途取消、实例释放与重试裁定。"""
         if not str(self.ctx.extra.get("mode_prompt") or "").strip():
             return
         states = self._challenge_states(dag)
@@ -286,7 +287,7 @@ class MasterCoordination:
                     node.meta.pop("defer_reason", None)
                 retried.append(cid)
 
-        deferred: list[dict[str, str]] = []
+        deferred: list[dict[str, Any]] = []
         raw_defer = decision.get("defer_challenges") or []
         if isinstance(raw_defer, list):
             for item in raw_defer:
@@ -302,18 +303,25 @@ class MasterCoordination:
                     if str(ch.get("id") or "") != cid:
                         continue
                     node.meta["deferred"] = True
-                    node.meta.pop("retain_instance", None)
+                    release = isinstance(item, dict) and item.get("release_instance") is True
+                    cancel = release or (isinstance(item, dict) and item.get("cancel_running") is True)
+                    node.meta["retain_instance"] = not release
                     node.meta["defer_reason"] = reason
-                    if node.status in (TaskStatus.PENDING, TaskStatus.DISPATCHED,
-                                       TaskStatus.RUNNING):
+                    if node.status == TaskStatus.PENDING or (cancel and node.status in (
+                            TaskStatus.DISPATCHED, TaskStatus.RUNNING)):
                         dag.mark(node.node_id, TaskStatus.CANCELLED)
                         node.meta["cancel_reason"] = f"赛题暂缓: {reason}"
-                deferred.append({"id": cid, "reason": reason})
+                deferred.append({"id": cid, "reason": reason,
+                                 "release_instance": isinstance(item, dict)
+                                 and item.get("release_instance") is True,
+                                 "cancel_running": cancel})
 
         platform = self.ctx.extra.get("platform")
         released: list[str] = []
         if deferred and platform is not None:
             for item in deferred:
+                if not item["release_instance"]:
+                    continue
                 try:
                     if await platform.close_instance(
                             item["id"], reason=f"赛题暂缓: {item['reason']}"):
@@ -406,7 +414,7 @@ class MasterCoordination:
                             "\"rationale\": str}]}，每个任务都必须给出。"),
                     }, ensure_ascii=False)},
                 ],
-                audit=ctx.audit, actor=self.agent_id,
+                audit=ctx.audit, actor=self.agent_id, memory=decision_memory(self, "dispatch"),
                 task_type="meta_planning", response_format="json",
                 reasoning_effort="low",
             )
@@ -576,7 +584,7 @@ class MasterCoordination:
 
                 async def close_idle(cid: str) -> None:
                     try:
-                        await platform.close_instance(cid, reason="本题执行已收尾，释放名额供后续题")
+                        await platform.close_instance(cid, reason="平台已确认整题完成")
                     finally:
                         closing_ids.discard(cid)
                         next_close_at[cid] = time.monotonic() + self._QUEUE_RETRY_INTERVAL
@@ -584,7 +592,7 @@ class MasterCoordination:
                 async def finish_deferral(decision: dict[str, Any], jobs: list[asyncio.Task[Any]],
                                           ids: set[str]) -> None:
                     try:
-                        # 同题必须先退场再关容器；其他题的补位不等待这里的清理。
+                        # 明确取消或释放时先等同题退场；仅暂停派工不打断运行工作。
                         await asyncio.gather(*jobs, return_exceptions=True)
                         await self._apply_competition_decisions(dag, decision)
                     finally:
@@ -607,10 +615,8 @@ class MasterCoordination:
                         revisit = {cid for cid in covered - active_ids - closing_ids
                                    if not platform.is_completed(cid)
                                    and platform.can_start_instance(cid)}
-                        retained_idle = {
-                            str((n.meta.get("challenge") or {}).get("id") or "")
-                            for n in dag.all_nodes() if n.meta.get("retain_instance") is True
-                            and not n.meta.get("deferred")} - active_ids - closing_ids
+                        # 未完成实例默认保留；空闲现场占满名额时交模型决定接力或释放。
+                        retained_idle = platform.active_instance_ids() - active_ids - closing_ids
                         ready = dag.ready_nodes()
                         capacity_blocked = bool(ready) and all(
                             platform.owns(str((n.meta.get("challenge") or {}).get("id") or ""))
@@ -646,18 +652,10 @@ class MasterCoordination:
                                     {**state, "dag": dag.to_dict()}, dispatch_only=True,
                                     live_dag=dag, blocked_challenge_ids=closing_ids,
                                     on_dispatch=launch))
-                        # 回收按具体实例安排，避免慢 close 阻塞其他空位；供给中的
-                        # DISPATCHED 节点纳入保护，不能按旧快照误关新启动的容器。
-                        active = {str((n.meta.get("challenge") or {}).get("id") or "")
-                                  for n in dag.all_nodes()
-                                  if n.status in {TaskStatus.PENDING, TaskStatus.RUNNING,
-                                                  TaskStatus.DISPATCHED}}
-                        active.update(str((n.meta.get("challenge") or {}).get("id") or "")
-                                      for n in dag.all_nodes() if n.meta.get("retain_instance") is True
-                                      and not n.meta.get("deferred")
-                                      and not platform.is_completed(
-                                          str((n.meta.get("challenge") or {}).get("id") or "")))
-                        for cid in platform.active_instance_ids() - active - closing_ids:
+                        # 子任务收尾不代表整题完成；只自动回收平台确认完成的实例。
+                        for cid in platform.active_instance_ids() - closing_ids:
+                            if not platform.is_completed(cid):
+                                continue
                             if time.monotonic() < next_close_at.get(cid, 0.0):
                                 continue
                             closing_ids.add(cid)
@@ -696,9 +694,12 @@ class MasterCoordination:
                             decision = {"defer_challenges": [
                                 i for i in decision.get("defer_challenges", [])
                                 if isinstance(i, dict) and str(i.get("id") or "") in ids]}
+                            cancel_ids = {str(i["id"]) for i in decision["defer_challenges"]
+                                          if i.get("cancel_running") is True
+                                          or i.get("release_instance") is True}
                             cancel_provisioning = any(
                                 n.status == TaskStatus.DISPATCHED
-                                and str((n.meta.get("challenge") or {}).get("id") or "") in ids
+                                and str((n.meta.get("challenge") or {}).get("id") or "") in cancel_ids
                                 for n in dag.all_nodes())
                             # 先冻结同题节点，异步清理期间也不能被续规划重新派发。
                             for node in dag.all_nodes():
@@ -708,12 +709,12 @@ class MasterCoordination:
                                     reason = next(str(i.get("reason") or "模型判定暂缓")
                                                   for i in decision["defer_challenges"] if str(i["id"]) == cid)
                                     node.meta["defer_reason"] = reason[:200]
-                                    if node.status in {TaskStatus.PENDING, TaskStatus.DISPATCHED,
-                                                       TaskStatus.RUNNING}:
+                                    if node.status == TaskStatus.PENDING or (cid in cancel_ids and node.status in {
+                                            TaskStatus.DISPATCHED, TaskStatus.RUNNING}):
                                         dag.mark(node.node_id, TaskStatus.CANCELLED)
                             cancelled = [job for job, nid in running.items()
                                          if str((dag.get(nid).meta.get("challenge") or {})
-                                                .get("id") or "") in ids]
+                                                .get("id") or "") in cancel_ids]
                             for job in cancelled:
                                 job.cancel()
                                 running.pop(job)
@@ -737,7 +738,7 @@ class MasterCoordination:
                             next_plan_at = time.monotonic() + self._QUEUE_RETRY_INTERVAL
                             if plan:
                                 try:
-                                    # 规划和督导的暂缓走同一退场通道：先取消同题执行，再关实例。
+                                    # 规划和督导共用生命周期通道，只有显式取消或释放才退场。
                                     await self._apply_competition_decisions(
                                         dag, {**plan, "defer_challenges": []})
                                     if plan.get("defer_challenges"):
