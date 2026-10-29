@@ -248,6 +248,7 @@ Illegal misuse is strictly prohibited. Individuals engaging in unlawful use bear
 - [OWASP WSTG](https://github.com/OWASP/wstg) (CC BY-SA-4.0)
 - [GTFOBins](https://github.com/GTFOBins/GTFOBins.github.io) (GPL-3.0)
 - [VoltAgent/awesome-agent-skills](https://github.com/VoltAgent/awesome-agent-skills) (MIT)
+- ARTEX
 
 ### MCP servers used by the project
 
@@ -276,6 +277,9 @@ Project configurations and examples reference the following MCP servers. Your lo
 - [@BProbie](https://github.com/BProbie): documentation formatting fixes
 - [@k1ne](https://github.com/k1ne7): cross-platform compatibility
 - [@neko](https://github.com/neko-11451): login page visual improvements
+
+## contact
+- atroot.fliaz@gmail.com
 
 ## Star History
 
