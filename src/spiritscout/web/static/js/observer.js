@@ -3,7 +3,7 @@
 const SessionObserver = (() => {
   let events = [], scheduled = false;
   const number = n => Number.isFinite(Number(n)) ? Number(n).toLocaleString("zh-CN") : "—";
-  const names = { web_search: "搜索公开资料", explore: "业务走访", record_endpoint: "登记接口", http_probe: "HTTP 请求", http_request: "HTTP 请求",
+  const names = { skill_search: "检索技能", skill_open: "使用技能", skill_read: "读取技能文件", web_search: "搜索公开资料", explore: "业务走访", record_endpoint: "登记接口", http_probe: "HTTP 请求", http_request: "HTTP 请求",
     shell: "执行命令", python: "运行脚本", browser_navigate: "浏览器打开页面",
     browser_click: "点击页面元素", browser_snapshot: "读取页面快照", browser_tabs: "管理浏览器标签页",
     meta_planning: "规划与复盘", verification: "独立危害复测", execution: "任务执行" };
@@ -21,7 +21,7 @@ const SessionObserver = (() => {
     // 旧日志缺少用量时，按模型和调用开始时间匹配持久化记录。
     const start = Date.parse(event.ts) / 1000 - Number(d.latency_ms || 0) / 1000;
     const candidates = (state?.model_usage?.call_series || [])
-      .filter(x => x.model === d.model && Math.abs(x.ts - start) < 1)
+      .filter(x => (x.model_key || x.model) === (d.model_key || d.model) && Math.abs(x.ts - start) < 1)
       .sort((a, b) => Math.abs(a.ts - start) - Math.abs(b.ts - start));
     return candidates[0]?.tokens ?? null;
   }
@@ -90,11 +90,11 @@ const SessionObserver = (() => {
         <small>${v.cache.measured_calls ? number(v.cache.cached_input_tokens) : "—"} 缓存读取 · ${number(v.cache.measured_calls || 0)} 次已测量</small></div>
         ${v.cache.total_input_tokens != null ? `<p>输入 ${number(v.cache.total_input_tokens)} · 已测未命中 ${number(v.cache.uncached_input_tokens)} · 输出 ${number(v.cache.output_tokens)} token</p>` : ""}
         ${v.cache.priced_calls ? `<p>DeepSeek 费用估算：¥${Number(v.cache.estimated_cost_cny_min).toFixed(4)}${v.cache.estimated_cost_cny_max > v.cache.estimated_cost_cny_min ? `–¥${Number(v.cache.estimated_cost_cny_max).toFixed(4)}` : ""} · ${number(v.cache.priced_calls)} 次可估算调用${v.cache.unpriced_calls ? `，${number(v.cache.unpriced_calls)} 次未计入` : ""}。按 2026-10-23 价格快照估算，以账单为准。</p>` : ""}
-        <details data-section="cache"><summary>按角色查看缓存与输出消耗</summary>${(v.cache.groups || []).map(g => `<div class="obs-call"><span>${esc(actorName(g.actor))} · ${esc(g.cache_scope || names[g.task_type] || g.task_type)} · ${esc(g.model)}</span><b>${g.hit_rate == null ? "缓存未提供" : `${(g.hit_rate * 100).toFixed(1)}% 输入命中`}</b><small>输入 ${number(g.total_input_tokens)} · 缓存 ${number(g.cached_input_tokens)} · 输出 ${number(g.output_tokens)} · ${number(g.measured_calls)} 次已测量${g.unmeasured_calls ? ` / ${number(g.unmeasured_calls)} 次未提供` : ""}</small></div>`).join("") || '<p>历史调用未保留分角色用量</p>'}<p>命中率按端点返回的输入用量计算。</p></details>
-        <div class="obs-models">${Object.entries(v.usage.per_model_tokens || {}).map(([m,n]) => `<div><span>${esc(m)}</span><b>${number(n)}</b></div>`).join("")}</div>
+        <details data-section="cache"><summary>按角色查看缓存与输出消耗</summary>${(v.cache.groups || []).map(g => `<div class="obs-call"><span>${esc(actorName(g.actor))} · ${esc(g.cache_scope || names[g.task_type] || g.task_type)} · ${esc(modelDisplayName(g.model))}</span><b>${g.hit_rate == null ? "缓存未提供" : `${(g.hit_rate * 100).toFixed(1)}% 输入命中`}</b><small>输入 ${number(g.total_input_tokens)} · 缓存 ${number(g.cached_input_tokens)} · 输出 ${number(g.output_tokens)} · ${number(g.measured_calls)} 次已测量${g.unmeasured_calls ? ` / ${number(g.unmeasured_calls)} 次未提供` : ""}</small></div>`).join("") || '<p>历史调用未保留分角色用量</p>'}<p>命中率按端点返回的输入用量计算。</p></details>
+        <div class="obs-models">${Object.entries(v.usage.per_model_tokens || {}).map(([m,n]) => `<div><span>${esc(modelDisplayName(m))}</span><b>${number(n)}</b></div>`).join("")}</div>
         <details data-section="usage"><summary>最近调用的消耗与耗时</summary>${v.calls.slice(-8).reverse().map(e => {
           const n = usageFor(e, state), d = e.detail || {};
-          return `<div class="obs-call"><span>${esc(d.model || "模型")}</span><b>${n === null ? "未保留单次用量" : `${number(n)} token`}</b><small>${esc(names[d.task_type] || d.task_type || "历史调用未记录用途")} · ${(Number(d.latency_ms || 0) / 1000).toFixed(1)} 秒${d.first_delta_ms == null ? "" : ` · 首次响应 ${(d.first_delta_ms / 1000).toFixed(1)} 秒`} · 缓存 ${typeof d.cached_input_tokens === "number" ? number(d.cached_input_tokens) : "未提供"}${typeof d.reused_prefix_bytes === "number" ? ` · 与前次重复前缀 ${number(d.reused_prefix_bytes)} 字节（本地比较）` : ""}</small></div>`;
+          return `<div class="obs-call"><span>${esc(modelDisplayName(d.model_key || d.model || "模型", d.provider_ref))}</span><b>${n === null ? "未保留单次用量" : `${number(n)} token`}</b><small>${esc(names[d.task_type] || d.task_type || "历史调用未记录用途")} · ${(Number(d.latency_ms || 0) / 1000).toFixed(1)} 秒${d.first_delta_ms == null ? "" : ` · 首次响应 ${(d.first_delta_ms / 1000).toFixed(1)} 秒`} · 缓存 ${typeof d.cached_input_tokens === "number" ? number(d.cached_input_tokens) : "未提供"}${typeof d.reused_prefix_bytes === "number" ? ` · 与前次重复前缀 ${number(d.reused_prefix_bytes)} 字节（本地比较）` : ""}</small></div>`;
         }).join("") || '<p>尚无已返回的模型调用事件</p>'}</details></section>
       <section class="obs-section"><h3>发现与记录</h3>
         <div class="obs-counts"><span><b>${number(v.evidence.length || v.business.observed_endpoints || 0)}</b> 接口 / 页面证据</span>

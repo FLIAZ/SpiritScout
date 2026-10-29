@@ -71,3 +71,12 @@ async function scroll(top){box.scrollTop=top;handlers.scroll();await settle();}
   assert.equal(rendered.length,old,'切换会话后旧请求不能渲染');
   console.log('session history: automatic scroll, anchor, bounded DOM, reload, live isolation and cancellation passed');
 })().catch(e=>{console.error(e);process.exitCode=1;});
+
+// 同一子任务的派发、不同推进阶段与结论有不同锚点，回看时不能跳到派发卡。
+const identitySource=fs.readFileSync('src/spiritscout/web/static/js/session-history.js','utf8')
+  .match(/function identity\(row\) \{[\s\S]*?\n  \}/)[0];
+const rowIdentity=vm.runInContext(`(${identitySource})`,ctx);
+const rowFor=extra=>({dataset:{agent:'web',taskId:'one',...extra}});
+assert.notEqual(rowIdentity(rowFor({stepKey:'r:1'})),rowIdentity(rowFor({stepKey:'r:2'})));
+assert.notEqual(rowIdentity(rowFor({taskPart:'dispatch'})),rowIdentity(rowFor({taskPart:'summary'})));
+assert.equal(rowIdentity(rowFor({stepKey:'r:1',eventTs:'old'})),rowIdentity(rowFor({stepKey:'r:1',eventTs:'new'})));

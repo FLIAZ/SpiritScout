@@ -298,8 +298,8 @@ class SubAgent(abc.ABC):
         """
         assert self.ctx.audit is not None
         try:
-            resp = await self.ctx.gateway.chat(
-                [
+            resp = await chat_decision(
+                self.ctx.gateway, [
                     {"role": "system", "content": self._system_prompt()
                       + "\nROLE: route_planner"},
                     {"role": "user", "content": json.dumps({
@@ -321,6 +321,7 @@ class SubAgent(abc.ABC):
                     }, ensure_ascii=False)},
                 ],
                 task_type="execution", response_format="json",
+                audit=self.ctx.audit, actor=self.agent_id,
                 reasoning_effort=self.task_effort(task),
                 task=task,
             )
@@ -425,7 +426,8 @@ class SubAgent(abc.ABC):
         self, task: Task, plan: RoutePlan, route: RouteState,
         routes: list[RouteState] | None = None,
     ) -> None:
-        token = current_execution_scope.set(ExecutionScope(
+        token = current_execution_scope.set(dataclasses.replace(
+            current_execution_scope.get() or ExecutionScope(),
             task_id=task.task_id, route_id=route.route_id, agent_id=self.agent_id))
         try:
             await self._run_route_inner(task, plan, route, routes)
@@ -458,36 +460,24 @@ class SubAgent(abc.ABC):
             self.ctx.audit.log("agent.tool_call", self.agent_id, {"task_id": task.task_id, "route_id": route.route_id, "calls": [{
                 "id": step_id, "name": str(step.get("action", "step")),
                 "arguments": {k: v for k, v in step.items() if k != "action"}}]})
-            # 环形避让：同伴已在同一入口做过无产出尝试 → 不再深入（互不等候、
-            # 互不重复做功）；有自己历史的入口由路线内去重负责，不在此拦截
+            # 低价值历史仅作为共享线索；精确只读请求由工具层合并，不跳过整步推理。
             akey = self._attempt_key(task, step)
-            prior = (self.ctx.ring.should_avoid(akey, agent_id=self.agent_id)
-                     if akey and self.ctx.ring is not None else None)
-            if prior is not None:
-                result = StepResult(
-                    ok=True, value=0.0,
-                    note=f"环形共享：{prior['agent_name']} 已尝试此入口"
-                         f"（无产出），跳过深入")
-                self.ctx.audit.log("ring.avoid", self.agent_id, {
-                    "route": route.name, "key": akey[:200],
-                    "prior_agent": prior["agent_name"],
-                    "prior_note": prior["note"][:120]})
-            else:
-                try:
-                    result = await self.execute_step(task, route, plan, step)
-                except Exception as exc:  # noqa: BLE001 —— 单步失败不拖垮路线（容错 2.1-3）
-                    result = StepResult(ok=False, note=f"step exception: {exc}")
-                    # 步异常必须留痕于事件流：只进路线笔记会让「智能体零回合
-                    # 收工」在时间线上看起来像正常完成
-                    self.ctx.audit.log("agent.error", self.agent_id, {
-                        "route": route.name, "step": str(step.get("action", "")),
-                        "error": str(exc)[:300]})
-                # 已尝试登记：结果价值供同伴避让参考（高价值先写不被低价值覆盖）
-                if akey and self.ctx.ring is not None:
-                    self.ctx.ring.record_attempt(
-                        akey, agent_id=self.agent_id,
-                        agent_name=self.agent_type.value, action=str(step.get("action", "")),
-                        outcome=result.value, note=result.note)
+            token = current_execution_scope.set(dataclasses.replace(
+                current_execution_scope.get() or ExecutionScope(), step_id=step_id, tool_call_id=step_id,
+                tool_name=str(step.get("action") or "")))
+            try:
+                result = await self.execute_step(task, route, plan, step)
+            except Exception as exc:  # noqa: BLE001 —— 单步失败如实记录
+                result = StepResult(ok=False, note=f"step exception: {exc}")
+                self.ctx.audit.log("agent.error", self.agent_id, {
+                    "task_id": task.task_id, "route_id": route.route_id,
+                    "step": step_id, "error": str(exc)[:300]})
+            finally:
+                current_execution_scope.reset(token)
+            if akey and self.ctx.ring is not None:
+                self.ctx.ring.record_attempt(akey, agent_id=self.agent_id,
+                    agent_name=self.agent_type.value, action=str(step.get("action", "")),
+                    outcome=result.value, note=result.note)
             self.ctx.audit.log("agent.tool_result", self.agent_id, {
                 "task_id": task.task_id, "route_id": route.route_id,
                 "id": step_id, "ok": result.ok,
@@ -521,8 +511,7 @@ class SubAgent(abc.ABC):
             return None
         if url.startswith("/"):
             url = task.target.rstrip("/") + url
-        params = step.get("params")
-        return attempt_key("GET", url, params if isinstance(params, dict) else None)
+        return attempt_key(str(step.get("method") or "GET"), url, {"action": step.get("action"), "parameters": step})
 
     _LIVE_INTERVAL = 1.0   # 实时上报节流（秒/任务）
 
@@ -656,7 +645,7 @@ class SubAgent(abc.ABC):
                       "node": str(task.payload.get("node_title", ""))[:120]}
             rules = str(task.payload.get("rules", "")).strip()
             if rules:
-                intent["rules"] = rules[:600]
+                intent["rules"] = rules
             exps = task.payload.get("recent_experience") or []
             if exps:
                 intent["experience"] = [str(e)[:200] for e in exps[-3:]]
@@ -680,16 +669,6 @@ class SubAgent(abc.ABC):
             shared = shared_context(getattr(self.ctx, "blackboard", None))
             if shared:
                 user_obj = {**user_obj, "shared_context": shared}
-        if task is not None:
-            from spiritscout.resources.store import ResourceStore
-
-            resources = getattr(getattr(self.ctx, "knowledge", None), "resources", None)
-            if isinstance(resources, ResourceStore):
-                query = str(task.payload.get("node_title", "")) + " " + role.replace("_", " ")
-                user_obj = {**user_obj, "reference_skills": [
-                    {"id":item["skill_id"],"version":item.get("version",0),"description":item.get("description",""),
-                     "reference":item.get("body","")[:1000]} for item in resources.skills(query,include_body=True)
-                    if item.get("enabled",True)][:3]}
         # 询问通道说明单独保留，观察数据按完整结构缩减，不能截断 JSON。
         budget = max_user_chars - (len(_ASK_CHANNEL_NOTE) if _allow_ask else 0)
 
@@ -716,7 +695,8 @@ class SubAgent(abc.ABC):
                     self.ctx.gateway,
                     decision_messages(self._system_prompt() + f"\nROLE: {role}" + search_contract
                                       + "\n保持原 JSON 决策格式；发现新证据、遇到阻碍或改变方向时，"
-                                      "可增加 progress 字符串，用一到三句向用户说明已确认的情况和下一步验证目标，"
+                                      "必须在本次决策的 progress 字符串中用一到三句向用户说明正在验证什么、"
+                                      "已确认的情况、当前阻碍和下一步验证目标；没有新结论时明确仍在验证，"
                                       "无需复述工具原始响应或内部推理。"
                                       + ("\n" + _ASK_CHANNEL_NOTE if _allow_ask else ""),
                                       {**user_obj, **({"search_observations": observations} if observations else {})},
@@ -825,7 +805,7 @@ class SubAgent(abc.ABC):
         from spiritscout.gateway.world_state import snapshot
 
         guard = getattr(getattr(self.ctx, "policy", None), "guard", None)
-        return snapshot(guard=guard, blackboard=getattr(self.ctx, "blackboard", None))
+        return snapshot(guard=guard, blackboard=getattr(self.ctx, "blackboard", None), references=True)
 
     @abc.abstractmethod
     async def execute_step(

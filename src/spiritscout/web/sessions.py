@@ -25,6 +25,7 @@ import yaml
 from pydantic import ValidationError
 
 from spiritscout.agents.ring import RingLedger
+from spiritscout.config.model_identity import resolve_model
 from spiritscout.config.settings import ModelEntry, SystemConfig
 from spiritscout.core.audit import AuditLogger
 from spiritscout.core.exceptions import SpiritScoutError
@@ -60,7 +61,14 @@ def _bound_model(cfg: SystemConfig, models: list[ModelEntry],
         assigned = agentcfg.read_assignments(cfg.agent_models_path).get(agent, "")
     except (SpiritScoutError, OSError, ValueError):
         return ""
-    return assigned if any(m.model == assigned for m in models) else ""
+    if not assigned:
+        return ""
+    try:
+        return resolve_model(models, assigned).key
+    except SpiritScoutError:
+        if any(m.model == assigned for m in models):
+            raise
+        return ""
 
 
 def _conversation_gateway(cfg: SystemConfig, models: list[ModelEntry], audit: AuditLogger) -> Any:
@@ -350,18 +358,21 @@ def _naming_model_candidates(cfg: SystemConfig, models: list[ModelEntry]) -> lis
     （改名/删行）时跳过，整链失效才回到默认（编队页灵枢指派，再退
     注册表首项——与网关空指派同语义）。
     """
-    names = {m.model for m in models}
+    names = {m.key for m in models} | {m.model for m in models if sum(e.model == m.model for e in models) == 1}
     try:
         configured = agentcfg.read_naming_chain(cfg.agent_models_path)
     except (SpiritScoutError, OSError, ValueError):
         configured = []
+    for mid in configured:
+        if sum(m.model == mid for m in models) > 1:
+            resolve_model(models, mid)
     chain = [mid for mid in configured if mid in names]
     if chain:
         return chain
     bound = _bound_model(cfg, models, "master")
     if bound:
         return [bound]
-    return [models[0].model] if models else []
+    return [models[0].key] if models else []
 
 
 async def _llm_name(cfg: SystemConfig, models: list[ModelEntry], audit: AuditLogger,
@@ -957,6 +968,7 @@ class SessionManager:
         self._models = models
         self._sem = asyncio.Semaphore(max_concurrent)
         self._sessions: dict[str, Session] = {}
+        self.storage_busy: set[str] = set()
         self._queue: asyncio.Queue[
             tuple[Session, SystemConfig, LaunchPlan, bool, list[ModelEntry], bool]] = \
             asyncio.Queue()
@@ -1175,11 +1187,20 @@ class SessionManager:
         if not self._models:
             return
         for session in list(self._sessions.values()):
-            if not pending_distill_snapshots(session.workspace):
+            from spiritscout.ctf.report_jobs import resume as resume_report
+            from spiritscout.ctf.report_jobs import status as report_status
+            if not pending_distill_snapshots(session.workspace) and report_status(session.workspace).get("status") not in {"queued","running"}:
                 continue
             try:
                 cfg = self._session_cfg(session, None)
                 assignments = agentcfg.read_assignments(cfg.agent_models_path)
+                from spiritscout.gateway import ModelGateway, ModelRegistry
+                from spiritscout.gateway.gateway import AgentBoundGateway
+                report_gateway = ModelGateway(ModelRegistry(self._models), cfg.gateway, audit=AuditLogger(session.audit_path))
+                from spiritscout.gateway.usage import bind_usage
+                bind_usage(report_gateway, session.workspace / "usage.json")
+                resume_report(session.workspace, AgentBoundGateway(report_gateway, assignments.get("master", "")),
+                              AuditLogger(session.audit_path))
                 await resume_pending_distills(
                     workspace=session.workspace, cfg=cfg,
                     models=self._models, agent_models=assignments)
@@ -1558,6 +1579,7 @@ class SessionManager:
                 allow_sensitive=bool(req.get("allow_sensitive", False)),
                 rps=float(req.get("rps", 10.0)),
                 flag_format=req.get("flag_format") or None,
+                multiple_answers=bool(req.get("multiple_answers", False)),
                 challenges_yaml=challenges_yaml,
                 platform_yaml=req.get("platform_yaml") or None,
                 rules_yaml=req.get("rules_yaml") or None,
@@ -1649,6 +1671,7 @@ class SessionManager:
         session = self._sessions.get(session_id)
         if session is None:
             raise SpiritScoutError(f"会话不存在: {session_id}")
+        self.ensure_storage_idle(session_id)
         if session.status not in TERMINAL_STATES:
             raise SpiritScoutError("会话仍在运行中，意见将直接进入当前决策环")
         if session.plan is None:
@@ -1958,102 +1981,28 @@ class SessionManager:
                         host = urlparse(str(found.get("base_url") or "")).hostname or ""
                         if host and host not in plan.authorization.scope.allowed_domains:
                             plan.authorization.scope.allowed_domains.append(host)
-                # 本地分析许可不代表已有网络目标；无附件的 SRC 续作仍须
-                # 确认本次目标，纯附件任务则沿用本地分析授权。
-                scope = plan.authorization.scope
-                has_network_target = bool(
-                    scope.allowed_domains or scope.allowed_cidrs or scope.allowed_urls)
-                has_attachments = bool(
-                    plan.source_request and plan.source_request.has_uploads)
-                attachment_dir = session.workspace / "attachments"
-                if attachment_dir.is_dir():
-                    has_attachments = has_attachments or any(
-                        path.is_file() for path in attachment_dir.iterdir())
-                # 真任务缺任何授权对象：记忆不是授权，不能自动
-                # 沿用。SRC 会话把项目记忆里的候选资产摆给用户勾选确认，
-                # 确认后重建本次范围再开工；其余情况或用户未确认时，灵枢
-                # 说明缺口，补齐后发送即自动开工。
-                if intent in ("task", "task_with_rules") and (
-                        scope.is_empty() or (mode == RunMode.SRC
-                                            and not has_network_target
-                                            and not has_attachments)):
-                    added: list[str] = []
-                    asked, scope_answer = False, ""
-                    if mode == RunMode.SRC:
-                        asked, added, scope_answer = \
-                            await self._confirm_project_scope(
-                                session, cfg, models, route_mission, plan,
-                                audit, project_memory, no_llm=no_llm)
-                    if added:
-                        try:
-                            base = plan.source_request or LaunchRequest(
-                                mission=route_mission)
-                            # 显式 target：SRC 装配要求目标非空，确认的范围
-                            # 本身就是要测的入口（域名补 https:// 作工作入口）
-                            target = base.target or added[0]
-                            if "://" not in target:
-                                target = "https://" + target
-                            plan = prepare_launch(LaunchRequest(**{
-                                **base.__dict__, "mode": mode,
-                                "target": target,
-                                "mission": route_mission,
-                                "extra_scope": [*base.extra_scope, *added]}))
-                            if plan.authorization.scope.is_empty():
-                                added = []
-                        except SpiritScoutError as exc:
-                            audit.log("decision.change", "runtime", {
-                                "action": "project_scope_rebuild_failed",
-                                "error": str(exc)[:300]})
-                            added = []
-                    if added:
-                        session.mode = mode.value
-                        session.target = plan.target
-                        cfg.mode = mode
-                        if isinstance(session.launch_request, dict):
-                            # 用户确认的范围随启动参数持久化：进程重启后
-                            # 续传仍按同一范围装配，不退回空范围
-                            stored = [str(v) for v in
-                                      (session.launch_request.get("scope") or [])
-                                      if str(v).strip()]
-                            session.launch_request["scope"] = [*stored, *added]
-                            session.launch_request["mission"] = route_mission
-                            if not session.launch_request.get("target"):
-                                session.launch_request["target"] = plan.target
-                        self._persist(session)
-                    else:
-                        self._set_phase(session, "master_reply", audit)
-                        if asked:
-                            hint = (
-                                "（装配提示：用户刚回答了你对本次测试范围"
-                                f"的确认——「{scope_answer[:300]}」；仍未确认"
-                                "任何目标，无法开工。不要重复罗列同一批候选"
-                                "资产：确认用户的选择，说明当前没有要测试的"
-                                "目标，需要时给出目标或勾选即可）")
-                        else:
-                            hint = (
-                                "（装配提示：任务中未识别到任何授权目标"
-                                "——域名/网段/URL 均为空，无法开工。项目记忆"
-                                "若含可用资产，说明你记得哪些并请用户勾选"
-                                "或给出目标；否则请向用户说明需要提供什么："
-                                "SRC 给目标地址，CTF 给赛题链接或附件）")
-                        reply = await _master_reply(
-                            cfg, models, f"{route_mission}\n\n{hint}",
-                            audit, kind="dialogue",
-                            history=(session.dialogue_history if asked else
-                                     session.dialogue_history[:-1]),
-                            project_memory=project_memory)
-                        audit.log("master.reply", "master",
-                                  {"text": reply[:4000]})
-                        _remember_reply(session, reply)
-                        session.status = "completed"
-                        session.phase = "completed"
-                        session.finished_at = time.time()
-                        session.summary = {
-                            "note": "任务未识别到授权目标，灵枢已向用户说明；"
-                                    "补齐后发送即自动开工",
-                            "intent": prev_intent or "task"}
-                        self._persist(session)
-                        return
+                # SRC 无网络目标或附件也进入规划，由模型判断是否需要澄清；
+                # 项目记忆仍仅作参考，不自动并入本次网络授权。
+                if (mode != RunMode.SRC and intent in ("task", "task_with_rules")
+                        and plan.authorization.scope.is_empty()):
+                    self._set_phase(session, "master_reply", audit)
+                    reply = await _master_reply(
+                        cfg, models,
+                        f"{route_mission}\n\n（装配提示：任务中未识别到授权目标，"
+                        "请根据任务说明缺少哪些赛题链接、附件或平台信息）",
+                        audit, kind="dialogue",
+                        history=session.dialogue_history[:-1],
+                        project_memory=project_memory)
+                    audit.log("master.reply", "master", {"text": reply[:4000]})
+                    _remember_reply(session, reply)
+                    session.status = "completed"
+                    session.phase = "completed"
+                    session.finished_at = time.time()
+                    session.summary = {
+                        "note": "任务未识别到授权目标，灵枢已向用户说明；补齐后发送即自动开工",
+                        "intent": prev_intent or "task"}
+                    self._persist(session)
+                    return
                 self._set_phase(session, "runtime_starting", audit)
                 agent_models = agentcfg.read_assignments(cfg.agent_models_path)
                 self._set_phase(session, "executing", audit)
@@ -2108,8 +2057,8 @@ class SessionManager:
                         standing_rules=session.standing_rules,
                         pause_gate=session.pause_gate,
                         dialogue_history=session.dialogue_history)
-                session.status = "completed"
-                session.phase = "completed"
+                session.status = "interrupted" if result.run_summary.get("answers_complete") is False else "completed"
+                session.phase = session.status
                 session.summary = {
                     "run": result.run_summary,
                     "verify": result.verify_stats,
@@ -2217,11 +2166,17 @@ class SessionManager:
             pass        # 审计失败不遮蔽移动结果：catalog 已是事实源
         return session
 
+    def ensure_storage_idle(self, session_id: str) -> None:
+        """清理期间禁止恢复和删除，避免后台线程操作已被替换的工作区。"""
+        if session_id in self.storage_busy:
+            raise SpiritScoutError("会话正在清理存储，请等待完成后再操作")
+
     async def delete(self, session_id: str, *, confirm: bool = False) -> Session | None:
         """删除会话：仅终态可删且需 confirm；连工作区目录一并移除。"""
         session = self._sessions.get(session_id)
         if session is None:
             return None
+        self.ensure_storage_idle(session_id)
         if session.status not in TERMINAL_STATES:
             raise SpiritScoutError(
                 f"会话 {session_id} 仍在 {session.status}，请先停止再删除")

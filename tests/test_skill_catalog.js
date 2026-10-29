@@ -1,0 +1,27 @@
+"use strict";
+// 技能筛选请求保留 false、分页参数与组合条件；展示时间固定使用北京时间。
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const path = require('node:path');
+const source = fs.readFileSync(path.join(__dirname, '../src/spiritscout/web/static/js/resources.js'), 'utf8');
+const helpers = source.slice(source.indexOf('  function skillDefaults'), source.indexOf('  function syncSkillControls'));
+const context = vm.createContext({URLSearchParams, Date});
+vm.runInContext(helpers, context);
+const query = vm.runInContext("skillQuery({q:'接口',filters:{...skillDefaults(),enabled:false,domain:'web',source:'archive',added_from:'2026-10-01',added_to:'2026-10-28'}},40).toString()", context);
+const params = new URLSearchParams(query);
+assert.equal(params.get('enabled'), 'false');
+assert.equal(params.get('offset'), '40');
+assert.equal(params.get('domain'), 'web');
+assert.equal(params.get('source'), 'archive');
+assert.equal(params.get('added_from'), '2026-10-01');
+assert.equal(params.get('added_to'), '2026-10-28');
+assert.equal(params.get('q'), '接口');
+const html = vm.runInContext('skillControlsHtml()', context);
+assert.match(html, /data-skill-enabled="true" aria-pressed="true"/);
+assert.match(html, /data-skill-enabled="false" aria-pressed="false"/);
+assert.match(html, /data-skill-filter="date_state"/);
+assert.match(html, /data-skill-reset/);
+assert.match(vm.runInContext("skillMeta({domain:'web',source_kind:'archive',created_at:0})", context), /1970\/01\/01 08:00/);
+assert.match(vm.runInContext("skillMeta({source_kind:'builtin',created_at:null})", context), /内置参考 · 时间未知/);
+console.log('skill catalog: combined query, status groups, pagination, Beijing timestamps and unknown history passed');

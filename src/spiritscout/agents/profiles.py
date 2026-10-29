@@ -27,6 +27,8 @@ class AgentProfile:
     runtime_tools: tuple[str, ...] = ()
 
     def allows_tool(self, name: str) -> bool:
+        if name == "http_response_read":
+            return self.allows_tool("http_probe")
         if name in {"asset_memory_lookup", "web_search"}:
             return self.key not in {AgentType.MASTER, AgentType.SECRETARY, AgentType.REPORT}
         return any(fnmatch.fnmatchcase(name, pattern)
@@ -75,7 +77,7 @@ PROFILES: tuple[AgentProfile, ...] = (
         "先当真实用户，后当安全人员。只把实际看到、实际发生的内容写成事实；"
         "证据不足就进未知，不猜角色、权限或隐藏接口。",
         ("访问入口并阅读功能语义", "以用户动线走访核心流程", "记录观测到的接口与交易", "分离事实、假设与未知"),
-        ("真实浏览器走访（渲染后页面与网络请求）", "HTTP 只读探测", "请求记录解析", "接口/交易登记", "业务上下文黑板"),
+        ("HTTP 只读探测", "按需浏览器交互（动态渲染、登录态与网络请求）", "请求记录解析", "接口/交易登记", "业务上下文黑板"),
         ("http_probe", "mcp__playwright__*", "record_endpoint"),
     ),
     AgentProfile(
@@ -210,6 +212,12 @@ def agent_prompt_parts(agent: AgentType | str, *, allow_search: bool = True) -> 
         f"{probe}{search_note}\n"
     )
     common = (
+        "工具选择以完成当前问题的最小成本为准：网页正文、源码、接口响应优先使用 HTTP 工具；"
+        "文件分析和计算优先已有文件工具或短脚本。仅在需要 JavaScript 渲染、页面交互、"
+        "用户登录态或 HTTP 证据不足时按需使用浏览器；用户明确要求浏览器时直接遵循。"
+        "不要为确认工具存在而打开浏览器，也不要无新问题地重复获取整页快照。"
+        "脚本只输出本轮需要的状态、关键字段、错误与证据路径，原始大结果留文件按需读取；"
+        "保留原文中的常量与可复现证据，避免手抄或凭摘要改写关键数据。"
         "输出只包含当前阶段需要的决策和证据引用；不复述已给出的任务、授权、"
         "业务背景或整段工具返回。简单参数选择和无异常响应判断简洁完成，"
         "遇到矛盾或高价值证据再深入推理；无新事实时明确指出缺口，避免重复生成相同计划。"
@@ -238,7 +246,9 @@ def agent_prompt_parts(agent: AgentType | str, *, allow_search: bool = True) -> 
         "authorization.approved_by_user。禁止破坏性操作，所有结论都必须能"
         "追溯到可复现证据。"
     )
-    return common, role
+    from spiritscout.blackboard.exchange import GUIDANCE
+
+    return common + "\n" + GUIDANCE, role
 
 
 def public_roster() -> list[dict[str, object]]:

@@ -1,19 +1,30 @@
+const modelKey = entry => entry.key || entry.model;
+const modelLabel = id => {
+  const entry = (S.models?.models || []).find(m => modelKey(m) === id);
+  return entry ? `${entry.provider_ref || "默认"} / ${entry.model}` : modelDisplayName(id);
+};
 /* ================= 编队/模型/启动 ================= */
 /* ================= 编队 ================= */
+let agentSavePending = Promise.resolve();
+let agentLoadVersion = 0;
 async function loadAgents() {
+  const version = ++agentLoadVersion;
   try {
-    S.agents = await api("/api/agents");
+    await agentSavePending;
+    const agents = await api("/api/agents");
+    if (version !== agentLoadVersion) return;
+    S.agents = agents;
     const g = $("#agents-grid");
     g.innerHTML = S.agents.roster.map(a => {
       const bound = S.agents.assignments[a.key] || "";
       const available = a.status === "available";
       const bind = a.configurable ? `<div class="bind">
-          <select data-agent="${esc(a.key)}" data-orig="${esc(bound)}">
+          <select data-agent="${esc(a.key)}" data-orig="${esc(bound)}" aria-label="${esc(a.name)}的模型">
             <option value="">不指派（按模型列表顺序路由）</option>
-            ${S.agents.models.map(m => `<option value="${esc(m.model)}" data-prov="${esc(m.provider || "")}" ${m.model === bound ? "selected" : ""}>${esc(m.model)}</option>`).join("")}
+            ${S.agents.models.map(m => `<option value="${esc(modelKey(m))}" data-prov="${esc(m.provider || "")}" ${modelKey(m) === bound ? "selected" : ""}>${esc(m.model)} · ${esc(m.provider || "默认")}</option>`).join("")}
             ${S.agents.models.length ? "" : `<option value="" disabled>（「模型」页还没有启用模型）</option>`}
           </select>
-        </div>` : `<div class="bind-note">${available ? "此角色不调用模型" : "尚未装配，不参与任务调度"}</div>`;
+        </div><div class="bind-status muted" role="status" aria-live="polite"></div>` : `<div class="bind-note">${available ? "此角色不调用模型" : "尚未装配，不参与任务调度"}</div>`;
       return `<div class="card acard ${available ? "" : "planned"}">
         <div class="h"><b>${esc(a.name)}</b><span class="en">${esc(a.key)}</span>
           <span class="tag ${available ? "green" : "orange"}" style="margin-left:auto">${available ? "可运行" : "规划中"}</span></div>
@@ -27,45 +38,72 @@ async function loadAgents() {
         ${bind}
       </div>`;
     }).join("");
-    // 比较已保存值，集中保存修改。
-    const dirtySels = () => [...g.querySelectorAll("select[data-agent]")]
-      .filter(sel => sel.value !== sel.dataset.orig);
-    const refreshBindBar = () => {
-      const n = dirtySels().length;
-      $("#bind-save").hidden = n === 0;
-      $("#bind-save-btn").disabled = n === 0;
-      $("#bind-save-btn").textContent = n ? `保存指派（${n} 处修改）` : "保存指派";
-    };
-    g.querySelectorAll("select[data-agent]").forEach(sel => sel.onchange = () => {
-      sel.closest(".selx")?.classList.toggle("dirty", sel.value !== sel.dataset.orig);
-      refreshBindBar();
-    });
-    $("#bind-revert").onclick = () => {
-      dirtySels().forEach(sel => {
-        sel.value = sel.dataset.orig;
-        selxSync(sel);
-        sel.closest(".selx")?.classList.remove("dirty");
-      });
-      refreshBindBar();
-    };
-    $("#bind-save-btn").onclick = async () => {
-      const sels = dirtySels();
-      if (!sels.length) return;
-      const btn = $("#bind-save-btn");
-      btn.disabled = true;
-      try {
-        for (const sel of sels) {
-          S.agents = await api(`/api/agents/${encodeURIComponent(sel.dataset.agent)}`,
-            { method: "PUT", body: JSON.stringify({ model: sel.value }) });
-        }
-        toast(`已保存 ${sels.length} 处模型指派，新任务即刻生效`);
-        loadAgents();
-      } catch (e) {
-        toast(e.message, true);
-        btn.disabled = false;
+    const all = $("#bind-all-model");
+    all.innerHTML = `<option value="">选择统一使用的模型</option>` + S.agents.models.map(m =>
+      `<option value="${esc(modelKey(m))}">${esc(m.model)} · ${esc(m.provider || "默认")}</option>`).join("");
+    all.disabled = !S.agents.models.length;
+    selxSync(all);
+    const sels = [...g.querySelectorAll("select[data-agent]")];
+    const apply = $("#bind-all-apply");
+    apply.disabled = true;
+    all.onchange = () => { apply.disabled = !all.value || !sels.length; };
+    $("#bind-status").textContent = "修改后自动保存，对新任务生效";
+    // 串行落盘，避免单角色与批量操作交错；保存时同步禁用自定义下拉。
+    const save = (targets, model) => {
+      const changes = targets.map(sel => ({ sel, model: model ?? sel.value }))
+        .filter(item => item.model !== item.sel.dataset.orig);
+      if (!changes.length) {
+        if (model != null) $("#bind-status").textContent = "所有可指派角色已使用所选模型";
+        return Promise.resolve();
       }
+      ++agentLoadVersion;
+      const controls = [...sels, all];
+      controls.forEach(sel => { sel.disabled = true; selxSync(sel); });
+      apply.disabled = true;
+      $("#bind-status").textContent = "正在保存模型指派…";
+      const statusOf = sel => sel.closest(".acard").querySelector(".bind-status");
+      changes.forEach(({ sel, model }) => {
+        sel.value = model;
+        selxSync(sel);
+        statusOf(sel).textContent = "保存中…";
+      });
+      agentSavePending = agentSavePending.then(async () => {
+        let saved = 0;
+        const failed = [];
+        for (const { sel, model } of changes) {
+          const status = statusOf(sel);
+          try {
+            S.agents = await api(`/api/agents/${encodeURIComponent(sel.dataset.agent)}`,
+              { method: "PUT", body: JSON.stringify({ model }) });
+            sel.dataset.orig = S.agents.assignments[sel.dataset.agent] || "";
+            sel.value = sel.dataset.orig;
+            status.textContent = "已保存";
+            saved++;
+          } catch (e) {
+            sel.value = sel.dataset.orig;
+            status.textContent = "保存失败，已恢复原指派，请重试";
+            failed.push(`${sel.dataset.agent}：${e.message}`);
+          }
+          selxSync(sel);
+        }
+        $("#bind-status").textContent = failed.length
+          ? `已保存 ${saved} 个角色，${failed.length} 个失败，请重试`
+          : `已保存 ${saved} 个角色的模型指派，对新任务生效`;
+        if (failed.length) toast(failed.join("；"), true);
+      }).finally(() => {
+        controls.forEach(sel => {
+          sel.disabled = sel === all && !S.agents.models.length;
+          selxSync(sel);
+        });
+        apply.disabled = !all.value || !sels.length;
+      });
+      return agentSavePending;
     };
-    refreshBindBar();
+    sels.forEach(sel => { sel.onchange = () => save([sel]); });
+    apply.onclick = () => {
+      if (!all.value || apply.disabled) return;
+      return save(sels, all.value);
+    };
   } catch (e) { toast(e.message, true); }
 }
 
@@ -105,11 +143,11 @@ function modelTile(m) {
     <div class="mt-eff"><span class="k">思考强度</span>${eff.length
       ? eff.map(e => `<span class="eff-pill">${esc(e)}</span>`).join("")
       : `<span class="muted" style="font-size:11.5px">默认档</span>`}</div>
-    ${(m.is_fallback_for || []).length ? `<div class="mt-fb">备：${esc(m.is_fallback_for.join("、"))}</div>` : ""}
+    ${(m.is_fallback_for || []).length ? `<div class="mt-fb">备：${esc(m.is_fallback_for.map(modelLabel).join("、"))}</div>` : ""}
     <div class="mt-ops">
-      <button data-mact="test" data-model="${esc(m.model)}">测试</button>
-      <button data-mact="edit" data-model="${esc(m.model)}">编辑</button>
-      <button class="danger" data-mact="del" data-model="${esc(m.model)}">删除</button>
+      <button data-mact="test" data-model="${esc(modelKey(m))}">测试</button>
+      <button data-mact="edit" data-model="${esc(modelKey(m))}">编辑</button>
+      <button class="danger" data-mact="del" data-model="${esc(modelKey(m))}">删除</button>
     </div>
   </div>`;
 }
@@ -164,9 +202,9 @@ let namingSaved = [];
 function namingRender() {
   const chain = S.namingChain || [];
   const registry = (S.models && S.models.models) || [];
-  const provOf = id => (registry.find(m => m.model === id) || {}).provider_ref || "未知供应商";
+  const provOf = id => (registry.find(m => modelKey(m) === id) || {}).provider_ref || "未知供应商";
   $("#naming-chain").innerHTML = chain.map((m, i) => `<li>
-      <span class="nb-idx">${i + 1}</span><span class="nb-prov" title="供应商">${esc(provOf(m))}</span><b>${esc(m)}</b>
+      <span class="nb-idx">${i + 1}</span><span class="nb-prov" title="供应商">${esc(provOf(m))}</span><b>${esc((registry.find(entry => modelKey(entry) === m) || {}).model || m)}</b>
       <span class="nb-ops-row">
         <button type="button" data-nm="up" data-i="${i}" ${i === 0 ? "disabled" : ""} title="前移">↑</button>
         <button type="button" data-nm="down" data-i="${i}" ${i === chain.length - 1 ? "disabled" : ""} title="后移">↓</button>
@@ -175,9 +213,9 @@ function namingRender() {
     || `<li class="nb-empty">未配置，使用灵枢的模型。</li>`;
   // 候选池：注册表全量模型（带供应商标识），点击即按先后顺序入链
   $("#naming-pool").innerHTML = registry.map(m => {
-    const on = chain.includes(m.model);
+    const on = chain.includes(modelKey(m));
     return `<button type="button" class="nb-chip${on ? " on" : ""}" data-nm="add"
-              data-model="${esc(m.model)}"${on ? " disabled" : ""}
+              data-model="${esc(modelKey(m))}"${on ? " disabled" : ""}
               title="${on ? "已在候选链上（可在上方列表移除）" : "点击加入候选链，按点击顺序排列"}">
               <span class="nb-prov">${esc(m.provider_ref || "未知供应商")}</span><b>${esc(m.model)}</b></button>`;
   }).join("") || `<span class="nb-pool-empty">注册表中还没有模型——先在下方添加。</span>`;
@@ -213,7 +251,7 @@ $("#naming-save").onclick = async () => {
 };
 
 window.modelTest = async model => {
-  toast(`正在测试 ${model} …`);
+  toast(`正在测试 ${modelLabel(model)} …`);
   try {
     const d = await api("/api/models/test", { method: "POST", body: JSON.stringify({ model }) });
     if (d.ok) toast(d.note || `连通正常 · ${d.latency_ms}ms${d.sample ? " · " + d.sample : ""}`);
@@ -275,10 +313,10 @@ $("#m-eff-custom").addEventListener("keydown", e => {
 });
 
 window.modelEdit = model => {
-  const m = (S.models.models || []).find(x => x.model === model);
+  const m = (S.models.models || []).find(x => modelKey(x) === model);
   if (!m) return;
   S.medit = model;
-  $("#m-dlg-title").textContent = `编辑模型 ${model}`;
+  $("#m-dlg-title").textContent = `编辑模型 ${m.model} · ${m.provider_ref || "默认"}`;
   $("#m-model").value = m.model || "";
   fillPrefs(m.provider_ref || "");
   $("#m-ctx").value = m.context_window || 0;
@@ -306,13 +344,13 @@ window.modelAddTo = ref => {
 
 window.modelDel = async model => {
   try { await api(`/api/models/${encodeURIComponent(model)}`, { method: "DELETE" });
-    toast(`已删除 ${model}`); loadModels(); }
+    toast(`已删除 ${modelLabel(model)}`); loadModels(); }
   catch (e) { toast(e.message, true); }
 };
 
 $("#m-cancel").onclick = () => $("#m-dlg").close();
 $("#m-save").onclick = async () => {
-  const existing = (S.models?.models || []).find(x => x.model === S.medit) || {};
+  const existing = (S.models?.models || []).find(x => modelKey(x) === S.medit) || {};
   const body = {
     ...Object.fromEntries(Object.entries(existing).filter(([,value]) => value != null)),
     model: $("#m-model").value.trim(), provider_ref: $("#m-pref").value,
@@ -467,7 +505,7 @@ window.providerFetch = async name => {
         <br>关掉本窗口，用「手动添加模型」直接填模型 ID 即可。</div>`;
       return;
     }
-    const known = new Set((S.models.models || []).map(x => x.model));
+    const known = new Set((S.models.models || []).filter(x => x.provider_ref === name).map(x => x.model));
     $("#fm-body").innerHTML = `
       <div class="muted" style="font-size:12px;margin-bottom:9px">来自 ${esc(d.url)}，共 ${d.models.length} 个可用模型。
         勾选后批量启用，之后可在模型行里逐个调整画像。</div>
@@ -588,10 +626,11 @@ const homeSync = () => {
 };
 const missionModeHints = {
   src: "评估已授权的网站或资产，验证漏洞并生成报告。",
-  ctf: "解答题目入口或附件，获取并提交答案。",
+  ctf: "解答题目入口或附件，获取答案并生成解题报告。",
   competition: "粘贴赛方规则、目标与平台说明，灵枢按实际规则规划，支持自定义赛制。",
 };
 $("#c-mode").onchange = () => {
+  $("#c-multiple-answers-option").hidden = $("#c-mode").value !== "ctf";
   $("#c-mode-hint").textContent = missionModeHints[$("#c-mode").value] || "先选择任务类型，再填写目标与要求。";
   document.querySelectorAll('input[name="home-mode"]').forEach(input => {
     input.checked = input.value === $("#c-mode").value;
@@ -618,7 +657,7 @@ document.querySelectorAll(".chip-s").forEach(b => b.onclick = () => {
 $("#c-go").onclick = async () => {
   const mission = $("#c-mission").value.trim();
   if (!mission) { toast("先用自然语言描述任务——目标与要求写清楚即可", true); return; }
-  await launchMission({ mission }, [...S.homeFiles]);
+  await launchMission({ mission, multiple_answers: $("#c-mode").value === "ctf" && $("#c-multiple-answers").checked }, [...S.homeFiles]);
 };
 $("#c-mission").addEventListener("keydown", ev => {
   if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) {

@@ -38,6 +38,12 @@ CREATE TABLE IF NOT EXISTS tool_invocations (
 CREATE INDEX IF NOT EXISTS idx_invocations_run ON tool_invocations(run_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_invocations_unknown ON tool_invocations(updated_at)
 WHERE execution_status='unknown' OR (effect_status='unknown' AND execution_status<>'running');
+CREATE TABLE IF NOT EXISTS tool_provenance (
+    invocation_id TEXT PRIMARY KEY, source_invocation_id TEXT NOT NULL DEFAULT '',
+    step_id TEXT NOT NULL DEFAULT '', turn INTEGER NOT NULL DEFAULT 0,
+    tool_call_id TEXT NOT NULL DEFAULT '', environment_id TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_tool_provenance_call ON tool_provenance(tool_call_id);
 CREATE TABLE IF NOT EXISTS runtime_events (
     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
     invocation_id TEXT NOT NULL, kind TEXT NOT NULL,
@@ -176,6 +182,8 @@ class ExecutionJournal:
                 "route_id,agent_id,identity_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (invocation_id, self.run_id, tool, digest, "not_started", replay_policy, now, now,
                  encrypted, scope.task_id, scope.route_id, scope.agent_id, scope.identity_id))
+            conn.execute("INSERT INTO tool_provenance(invocation_id,step_id,turn,tool_call_id,environment_id) "
+                         "VALUES(?,?,?,?,?)", (invocation_id, scope.step_id, scope.turn, scope.tool_call_id, scope.environment_id))
             self._event(conn, invocation_id, "not_started", now)
 
     def transition(self, invocation_id: str, status: str, *, effect: str = "none",
@@ -191,6 +199,9 @@ class ExecutionJournal:
                 (status, effect, encrypted, now, invocation_id))
             if cursor.rowcount != 1:
                 raise ValueError("调用记录不存在")
+            if result is not None and result.source_invocation_id:
+                conn.execute("UPDATE tool_provenance SET source_invocation_id=? WHERE invocation_id=?",
+                             (result.source_invocation_id, invocation_id))
             self._event(conn, invocation_id, status, now)
 
     @staticmethod
@@ -274,6 +285,10 @@ class ExecutionJournal:
                                   "VALUES(?,?,?,?,?,?,?,?)",
                                   (self.run_id, scope, key, phase, version, event.lastrowid, encrypted, now))
             checkpoint_id = int(result.lastrowid)
+            # 新完整基线不依赖旧链；增量链在下一次基线写入前完整保留。
+            if version == 1:
+                conn.execute("DELETE FROM runtime_checkpoints WHERE scope=? AND checkpoint_key=? "
+                             "AND checkpoint_id<?", (scope, key, checkpoint_id))
         if scope in {"ctf_conversation", "decision_memory"} and isinstance(messages, list):
             self._checkpoint_heads.pop(head_key, None)
             self._checkpoint_heads[head_key] = (checkpoint_id, depth, copy.deepcopy(messages))
@@ -378,6 +393,12 @@ def read_execution_page(db_path: Path, *, events: bool = False,
                                 f",{extra} FROM tool_invocations WHERE rowid>? ORDER BY rowid LIMIT ?",
                                 (after, limit + 1)).fetchall()
         items = [dict(row) for row in rows[:limit]]
+        if not events and conn.execute("SELECT 1 FROM sqlite_master WHERE name='tool_provenance'").fetchone():
+            for item in items:
+                source = conn.execute("SELECT source_invocation_id,step_id,turn,tool_call_id,environment_id "
+                                      "FROM tool_provenance WHERE invocation_id=?", (item['invocation_id'],)).fetchone()
+                if source:
+                    item.update(dict(source))
         if events:
             for item in items:
                 item["payload"] = json.loads(item["payload"])

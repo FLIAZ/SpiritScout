@@ -121,8 +121,10 @@ class CTFProjectMemorySeedTests(unittest.TestCase):
             route = RoutePlan(name="web", strategy="先读现场")
             state = {"seed": ["预感知响应" * 20000]}
             agent._seed_messages(task, route, route, state)
-            self.assertIn(rules, state["messages"][1]["content"])
-            self.assertEqual(state["messages"][1]["content"].count(rules), 1)
+            self.assertNotIn(rules, state["messages"][1]["content"])
+            self.assertIn("blackboard_ref", state["messages"][1]["content"])
+            records = blackboard.query(BlackboardLayer.TARGET_AUTH)
+            self.assertTrue(any(row["data"].get("content") == rules for row in records))
             self.assertIn("## 任务", state["messages"][1]["content"])
 
     def test_memory_appended_last_and_capped(self) -> None:
@@ -152,14 +154,15 @@ class CTFProjectMemorySeedTests(unittest.TestCase):
             self.assertIn("<world_state>", content)
             self.assertIn("challenge.test", content)
             self.assertIn("## 所属项目的历史记忆", content)
-            # 说明就是测试规则：全文注入且不参与正文截断
+            # 说明作为规则无损落黑板，上下文仅带引用
             self.assertIn("project_rules", content)
-            self.assertIn("长" * 8000, content)
+            self.assertNotIn("长" * 8000, content)
+            self.assertIn("blackboard_ref", content)
             self.assertLess(content.index("project_rules"), content.index("## 任务"))
             encoded = json.dumps(memory, ensure_ascii=False)
             self.assertNotIn(encoded, content)
-            # 历史记忆块不含说明正文，规则只出现一次
-            self.assertEqual(content.count("长" * 8000), 1)
+            # 历史记忆块和上下文不复制规则正文
+            self.assertEqual(content.count("长" * 8000), 0)
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ class Element {
   focus() { this.focused = true; }
   closest() { return null; }
 }
-const elements = Object.fromEntries(['c-go', 'c-mode', 'c-mode-hint', 'c-mission'].map(id => [`#${id}`, new Element()]));
+const elements = Object.fromEntries(['c-go', 'c-mode', 'c-mode-hint', 'c-mission', 'c-multiple-answers-option', 'c-multiple-answers'].map(id => [`#${id}`, new Element()]));
 const radios = ['src', 'ctf', 'competition'].map(mode => new Element(mode));
 const examples = ['src', 'ctf', 'competition'].map(mode => {
   const element = new Element();
@@ -38,6 +38,7 @@ assert.equal(elements['#c-go'].classes.has('ready'), false);
 for (const radio of radios) {
   radio.listeners.change();
   assert.equal(elements['#c-mode'].value, radio.value);
+  assert.equal(elements['#c-multiple-answers-option'].hidden, radio.value !== 'ctf');
   assert.deepEqual(radios.filter(item => item.checked).map(item => item.value), [radio.value]);
 }
 elements['#c-mission'].value = '实际任务';

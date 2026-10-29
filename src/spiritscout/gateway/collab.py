@@ -235,7 +235,7 @@ class CollabGateway:
                      if confidence_threshold is not None
                      else self.cfg.cascade_confidence_threshold)
         first = self.registry.cheapest_for("simple")
-        resp = await self.gateway.chat(messages, model=first.model,
+        resp = await self.gateway.chat(messages, model=first.key,
                                        task_type=task_type)
         confidence = parse_judgment(resp.content).confidence
         if confidence >= threshold:
@@ -243,7 +243,7 @@ class CollabGateway:
                 "escalated": False, "confidence": confidence, "model": first.model})
             return CascadeResult(response=resp, escalated=False,
                                  confidence=confidence,
-                                 first_model=first.model, final_model=first.model)
+                                 first_model=first.key, final_model=first.key)
         # 升级旗舰复判（带上首棒结论供参考，不盲从）
         flagship = self.registry.route("meta_planning")
         escalated_messages = list(messages) + [{
@@ -252,13 +252,13 @@ class CollabGateway:
                        f"{confidence:.2f}），请独立复判并给出最终结论：\n{resp.content[:2000]}",
         }]
         final = await self.gateway.chat(escalated_messages,
-                                        model=flagship.model,
+                                        model=flagship.key,
                                         task_type="meta_planning")
         self.gateway.audit.log("model.cascade", "collab", {
             "escalated": True, "confidence": confidence,
             "from": first.model, "to": flagship.model})
         return CascadeResult(response=final, escalated=True, confidence=confidence,
-                             first_model=first.model, final_model=flagship.model)
+                             first_model=first.key, final_model=flagship.key)
 
     # ------------------------------------------------------------ 异构角色
 
@@ -284,7 +284,7 @@ class CollabGateway:
             {"role": "user", "content": json.dumps(
                 {"subject": subject, "context": context or {}}, ensure_ascii=False)},
         ]
-        resp = await self.gateway.chat(messages, model=entry.model,
+        resp = await self.gateway.chat(messages, model=entry.key,
                                        task_type="verification")
         return parse_judgment(resp.content, entry.model)
 
@@ -302,7 +302,7 @@ class CollabGateway:
         resp = await self.gateway.chat(
             [{"role": "system", "content": _JUDGE_SYSTEM},
              {"role": "user", "content": json.dumps(user, ensure_ascii=False)}],
-            model=entry.model, task_type="verification")
+            model=entry.key, task_type="verification")
         return parse_judgment(resp.content, entry.model)
 
     async def _arbitrate(
@@ -317,5 +317,5 @@ class CollabGateway:
                                 "证据不足一律 review。",
                  "transcript": transcript,
              }, ensure_ascii=False)}],
-            model=entry.model, task_type="meta_planning")
+            model=entry.key, task_type="meta_planning")
         return parse_judgment(resp.content, entry.model)

@@ -35,6 +35,29 @@ input:checked ~ .mode-check { border: 4px solid var(--accent); background: var(-
 #view-home .mission-settings p { flex: 1 1 240px; text-align: right; color: var(--ink-2); font-size: 11px; }
 #view-home .composer textarea { display: block; padding: 20px 24px 14px; min-height: 160px; max-height: 360px; border-radius: 0; font-size: 15px; line-height: 1.85; }
 #view-home .composer textarea::placeholder { color: var(--ink-3); }
+#view-home .answer-option { position: relative; display: grid; grid-template-columns: 32px minmax(0, 1fr) 36px; align-items: center; gap: 12px; margin: 0 24px 16px; padding: 13px 15px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); cursor: pointer; transition: border-color .16s, background .16s; }
+#view-home .answer-option[hidden] { display: none; }
+#view-home .answer-option input { position: absolute; width: 1px; height: 1px; opacity: 0; margin: 0; padding: 0; }
+#view-home .answer-option-icon { display: grid; place-items: center; width: 32px; height: 36px; color: var(--ink-2); }
+#view-home .answer-option-icon svg { width: 25px; height: 25px; }
+#view-home .answer-option-copy { display: grid; gap: 5px; min-width: 0; }
+#view-home .answer-option-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
+#view-home .answer-option-heading strong { color: var(--ink); font-size: 12px; font-weight: 600; }
+#view-home .answer-option-status { color: var(--ink-3); font-size: 10px; }
+#view-home .answer-option-copy small { color: var(--ink-2); font-size: 11px; line-height: 1.7; }
+#view-home .answer-option-switch { position: relative; width: 36px; height: 21px; border: 1px solid var(--line); border-radius: 12px; background: var(--line); transition: background .16s, border-color .16s; }
+#view-home .answer-option-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 15px; height: 15px; border-radius: 50%; background: var(--home-panel); box-shadow: 0 1px 3px rgb(0 0 0 / .14); transition: transform .16s; }
+#view-home .answer-option-on { display: none; }
+#view-home .answer-option:hover { border-color: var(--accent); }
+#view-home .answer-option:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+#view-home .answer-option:has(input:checked) :is(.answer-option-icon, .answer-option-status) { color: var(--accent-ink); }
+#view-home .answer-option:has(input:checked) .answer-option-switch { background: var(--accent); border-color: var(--accent); }
+#view-home .answer-option:has(input:checked) .answer-option-switch::after { transform: translateX(15px); }
+#view-home .answer-option:has(input:checked) .answer-option-off { display: none; }
+#view-home .answer-option:has(input:checked) .answer-option-on { display: inline; }
+#view-home .answer-option:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 3px; }
+@media (max-width: 600px) { #view-home .answer-option { margin-inline: 16px; padding: 12px; gap: 9px; grid-template-columns: 26px minmax(0, 1fr) 36px; } #view-home .answer-option-icon { width: 26px; } }
+@media (prefers-reduced-motion: reduce) { #view-home .answer-option, #view-home .answer-option-switch, #view-home .answer-option-switch::after { transition: none; } }
 #view-home .composer .bar { margin: 0 14px; padding: 12px 6px 14px; border-top: 1px solid var(--line); gap: 12px; }
 #view-home .bar-left { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
 #view-home #c-project { max-width: 200px; }

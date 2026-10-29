@@ -9,11 +9,23 @@ import re
 from typing import Any
 
 from spiritscout.agents.sub.base import RoutePlan, StepResult, SubAgent
+from spiritscout.blackboard.exchange import NAMES, SCHEMAS, execute, project_rules
 from spiritscout.core.audit import tool_preview
 from spiritscout.core.ids import new_id
 from spiritscout.core.models import AgentType, Asset, BlackboardLayer, Task
+from spiritscout.gateway.backends import extract_json
 from spiritscout.gateway.context import append_instruction_events, compact_history
+from spiritscout.gateway.progress import NATIVE_PROGRESS_GUIDANCE, publish_progress
+from spiritscout.resources.runtime import (
+    SKILL_GUIDANCE,
+    SKILL_NAMES,
+    SKILL_SCHEMAS,
+    append_catalog,
+    native_skill_result,
+    runtime_for,
+)
 from spiritscout.tools.catalog import MCP_PROXY_SCHEMAS, search_mcp_tools
+from spiritscout.tools.invocation import current_execution_scope
 from spiritscout.tools.search_policy import search_allowed
 from spiritscout.tools.web_search import SEARCH_SCHEMA
 
@@ -73,9 +85,14 @@ class BusinessContextAgent(SubAgent):
                     "url": {"type": "string"},
                     "method": {"type": "string"},
                     "params": {"type": "object"},
+                    "refresh": {"type": "boolean", "description": "需要新鲜响应时设 true，绕过共享记录"},
                     "headers": {"type": "object"},
                 }, "required": ["url"]}}},
         ]
+        schemas.extend(SCHEMAS)
+        from spiritscout.tools.http_responses import SCHEMA as RESPONSE_SCHEMA
+
+        schemas.append(RESPONSE_SCHEMA)
         schemas.append({"type":"function","function":{"name":"ask_user",
             "description":(
                 "向用户提问并等待答复。遇到只有用户能提供的信息（测试账号、"
@@ -116,6 +133,8 @@ class BusinessContextAgent(SubAgent):
                 "description": str(schema.get("description") or meta.get("tool") or name),
                 "parameters": schema.get("inputSchema") or {"type": "object", "properties": {}},
             }})
+        if runtime_for(self.ctx) is not None:
+            schemas.extend(SKILL_SCHEMAS)
         return schemas
 
     def _explore_brief(self, task: Task) -> str:
@@ -144,7 +163,7 @@ class BusinessContextAgent(SubAgent):
         cleaned = {k: v for k, v in intent.items() if v}
         if cleaned:
             payload["task_intent"] = cleaned
-        return json.dumps(payload, ensure_ascii=False)
+        return json.dumps(project_rules(getattr(self.ctx, "blackboard", None), payload), ensure_ascii=False)
 
     # ------------------------------------------------------------ 走访回合
 
@@ -159,12 +178,12 @@ class BusinessContextAgent(SubAgent):
             return StepResult(ok=True, value=0.9, note="走访已完成并建模")
         from spiritscout.gateway import world_state
 
-        current_world = self._world_state()
+        current_world = project_rules(getattr(self.ctx, "blackboard", None), self._world_state())
         if not st["messages"]:
             st["world_state"] = current_world
             st["messages"] = [
                 {"role": "system",
-                 "content": self._system_prompt() + "\nROLE: business_explorer"},
+                 "content": self._system_prompt() + NATIVE_PROGRESS_GUIDANCE + "\nROLE: business_explorer" + ("\n" + SKILL_GUIDANCE if runtime_for(self.ctx) else "")},
                 {"role": "user", "content": self._explore_brief(task)},
             ]
         else:
@@ -175,16 +194,18 @@ class BusinessContextAgent(SubAgent):
         steering = (self.ctx.ring.steerings_for(self.agent_type.value, task_id=task.task_id)
                     if self.ctx.ring is not None else [])
         append_instruction_events(st, steering, consumer_key=f"{task.task_id}|{route.route_id}")
+        append_catalog(runtime_for(self.ctx), st, st["messages"])
         size = len(json.dumps(st["messages"], ensure_ascii=False))
         if size > st.get("compact_at", 48000):
             compact_history(st["messages"])
             size = len(json.dumps(st["messages"], ensure_ascii=False))
             st["compact_at"] = size + max(16000, size // 2)
-        messages = [{k: v for k, v in m.items() if not k.startswith("_context_")}
+        messages = [{k: v for k, v in m.items() if not k.startswith("_")}
                     for m in st["messages"]]
         st["turn"] += 1
-        if st["turn"] > 1:
-            self.ctx.audit.log("agent.turn", self.agent_id, {"turn": st["turn"], "task_id": task.task_id})
+        self.ctx.audit.log("agent.turn", self.agent_id, {
+            "turn": st["turn"], "task_id": task.task_id,
+            "route_id": route.route_id, "route": getattr(route, "name", plan.name)})
         try:
             resp = await self.ctx.gateway.chat(
                 messages, task_type="execution",
@@ -198,8 +219,8 @@ class BusinessContextAgent(SubAgent):
             return StepResult(ok=False, note=f"走访决策不可用: {exc}")
 
         # assistant 消息（含工具调用）回灌，保持多轮协议完整
-        if resp.tool_calls and str(resp.content or "").strip():
-            self.ctx.audit.log("agent.note", self.agent_id, {"text": str(resp.content)[:2000]})
+        publish_progress(self.ctx.audit, self.agent_id, resp.content or "",
+                         task_id=task.task_id, route_id=route.route_id, turn=st["turn"])
         st["messages"].append({
             "role": "assistant",
             "content": resp.content or "",
@@ -221,11 +242,14 @@ class BusinessContextAgent(SubAgent):
         # 浏览器是有状态会话，逐个派发避免页面竞态
         for call in resp.tool_calls:
             text = await self._run_tool_call(task, call)
+            skill_result = (extract_json(text) or {}) if call.get("name") in SKILL_NAMES else {}
             st["messages"].append({
                 "role": "tool",
                 "tool_call_id": call.get("id") or "call_0",
-                "content": text if call.get("name") == "mcp_search" else text[: self._TOOL_RESULT_CAP],
-                **({"_context_contract": True} if call.get("name") == "mcp_search" else {}),
+                "content": text if call.get("name") == "mcp_search" or call.get("name") in SKILL_NAMES | NAMES else text[: self._TOOL_RESULT_CAP],
+                **({"_context_contract": True, "_skill_ref": skill_result["ref"]}
+                   if skill_result.get("ok") and "content" in skill_result else
+                   {"_context_contract": True} if call.get("name") == "mcp_search" else {}),
             })
         plan.steps.append({"action": "explore"})   # 续回合：终局由模型给出
         return StepResult(ok=True, value=min(0.1 * st["turn"], 0.6),
@@ -233,15 +257,44 @@ class BusinessContextAgent(SubAgent):
 
     async def _run_tool_call(self, task: Task, call: dict[str, Any]) -> str:
         """派发一次模型工具调用：record_endpoint 记账，其余一律过工具门。"""
+        from dataclasses import replace
+
+        from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
+
+        state = self._explore.get(task.task_id, {})
+        turn = int(state.get("turn") or 0)
+        previous = current_execution_scope.get() or ExecutionScope()
+        token = current_execution_scope.set(replace(previous, task_id=task.task_id, agent_id=self.agent_id,
+            step_id=f"{previous.route_id}:{turn}", turn=turn, tool_call_id=str(call.get("id") or ""),
+            tool_name=str(call.get("name") or "")))
+        try:
+            return await self._run_tool_call_inner(task, call)
+        finally:
+            current_execution_scope.reset(token)
+
+    async def _run_tool_call_inner(self, task: Task, call: dict[str, Any]) -> str:
+        """派发一次模型工具调用：record_endpoint 记账，其余一律过工具门。"""
         name = str(call.get("name") or "")
         args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
-        self.ctx.audit.log("agent.tool_call", self.agent_id, {
+        execution = current_execution_scope.get()
+        event_scope = {"task_id": task.task_id, "route_id": execution.route_id if execution else ""}
+        self.ctx.audit.log("agent.tool_call", self.agent_id, {**event_scope,
             "calls": [{"id": call.get("id") or "", "name": name, "arguments": args,
                        "preview": tool_preview(args)}]})
         result_meta: dict[str, Any] = {"tool": name}
         try:
             if call.get("parse_error"):
                 ok, text = False, f"工具参数解析失败: {call['parse_error']}。请修正 JSON 后重新调用。"
+            elif name in NAMES:
+                result = execute(self.ctx.blackboard, name, args, actor=self.agent_id,
+                                 agent_type=self.agent_type, source=event_scope)
+                ok, text = result["ok"], json.dumps(result, ensure_ascii=False, separators=(',', ':'))
+            elif name in SKILL_NAMES:
+                st = self._explore.setdefault(task.task_id, {"messages": [], "concluded": False, "pages": [], "turn": 0})
+                result = native_skill_result(self.ctx, name, args, st, st["messages"],
+                                             self.agent_id, event_scope)
+                result_meta["skill"] = {key: value for key, value in result.items() if key != "content"}
+                ok, text = result["ok"], json.dumps(result, ensure_ascii=False)
             elif name == "mcp_search":
                 result = search_mcp_tools(self.ctx.mcp_tools or {}, str(args.get("query") or ""),
                                           offset=int(args.get("offset") or 0),
@@ -262,6 +315,10 @@ class BusinessContextAgent(SubAgent):
                 ok = res.ok
                 text = (f"工具执行失败: {res.failure_reason()}"
                         if not res.ok else (res.stdout or "（无输出）"))
+                if name == "http_probe" and res.ok:
+                    from spiritscout.tools.http_responses import model_preview
+
+                    text = model_preview(res)
                 if name == "web_search":
                     result_meta.update(res.parsed)
                 result_meta.update(invocation_id=res.invocation_id, returncode=res.returncode,
@@ -273,7 +330,7 @@ class BusinessContextAgent(SubAgent):
         except Exception as exc:  # noqa: BLE001 —— 工具异常转结果回灌自纠
             ok, text = False, f"工具调用异常: {type(exc).__name__}: {exc}"
         self.ctx.audit.log("agent.tool_result", self.agent_id, {
-            "id": call.get("id") or "", "ok": ok, "note": text[:300], **result_meta})
+            "id": call.get("id") or "", "name": name, **event_scope, "ok": ok, "note": result_meta.get("skill", {}).get("note") or text[:300], **result_meta})
         return text
 
     async def _tool_ask_user(self, task: Task,

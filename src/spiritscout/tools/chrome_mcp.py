@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import os
 import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -72,7 +74,13 @@ def command(endpoint: str, env: dict[str, str]) -> list[str]:
     output = Path(env["SPIRITSCOUT_CHROME_OUTPUT_DIR"]) if env.get("SPIRITSCOUT_CHROME_OUTPUT_DIR") else (
         Path.cwd() / ".tools" / "chrome-mcp" / "output")
     output.mkdir(parents=True, exist_ok=True)
-    temporary = output / "tmp"
+    # Unix socket 路径有长度限制，不能放在可能含中文或深层目录的会话产物路径下。
+    socket_base = Path("/tmp") if os.name != "nt" and Path("/tmp").is_dir() else Path(tempfile.gettempdir())
+    socket_root = socket_base / (
+        "ss-pw-" + hashlib.sha256(str(output.resolve()).encode()).hexdigest()[:12])
+    socket_root.mkdir(mode=0o700, exist_ok=True)
+    env.setdefault("PWTEST_SOCKETS_DIR", str(socket_root))
+    temporary = socket_root / "tmp"
     temporary.mkdir(exist_ok=True)
     for key in ("TMPDIR", "TEMP", "TMP"):
         env[key] = str(temporary.resolve())
@@ -99,6 +107,10 @@ def main() -> int:
         env = dict(os.environ)
         endpoint = ("" if env.get("SPIRITSCOUT_CHROME_MODE") == "headless" else
                     cdp_endpoint(env.get("SPIRITSCOUT_CHROME_CDP_URL", "")))
+        if endpoint and env.get("SPIRITSCOUT_CHROME_DEFER_START") != "1":
+            from spiritscout.tools.browser_desktop import ensure_browser
+
+            ensure_browser(endpoint, env)
         argv = command(endpoint, env)
         if sys.platform == "win32":
             # Windows CRT exec 不会自动引用带空格路径；subprocess 按 argv 正确编码。

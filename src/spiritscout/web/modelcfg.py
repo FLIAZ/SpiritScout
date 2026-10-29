@@ -11,6 +11,7 @@ from typing import Any
 
 import yaml
 
+from spiritscout.config.model_identity import model_key, resolve_model
 from spiritscout.config.settings import ModelEntry, ProviderEntry
 from spiritscout.core.exceptions import ConfigurationError, SpiritScoutError
 
@@ -129,7 +130,7 @@ def _validate(providers: list[dict[str, Any]],
         if e.provider_ref and e.provider_ref not in names:
             raise SpiritScoutError(
                 f"模型 {e.model} 引用了不存在的供应商: {e.provider_ref}")
-        if e.model in seen:
+        if e.key in seen:
             raise SpiritScoutError(f"模型 ID 重复: {e.model}")
         provider = next((p for p in providers if p.get("name") == e.provider_ref), {})
         resolved = e.model_copy(update={
@@ -139,7 +140,7 @@ def _validate(providers: list[dict[str, Any]],
             resolved.validate_cache_transport()
         except ConfigurationError as exc:
             raise SpiritScoutError(str(exc)) from exc
-        seen.add(e.model)
+        seen.add(e.key)
 
 
 def write_config(path: str | Path, providers: list[dict[str, Any]],
@@ -165,10 +166,12 @@ def write_config(path: str | Path, providers: list[dict[str, Any]],
 
 
 def upsert_provider(path: str | Path, provider: dict[str, Any], *,
-                    original_name: str | None = None) -> list[dict[str, Any]]:
+                    original_name: str | None = None,
+                    assignments_path: str | Path | None = None) -> list[dict[str, Any]]:
     """新增（original_name=None）或更新供应商；重名/不存在抛 SpiritScoutError。"""
     provider = canonical_provider(provider)
     providers, models = read_config(path)
+    old_models = list(models)
     if original_name is None:
         if any(p.get("name") == provider.get("name") for p in providers):
             raise SpiritScoutError(f"供应商已存在: {provider.get('name')}")
@@ -190,7 +193,9 @@ def upsert_provider(path: str | Path, provider: dict[str, Any], *,
             models = [dict(m, provider_ref=new_name)
                       if m.get("provider_ref") == original_name else m
                       for m in models]
-    write_config(path, providers, models)
+    renames = {model_key(before): model_key(after) for before, after in zip(old_models, models)
+               if model_key(before) != model_key(after)}
+    _save_models(path, providers, old_models, models, assignments_path, renames)
     return providers
 
 
@@ -212,82 +217,104 @@ def delete_provider(path: str | Path, name: str) -> list[dict[str, Any]]:
 # ------------------------------------------------------------ 模型
 
 
+def _save_models(path: str | Path, providers: list[dict], old: list[dict], entries: list[dict],
+                 assignments_path: str | Path | None, renames: dict[str, str] | None = None) -> None:
+    """出现同名模型前，固定旧裸名引用；改名时迁移完整身份，写盘失败回滚。"""
+    renames = renames or {}
+
+    def migrate(ref: str) -> str:
+        try:
+            target = resolve_model(old, ref)
+        except ConfigurationError:
+            if sum(e.get('model') == ref for e in old) > 1:
+                raise
+            return ref
+        key = model_key(target)
+        if key in renames:
+            return renames[key]
+        if sum(e.get('model') == target.get('model') for e in entries) > 1:
+            return key
+        return ref
+
+    entries = [dict(e, is_fallback_for=[migrate(ref) for ref in e.get('is_fallback_for', [])])
+               if e.get('is_fallback_for') else e for e in entries]
+    _validate(providers, entries)
+    from spiritscout.web import agentcfg
+
+    table = agentcfg.read_assignments(assignments_path) if assignments_path else {}
+    chain = agentcfg.read_naming_chain(assignments_path) if assignments_path else []
+    updated = {key: migrate(value) for key, value in table.items()}
+    updated_chain = [migrate(ref) for ref in chain]
+    changed = (updated, updated_chain) != (table, chain)
+    if assignments_path and changed:
+        agentcfg._write_doc(assignments_path, updated, updated_chain)
+    try:
+        write_config(path, providers, entries)
+    except BaseException:
+        if assignments_path and changed:
+            agentcfg._write_doc(assignments_path, table, chain)
+        raise
+
+
 def upsert_entry(path: str | Path, entry: dict[str, Any], *,
                  original_model: str | None = None,
                  assignments_path: str | Path | None = None) -> list[dict[str, Any]]:
-    """新增（original_model=None）或更新模型；ID 冲突/不存在抛 SpiritScoutError。"""
-    entry = canonical_entry(entry)   # 密钥字段拒绝、未知字段丢弃、规范化
+    """以供应商和原始模型 ID 定位配置；旧裸名只接受唯一匹配。"""
+    entry = canonical_entry(entry)
     providers, entries = read_config(path)
+    old = list(entries)
+    renamed = {}
     if original_model is None:
-        if any(e.get("model") == entry.get("model") for e in entries):
-            raise SpiritScoutError(f"模型已存在: {entry.get('model')}")
+        if any(model_key(e) == model_key(entry) for e in entries):
+            raise SpiritScoutError(f"模型已存在: {model_key(entry)}")
         entries.append(entry)
     else:
-        for i, e in enumerate(entries):
-            if e.get("model") == original_model:
-                if (entry.get("model") != original_model
-                        and any(x.get("model") == entry.get("model") for x in entries)):
-                    raise SpiritScoutError(f"模型已存在: {entry.get('model')}")
-                entries[i] = entry
-                break
-        else:
-            raise SpiritScoutError(f"模型不存在: {original_model}")
-    if original_model and original_model != entry["model"]:
-        entries = [dict(e, is_fallback_for=[entry["model"] if m == original_model else m
-                    for m in e.get("is_fallback_for", [])]) for e in entries]
-    if assignments_path and original_model and original_model != entry["model"]:
-        from spiritscout.web.agentcfg import migrate_model, read_assignments
-
-        table = read_assignments(assignments_path)
-        # 配置校验先完成；写盘异常回滚编队，避免静默留悬空引用。
-        _validate(providers, entries)
-        migrate_model(assignments_path, original_model, entry["model"])
-        try:
-            write_config(path, providers, entries)
-        except BaseException:
-            from spiritscout.web.agentcfg import write_assignments
-            write_assignments(assignments_path, table)
-            raise
-    else:
-        write_config(path, providers, entries)
-    return entries
+        existing = resolve_model(entries, original_model)
+        if any(e is not existing and model_key(e) == model_key(entry) for e in entries):
+            raise SpiritScoutError(f"模型已存在: {model_key(entry)}")
+        entries[entries.index(existing)] = entry
+        if model_key(existing) != model_key(entry):
+            renamed[model_key(existing)] = model_key(entry)
+    _save_models(path, providers, old, entries, assignments_path, renamed)
+    return read_entries(path)
 
 
-def add_entries(path: str | Path, provider_ref: str,
-                model_ids: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
-    """批量启用某供应商下的模型（从云端拉取的可用列表里勾选）。
-
-    返回 (全部模型, 本次新增的模型 ID)；已存在的跳过（不覆盖既有画像设置）。
-    """
+def add_entries(path: str | Path, provider_ref: str, model_ids: list[str], *,
+                assignments_path: str | Path | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+    """仅跳过同供应商已启用的 ID，其他供应商同名模型可并存。"""
     providers, entries = read_config(path)
-    if not any(p.get("name") == provider_ref for p in providers):
+    if not any(p.get('name') == provider_ref for p in providers):
         raise SpiritScoutError(f"供应商不存在: {provider_ref}")
-    existing = {str(e.get("model")) for e in entries}
-    added: list[str] = []
-    for raw_id in model_ids:
-        mid = str(raw_id).strip()
+    old = list(entries)
+    existing = {e.get('model') for e in entries if e.get('provider_ref') == provider_ref}
+    added = []
+    for raw in model_ids:
+        mid = str(raw).strip()
         if not mid or mid in existing:
             continue
-        entries.append({"model": mid, "provider_ref": provider_ref,
-                        "capabilities": [], "context_window": 0,
-                        "reasoning_effort_levels": [], "is_fallback_for": []})
+        entries.append(canonical_entry({'model': mid, 'provider_ref': provider_ref}))
         existing.add(mid)
         added.append(mid)
-    write_config(path, providers, entries)
-    return entries, added
+    _save_models(path, providers, old, entries, assignments_path)
+    return read_entries(path), added
 
 
 def delete_entry(path: str | Path, model: str, *, assignments_path: str | Path | None = None) -> list[dict[str, Any]]:
     providers, entries = read_config(path)
+    target = resolve_model(entries, model)
     from spiritscout.web.agentcfg import read_assignments, read_naming_chain
 
-    users = [k for k, v in read_assignments(assignments_path).items() if v == model] if assignments_path else []
-    chain = [m for m in read_naming_chain(assignments_path) if m == model] if assignments_path else []
-    backups = [e["model"] for e in entries if model in e.get("is_fallback_for", [])]
+    def matches(ref: str) -> bool:
+        try:
+            return model_key(resolve_model(entries, ref)) == model_key(target)
+        except ConfigurationError:
+            return ref == target['model']
+
+    users = [k for k, v in read_assignments(assignments_path).items() if matches(v)] if assignments_path else []
+    chain = [m for m in read_naming_chain(assignments_path) if matches(m)] if assignments_path else []
+    backups = [model_key(e) for e in entries if any(matches(ref) for ref in e.get('is_fallback_for', []))]
     if users or chain or backups:
         raise SpiritScoutError(f"模型仍被引用，请先迁移：编队 {users}，命名链 {chain}，备用关系 {backups}")
-    remaining = [e for e in entries if e.get("model") != model]
-    if len(remaining) == len(entries):
-        raise SpiritScoutError(f"模型不存在: {model}")
+    remaining = [e for e in entries if e is not target]
     write_config(path, providers, remaining)
     return remaining

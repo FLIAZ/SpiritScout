@@ -24,6 +24,11 @@ class ExecutionScope:
     route_id: str = ""
     agent_id: str = ""
     identity_id: str = ""
+    environment_id: str = ""
+    step_id: str = ""
+    turn: int = 0
+    tool_call_id: str = ""
+    tool_name: str = ""
 
 
 current_execution_scope: ContextVar[ExecutionScope | None] = ContextVar(

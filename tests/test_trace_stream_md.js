@@ -56,6 +56,9 @@ Object.assign(context, {
   ToolParameters: { attach: () => {} },
   traceAppend: () => ({ dataset: {} }), traceScroll: () => {},
 });
+const core = fs.readFileSync(path.join(__dirname, "../src/spiritscout/web/static/js/core.js"), "utf8");
+Object.assign(context, {atob, TextDecoder, Uint8Array});
+vm.runInContext(core.slice(core.indexOf("function modelDisplayName("), core.indexOf("async function api(")), context);
 vm.runInContext(cut("function traceTurn(", "function argBrief(") + cut("function tracePush(", 'const traceBox = $("#trace-box");'), context);
 
 const push = (type, detail) => vm.runInContext("tracePush", context)({ type, actor: ACTOR, detail, ts: "2026-10-17T00:00:00Z" });

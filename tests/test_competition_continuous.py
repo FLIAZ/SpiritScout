@@ -132,7 +132,7 @@ class ContinuousCompetitionTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(dispatch, return_exceptions=True)
 
     async def test_slow_idle_close_does_not_block_refilling_another_vacancy(self) -> None:
-        """一道题慢速关闭时，另一个空位仍应立即启动后备题。"""
+        """已完成题慢速关闭时，另一个空位仍应立即启动后备题。"""
         closing = asyncio.Event()
         allow_close = asyncio.Event()
         next_running = asyncio.Event()
@@ -154,6 +154,7 @@ class ContinuousCompetitionTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(adapter.aclose)
         await adapter.list_challenges()
         await adapter.ensure_instance({'id': 'old'})
+        adapter._listed['old']['is_completed'] = True
 
         async def run(task: Task) -> None:
             next_running.set()
@@ -275,9 +276,22 @@ class ContinuousCompetitionTests(unittest.IsolatedAsyncioTestCase):
         """首批没有任何后备节点，也必须在慢题收尾前补题并维持三个席位。"""
         await self._check_exhausted_queue(solved=True)
 
-    async def test_unsolved_conclusion_releases_slot_before_other_tasks_finish(self) -> None:
-        """卡题主动留档收尾后也要立即关容器、启动后续题。"""
-        await self._check_exhausted_queue(solved=False)
+    async def test_unsolved_conclusion_keeps_instance_for_handoff(self) -> None:
+        """调查节点完成不能隐式销毁未完成题的现场。"""
+        adapter = PlatformAdapter(parse_platform_profile(PROFILE), continuous=True)
+        self.addAsyncCleanup(adapter.aclose)
+        adapter._instances['c1'] = 'http://c1.box'
+        adapter._listed['c1'] = _challenge('c1')
+        adapter.close_instance = AsyncMock()
+        dag = TaskDAG()
+        old = dag.add_node('CTF-WEB', '阶段完成', meta={'challenge': {'id': 'c1'}})
+        dag.mark(old.node_id, TaskStatus.DONE)
+        master = self._master(adapter, AsyncMock())
+        master._platform_release = AsyncMock()
+        await master._dispatch({'dag': dag.to_dict(), 'round_no': 0,
+                                'target': 'http://c1.box', 'tasks_dispatched': []})
+        self.assertEqual(adapter.active_instance_ids(), {'c1'})
+        adapter.close_instance.assert_not_awaited()
 
     async def test_supervisor_cancels_stuck_task_before_close_and_refills(self) -> None:
         """模型主动暂缓应退出在途执行，再关实例、补位，不等慢题收尾。"""
@@ -370,7 +384,7 @@ class ContinuousCompetitionTests(unittest.IsolatedAsyncioTestCase):
                 await planner_started.wait()
                 allow_plan.set()
                 decisions.put_nowait({'defer_challenges': [
-                    {'id': 'c1', 'reason': '重复探测无新线索，先做后续题'}]})
+                    {'id': 'c1', 'reason': '现场可重建，腾名额做后续题', 'release_instance': True}]})
                 watched.append(task_ids)
                 await slow.wait()
 

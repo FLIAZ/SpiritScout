@@ -20,6 +20,7 @@ from spiritscout.config.settings import (
     WorkspaceConfig,
 )
 from spiritscout.core.models import Authorization, RunMode, Scope
+from spiritscout.policy.questions import QuestionBroker
 from spiritscout.runtime import _build_infra
 from spiritscout.tools.chrome_mcp import (
     MCP_PACKAGE,
@@ -27,7 +28,7 @@ from spiritscout.tools.chrome_mcp import (
     command,
     default_host,
 )
-from spiritscout.tools.mcp_client import build_client
+from spiritscout.tools.mcp_client import McpStdioClient, build_client
 from spiritscout.tools.registry import AgentToolView
 
 
@@ -49,12 +50,14 @@ class ChromeEndpointTests(unittest.TestCase):
 
     def test_project_adapter_uses_running_venv_without_path_activation(self) -> None:
         with patch.dict(os.environ, {"SPIRITSCOUT_CHROME_CDP_URL": "http://127.0.0.1:9223",
+                                    "DISPLAY": ":test-display",
                                     "SPIRITSCOUT_CHROME_MCP_CLI": "/installed/cli.js"}):
             client = build_client(McpServerConfig(name="chrome", command="python",
                 args=["-m", "spiritscout.tools.chrome_mcp"]))
         self.assertEqual(client._params.command, sys.executable)
         self.assertEqual(client._params.env["SPIRITSCOUT_CHROME_MCP_CLI"], "/installed/cli.js")
         self.assertEqual(client._params.env["SPIRITSCOUT_CHROME_CDP_URL"], "http://127.0.0.1:9223")
+        self.assertEqual(client._params.env["DISPLAY"], ":test-display")
 
     def test_explicit_docker_hostname_is_resolved_to_ip(self) -> None:
         with patch("spiritscout.tools.chrome_mcp.socket.gethostbyname", return_value="192.168.65.254"):
@@ -101,6 +104,8 @@ class ChromeEndpointTests(unittest.TestCase):
             self.assertNotIn("--isolated", argv)
             self.assertNotIn("--user-data-dir", argv)
             self.assertTrue(Path(env["npm_config_cache"]).is_relative_to(root))
+            self.assertLess(len(env["PWTEST_SOCKETS_DIR"].encode()), 70)
+            self.assertFalse(Path(env["PWTEST_SOCKETS_DIR"]).is_relative_to(root))
 
     def test_source_install_uses_fixed_package_and_invalid_cli_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -140,7 +145,7 @@ class ChromeRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_catalog_reaches_business_and_ctf_with_human_handoff_guidance(self) -> None:
         tools = [{"name": name, "inputSchema": {"type": "object", "properties": {}}}
-                 for name in ("browser_navigate", "browser_cookie_list")]
+                 for name in ("browser_navigate", "browser_cookie_list", "browser_run_code")]
         client = SimpleNamespace(start=AsyncMock(return_value=tools), close=AsyncMock(),
                                  call=AsyncMock(return_value={"text": "live-cookie-result", "is_error": False}))
         with tempfile.TemporaryDirectory() as temp:
@@ -154,14 +159,17 @@ class ChromeRuntimeTests(unittest.IsolatedAsyncioTestCase):
             with patch("spiritscout.tools.mcp_client.build_client", return_value=client) as build:
                 infra = await _build_infra(cfg, [ModelEntry(model="mock", provider="mock")],
                     Authorization(auth_id="chrome-test", mode=RunMode.SRC, human_confirmed=True,
-                                  scope=Scope(allowed_urls=["http://127.0.0.1"])))
+                                  scope=Scope(allowed_urls=["http://127.0.0.1"])),
+                    question_broker=QuestionBroker())
             try:
                 self.assertEqual(build.call_args.args[0].env["SPIRITSCOUT_CHROME_MODE"], "cdp")
                 name = "mcp__chrome__browser_cookie_list"
                 for role in ("business_context", "ctf_web"):
                     self.assertTrue(AgentToolView(infra.tools, role).allows(name))
+                    self.assertTrue(AgentToolView(infra.tools, role).allows("mcp__chrome__browser_login"))
                 for role in ("secretary", "report", "ctf_crypto"):
                     self.assertFalse(AgentToolView(infra.tools, role).allows(name))
+                    self.assertFalse(AgentToolView(infra.tools, role).allows("mcp__chrome__browser_login"))
                 description = infra.mcp_tools[name]["schema"]["description"]
                 self.assertIn("ask_user", description)
                 self.assertIn("HttpOnly", description)
@@ -169,13 +177,12 @@ class ChromeRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 response = await infra.tools.call(name, {"_safety_action": "analysis"}, **infra.builtin_ctx)
                 self.assertTrue(response.ok)
                 self.assertEqual(client.call.await_args_list, [
-                    call("browser_tabs", {"action": "list"}, timeout=5.0),
                     call("browser_cookie_list", {}, timeout=180.0)])
             finally:
                 await infra.close()
             client.close.assert_awaited_once()
 
-    async def test_handshake_without_browser_connection_is_not_registered_as_ready(self) -> None:
+    async def test_catalog_does_not_probe_browser_and_first_call_reports_connection_failure(self) -> None:
         client = SimpleNamespace(start=AsyncMock(return_value=[{"name": "browser_navigate"}]),
             close=AsyncMock(), call=AsyncMock(return_value={"is_error": True,
                 "text": "async initializeServer: connect ECONNREFUSED 127.0.0.1:9223"}))
@@ -183,7 +190,8 @@ class ChromeRuntimeTests(unittest.IsolatedAsyncioTestCase):
             root = Path(temp)
             cfg = SystemConfig(workspace=WorkspaceConfig(root=temp),
                 audit_log_path=str(root / "audit.jsonl"), mcp_servers=[McpServerConfig(
-                    name="chrome", command="python", args=["-m", "spiritscout.tools.chrome_mcp"])])
+                    name="chrome", command="python", args=["-m", "spiritscout.tools.chrome_mcp"],
+                    default_risk="readonly")])
             cfg.blackboard.sqlite_path = str(root / "bb.db")
             cfg.knowledge.sqlite_path = str(root / "kb.db")
             with patch("spiritscout.tools.mcp_client.build_client", return_value=client):
@@ -191,13 +199,38 @@ class ChromeRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     Authorization(auth_id="chrome-unavailable", mode=RunMode.SRC, human_confirmed=True,
                                   scope=Scope(allowed_urls=["http://127.0.0.1"])))
             try:
-                self.assertNotIn("mcp__chrome__browser_navigate", infra.mcp_tools)
+                self.assertIn("mcp__chrome__browser_navigate", infra.mcp_tools)
+                client.call.assert_not_awaited()
+                result = await infra.tools.call("mcp__chrome__browser_navigate", {}, **infra.builtin_ctx)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.parsed["failure_kind"], "browser_connection_unavailable")
                 records = [json.loads(line) for line in (root / "audit.jsonl").read_text(encoding="utf-8").splitlines()]
                 failed = [r for r in records if r["detail"].get("action") == "mcp_server_failed"]
-                self.assertEqual(len(failed), 1)
-                self.assertIn("9223", failed[0]["detail"]["error"])
+                self.assertEqual(len(failed), 0)
             finally:
                 await infra.close()
+
+    async def test_shared_browser_is_prepared_once_on_first_actual_call(self) -> None:
+        client = build_client(McpServerConfig(name="chrome", command="python",
+            args=["-m", "spiritscout.tools.chrome_mcp"],
+            env={"SPIRITSCOUT_CHROME_CDP_URL": "http://127.0.0.1:9223"}))
+        with patch("spiritscout.tools.browser_desktop.ensure_browser") as ensure, \
+                patch.object(McpStdioClient, "call", new_callable=AsyncMock,
+                             return_value={"text": "ok", "is_error": False}) as invoke:
+            ensure.assert_not_called()
+            await asyncio.gather(client.call("browser_tabs", {"action": "list"}),
+                                 client.call("browser_snapshot", {}))
+            ensure.assert_called_once()
+            self.assertEqual(invoke.await_count, 2)
+            self.assertEqual(client._params.env["SPIRITSCOUT_CHROME_DEFER_START"], "1")
+
+    async def test_headless_calls_do_not_prepare_shared_browser(self) -> None:
+        client = build_client(McpServerConfig(name="chrome", command="python",
+            args=["-m", "spiritscout.tools.chrome_mcp"], env={"SPIRITSCOUT_CHROME_MODE": "headless"}))
+        with patch("spiritscout.tools.browser_desktop.ensure_browser") as ensure, \
+                patch.object(McpStdioClient, "call", new_callable=AsyncMock):
+            await client.call("browser_tabs", {"action": "list"})
+            ensure.assert_not_called()
 
 
 @unittest.skipUnless(os.environ.get("SPIRITSCOUT_TEST_HEADLESS_MCP") == "1",

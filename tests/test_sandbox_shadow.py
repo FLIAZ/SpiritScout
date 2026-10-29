@@ -13,6 +13,15 @@ from spiritscout.tools.sandbox import _build_argv
 
 
 class ShadowRootArgvTests(unittest.TestCase):
+    def test_http_response_snapshots_are_read_only_in_sandbox(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp).resolve()
+            responses = workspace / "http-responses"
+            responses.mkdir()
+            argv = self._argv(workspace, guard=None)
+            index = argv.index(str(responses))
+            self.assertEqual(argv[index - 1], "--ro-bind")
+
     def _argv(self, workspace: Path, *, guard: Path | None) -> list[str]:
         rundir = workspace / "sandbox"
         rundir.mkdir(parents=True, exist_ok=True)

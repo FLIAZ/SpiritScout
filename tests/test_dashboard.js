@@ -23,6 +23,9 @@ const context = vm.createContext({
   S: state, $: () => box, api: async () => metrics,
   esc: value => String(value), toast: () => {}, MODE_CN:{}, STATUS_CN:{},
 });
+const coreSource=fs.readFileSync(require("node:path").join(__dirname,"../src/spiritscout/web/static/js/core.js"),"utf8");
+context.atob=atob;context.TextDecoder=TextDecoder;context.Uint8Array=Uint8Array;
+vm.runInContext(coreSource.slice(coreSource.indexOf("function modelDisplayName("),coreSource.indexOf("async function api(")),context);
 vm.runInContext(fs.readFileSync(path.join(__dirname,"../src/spiritscout/web/static/js/dashboard.js"),"utf8"),context);
 vm.runInContext(renderer, context);
 

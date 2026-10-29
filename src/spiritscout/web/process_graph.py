@@ -1,147 +1,144 @@
-"""从有界审计窗口投影执行过程；不调用模型，不把观察冒充已验证发现。"""
+"""黑板资产、探索与事实图投影；图关系来自显式引用。"""
 from __future__ import annotations
 
-import copy
 import json
-import threading
-from collections import OrderedDict
-from pathlib import Path
+import re
 from typing import Any
 
-from spiritscout.web.events import read_activity_page
-
-_CACHE: OrderedDict[tuple, dict[str, Any]] = OrderedDict()
-_LOCK = threading.Lock()
+from spiritscout.core.models import BlackboardLayer
 
 
-def project_process(events: list[dict[str, Any]]) -> dict[str, Any]:
-    """按明确任务/路线/回合关联；旧事件仅在出处唯一时补归属。"""
-    nodes: dict[str, dict[str, Any]] = {}
-    edges: list[dict[str, str]] = []
-    active: dict[tuple[str, str, str], dict[str, Any]] = {}
-    aliases: dict[tuple[str, str], set[tuple[str, str, str]]] = {}
-    calls: dict[tuple, str] = {}
-    internal_calls: set[tuple] = set()
-    pending_outputs: dict[tuple[str, str, str], list[str]] = {}
+def rules_text(data: Any) -> str:
+    """规则原文按需展示；授权元数据转为可读字段，空模板不冒充用户规则。"""
+    if isinstance(data, str):
+        return data.strip()
+    if not isinstance(data, dict):
+        return json.dumps(data, ensure_ascii=False, indent=2) if data else ''
+    if data.get('kind') == 'rule' and 'content' in data:
+        return rules_text(data['content'])
+    lines: list[str] = []
+    if 'auth_id' in data:
+        if data.get('target_description'):
+            lines.append('授权目标：' + str(data['target_description']))
+        scope = data.get('scope') or {}
+        for field, label in [('allowed_urls', '网址'), ('allowed_domains', '域名'),
+                             ('allowed_cidrs', '网段'), ('testing_rules', '测试规则')]:
+            value = scope.get(field)
+            if isinstance(value, list):
+                value = list(dict.fromkeys(map(str, value)))
+                if field == 'allowed_urls':
+                    value = [item for item in value if item.rstrip('/') != str(data.get('target_description') or '').rstrip('/')]
+            if value:
+                lines.append(label + '：' + ('、'.join(map(str, value)) if isinstance(value, list) else str(value)))
+        return '\n'.join(lines)
+    if any(key in data for key in ('mission', 'standing_rules', 'statements')):
+        for key, label in [('mission', '任务原话'), ('standing_rules', '用户规则')]:
+            if data.get(key):
+                lines.append(label + '：' + str(data[key]))
+        for statement in data.get('statements') or []:
+            text = statement.get('text') or statement.get('answer') or statement.get('content')
+            if text:
+                lines.append(('用户答复：' if statement.get('kind') == 'answer' else '用户输入：') + str(text))
+        return '\n\n'.join(dict.fromkeys(lines))
+    meaningful = {key: value for key, value in data.items() if value not in (None, '', [], {})}
+    return json.dumps(meaningful, ensure_ascii=False, indent=2) if meaningful else ''
 
-    def edge(source: str, target: str, kind: str) -> None:
-        item = {'source': source, 'target': target, 'kind': kind}
-        if source != target and item not in edges:
-            edges.append(item)
 
-    for event in events:
-        kind = str(event.get('type') or '')
-        d = event.get('detail') or {}
-        if kind in {'task.done', 'task.failed', 'task.cancelled', 'task.pruned'}:
-            for owner, current in active.items():
-                if owner[1] == d.get('task_id'):
-                    current['status'] = kind.split('.')[1]
-            continue
-        if kind not in {'agent.turn', 'agent.delta', 'agent.tool_call',
-                        'agent.tool_result', 'agent.note', 'agent.conclude'}:
-            continue
-        actor = str(event.get('actor') or '')
-        tid, rid = str(d.get('task_id') or ''), str(d.get('route_id') or '')
-        route = str(d.get('route') or '')
-        if tid and rid:
-            key = (actor, tid, rid)
-            for name in (rid, route):
-                if name:
-                    aliases.setdefault((actor, name), set()).add(key)
-        else:
-            candidates = aliases.get((actor, rid or route), set()) if rid or route else set(active)
-            candidates = {k for k in candidates if k[0] == actor and (not tid or k[1] == tid)}
-            if len(candidates) != 1:
+def project_blackboard(blackboard: Any) -> dict[str, Any]:
+    """探索记录单独标型，不把模型假设或尝试状态提升为事实。"""
+    nodes: list[dict[str, Any]] = []
+    aliases: dict[str, set[str]] = {}
+    has_more = False
+    for layer in (BlackboardLayer.TARGET_AUTH, BlackboardLayer.ASSET,
+                  BlackboardLayer.RECON_CLUE, BlackboardLayer.VULN,
+                  BlackboardLayer.CREDENTIAL, BlackboardLayer.TOPOLOGY):
+        records = blackboard.query(layer, limit=201)
+        has_more = has_more or len(records) > 200
+        for rec in records[:200]:
+            data, key = rec['data'], rec['record_id']
+            if layer == BlackboardLayer.TOPOLOGY and data.get('kind') not in {'finding', 'exploration'}:
                 continue
-            key = next(iter(candidates))
-            _, tid, rid = key
-        if kind == 'agent.tool_call':
-            internal_calls.update((*key, str(c.get('id') or ''))
-                                  for c in d.get('calls') or [] if c.get('name') == 'investigate')
-        turn = d.get('turn')
-        step = active.get(key)
-        if isinstance(turn, int) and not isinstance(turn, bool) and turn > 0:
-            sid = '__process_' + json.dumps([actor, tid, rid, turn], ensure_ascii=False)
-            if sid not in nodes:
-                nodes[sid] = {'id': sid, 'kind': 'step', 'task_id': tid, 'route_id': rid,
-                              'route': route, 'actor': actor, 'turn': turn,
-                              'title': f'第 {turn} 步', 'body': '', 'status': 'running',
-                              'seq': event.get('seq'), 'ts': event.get('ts')}
-                if step and turn > step['turn']:
-                    sources = pending_outputs.pop(key, [])
-                    for source in sources or [step['id']]:
-                        edge(source, sid, 'context' if source != step['id'] else 'sequence')
-                    if sources and all(nodes[source]['turn'] != step['turn'] for source in sources):
-                        edge(step['id'], sid, 'sequence')
-                    step['status'] = 'done'
-            step = nodes[sid]
-            if key not in active or turn >= active[key]['turn']:
-                active[key] = step
-        if step is None:
-            continue
-        if kind == 'agent.delta' and d.get('kind') in {'text', 'reset'}:
-            step['body'] = ('' if d['kind'] == 'reset' else
-                            (step['body'] + str(d.get('text') or ''))[-4000:])
-        if kind == 'agent.tool_call':
-            for call in d.get('calls') or []:
-                if call.get('name') != 'investigate':
-                    calls[(*key, str(call.get('id') or ''))] = step['id']
-                    if step['title'] == f"第 {step['turn']} 步":
-                        step['title'] += f" · {str(call.get('name') or '执行')}"
-        if kind in {'agent.tool_result', 'agent.note'}:
-            if (d.get('name') == 'investigate'
-                    or (*key, str(d.get('id') or '')) in internal_calls):
-                continue  # 外层调度回执不是新的现场发现。
-            source = calls.get((*key, str(d.get('id') or '')), step['id'])
-            base = nodes[source]
-            nid = '__process_event_' + json.dumps([actor, tid, rid, event.get('seq'),
-                                                   d.get('id'), kind], ensure_ascii=False)
-            text = d.get('text') if kind == 'agent.note' else d.get('result', d.get('note', ''))
-            if not isinstance(text, str):
-                text = json.dumps(text, ensure_ascii=False)
-            label = '发现记录' if kind == 'agent.note' else ('执行失败' if d.get('ok') is False else '工具观察')
-            note = str(d.get('note') or '')
-            summary = ' → '.join(note.split(' → ')[1:]) or note
-            node = {**base, 'id': nid, 'kind': 'finding' if kind == 'agent.note' else 'observation',
-                    'title': label + (' · ' + ' '.join(summary.split())[:90] if summary else
-                                     f" · {d['name']}" if d.get('name') else ''),
-                    'body': text[:4000], 'status': 'failed' if d.get('ok') is False else 'done',
-                    'seq': event.get('seq'), 'ts': event.get('ts')}
-            nodes[nid] = node
-            edge(source, nid, 'produces')
-            pending_outputs.setdefault(key, []).append(nid)
-            if d.get('output_file'):
-                aid = nid + ':artifact'
-                nodes[aid] = {**node, 'id': aid, 'kind': 'artifact', 'title': '输出产物',
-                              'body': str(d['output_file'])[:2000]}
-                edge(nid, aid, 'produces')
-                pending_outputs[key].append(aid)
-        if kind == 'agent.conclude':
-            step['status'] = 'done'
-            step['body'] = str(d.get('summary') or step['body'])[:4000]
-    return {'nodes': list(nodes.values()), 'edges': edges}
-
-
-def read_process_graph(path: Path) -> dict[str, Any]:
-    """最多保留最近 320 个完整活动；按文件版本缓存，避免轮询重复解码。"""
-    try:
-        stat = path.stat()
-    except OSError:
-        return {'nodes': [], 'edges': [], 'has_more': False}
-    key = (str(path.resolve()), stat.st_ino, stat.st_size, stat.st_mtime_ns)
-    with _LOCK:
-        cached = _CACHE.get(key)
-        if cached is not None:
-            return copy.deepcopy(cached)
-    page = read_activity_page(path, limit=320)
-    graph = {**project_process([row['event'] for row in page['items']]),
-             'has_more': page['has_more']}
-    with _LOCK:
-        # 同一文件只保留当前版本，缓存不会随每次写入累积。
-        for previous in list(_CACHE):
-            if previous[0] == key[0]:
-                del _CACHE[previous]
-        _CACHE[key] = graph
-        while len(_CACHE) > 16:
-            _CACHE.popitem(last=False)
-    return copy.deepcopy(graph)
+            if layer == BlackboardLayer.RECON_CLUE and data.get('clue_type') == 'user_reply':
+                continue  # 用户原话在授权层保留，不再复制成发现。
+            if layer == BlackboardLayer.CREDENTIAL:
+                data = {name: data[name] for name in ('where', 'credential_type', 'evidence_refs') if name in data}
+            nid = f'__process_bb:{layer.value}:{key}'
+            is_rule = layer == BlackboardLayer.TARGET_AUTH
+            if is_rule and not rules_text(data):
+                continue
+            # 规则正文按需读；画布目录和状态轮询不再搬运长篇原文。
+            body = json.dumps(data, ensure_ascii=False, indent=2)
+            title = (('授权目标与范围' if 'auth_id' in data else
+                      '任务原话与后续答复' if key == 'user-context' else '用户规则原文') if is_rule else
+                     str(data.get('text') or data.get('title')
+                         or (data.get('detail') if layer == BlackboardLayer.RECON_CLUE
+                             and isinstance(data.get('detail'), str) else '')
+                         or data.get('value') or data.get('detail') or key))
+            refs = [ref for ref in (data.get('evidence_refs') or []) if isinstance(ref, str)]
+            reference_type = ('assets' if layer == BlackboardLayer.ASSET or
+                              layer == BlackboardLayer.TOPOLOGY and data.get('type') == 'asset' else
+                              'rules' if is_rule else
+                              'evidence' if layer == BlackboardLayer.RECON_CLUE
+                              and isinstance(data.get('detail'), (dict, list))
+                              and not (data.get('text') or data.get('title')) else
+                              'evidence' if re.fullmatch(r'https?://\S+', title.strip()) else '')
+            nodes.append({'id': nid, 'kind': 'rule' if is_rule else
+                          'exploration' if data.get('kind') == 'exploration' else 'finding',
+                          'title': title[:90], 'body': '' if is_rule else body,
+                          'record_id': key, 'layer': layer.value, 'version': rec['version'],
+                          'task_id': data.get('task_id', ''), 'route_id': data.get('route_id', ''),
+                          'route': data.get('route', ''), 'actor': rec['updated_by'],
+                          'status': data.get('status', 'done'), 'evidence_refs': refs,
+                          'node_type': data.get('node_type', data.get('asset_type', '')),
+                          'state': data.get('state', ''), 'reason': data.get('reason', ''),
+                          'parent_refs': data.get('parent_refs', []),
+                          'asset_refs': data.get('asset_refs', []),
+                          'exploration_refs': data.get('exploration_refs', []),
+                          'source_ref': data.get('source_ref', ''), 'target_ref': data.get('target_ref', ''),
+                          'relation': data.get('relation', '') if data.get('type') == 'asset_relation' else '',
+                          'reference_type': reference_type,
+                          'provenance': data.get('provenance', {}),
+                          'evidence_state': '' if is_rule else data.get('evidence_state', 'unverified'),
+                          'parent_finding_id': data.get('parent_finding_id', '')})
+            aliases.setdefault(key, set()).add(nid)
+            aliases.setdefault(f'{layer.value}:{key}', set()).add(nid)
+            aliases.setdefault(f'{layer.value}:{key}@{rec["version"]}', set()).add(nid)
+    # 业务建模的事实/依据也是同一张黑板上的共享知识；工作流步骤和假设不冒充事实。
+    context = blackboard.read_versioned(BlackboardLayer.TOPOLOGY, 'business-context')
+    if context:
+        data, version = context
+        for kind, rows in (('evidence', data.get('evidence', [])), ('finding', data.get('facts', []))):
+            for index, item in enumerate(rows):
+                key = str(item.get('id') or f'fact-{index}')
+                nid = f'__process_bb:business-context:{kind}:{key}'
+                aliases.setdefault(f'business-context:{key}', set()).add(nid)
+                nodes.append({'id': nid, 'kind': kind, 'title': str(item.get('statement') or item.get('title')
+                              or item.get('note') or item.get('url') or key)[:90],
+                              'body': json.dumps(item, ensure_ascii=False, indent=2),
+                              'layer': 'topology', 'record_id': 'business-context', 'version': version,
+                              'actor': 'business_context', 'status': 'done',
+                              'reference_type': 'evidence' if kind == 'evidence' else '',
+                              'provenance': item.get('provenance', {}),
+                              'evidence_state': item.get('evidence_state', 'unverified'),
+                              'evidence_refs': [f'business-context:{ref}' for ref in item.get('evidence_refs', [])],
+                              'parent_finding_id': ''})
+    edges = []
+    seen = set()
+    for node in nodes:
+        if node.get('relation'):
+            sources, targets = aliases.get(node['source_ref'], set()), aliases.get(node['target_ref'], set())
+            if len(sources) == len(targets) == 1:
+                edges.append({'source': next(iter(sources)), 'target': next(iter(targets)),
+                              'kind': node['relation'], 'record_id': node['record_id'],
+                              'evidence_state': node['evidence_state']})
+        refs = [(ref, 'evidence') for ref in [*node['evidence_refs'], node['parent_finding_id']]]
+        for field, kind in [('parent_refs', 'derives'), ('asset_refs', 'anchor'), ('exploration_refs', 'produces')]:
+            refs.extend((ref, kind) for ref in node.get(field, []))
+        for ref, kind in refs:
+            candidates = aliases.get(ref, set()) if isinstance(ref, str) else set()
+            source = next(iter(candidates)) if len(candidates) == 1 else None
+            pair = (source, node['id'], kind)
+            if source and source != node['id'] and pair not in seen:
+                seen.add(pair)
+                edges.append({'source': source, 'target': node['id'], 'kind': kind})
+    return {'nodes': nodes, 'edges': edges, 'has_more': has_more}

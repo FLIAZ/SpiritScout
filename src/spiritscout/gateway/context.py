@@ -36,6 +36,7 @@ def input_window_budget(context_window: int, reserved_output: int = 0) -> int | 
 _PROTECTED = {"constraints", "task_intent", "用户答复", "scope", "rules", "mission",
               "target", "available_tactics", "shared_context", "business_context",
               "reference_skills", "world_state", "project_rules", "user_context",
+              "available_skills", "skill_context", "skill_observations",
               "authorization", "testing_rules", "user_replies",
               "competition_context", "platform_facts", "灵枢当前指令",
               "active_tasks", "steering_status", "competition_status"}
@@ -252,6 +253,7 @@ def decision_messages(system: str, payload: dict[str, Any], max_chars: int = 800
     projected = json.loads(compact_json(dynamic, max_chars))
     stable_keys = ("world_state", "available_tactics", "task_intent", "mission",
                    "rules", "target", "execution_recovery", "reference_skills",
+                   "available_skills", "skill_context",
                    "business_context", "shared_context")
     ordered = {key: projected.pop(key) for key in stable_keys if key in projected}
     situation = projected.pop("situation", None)
@@ -316,6 +318,9 @@ class DecisionMemory:
         self.segment_info: dict[str, Any] = {}
         self.journal: Any = None
         self.checkpoint_key = ""
+        self.skills: dict[str, Any] = {}
+        self.blackboard: Any = None
+        self.agent_type: Any = None
 
     @staticmethod
     def _same_value(old: Any, new: Any) -> bool:
@@ -442,6 +447,7 @@ class DecisionMemory:
                 # 只布局新建段；已提交的历史（含旧版本检查点）绝不重新排序。
                 stable = ("world_state", "available_tactics", "task_intent", "mission",
                           "rules", "target", "execution_recovery", "reference_skills",
+                   "available_skills", "skill_context",
                           "business_context", "shared_context", "project_rules")
                 canonical = json.loads(serialize(snapshot))
                 ordered = {key: canonical.pop(key) for key in stable if key in canonical}
@@ -461,9 +467,14 @@ class DecisionMemory:
         self.messages = copy.deepcopy([*messages, {"role": "assistant", "content": content,
                                      **({"reasoning_content": reasoning} if reasoning else {})}])
         self.pending = None
+        self.persist()
+
+    def persist(self) -> None:
+        """技能版本快照与实际已读内容随当前决策记忆一起恢复。"""
         if self.journal is not None:
             self.journal.checkpoint("decision_memory", self.checkpoint_key, "committed", {
-                "messages": self.messages, "snapshot": self.snapshot, "system": self.system})
+                "messages": self.messages, "snapshot": self.snapshot, "system": self.system,
+                "skills": self.skills})
 
 
 def decision_memory(owner: Any, key: str) -> DecisionMemory:
@@ -475,6 +486,8 @@ def decision_memory(owner: Any, key: str) -> DecisionMemory:
     if key not in memories:
         journal = getattr(getattr(owner, "ctx", None), "journal", None)
         memory = DecisionMemory()
+        memory.blackboard = getattr(getattr(owner, "ctx", None), "blackboard", None)
+        memory.agent_type = getattr(owner, "agent_type", None)
         if callable(getattr(journal, "latest_checkpoint", None)):
             # 会话数据库隔离会话；类型隔离 Agent，key 已含任务/路线/阶段。
             checkpoint_key = f"{type(owner).__name__}:{key}"
@@ -485,6 +498,7 @@ def decision_memory(owner: Any, key: str) -> DecisionMemory:
                 memory.messages = copy.deepcopy(state["messages"])
                 memory.snapshot = copy.deepcopy(state["snapshot"])
                 memory.system = state["system"]
+                memory.skills = copy.deepcopy(state.get("skills") or {})
             memory.journal, memory.checkpoint_key = journal, checkpoint_key
             # 只淘汰已提交且可从磁盘恢复的记忆；无持久化时不能悄悄丢上下文。
             if len(memories) >= 128:

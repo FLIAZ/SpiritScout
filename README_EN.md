@@ -8,7 +8,7 @@ Assign tasks in your browser, let agents collaborate, and inspect their progress
 
 **[简体中文](README.md) · English**
 
-[![Version](https://img.shields.io/badge/version-v0.12.9-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.17.0-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
 
 [Quick start](#quick-start) · [Capabilities and modes](#capabilities-and-modes) · [Architecture](#architecture) · [Deployment guide (中文)](docs/部署与配置.md) · [Contributing (中文)](CONTRIBUTING.md)
 
@@ -31,8 +31,11 @@ SRC refers to security response center / bug bounty workflows.
 | Agent teams | A lead agent decomposes tasks; sub-agents branch into different approaches, share findings, and use models assigned by role |
 | Execution workbench | Expand tasks, approaches, and execution steps; inspect tool results and a process graph linked to audit records |
 | Projects and artifacts | Persist assets and sessions; independently reproduce SRC vulnerability candidates with the verifier agent, Jianzhen, and generate reports or write-ups |
-| Browser and tools | Connect MCP servers, Skills, and shell/Python sandboxes; SRC can reuse authenticated browser sessions and let users handle CAPTCHAs |
+| Browser and tools | Connect MCP servers, Skills, and shell/Python sandboxes; manage MCP and Skill cards with status groups, combined filters, and switches; SRC can reuse authenticated browser sessions and let users handle CAPTCHAs |
 | Models and usage | Configure providers, teams, and models; inspect estimated costs, tokens, and input cache usage reported by endpoints |
+
+Skill management uses cards with separate enabled/disabled groups, combined category/source/date filters, green switches, and deletion. Open a card to browse its folders, preview and edit rendered Markdown, with draft protection and version-checked saves. Multiple ZIP and TAR archives can be imported directly; RAR / 7z requires system libarchive. See [management and import details (中文)](docs/部署与配置.md#skill-目录与文件浏览).
+Main and child agents can discover Skills, load SKILL.md in full, and read supporting files on demand. Conversation traces show actual reads, while retained content is reused without duplicate injection.
 
 ----
 
@@ -120,8 +123,10 @@ The shell/Python sandbox requires Linux and bubblewrap. A native Windows/macOS c
 ### Configure models and start a task
 
 1. On the Models page (模型), add the provider URL, API key, and model ID.
-2. On the Teams page (编队), assign models to the lead agent, Lingshu, and each sub-agent.
+2. On the Teams page (编队), assign models to Lingshu and each sub-agent. Changes save automatically; you can also apply one model to all configurable roles. New assignments take effect for new tasks.
 3. Return to the home page, select SRC, CTF, or agent competition, enter the target and rules, attach any files, and click Start (开始执行).
+
+Use **Clean storage (清理存储)** in the sidebar or session details to inspect sessions sorted by disk usage, compact the database, and remove download caches. Cleanup runs only after confirmation and preserves conversations, results, and the latest recovery chain. Cold archive and restore are not included.
 
 The user selects the task mode. Assets from a project's history are not automatically authorized targets for the current task.
 CTF and agent competition modes use a separate headless browser for each session. SRC can connect to an existing browser or enable a manual takeover window.
@@ -135,7 +140,7 @@ CTF and agent competition modes use a separate headless browser for each session
 The lead agent adjusts its plan based on the task and execution results. Sub-agents share facts through a blackboard and an attempt ledger.
 The model gateway handles provider protocols, streaming, and usage accounting. The tool layer handles permissions, mode-specific approvals, sandboxing, and auditing.
 
-Steps, observations, findings, and artifacts retain links to their original records. The graph distinguishes actual outputs from context continuation and does not represent an individual execution step as a separate parallel agent. See the [architecture overview (中文)](docs/02-架构总览与项目结构.md) for the module layout.
+The topology shows persistent blackboard facts, evidence, and user-rule references, with edges only for explicit citations. Execution steps and tool receipts remain in session history; file paths are evidence attached to facts rather than standalone artifact nodes. Rules stay on the blackboard and are read on demand through versioned, paginated `blackboard_read` calls. Execution agents share evidence-backed facts through `blackboard_write`. Runtime provenance links agents, stages, and tool executions; evidence states distinguish unresolved sources, observations, supported records, independent verification, conflicts, and expired dependencies. Identical stateless read calls can share in-flight results or short-lived cache entries, isolated by identity and environment. Independent verification always executes again. See the [architecture overview (中文)](docs/02-架构总览与项目结构.md) for the module layout.
 
 ## Data and usage boundaries
 
@@ -147,7 +152,12 @@ Steps, observations, findings, and artifacts retain links to their original reco
 
 ## Documentation and contributing
 
-Current code version: **v0.12.9**. See [Version management (中文)](CONTRIBUTING.md#版本管理) for the single source of truth, increment rules, and historical version notes.
+Agent competition mode preserves unfinished instances across investigation stages. Deferring dispatch, cancelling running work, and releasing an instance are explicit model decisions; elapsed time alone does not force a switch.
+
+Current code version: **v0.17.0**. See [Version management (中文)](CONTRIBUTING.md#版本管理) for the single source of truth, increment rules, and historical version notes.
+
+Follow the [Agent working rules](AGENTS.md): keep changes in the same batch under one version, and obtain explicit user approval before changing the version or pushing to a remote.
+`ctfy-docker/` and `tsecbench-docker/` are local validation projects for the maintainer, are excluded from the repository, and are not required for contributors.
 
 This README is available in English and [Simplified Chinese](README.md). The detailed documentation, contribution guide, changelog, and security policy linked below are currently in Chinese. The architecture diagram also retains its original Chinese labels.
 

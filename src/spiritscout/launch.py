@@ -33,6 +33,7 @@ class LaunchRequest:
     allow_sensitive: bool = False
     rps: float = 10.0
     flag_format: str | None = None
+    multiple_answers: bool = False
     challenges_yaml: str | None = None      # CTF/渗透赛赛题 YAML 文本
     platform_yaml: str | None = None        # 平台档案 YAML 文本（托管题/跑分平台）
     rules_yaml: str | None = None           # 渗透赛赛制规则 YAML 文本
@@ -47,7 +48,7 @@ class LaunchPlan:
     """装配产物：可直接传给 runtime 三个入口。"""
 
     authorization: Authorization
-    target: str                             # SRC 目标 / CTF 占位 "ctf://challenges"
+    target: str                             # SRC 目标可为空 / CTF 占位 "ctf://challenges"
     challenges: list[dict]
     rules: object | None                    # CompetitionRules（仅渗透赛）
     flag_patterns: list[str] | None
@@ -178,8 +179,8 @@ def fallback_mode(req: LaunchRequest) -> RunMode:
     if declared is not None:
         return declared
     if req.has_uploads and not extract_targets(req.mission or "")[0]:
-        # 只有附件、没有目标 URL：SRC 无处安放目标，只能按赛题处理
-        # （附件文件由创建流程注入赛题载荷；运行期 LLM 路由仍可改判）
+        # 旧自动入口对纯附件默认按离线赛题装配；显式 SRC 不走此兜底。
+        # 附件文件由创建流程注入赛题载荷，运行期 LLM 路由仍可改判。
         return RunMode.CTF
     return RunMode.SRC
 
@@ -203,19 +204,9 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
     if mission and not req.target and m_urls:
         req = LaunchRequest(**{**req.__dict__, "target": m_urls[0]})
     elif mission and not req.target and m_domains:
-        # 纯域名授权（如 SRC「*.bilibili.com」清单）同样要有工作入口，
-        # 否则 plan.target 落到 ctf:// 占位符，侦察/测绘步骤全打在伪协议上
+        # 任务中已有纯域名时补齐工作入口；无目标的 SRC 则保留空值。
         req = LaunchRequest(**{**req.__dict__, "target": "https://" + m_domains[0]})
-    # 目标硬校验只对用户显式选择的模式生效。智能模式（mode_auto）下
-    # 不在创建时拦——「你好」这类普通对话、纯规则说明都不该被目标
-    # 校验挡在门外；意图（对话/规则/任务）由运行期 LLM 路由裁决，
-    # 真任务缺目标时灵枢会主动向用户询问。
-    # 用户显式选择 SRC 的纯附件分析无需网络目标，也不改判成 CTF。
-    if (req.mode == RunMode.SRC and not req.target
-            and not req.has_uploads and not mode_auto):
-        hint = ("；任务描述中未识别到目标 URL——请写明 http(s):// 地址"
-                if mission else "——或在任务描述中写明目标")
-        raise SpiritScoutError(f"SRC 模式需要目标 URL{hint}")
+    # SRC 可仅凭任务描述进入规划；目标缺失由模型按任务需要澄清。
     if (req.mode == RunMode.CTF and not req.challenges_yaml and not m_urls
             and not req.has_uploads and not req.platform_yaml and not mode_auto):
         raise SpiritScoutError(
@@ -237,6 +228,9 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
         # 会话创建流程注入 attachments 字段——此处不知道落地路径
         challenges = [{"id": "mission-1", "title": "任务附件赛题",
                        "description": mission[:500]}]
+
+    if req.mode == RunMode.CTF and len(challenges) == 1 and not req.platform_yaml:
+        challenges[0]["multiple_answers"] = req.multiple_answers
 
     rules = None
     if req.mode == RunMode.COMPETITION:
@@ -306,9 +300,9 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
         local_analysis=True,
         notes="启动装配授权声明",
     )
-    # SRC 的工作目标必须落在真实资产上：显式 target 优先；没有时从装配后的
-    # 授权范围取第一个 URL/域名（续传合并 extra_scope 的常见场景）——否则
-    # 会落到 CTF 占位符 "ctf://challenges"，侦察/测绘把 "challenges" 当主机名。
+    # SRC 已知工作目标优先取显式 target，其次从装配后的
+    # 授权范围取第一个 URL/域名；未知时保留空值，交给模型规划和澄清，
+    # 不填入 CTF 占位符 "ctf://challenges"。
     # 多域目标由规划节点各自指定 target（见 MasterAgent._task_target）。
     target = req.target or ""
     if req.mode == RunMode.SRC and (

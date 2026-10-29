@@ -8,7 +8,7 @@
 
 **简体中文 · [English](README_EN.md)**
 
-[![Version](https://img.shields.io/badge/version-v0.12.9-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.17.0-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
 
 [快速开始](#快速开始) · [能力与模式](#能力与模式) · [架构](#架构) · [部署指南](docs/部署与配置.md) · [参与贡献](CONTRIBUTING.md)
 
@@ -27,10 +27,13 @@
 | 能力 | 可以做什么 |
 | --- | --- |
 | 编队协作 | 主 Agent 拆分任务，子 Agent 派生路线、共享线索，按角色分配模型 |
-| 执行工作台 | 展开任务、路线与推进步骤，查看工具结果及带审计出处的过程拓扑 |
+| 执行工作台 | 展开任务、路线与推进步骤，查看工具结果及事实／依据黑板图 |
 | 项目与产物 | 保存资产和会话；SRC 候选漏洞由「鉴真」独立复测，生成报告或 WriteUp |
-| 浏览器与工具 | 接入 MCP、Skill 和 shell/Python 沙箱；SRC 可复用登录态并人工处理验证码 |
+| 浏览器与工具 | 接入 MCP、Skill 和 shell/Python 沙箱；MCP 与 Skill 以卡片分组管理、组合筛选和启停；SRC 可复用登录态并人工处理验证码 |
 | 模型与用量 | 配置供应商、编队与模型，查看费用估算、Token、端点返回的输入缓存用量 |
+
+Skill 管理采用卡片目录，支持启用分组、类型／来源／日期组合筛选、绿色开关和删除；点击卡片浏览技能目录、渲染并直接编辑 Markdown，支持草稿保护和版本校验保存。支持直接多选导入 ZIP、tar.gz 等压缩包，RAR / 7z 通过系统 libarchive 读取；参见[管理与导入说明](docs/部署与配置.md#skill-目录与文件浏览)。
+主 Agent 与子 Agent 可自主发现技能、完整读取 SKILL.md，再按需查阅子目录资料；会话展示实际技能读取，避免重复注入已读正文。
 
 ----
 
@@ -125,8 +128,10 @@ shell/Python 沙箱需要 Linux 与 bubblewrap。Windows/macOS 原生控制台�
 ### 配置模型并开始任务
 
 1. 在「模型」页添加供应商地址、API Key 和模型 ID。
-2. 在「编队」页为灵枢和各子 Agent 指派模型。
+2. 在「编队」页为灵枢和各子 Agent 指派模型，修改后自动保存；也可选择一个模型，一键应用到所有可指派角色。新指派对新任务生效。
 3. 返回首页，选择 SRC、CTF 或智能体竞赛，填写目标、规则与附件，点击「开始执行」。
+
+侧栏底部或会话详情的「清理存储」可查看占用、精简数据库及清理下载缓存，保留会话与成果；查看范围并确认后执行。
 
 任务模式由用户选择；项目历史资产不会自动成为本次测试的授权目标。
 CTF/智能体模式使用会话独立的无头浏览器，SRC 可连接已有浏览器或启用人工接管窗口。
@@ -142,8 +147,12 @@ CTF/智能体模式使用会话独立的无头浏览器，SRC 可连接已有浏
 主 Agent 结合任务和执行结果调整规划，子 Agent 通过黑板与尝试台账共享事实。
 模型网关统一处理供应商协议、流式输出与用量；工具层处理权限、按模式审批、沙箱和审计。
 
-步骤、观察、发现和产物保留原始记录出处；拓扑区分实际产出与上下文延续，
-不把一次执行步骤当作独立并行 Agent。模块划分见 [架构总览](docs/02-架构总览与项目结构.md)。
+拓扑直接展示黑板中的产出事实、依据与用户规则，只按明确引用连线；执行步骤、
+工具回执与“输出产物”行为留在会话历史，文件路径附在事实依据中。用户规则原文
+保存在黑板，模型接收版本引用并通过 `blackboard_read` 按需分段读取；执行角色
+通过 `blackboard_write` 共享带依据的事实。来源由运行时关联 Agent、推进步骤和工具执行台账，
+证据状态区分待核实、直接观察、有依据记录、独立复测、冲突与过期。精确相同的无状态只读
+调用可共享在途结果或短时复用；身份、实例及写入状态变化隔离缓存，独立复测始终重新执行。模块划分见 [架构总览](docs/02-架构总览与项目结构.md)。
 
 ## 数据与使用边界
 
@@ -155,7 +164,12 @@ CTF/智能体模式使用会话独立的无头浏览器，SRC 可连接已有浏
 
 ## 文档与贡献
 
-当前代码版本 **v0.12.9**。版本唯一来源、递增规则和历史版本说明见 [版本管理](CONTRIBUTING.md#版本管理)。
+智能体模式默认保留未完成题的运行现场；暂缓派工、取消在途工作与释放实例分别由模型明确决策，不按固定耗时强制切题。
+
+当前代码版本 **v0.17.0**。版本唯一来源、递增规则和历史版本说明见 [版本管理](CONTRIBUTING.md#版本管理)。
+
+贡献时按 [Agent 工作约定](AGENTS.md) 执行：同期功能共用一个版本，调整版本号和推送远端须先取得用户明确同意。
+`ctfy-docker/`、`tsecbench-docker/` 仅供维护者本机验证，不随仓库分发，协作者无需下载。
 
 | 我想了解 | 阅读入口 |
 | --- | --- |

@@ -644,39 +644,128 @@ class ResourceStore:
         ]
 
     def save(self, kind: str, key: str, data: dict[str, Any], expected: int) -> int:
-        payload = self.cipher().encrypt(json.dumps(data, ensure_ascii=False).encode())
+        cipher = self.cipher()
         with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT version FROM settings WHERE kind=? AND id=?", (kind, key)
+                "SELECT version,data FROM settings WHERE kind=? AND id=?", (kind, key)
             ).fetchone()
             version = row[0] if row else 0
             if version != expected:
                 raise SpiritScoutError("配置已被其他操作更新，请刷新后再保存")
+            now = time.time()
+            if kind in {"skill", "mcp"}:
+                original = json.loads(cipher.decrypt(row["data"])) if row else {}
+                # 旧记录没有首次添加时间时保持未知，编辑及启停不补造历史。
+                data = {k: v for k, v in data.items()
+                        if k not in {"created_at", "updated_at", "source_kind"}}
+                data["created_at"] = original.get("created_at") if row else now
+                if kind == "skill" and original.get("source") == "archive":
+                    data["source"] = "archive"
+            payload = cipher.encrypt(json.dumps(data, ensure_ascii=False).encode())
             conn.execute(
                 "INSERT INTO settings VALUES(?,?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET "
                 "version=excluded.version,data=excluded.data,updated_at=excluded.updated_at",
-                (kind, key, version + 1, payload, time.time()),
+                (kind, key, version + 1, payload, now),
             )
         return version + 1
+
+    def import_skills(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """整包原子导入；已有技能（含内置）不允许被压缩包覆盖。"""
+        cipher = self.cipher()
+        now = time.time()
+        payloads = [(item["skill_id"], cipher.encrypt(
+            json.dumps({**item, "created_at": now}, ensure_ascii=False).encode())) for item in items]
+        builtin = builtin_skills()
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for key, _ in payloads:
+                if key in builtin or conn.execute(
+                    "SELECT 1 FROM settings WHERE kind='skill' AND id=?", (key,)
+                ).fetchone():
+                    raise SpiritScoutError(f"Skill 已存在：{key}；请在管理页编辑或修改包内 name 后重试")
+            for key, payload in payloads:
+                conn.execute("INSERT INTO settings VALUES(?,?,?,?,?)",
+                             ("skill", key, 1, payload, now))
+        return [{"skill_id": key, "version": 1} for key, _ in payloads]
+
+    def delete_skill(self, key: str, expected: int) -> None:
+        """自定义技能删除保存内容；内置技能写移除标记，避免重新从种子出现。"""
+        builtin = key in builtin_skills()
+        cipher = self.cipher()
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT version,data FROM settings WHERE kind='skill' AND id=?",
+                               (key,)).fetchone()
+            if (not row and not builtin) or (row and json.loads(
+                    cipher.decrypt(row["data"])).get("_deleted")):
+                raise KeyError(key)
+            if (row["version"] if row else 0) != expected:
+                raise SpiritScoutError("Skill 已被其他操作更新，请刷新后再删除")
+            if builtin:
+                payload = cipher.encrypt(json.dumps({"_deleted": True}).encode())
+                conn.execute("INSERT INTO settings VALUES(?,?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET "
+                             "version=excluded.version,data=excluded.data,updated_at=excluded.updated_at",
+                             ("skill", key, expected + 1, payload, time.time()))
+            else:
+                conn.execute("DELETE FROM settings WHERE kind='skill' AND id=?", (key,))
+
+    def delete_mcp(self, key: str, expected: int, *, configured: bool = False) -> None:
+        """配置文件接入保存移除标记；管理页新增接入删除本地内容，不卸载依赖。"""
+        cipher = self.cipher()
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT version,data FROM settings WHERE kind='mcp' AND id=?",
+                               (key,)).fetchone()
+            if (not row and not configured) or (row and json.loads(
+                    cipher.decrypt(row["data"])).get("_deleted")):
+                raise KeyError(key)
+            if (row["version"] if row else 0) != expected:
+                raise SpiritScoutError("MCP 已被其他操作更新，请刷新后再删除")
+            if configured:
+                payload = cipher.encrypt(json.dumps({"_deleted": True}).encode())
+                conn.execute("INSERT INTO settings VALUES(?,?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET "
+                             "version=excluded.version,data=excluded.data,updated_at=excluded.updated_at",
+                             ("mcp", key, expected + 1, payload, time.time()))
+            else:
+                conn.execute("DELETE FROM settings WHERE kind='mcp' AND id=?", (key,))
 
     def effective_mcp(self, base: list[McpServerConfig]) -> list[McpServerConfig]:
         result = {item.name: item for item in base}
         for row in self.settings("mcp"):
-            result[row["id"]] = McpServerConfig.model_validate(row["data"])
+            if row["data"].get("_deleted"):
+                result.pop(row["id"], None)
+                continue
+            data = {k: v for k, v in row["data"].items() if k != "created_at"}
+            result[row["id"]] = McpServerConfig.model_validate(data)
         return list(result.values())
 
     def skills(
         self, query: str = "", *, include_body: bool = False
     ) -> list[dict[str, Any]]:
         result = {
-            key: {**value, "enabled": True, "version": 0, "origin": "builtin"}
+            key: {**value, "enabled": True, "version": 0, "origin": "builtin",
+                  "created_at": None, "updated_at": None, "source_kind": "builtin"}
             for key, value in builtin_skills().items()
         }
         for row in self.settings("skill"):
+            if row["data"].get("_deleted"):
+                result.pop(row["id"], None)
+                continue
+            data = dict(row["data"])
+            if (row["id"] in result
+                    and str(data.get("description") or "").strip() in {"", ">", "|"}):
+                # 老覆盖记录保留用户配置，只为占位描述沿用更新后的内置适用说明。
+                data["description"] = result[row["id"]].get("description", "")
             result[row["id"]] = {
-                **row["data"],
+                **data,
                 "version": row["version"],
                 "origin": "custom",
+                "created_at": (None if row["id"] in result
+                               else row["data"].get("created_at")),
+                "updated_at": row["updated_at"],
+                "source_kind": ("builtin" if row["id"] in result else
+                                "archive" if row["data"].get("source") == "archive" else "manual"),
             }
         words = query.casefold().split()
         rows = [
@@ -699,7 +788,7 @@ class ResourceStore:
         return (
             rows
             if include_body
-            else [{k: v for k, v in row.items() if k != "body"} for row in rows]
+            else [{k: v for k, v in row.items() if k not in {"body", "files"}} for row in rows]
         )
 
     # ------------------------------------------------------------ 观测与资产

@@ -159,6 +159,8 @@ async def http_probe(
     timeout: float = 15.0,
     max_redirects: int = 5,
     max_output_chars: int = 20000,
+    workspace_root: str = "",
+    http_max_body_bytes: int = 8 * 1024 * 1024,
     **_: Any,  # 兼容 builtin_ctx 中面向其他内置工具的键（如 allowed_dirs）
 ) -> ToolResult:
     """HTTP 探测工具：限速 → 请求（重定向逐跳跟随）→ 结构化解析。
@@ -219,9 +221,9 @@ async def http_probe(
             else:  # pragma: no cover - 循环由 break/上限分支结束
                 raise RuntimeError("redirect loop")
             # 仍在连接池内读取最终响应体（流式响应随连接关闭失效）：
-            # 只取展示窗口需要的字节（字符窗口 ×4 给多字节编码留余量），
-            # 超大响应下载到窗口容量即断，不全额进内存
-            cap_bytes = max(1000, max_output_chars) * 4
+            # 会话通道按独立下载上限读取正文；展示窗口不再决定是否停止下载。
+            # 仍使用有界解压，避免压缩响应绕过正文上限；旧无工作区调用沿用原窗口。
+            cap_bytes = http_max_body_bytes if workspace_root else max(1000, max_output_chars) * 4
             content, body_truncated = await _response_window(resp, cap_bytes)
             got = len(content)
             await resp.aclose()
@@ -230,13 +232,15 @@ async def http_probe(
             final_url = str(resp.url)
             cl = final_headers.get("content-length", "")
             content_length = int(cl) if cl.isdigit() else got
-            body = content.decode(resp.encoding or "utf-8", errors="replace")
+            try:
+                body = content.decode(resp.encoding or "utf-8")
+                text_decode_lossy = False
+            except UnicodeDecodeError:
+                body = content.decode(resp.encoding or "utf-8", errors="replace")
+                text_decode_lossy = True
     except httpx.HTTPError as exc:
         return ToolResult(tool="http_probe", ok=False, error=f"HTTP 错误: {exc}",
                           returncode=-2, duration_ms=(time.perf_counter() - started) * 1000)
-
-    if len(body) > max_output_chars:
-        body = body[: max_output_chars * 3 // 4] + "\n...[截断]...\n" + body[-max_output_chars // 4 :]
 
     title = ""
     m = re.search(r"<title[^>]*>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
@@ -254,7 +258,30 @@ async def http_probe(
         "fingerprint": fingerprint,
         "final_url": final_url,
         "redirect_chain": redirect_chain,
+        "download_complete": not body_truncated,
+        "response_is_partial": final_status == 206,
+        "text_decode_lossy": text_decode_lossy,
     }
+    if workspace_root:
+        from spiritscout.tools.http_responses import save_response
+
+        try:
+            saved = await asyncio.to_thread(save_response, workspace_root, content, body,
+                {**parsed, "url": url, "method": method, "encoding": resp.encoding or "utf-8",
+                 "captured_at": time.time()})
+        except OSError as exc:
+            return ToolResult(tool="http_probe", ok=False, returncode=1,
+                error=f"HTTP 响应已收到但源码保存失败：{exc}",
+                parsed={**parsed, "retryable": False},
+                duration_ms=(time.perf_counter() - started) * 1000)
+        parsed.update({key: saved[key] for key in
+                       ("body_ref", "body_path", "body_sha256", "saved_body_bytes", "body_chars")})
+    # 内部探测器沿用原窗口；给模型的预览由 Agent 层单独控制，不能缩小旧检测面。
+    preview_limit = max_output_chars
+    parsed["preview_truncated"] = len(body) > preview_limit
+    if parsed["preview_truncated"]:
+        body = (body[:preview_limit * 3 // 4] + "\n...[展示省略，非完整源码]...\n"
+                + body[-preview_limit // 4:])
     # 列表只记录初始地址与用户扩围，无法穷尽任务规则授权的动态目标。
     # 仅报告未匹配事实；是否真正扩围由模型结合上下文判断。
     if not guard.is_allowed(final_url):
@@ -471,16 +498,16 @@ async def file_analyze(
 # 内置工具的规范描述（策略门风险定级的依据，4.1 统一抽象 BUILTIN 态）
 BUILTIN_SPECS: dict[str, ToolSpec] = {
     "http_probe": ToolSpec(
-        name="http_probe", kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY,
+        name="http_probe", kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY, reuse_ttl_seconds=30,
         description="HTTP 探测（任意 HTTP 方法，范围标注 + 限速 + 结构化解析）",
         target_params=("url",), scope_required=True),
     "dns_resolve": ToolSpec(
-        name="dns_resolve", kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY,
+        name="dns_resolve", kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY, reuse_ttl_seconds=30,
         description="DNS 解析（A/AAAA/PTR，范围标注 + 限速）",
         target_params=("host",), scope_required=True),
     # 端口扫描：SRC/渗透赛测绘面（CTF 模式 C7 不装配该角色，模式层排除）
     "tcp_scan": ToolSpec(
-        name="tcp_scan", kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY,
+        name="tcp_scan", kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY, reuse_ttl_seconds=10,
         description="TCP 端口扫描（连接级探测 + 服务横幅，范围标注 + 限速 + 并发上限）",
         target_params=("host",), scope_required=True),
     "file_analyze": ToolSpec(

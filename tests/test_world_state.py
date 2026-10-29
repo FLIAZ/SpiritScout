@@ -22,6 +22,40 @@ from spiritscout.policy.scope import ScopeGuard
 
 
 class WorldStateSnapshotTests(unittest.TestCase):
+    def test_incremental_facts_preserve_versions_retirement_and_full_authorization(self) -> None:
+        def fact(key, version=1):
+            return {"blackboard_ref": {"layer": "topology", "record_id": key, "version": version},
+                    "summary": "证据摘要" * 30}
+        before = {"authorization": {"allowed_urls": ["https://a.test"]},
+                  "shared_facts": [fact(str(i)) for i in range(12)]}
+        after = {"authorization": {"allowed_urls": ["https://a.test", "https://b.test"]},
+                 "shared_facts": [fact(str(i), 2 if i == 5 else 1) for i in range(1, 13)]}
+        fragment = world_state.update(before, after, incremental_facts=True)
+        data = json.loads(fragment.split('\n')[1])
+        self.assertEqual(data["authorization"], after["authorization"])
+        self.assertNotIn("shared_facts", data)
+        delta = data["shared_facts_delta"]
+        self.assertEqual(delta["upsert"], [fact("5", 2), fact("12")])
+        self.assertEqual(delta["retired"], [{"layer": "topology", "record_id": "0"}])
+        restored = {row["blackboard_ref"]["record_id"]: row for row in before["shared_facts"]}
+        for ref in delta["retired"]:
+            restored.pop(ref["record_id"])
+        for row in delta["upsert"]:
+            restored[row["blackboard_ref"]["record_id"]] = row
+        self.assertEqual(restored, {row["blackboard_ref"]["record_id"]: row for row in after["shared_facts"]})
+        self.assertLess(len(fragment), len(world_state.update(before, after)) / 2)
+        self.assertIsNone(world_state.update(after, {**after, "shared_facts": list(reversed(after["shared_facts"]))}, incremental_facts=True))
+        self.assertIn('"shared_facts"', world_state.update(before, after))
+
+    def test_incremental_facts_fall_back_for_legacy_rows_and_keep_clear_events(self) -> None:
+        old = {"shared_facts": [{"text": "旧结构"}]}
+        new = {"shared_facts": [{"text": "新结构"}]}
+        self.assertIn('"shared_facts"', world_state.update(old, new, incremental_facts=True))
+        old = {"shared_facts": [{"blackboard_ref": {"layer": "topology", "record_id": "one", "version": 1}}]}
+        # 清空整个状态仍沿用旧空状态契约；字段移除发生在其余世界状态仍在时。
+        cleared = world_state.update({**old, "environment": {"date": "x"}}, {"environment": {"date": "x"}}, incremental_facts=True)
+        self.assertIn('"retired":[{"layer":"topology","record_id":"one"}]', cleared)
+
     def setUp(self) -> None:
         self.guard = ScopeGuard(Scope(
             allowed_domains=["a.test"], allowed_urls=["https://b.test/app"],
@@ -277,7 +311,9 @@ class CTFWorldStateUpdateTests(unittest.TestCase):
             fragment, changed = self.agent._sync_world_state(state)
             self.assertEqual(changed, ["user_context"])
             body = json.loads(fragment.split("\n", 1)[1].rsplit("\n", 1)[0])
-            self.assertEqual(body["user_context"]["statements"], [first, second])
+            ref = body["user_context"]["blackboard_ref"]
+            original = bb.read(BlackboardLayer(ref["layer"]), ref["record_id"])
+            self.assertEqual(original["statements"], [first, second])
             self.assertEqual(self.agent._sync_world_state(state), ("", []))
 
     def test_missing_snapshot_on_resume_replays_full_state(self) -> None:
