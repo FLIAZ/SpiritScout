@@ -169,7 +169,6 @@ CTF/智能体模式使用会话独立的无头浏览器，SRC 可连接已有浏
 当前代码版本 **v0.17.0**。版本唯一来源、递增规则和历史版本说明见 [版本管理](CONTRIBUTING.md#版本管理)。
 
 贡献时按 [Agent 工作约定](AGENTS.md) 执行：同期功能共用一个版本，调整版本号和推送远端须先取得用户明确同意。
-`ctfy-docker/`、`tsecbench-docker/` 仅供维护者本机验证，不随仓库分发，协作者无需下载。
 
 | 我想了解 | 阅读入口 |
 | --- | --- |
@@ -258,6 +257,7 @@ CTF/智能体模式使用会话独立的无头浏览器，SRC 可连接已有浏
 - [OWASP WSTG](https://github.com/OWASP/wstg)（CC BY-SA-4.0）
 - [GTFOBins](https://github.com/GTFOBins/GTFOBins.github.io)（GPL-3.0）
 - [VoltAgent/awesome-agent-skills](https://github.com/VoltAgent/awesome-agent-skills)（MIT）
+- ARTEX
 
 ### 项目使用的 MCP 服务器
 
@@ -284,11 +284,14 @@ CTF/智能体模式使用会话独立的无头浏览器，SRC 可连接已有浏
 ### 用户
 
 
-- [@BProbie](https://github.com/BProbie)：修正文档格式
-- [@k1ne](https://github.com/k1ne7)：多平台兼容功能
-- [@neko](https://github.com/neko-11451)：对登录页的前端美化
+- [@BProbie](https://github.com/BProbie)：修正文档规范
+- [@k1ne](https://github.com/k1ne7)：多平台适配兼容优化
+- [@neko](https://github.com/neko-11451)：登录页的前端美化
 
 </details>
+
+## 联系
+- atroot.fliaz@gmail.com
 
 ## Star History
 
