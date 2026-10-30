@@ -1,7 +1,7 @@
 """运行时状态的增量消息。
 
-系统提示保持稳定；授权、规则和环境放入 user 消息的 world_state 片段。
-变化按顶层字段整体发送，未出现的字段沿用前值。"""
+系统提示保持稳定；授权与环境放入 world_state，模型侧规则仅携带黑板引用。
+授权与规则变化按顶层字段整体发送；保留原始片段的 CTF 会话可增量同步近期事实目录。"""
 
 from __future__ import annotations
 
@@ -119,7 +119,7 @@ def sync_user_context(blackboard: Any, *,
 
 
 def snapshot(*, guard: Any = None, env: dict[str, Any] | None = None,
-             blackboard: Any = None) -> dict[str, Any]:
+             blackboard: Any = None, references: bool = False) -> dict[str, Any]:
     """当前世界状态：空字段不占位，片段只承载运行时事实。"""
     out: dict[str, Any] = {}
     auth = authorization(guard)
@@ -134,6 +134,21 @@ def snapshot(*, guard: Any = None, env: dict[str, Any] | None = None,
         project = blackboard.read(BlackboardLayer.TOPOLOGY, "project-memory") or {}
         if project.get("description"):
             out["project_rules"] = project["description"]
+        from spiritscout.blackboard.exchange import fact_index
+
+        facts = fact_index(blackboard) if references else []
+        if facts:
+            out["shared_facts"] = facts
+        if references and callable(getattr(blackboard, 'query', None)):
+            from spiritscout.blackboard.exploration import directory
+
+            # 仅广播小目录；详细图与失败分支由模型按需查询。
+            recent = directory(blackboard, 'exploration', limit=8, recent=True)
+            if recent['items']:
+                out['exploration_graph'] = recent
+    if references and blackboard is not None:
+        from spiritscout.blackboard.exchange import project_rules
+        return project_rules(blackboard, out)
     return out
 
 
@@ -143,12 +158,15 @@ def render(values: dict[str, Any], *, update: bool = False) -> str:
     return f"<world_state{attribute}>\n{body}\n</world_state>"
 
 
-def update(previous: dict[str, Any] | None, current: dict[str, Any]) -> str | None:
+def update(previous: dict[str, Any] | None, current: dict[str, Any], *,
+           incremental_facts: bool = False, incremental_exploration: bool = False) -> str | None:
     """返回与上次不同的顶层字段（整值重发）；无变化返回 None。
 
     不发送 JSON Patch：旧片段可能被上下文压缩折叠，后续片段必须能独立
     读懂。整值重发让最新片段始终包含该字段的完整现状（与 Codex 的
-    environment_context 按区块重绘同语义）。
+    environment_context 按区块重绘同语义）。incremental_facts 仅供完整保留
+    初始片段和后续更新的 CTF 对话启用，按记录身份同步近期目录，不变更授权更新契约。
+    探索目录增量另行协商；仅在补丁明显更小时发送，旧会话继续接收完整字段。
     """
     if not current:
         return None
@@ -160,6 +178,69 @@ def update(previous: dict[str, Any] | None, current: dict[str, Any]) -> str | No
             changed[key] = value
     for key in previous.keys() - current.keys():
         changed[key] = None
+    if 'exploration_graph' in changed and isinstance(current.get('exploration_graph'), dict):
+        before, after = previous.get('exploration_graph') or {}, current['exploration_graph']
+        def graph_index(value: Any) -> dict[tuple[str, str], dict[str, Any]] | None:
+            if not isinstance(value, dict) or not isinstance(value.get('items', []), list):
+                return None
+            result = {}
+            for item in value.get('items', []):
+                ref = item.get('blackboard_ref') if isinstance(item, dict) else None
+                if (not isinstance(ref, dict) or not isinstance(ref.get('layer'), str)
+                        or not isinstance(ref.get('record_id'), str) or not ref['layer'] or not ref['record_id']):
+                    return None
+                identity = ref['layer'], ref['record_id']
+                if identity in result:
+                    return None
+                result[identity] = item
+            return result
+
+        old, new = graph_index(before), graph_index(after)
+        if old is not None and new is not None:
+            old_meta = {key: value for key, value in before.items() if key != 'items'}
+            new_meta = {key: value for key, value in after.items() if key != 'items'}
+            upsert = [row for key, row in new.items() if old.get(key) != row]
+            retired = [{'layer': key[0], 'record_id': key[1]} for key in old if key not in new]
+            if not upsert and not retired and old_meta == new_meta:
+                changed.pop('exploration_graph')  # 仅展示次序变化不产生模型消息。
+            elif incremental_exploration:
+                delta = {'upsert': upsert, 'retired': retired}
+                if old_meta != new_meta:
+                    delta['meta'] = new_meta
+                compact = render({'exploration_graph_delta': delta}, update=True)
+                full = render({'exploration_graph': after}, update=True)
+                from spiritscout.gateway.context import estimate_input_tokens
+
+                # 传输保留全部字段；补丁膨胀时回退整块，避免全图变化反而更贵。
+                if (len(compact.encode()) * 5 <= len(full.encode()) * 4
+                        and estimate_input_tokens([{'role': 'user', 'content': compact}])
+                        < estimate_input_tokens([{'role': 'user', 'content': full}])):
+                    changed.pop('exploration_graph')
+                    changed['exploration_graph_delta'] = delta
+    if incremental_facts and "shared_facts" in changed:
+        # 仅用于原始世界片段完整保留的追加式会话；授权/规则仍按原契约整字段更新。
+        before, after = previous.get("shared_facts", []), current.get("shared_facts", [])
+        def indexed(rows: Any) -> dict[tuple[str, str], dict[str, Any]] | None:
+            if not isinstance(rows, list):
+                return None
+            result = {}
+            for row in rows:
+                ref = row.get("blackboard_ref") if isinstance(row, dict) else None
+                if (not isinstance(ref, dict) or not isinstance(ref.get("layer"), str)
+                        or not isinstance(ref.get("record_id"), str) or not ref["layer"] or not ref["record_id"]):
+                    return None
+                identity = (ref["layer"], ref["record_id"])
+                if identity in result:
+                    return None
+                result[identity] = row
+            return result
+        old_index, new_index = indexed(before), indexed(after)
+        if old_index is not None and new_index is not None:
+            changed.pop("shared_facts")
+            upsert = [row for key, row in new_index.items() if old_index.get(key) != row]
+            retired = [{"layer": key[0], "record_id": key[1]} for key in old_index if key not in new_index]
+            if upsert or retired:
+                changed["shared_facts_delta"] = {"upsert": upsert, "retired": retired}
     if not changed:
         return None
     return render(changed, update=True)

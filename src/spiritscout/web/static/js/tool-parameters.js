@@ -31,7 +31,11 @@ const ToolParameters = (() => {
           const data = await request;
           if (version !== generation || entry.session !== session) return;
           entry.attempts++;
-          if (data.available) { cache.set(entry.key, data); entry.loaded = true; waiting.delete(entry); }
+          if (data.available) {
+            cache.set(entry.key, data);
+            while (cache.size > 128) cache.delete(cache.keys().next().value);
+            entry.loaded = true; waiting.delete(entry);
+          }
           else if (data.retryable !== false && entry.attempts < 3 && !TERMINAL.has(S.state?.session?.status)) waiting.add(entry);
           show(entry, data);
         } catch (error) {
@@ -60,7 +64,10 @@ const ToolParameters = (() => {
     });
   }
   function refresh() {
-    for (const entry of waiting) { waiting.delete(entry); enqueue(entry); }
+    for (const entry of waiting) { waiting.delete(entry); if (entry.element.isConnected) enqueue(entry); }
   }
-  return {reset,attach,refresh};
+  function prune() {
+    for (const entry of waiting) if (!entry.element.isConnected) waiting.delete(entry);
+  }
+  return {reset,attach,refresh,prune};
 })();

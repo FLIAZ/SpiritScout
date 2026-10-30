@@ -158,7 +158,7 @@ class MasterReviewTests(unittest.IsolatedAsyncioTestCase):
             audit=Mock(), extra={"mode_prompt": "竞赛策略", "platform": platform})
 
         await master._apply_competition_decisions(dag, {
-            "defer_challenges": [{"id": "c1", "reason": "连续无新增信息"}],
+            "defer_challenges": [{"id": "c1", "reason": "连续无新增信息", "release_instance": True}],
         })
 
         updated = dag.all_nodes()[0]

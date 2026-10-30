@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import dataclasses
 import hashlib
 import json
 import uuid
@@ -15,6 +16,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from spiritscout.agents.profiles import AgentProfile, get_profile
+from spiritscout.core.attempts import AttemptLedger, exact_key
 from spiritscout.core.audit import AuditLogger, NullAuditLogger
 from spiritscout.core.exceptions import (
     PolicyViolation,
@@ -24,6 +26,7 @@ from spiritscout.core.exceptions import (
 from spiritscout.core.models import AgentType, RunMode
 from spiritscout.tools.executor import ToolExecutor
 from spiritscout.tools.invocation import (
+    ExecutionScope,
     InvocationContext,
     current_execution_scope,
     current_invocation,
@@ -54,21 +57,27 @@ class ToolRegistry:
         audit: AuditLogger | None = None,
         max_retries: int = 1,
         journal: ExecutionJournal | None = None,
+        attempts: AttemptLedger | None = None,
     ):
         self.executor = executor
         self.policy = policy
         self.audit = audit or NullAuditLogger()
         self.max_retries = max_retries
         self.journal = journal
+        self.attempts = attempts or AttemptLedger()
+        self._generation = 0
+        self._mutations = 0
         self._specs: dict[str, ToolSpec] = {}
         self._builtins: dict[str, BuiltinFn] = {}
 
     # ------------------------------------------------------------ 注册
 
     def register(self, spec: ToolSpec) -> None:
+        self._generation += 1
         self._specs[spec.name] = spec
 
     def register_builtin(self, name: str, fn: BuiltinFn, spec: ToolSpec | None = None) -> None:
+        self._generation += 1
         self._builtins[name] = fn
         if spec:
             self._specs[name] = spec
@@ -88,6 +97,17 @@ class ToolRegistry:
         """每次调用独立编号，参数快照绑定审批；未决动作只留痕、不自动重放。"""
         spec = self.get(name)
         params = copy.deepcopy(params)
+        refresh = bool(builtin_ctx.pop("_fresh", False))
+        if name == "http_probe":
+            refresh = bool(params.pop("refresh", False)) or refresh
+        bypass = bool(builtin_ctx.pop("_dedup_bypass", False))
+        environment_id = str(builtin_ctx.pop("_environment_id", "") or "")
+        scope = current_execution_scope.get()
+        bypass = bypass or bool(scope and (scope.agent_id == "verifier" or scope.task_id.startswith("verify-")))
+        reusable = self._replay_safe(spec, params) and spec.reuse_ttl_seconds > 0 and not bypass
+        mutates = not self._replay_safe(spec, params)
+        if refresh or mutates:
+            self._generation += 1
         digest = hashlib.sha256(json.dumps(
             params, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()).hexdigest()
         invocation_id = f"inv-{uuid.uuid4().hex}"
@@ -98,6 +118,8 @@ class ToolRegistry:
         token = current_invocation.set(context)
         phase = "not_started"
         registered = False
+        if mutates:
+            self._mutations += 1
 
         def transition(status: str) -> None:
             nonlocal phase
@@ -111,9 +133,43 @@ class ToolRegistry:
             if self.journal is not None:
                 self.journal.begin(invocation_id, name, digest,
                                    "safe" if replay_safe else "never_automatic",
-                                   params=params, scope=current_execution_scope.get())
+                                   params=params, scope=(dataclasses.replace(scope or ExecutionScope(), environment_id=environment_id)
+                                                        if environment_id else scope))
                 registered = True
-            result = await self._call(name, params, transition=transition, **builtin_ctx)
+            async def perform() -> ToolResult:
+                result = await self._call(name, params, transition=transition,
+                                          preauthorized=reusable, **builtin_ctx)
+                if result.invocation_id and result.invocation_id != invocation_id:
+                    result.source_invocation_id = result.source_invocation_id or result.invocation_id
+                result.invocation_id = invocation_id
+                return result
+
+            denied = await self._authorize(name, params, transition) if reusable else None
+            if denied is not None:
+                result = denied
+            elif reusable and not refresh and not self._mutations:
+                guard = builtin_ctx.get("guard") or getattr(self.policy, "guard", None)
+                scope_model = getattr(guard, "scope", None)
+                auth = scope_model.model_dump(mode="json") if callable(getattr(scope_model, "model_dump", None)) else {}
+                approved = guard.approved_targets() if callable(getattr(guard, "approved_targets", None)) else []
+                auth = {**auth, "approved": sorted(approved)} if isinstance(auth, dict) and isinstance(approved, (set, list, tuple)) else {}
+                key_parameters = {**params, "method": str(params.get("method", "GET")).upper()} if name == "http_probe" else params
+                key = exact_key(name, "", key_parameters, {
+                    "identity": scope.identity_id if scope else "",
+                    "environment": environment_id or (scope.environment_id if scope else ""),
+                    "workspace": str(builtin_ctx.get("workspace_scope") or ""),
+                    "generation": self._generation, "authorization": auth,
+                    "run": self.journal.run_id if self.journal is not None else id(self)})
+                result, reuse = await self.attempts.execute(key, perform, ttl=spec.reuse_ttl_seconds)
+                if reuse != "executed":
+                    result.source_invocation_id = result.source_invocation_id or result.invocation_id
+                    result.reuse = reuse
+                    transition("running")
+                    self.audit.log("attempt.reused", scope.agent_id if scope else "registry", {
+                        "key": key, "invocation_id": invocation_id, "source_invocation_id": result.source_invocation_id,
+                        "kind": reuse})
+            else:
+                result = await perform()
             result.invocation_id = invocation_id
             result.execution_status = ("denied" if phase != "running" else
                                        "succeeded" if result.ok else "failed")
@@ -131,6 +187,9 @@ class ToolRegistry:
             raise
         finally:
             current_invocation.reset(token)
+            if mutates:
+                self._mutations -= 1
+                self._generation += 1
 
     @staticmethod
     def _replay_safe(spec: ToolSpec, params: dict[str, Any]) -> bool:
@@ -141,9 +200,7 @@ class ToolRegistry:
                 and (spec.name != "http_probe" or str(params.get("method", "GET")).upper()
                      in {"GET", "HEAD", "OPTIONS"}))
 
-    async def _call(self, name: str, params: dict[str, Any], *,
-                    transition: Callable[[str], None], **builtin_ctx) -> ToolResult:
-        """统一调用入口：工具权限与危险动作审批 → 执行/重试 → 结构化结果。"""
+    async def _authorize(self, name: str, params: dict[str, Any], transition: Callable[[str], None]) -> ToolResult | None:
         spec = self.get(name)
         # 行为声明在统一入口校验，不能依赖某个 Agent 的包装函数。
         # MCP 的 action 可能是远端业务参数；其风险仍由工具规格门把关。
@@ -186,6 +243,16 @@ class ToolRegistry:
             except PolicyViolation as exc:
                 self.audit.log("tool.denied", "registry", {"tool": name, "reason": str(exc)})
                 return ToolResult(tool=name, ok=False, error=str(exc), returncode=-3)
+        return None
+
+    async def _call(self, name: str, params: dict[str, Any], *,
+                    transition: Callable[[str], None], preauthorized: bool = False, **builtin_ctx) -> ToolResult:
+        """统一调用入口：工具权限与危险动作审批 → 执行/重试 → 结构化结果。"""
+        # 可复用调用已在查缓存前逐次授权；实际执行不能再次写同一调用的审批记录。
+        denied = None if preauthorized else await self._authorize(name, params, transition)
+        if denied is not None:
+            return denied
+        spec = self.get(name)
         attempts = 0
         last: ToolResult | None = None
         # 侵入性工具不自动重放，避免网络抖动把一次有副作用的调用变成两次。
@@ -270,4 +337,6 @@ class AgentToolView:
                 "reason": reason,
             })
             return ToolResult(tool=name, ok=False, error=reason, returncode=-5)
+        if self.profile.key == AgentType.VERIFIER:
+            builtin_ctx["_dedup_bypass"] = True
         return await self._registry.call(name, params, **builtin_ctx)

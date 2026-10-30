@@ -24,6 +24,7 @@ from spiritscout.platform_support import (
     node_cli_command,
     process_options,
 )
+from spiritscout.resources.files import project_body
 from spiritscout.resources.store import ResourceStore, redact_credentials, validate_mcp
 from spiritscout.web import agentcfg, vault
 
@@ -502,6 +503,8 @@ class ResourceAssistant:
 
 
 def validate_skill(data: dict[str, Any]) -> None:
+    if "files" in data:
+        data["body"] = project_body(data["files"])
     if not re.fullmatch(r"[a-zA-Z0-9_-]{1,100}", str(data.get("skill_id", ""))):
         raise ValueError("Skill ID 仅支持字母数字、下划线和短横线")
     if not isinstance(data.get("body"), str) or not 1 <= len(data["body"]) <= 100_000:

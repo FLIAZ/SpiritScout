@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from spiritscout.config.model_identity import resolve_model
 from spiritscout.config.settings import ModelEntry
 from spiritscout.core.exceptions import ConfigurationError
 
@@ -12,20 +13,26 @@ class ModelRegistry:
     def __init__(self, entries: list[ModelEntry]):
         if not entries:
             raise ConfigurationError("模型注册表为空：请先在 Web 控制台「模型」页配置至少一个模型")
-        self._by_model: dict[str, ModelEntry] = {e.model: e for e in entries}
+        if len({e.key for e in entries}) != len(entries):
+            raise ConfigurationError("同一供应商下模型 ID 存在重复")
+        self._by_model: dict[str, ModelEntry] = {e.key: e for e in entries}
 
     def get(self, model: str) -> ModelEntry:
-        try:
-            return self._by_model[model]
-        except KeyError as exc:
-            raise ConfigurationError(f"未注册的模型: {model}") from exc
+        return resolve_model(self.all(), model)
 
     def has(self, model: str) -> bool:
-        return model in self._by_model
+        try:
+            self.get(model)
+            return True
+        except ConfigurationError:
+            return False
 
     def fallback_of(self, model: str) -> list[ModelEntry]:
         """主备关系：返回声明为该模型备机的条目（4.9.3-5 主备切换）。"""
-        return [e for e in self._by_model.values() if model in e.is_fallback_for]
+        # 旧裸名备用关系必须唯一，不能把另一供应商的同名模型也当作主机。
+        target = self.get(model).key
+        return [e for e in self._by_model.values() if any(
+            self.has(ref) and self.get(ref).key == target for ref in e.is_fallback_for)]
 
     def all(self) -> list[ModelEntry]:
         return list(self._by_model.values())

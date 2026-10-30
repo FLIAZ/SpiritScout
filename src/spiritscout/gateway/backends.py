@@ -15,6 +15,7 @@ from typing import Any
 
 from spiritscout.config.settings import ModelEntry
 from spiritscout.gateway.attempts import current_attempt_trace, tracked_request
+from spiritscout.gateway.capabilities import EndpointCapabilities
 
 # 流式增量回调：(kind, text) -> None | Awaitable[None]
 DeltaCallback = Callable[[str, str], Any]
@@ -182,6 +183,9 @@ class LiteLLMBackend(ChatBackend):
     不混入最终回答 content；JSON 模式被端点拒绝时自动回退无 response_format 重试。
     """
 
+    def __init__(self, *, capabilities: EndpointCapabilities | None = None):
+        self._capabilities = capabilities if capabilities is not None else EndpointCapabilities()
+
     async def complete(
         self,
         entry: ModelEntry,
@@ -292,6 +296,10 @@ class LiteLLMBackend(ChatBackend):
             # 流式响应可能不含 usage 块，token 计数会归零
             kwargs["stream_options"] = {"include_usage": True}
 
+        for option in ("stream_options", "response_format"):
+            if option in kwargs and self._capabilities.unsupported(entry, anthropic, option):
+                kwargs.pop(option)
+        rejected: dict[str, Exception] = {}
         requested_at = time.perf_counter()
         try:
             resp = await tracked_request(litellm.acompletion, **kwargs)
@@ -303,9 +311,11 @@ class LiteLLMBackend(ChatBackend):
             if kwargs.get("stream_options") and self._opt_unsupported(
                     exc, "stream_options"):
                 kwargs.pop("stream_options", None)
+                rejected["stream_options"] = exc
                 retried = True
-            if not retried and response_format == "json" and self._json_mode_unsupported(exc):
+            if not retried and kwargs.get("response_format") and self._json_mode_unsupported(exc):
                 kwargs.pop("response_format", None)
+                rejected["response_format"] = exc
                 retried = True
             if not retried and self._tool_args_truncated(exc) and not _retry_truncated:
                 return await self._reissue_truncated_call(
@@ -319,7 +329,10 @@ class LiteLLMBackend(ChatBackend):
 
         if streaming:
             try:
-                return await self._consume_stream(resp, on_delta, started=requested_at)
+                result = await self._consume_stream(resp, on_delta, started=requested_at)
+                for option, error in rejected.items():
+                    self._capabilities.remember(entry, anthropic, option, error)
+                return result
             except Exception as exc:
                 # 流式的截断错误在增量消费时才抛出（非流式在 acompletion 就抛）
                 if self._tool_args_truncated(exc) and not _retry_truncated:
@@ -332,6 +345,8 @@ class LiteLLMBackend(ChatBackend):
 
         choice = resp.choices[0]
         usage = getattr(resp, "usage", None)
+        for option, error in rejected.items():
+            self._capabilities.remember(entry, anthropic, option, error)
         return {
             "content": choice.message.content or "",
             "reasoning": str(getattr(choice.message, "reasoning_content", "") or ""),
@@ -924,8 +939,9 @@ def entry_role_safe(role: str) -> str:
     return role or "default"
 
 
-def backend_for(entry: ModelEntry, mock_backend: MockBackend | None = None) -> ChatBackend:
+def backend_for(entry: ModelEntry, mock_backend: MockBackend | None = None, *,
+                capabilities: EndpointCapabilities | None = None) -> ChatBackend:
     """按 provider 选择后端。provider=mock 时共用注入的 MockBackend 实例。"""
     if entry.provider == "mock":
         return mock_backend or MockBackend()
-    return LiteLLMBackend()
+    return LiteLLMBackend(capabilities=capabilities)

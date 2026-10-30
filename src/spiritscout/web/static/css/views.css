@@ -513,10 +513,10 @@ table.list tr:last-child td { border-bottom: 0; }
 .acard .bind select { flex: 1; font-size: 12.5px; padding: 6px 8px; }
 .acard .bind .selx { flex: 1; }
 .acard .bind .selx-btn { font-size: 12.5px; padding: 6px 8px; border-radius: 7px; }
-/* 统一保存：改动未提交的指派琥珀描边标脏，页头保存条一键提交/还原 */
-.selx.dirty .selx-btn { border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 4%, var(--surface)); }
-.bind-save { display: flex; gap: 8px; align-items: center; }
+.bind-all { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; max-width: 100%; }
+.bind-all .selx { width: 300px; max-width: 100%; }
+.bind-status { font-size: 12px; margin: 0 0 12px; }
+.acard .bind-status { margin: 0; }
 
 /* ================= 模型 ================= */
 .models-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; gap: 10px; flex-wrap: wrap; }
@@ -1053,10 +1053,12 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
   .mission-settings select { width: 100%; }
 }
 
-/* 历史窗口独立翻页，打开长会话无需从第一条事件重放。 */
+/* 有界滚动历史，打开长会话无需从第一条事件重放。 */
 .trace-history { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); color: var(--ink-3); font-size: 11px; flex: none; }
 .trace-history > div { display: flex; gap: 6px; }
-.trace > .tl { content-visibility: auto; contain-intrinsic-size: auto 80px; }
+/* 滚动窗口已限制 DOM 数量；使用真实高度量锚点，避免估算高度在入屏时跳动。 */
+.trace { overflow-anchor: none; }
+.trace.trace-staging { position: fixed; left: -100000px; top: 0; visibility: hidden; pointer-events: none; flex: none; }
 
 /* 工作台以任务为中心：实例轨道、当前现场和独立反馈区。 */
 .agent-workbench { max-height: min(65vh, 640px); }
@@ -1162,6 +1164,32 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
 .task-errors { margin-left: auto; color: var(--bad); font-size: 11px; }
 .task-activity-body { padding: 10px; display: grid; gap: 8px; }
 .task-tools { display: grid; gap: 7px; }
+/* 派发、每次推进与结论各占时间线一行；阶段不共用任务的总状态。 */
+.task-context { margin: 0 0 7px; color: var(--ink-3); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.task-dispatch .task-context { margin: 6px 0 0 16px; }
+.task-step { border: 1px solid var(--line); border-radius: 9px; background: var(--surface); min-width: 0; }
+.task-step > summary { display: flex; align-items: baseline; gap: 9px; cursor: pointer; padding: 12px 14px; color: var(--ink-2); font-size: 12px; list-style: none; }
+.task-step > summary::-webkit-details-marker { display: none; }
+.task-step > summary::before { content: "›"; flex: none; transition: transform .15s; }
+.task-step[open] > summary::before { transform: rotate(90deg); }
+.task-step > summary b { color: var(--ink); min-width: 0; overflow-wrap: anywhere; font-weight: 600; }
+.task-step > summary .task-status { flex: none; }
+.task-step[open] > summary { border-bottom: 1px solid var(--line); }
+.task-step > .task-tools, .task-step-text:not(:empty) { padding: 0 14px 12px; }
+.task-step > .task-step-text { font-size: 12.5px; line-height: 1.75; overflow-wrap: anywhere; }
+.task-step-text > :first-child { margin-top: 8px; }.task-step-text > :last-child { margin-bottom: 0; }
+.task-stage .task-progress { margin: 8px 14px; }
+.task-stage[data-status="waiting"] .task-status { color: var(--accent); }
+.task-thread.task-stage[data-status="failed"] .task-progress { display: block; color: var(--bad); }
+.task-step:focus-within { outline: 1px solid var(--accent); }
+.task-outcome .task-summary { margin-top: 8px; }
+@media(max-width:640px) {
+  .task-step > summary { flex-wrap: wrap; gap: 6px; padding: 10px; }
+  .task-step > summary b { flex: 1; }
+  .task-context { font-size: 10px; }
+}
+@media(prefers-reduced-motion:reduce) { .task-step > summary::before { transition: none; } }
+.edges .context-edge { stroke: var(--ink-3); stroke-dasharray: 5 4; }
 .task-tools:empty::after { content: "此记录片段暂无工具调用"; padding: 5px; font-size: 12px; color: var(--ink-3); }
 .task-tools .tl-act { background: transparent; border-radius: 6px; }
 .task-tools .tl-act:not(.open) > .nt, .task-tools .tl-act:not(.open) > .tl-parameters { display: none; }
@@ -1209,3 +1237,136 @@ dialog.panel { width: min(880px, 94vw); padding: 0; overflow: hidden; max-height
 
 .agent-profile-details { margin: 10px 0; font-size: 12px; color: var(--ink-2); }
 .agent-profile-details > summary { cursor: pointer; }
+
+/* 技能使用只由成功读取回执生成，执行详情折叠时仍可识别来源。 */
+.task-skills {margin:10px 0 12px 16px;padding:7px 10px;border-left:2px solid var(--accent);background:var(--surface-2);color:var(--accent-ink);font-size:12px;line-height:1.8;overflow-wrap:anywhere;}
+@media(max-width:600px){.task-skills {margin-left:0;}}
+
+/* 事实依赖图：资料收拢，选中后突出真实来源。 */
+.topo .tnode { padding: 14px 16px; cursor: pointer; background: var(--surface); }
+.topo .tnode:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.topo .reference-card { background: var(--surface-2); border-style: dashed; }
+.topo-card-type { color: var(--accent-ink); font-size: 10.5px; margin-bottom: 8px; }
+.topo-card-foot { color: var(--ink-3); font-size: 10.5px; margin-top: 10px; }
+.topo-section-label { position: absolute; left: 0; top: 0; color: var(--ink-2); font-size: 12px; font-weight: 600; }
+.topo .tnode.is-selected { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent); }
+.topo .tnode.is-muted { opacity: .35; }
+.topo svg.edges path.fact-edge { opacity: .16; stroke: var(--ink-3); }
+.topo svg.edges path.fact-edge.is-highlighted { opacity: 1; stroke: var(--accent); stroke-width: 2.5; }
+.topo .topo-detail { width: min(440px, calc(100% - 16px)); user-select: text; touch-action: auto; cursor: auto; }
+.topo-search-label { display: grid; gap: 6px; font-size: 12px; color: var(--ink-2); }
+.topo-search-label input { width: 100%; box-sizing: border-box; }
+.topo-collection-list { margin-top: 10px; display: grid; gap: 6px; }
+.topo-collection-list button, .topo-related button { text-align: left; width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 9px 10px; background: var(--surface-2); color: var(--ink); cursor: pointer; overflow-wrap: anywhere; }
+.topo-collection-list button b { display: block; font-size: 12px; font-weight: 500; }
+.topo-collection-list button small { display: block; color: var(--ink-3); margin-top: 5px; font-size: 10px; }
+.topo-pagination { display: flex; gap: 8px; align-items: center; justify-content: space-between; margin-top: 12px; font-size: 11px; }
+.topo-pagination button { background: var(--surface-2); color: var(--ink); border: 1px solid var(--line); border-radius: 5px; padding: 5px 8px; cursor: pointer; }
+.topo-pagination button:disabled { opacity: .4; cursor: default; }
+.topo-related { display: grid; gap: 6px; margin-top: 14px; font-size: 12px; }
+.topo-original { margin-top: 14px; font-size: 12px; }
+.topo-original summary { cursor: pointer; color: var(--ink-2); }
+.topo-original pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.7 var(--mono); color: var(--ink-2); }
+.topo-fact-text { font-size: 13px; }
+.topo .tnode { gap: 0; padding: 12px 16px; }
+.topo .tnode .tact > b { -webkit-line-clamp: 2; line-height: 1.5; }
+.topo-card-foot { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.topo-back { border: 0; background: none; color: var(--accent-ink); padding: 0; margin-bottom: 12px; cursor: pointer; font-size: 12px; }
+
+/* 阶段说明始终可见，工具流水仅作为可展开的执行依据。 */
+.task-live-summary { margin: 10px 0 12px 16px; padding: 10px 13px; border-left: 2px solid var(--accent); background: var(--surface-2); color: var(--ink); font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
+.task-stage-summary { margin: 8px 0 12px 16px; color: var(--ink-2); font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
+.task-live-summary > :first-child, .task-stage-summary > :first-child { margin-top: 0; }
+.task-live-summary > :last-child, .task-stage-summary > :last-child { margin-bottom: 0; }
+.task-waiting { margin: 8px 0 12px 16px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; color: var(--accent-ink); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.task-stage > .task-step { margin-left: 16px; border: 0; background: transparent; }
+.task-stage > .task-step > summary { padding: 6px 0; color: var(--ink-3); font-size: 11.5px; }
+.task-stage .task-tool-count { font-weight: 400; }
+@media (max-width:700px) { .task-live-summary, .task-stage-summary, .task-waiting, .task-stage > .task-step { margin-left: 0; } }
+
+.topo-live { position: absolute; top: 12px; left: 12px; z-index: 6; width: min(640px, calc(100% - 140px)); max-height: 148px; overflow-y: auto; padding: 10px 13px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); cursor: auto; user-select: text; }
+.topo-live header { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; }
+.topo-live header span { color: var(--accent-ink); }
+.topo-live-row { border-top: 1px solid var(--line); padding-top: 7px; margin-top: 7px; }
+.topo-live-row strong { font-size: 11px; color: var(--ink-2); }
+.topo-live p { margin: 4px 0; font-size: 12px; line-height: 1.65; color: var(--ink-2); overflow-wrap: anywhere; }
+.topo-live small { font-size: 10.5px; color: var(--ink-3); }
+.topo-rule-content { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; }
+@media(max-width:600px) { .topo-live { width: calc(100% - 24px); top: 56px; max-height: 130px; } }
+
+/* 双图工作区：资产与探索独立导航，选中节点时跨图联动。 */
+.topo.dual-topology { display:flex; flex-direction:column; height:clamp(620px,76vh,920px); cursor:auto; touch-action:auto; background:var(--surface); }
+.dual-header { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:14px 18px; border-bottom:1px solid var(--line); }
+.dual-header > div { display:flex; flex-direction:column; gap:5px; min-width:0; }
+.dual-header b { font-size:14px; }
+.dual-header span { font-size:11px; color:var(--ink-3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dual-header > span { flex-shrink:0; font-family:var(--mono); }
+.dual-grid { display:grid; grid-template-columns:minmax(0, .9fr) minmax(0, 1.3fr); flex:1; min-height:0; }
+.dual-panel { display:flex; flex-direction:column; min-width:0; min-height:0; }
+.dual-panel + .dual-panel { border-left:1px solid var(--line); }
+.dual-panel > header { padding:12px 16px; border-bottom:1px solid var(--line); }
+.dual-panel > header > div:first-child { display:flex; align-items:center; justify-content:space-between; }
+.dual-panel header b { font-size:13px; }
+.dual-panel header span { font:11px var(--mono); color:var(--ink-3); }
+.dual-panel header p { margin:5px 0 10px; color:var(--ink-3); font-size:11px; }
+.dual-filter { display:flex; gap:8px; }
+.dual-filter input, .dual-filter select { min-width:0; padding:6px 8px; border:1px solid var(--line); border-radius:6px; color:var(--ink-2); background:var(--surface); font-size:11px; }
+.dual-filter input { width:100%; }
+.dual-filter select { flex-shrink:0; max-width:110px; }
+.dual-canvas { position:relative; flex:1; min-height:0; overflow:hidden; cursor:grab; touch-action:none; background-image:radial-gradient(circle,color-mix(in srgb,var(--ink-3) 20%,transparent) 1px,transparent 1px); background-size:22px 22px; }
+.dual-canvas.grabbing { cursor:grabbing; }
+.dual-stage { position:absolute; left:0; top:0; transform-origin:0 0; }
+.dual-stage .dual-node { position:absolute; width:248px; min-height:104px; padding:12px; display:flex; flex-direction:column; gap:8px; border-radius:9px; background:var(--surface); border:1px solid var(--line); border-left:3px solid var(--accent); box-sizing:border-box; }
+.dual-node[data-kind="hypothesis"] { border-left-style:dashed; border-left-color:var(--violet); }
+.dual-node[data-kind="attempt"] { border-left-color:var(--ink-3); }
+.dual-node[data-state="blocked"] .dual-node-meta span:last-child { color:var(--warn); }
+.dual-node[data-state="refuted"] .dual-node-meta span:last-child { color:var(--bad); }
+.dual-node > b { font-size:13px; line-height:1.6; overflow-wrap:anywhere; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+.dual-node > small { color:var(--ink-3); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dual-node-meta { display:flex; justify-content:space-between; gap:8px; color:var(--ink-3); font:11px var(--mono); }
+.dual-node-meta span:last-child { color:var(--accent-ink); }
+.dual-anchor { color:var(--accent-ink); font-size:10px; }
+.dual-node.is-linked { border-color:var(--accent); box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 12%,transparent); }
+.dual-node:focus-visible, .dual-tools button:focus-visible, .dual-filter :focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+.dual-stage svg.edges { z-index:0; }
+.dual-stage svg.edges .fact-edge { stroke:var(--ink-3); }
+.dual-stage .tnode { z-index:1; }
+.dual-stage svg.edges .dual-sequence { stroke-dasharray:4 5; }
+.dual-stage svg.edges .dual-arrow { fill:var(--ink-3); stroke:none; }
+.dual-tools { position:absolute; right:10px; bottom:10px; z-index:3; display:flex; gap:4px; }
+.dual-tools button { width:30px; height:28px; border:1px solid var(--line); border-radius:6px; background:var(--surface); color:var(--ink-2); cursor:pointer; }
+.dual-empty { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; padding:28px; text-align:center; font-size:12px; color:var(--ink-3); line-height:1.8; }
+.dual-activity { border-top:1px solid var(--line); background:var(--surface); z-index:2; }
+.dual-activity > summary { cursor:pointer; padding:10px 16px; color:var(--ink-2); font-size:11px; }
+.dual-topology .topo-live { position:static; width:auto; max-height:160px; margin:0 12px 12px; }
+.dual-topology .topo-detail { z-index:8; }
+@media(max-width:760px) {
+  .topo.dual-topology { height:960px; max-height:none; }
+  .dual-grid { grid-template-columns:minmax(0,1fr); grid-template-rows:1fr 1fr; }
+  .dual-panel + .dual-panel { border-left:0; border-top:1px solid var(--line); }
+  .dual-header { padding:12px; }
+  .dual-header > span { display:none; }
+}
+
+/* 会话存储清理：沿用控制台弹窗，长列表和进度在窗口内滚动。 */
+#storage-dlg { width: min(680px, 94vw); max-height: 88vh; overflow: auto; }
+.storage-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.storage-head h3 { margin: 0; }
+.storage-session { display: grid; gap: 7px; font-size: 13px; }
+.storage-session .selx { min-width: 0; }
+.storage-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.storage-stats div { padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
+.storage-stats dt { color: var(--ink-2); font-size: 12px; }
+.storage-stats dd { margin: 7px 0 0; font-family: var(--mono); }
+#storage-details p, .storage-options p, #storage-status { font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.storage-options { border-top: 1px solid var(--line); padding-top: 12px; }
+.storage-options label { display: flex; gap: 7px; align-items: center; font-size: 13px; }
+.storage-options input { width: auto; }
+.storage-error { color: var(--bad); }
+
+.side-foot { flex-wrap: wrap; gap: 8px; }
+.side-foot .side-actions { width: 100%; justify-content: space-between; }
+.side-foot .side-actions button { white-space: nowrap; flex-shrink: 0; }
+#btn-storage { border: 1px solid var(--line); background: var(--surface); color: var(--ink-2);
+  border-radius: 7px; padding: 4px 10px; font-size: 12px; }
+#btn-storage:hover { color: var(--ink); border-color: var(--ink-3); }

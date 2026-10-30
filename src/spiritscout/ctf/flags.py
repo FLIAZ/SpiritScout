@@ -60,7 +60,12 @@ class FlagManager:
         backoff_base_seconds: float = 1.0,
         max_attempts: int = 3,
         store_path: str | Path | None = None,
+        local_only: bool = False,
+        multiple_answers: bool = False,
     ):
+        self.local_only = local_only
+        self.multiple_answers = multiple_answers
+        self.completions: dict[str, dict] = {}
         self.patterns = flag_patterns or list(DEFAULT_FLAG_PATTERNS)
         self.submit_fn = submit_fn
         self.audit = audit or NullAuditLogger()
@@ -74,6 +79,30 @@ class FlagManager:
         self._lock = asyncio.Lock()
         if self.store_path and self.store_path.exists():
             self._load()
+        if self.local_only and self.store_path:
+            try:
+                self.completions = json.loads(self.store_path.with_suffix('.completion.json').read_text())
+            except (OSError, ValueError):
+                pass
+
+    def confirm_complete(self, challenge_id: str, answer_ids: list[str], reason: str,
+                         expected: int = 0) -> bool:
+        """单题完成由模型明确确认全部答案；已知答案数量仍须完整覆盖。"""
+        answers = {f.flag_id for f in self.all() if f.challenge_id == challenge_id}
+        if (not self.local_only or not reason.strip() or not answers
+                or set(answer_ids) != answers or (expected > 0 and len(answers) < expected)):
+            return False
+        self.completions[challenge_id] = {'answer_ids': sorted(answers), 'reason': reason, 'completed': True}
+        if self.store_path:
+            path = self.store_path.with_suffix('.completion.json')
+            tmp = path.with_suffix('.tmp')
+            tmp.write_text(json.dumps(self.completions, ensure_ascii=False), encoding='utf-8')
+            tmp.replace(path)
+        return True
+
+    def completed_ids(self) -> set[str]:
+        return {cid for cid, row in self.completions.items() if row.get('completed') and row.get('answer_ids') and set(row.get('answer_ids', [])) ==
+                {flag.flag_id for flag in self.all() if flag.challenge_id == cid}}
 
     # ------------------------------------------------------------ 提取
 
@@ -111,6 +140,7 @@ class FlagManager:
             format_ok=bool(extract_flags(value, self.patterns)), found_by=found_by,
         )
         self._flags[value] = cand
+        self.completions.pop(challenge_id, None)
         self.audit.log("flag.registered", "flag_manager", {
             "flag_id": cand.flag_id, "challenge_id": challenge_id,
             "found_by": found_by, "format_ok": cand.format_ok,
@@ -183,6 +213,8 @@ class FlagManager:
             "submitted": sum(1 for c in self._flags.values() if c.submitted),
             "accepted": sum(1 for c in self._flags.values() if c.accepted is True),
             "rejected": sum(1 for c in self._flags.values() if c.accepted is False),
+            **({"local_only": True, "multiple_answers": self.multiple_answers,
+                "all_answers_complete": bool(self.completed_ids())} if self.local_only else {}),
         }
 
     # ------------------------------------------------------------ 内部

@@ -62,7 +62,7 @@ def build_digest(
         d = rec["data"]
         if isinstance(d, dict) and d.get("kind") == "finding":
             findings.append({"type": d.get("type"), "text": str(d.get("text", ""))[:200],
-                             "by": d.get("by")})
+                             "by": d.get("by"), "evidence_refs": d.get("evidence_refs", [])})
     return {
         "challenges": [
             {"id": str(c.get("id") or ""), "title": str(c.get("title") or ""),
@@ -95,9 +95,11 @@ async def writeup_body(
     try:
         resp = await gateway.chat(
             [
-                {"role": "system", "content": _WRITER_SYSTEM},
+                {"role": "system", "content": _WRITER_SYSTEM + (
+                    "\n这是无提交接口的单题解答，按 local_answer_completion 说明答案完整性与证据确认状态，"
+                    "不要写等待人工提交或虚构平台判定。" if digest.get("local_answer_completion") else "")},
                 {"role": "user", "content":
-                    json.dumps(digest, ensure_ascii=False)[:_DIGIT_BUDGET]},
+                    json.dumps(digest, ensure_ascii=False, separators=(",", ":"))[:_DIGIT_BUDGET]},
             ],
             task_type="meta_planning", max_tokens=8192, timeout_seconds=420,
             # 战报综合是散文写作不是规划：限定低思考强度（不限时单次可磨

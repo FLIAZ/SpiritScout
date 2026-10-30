@@ -143,7 +143,6 @@ class Blackboard:
         if not can_write(agent_type, layer):
             raise PolicyViolation(f"{agent_type.value} 无黑板层 {layer.value} 写入权限")
         now = datetime.now(UTC).isoformat()
-        payload = json.dumps(data, ensure_ascii=False)
         # Web 入口短连接与运行态并发写：先取得数据库写锁，再读当前版本。
         with self.transaction(immediate=True):
             if dedup_key:
@@ -159,16 +158,24 @@ class Blackboard:
                 if hit:
                     record_id = hit["record_id"]
             row = self._conn.execute(
-                "SELECT version FROM bb_records WHERE layer=? AND record_id=?",
+                "SELECT version,data FROM bb_records WHERE layer=? AND record_id=?",
                 (layer.value, record_id),
             ).fetchone()
             current = row["version"] if row else 0
             if expected_version is not None and expected_version != current:
                 raise VersionConflict(layer.value, record_id, expected_version, current)
+            # DAG 是实时展示快照；相同内容不制造历史与通知，其他事实仍逐版留痕。
+            dag_snapshot = layer == BlackboardLayer.TASK_STATE and record_id == "dag-snapshot"
+            if dag_snapshot and row is not None and json.loads(row["data"]) == data:
+                return current
             # 首次升级时先保存已有现值，后续在同一事务留存每个版本。
             self._conn.execute(
                 "INSERT OR IGNORE INTO bb_record_history SELECT layer,record_id,version,data,updated_by,updated_at "
                 "FROM bb_records WHERE layer=? AND record_id=?", (layer.value, record_id))
+            from spiritscout.blackboard.provenance import annotate
+
+            data = annotate(self._conn, layer, data, actor=updated_by, now=now, agent_type=agent_type, record_id=record_id)
+            payload = json.dumps(data, ensure_ascii=False)
             new_version = current + 1
             self._conn.execute(
                 "INSERT INTO bb_record_history VALUES(?,?,?,?,?,?)",
@@ -182,6 +189,12 @@ class Blackboard:
                        updated_at=excluded.updated_at""",
                 (layer.value, record_id, new_version, dedup_key, payload, updated_by, now),
             )
+            if dag_snapshot:
+                self._conn.execute(
+                    "DELETE FROM bb_record_history WHERE layer=? AND record_id=? AND version NOT IN "
+                    "(SELECT version FROM bb_record_history WHERE layer=? AND record_id=? "
+                    "ORDER BY version DESC LIMIT 64)",
+                    (layer.value, record_id, layer.value, record_id))
             event = Event(event_id=f"evt-{uuid.uuid4().hex}", topic=f"bb.{layer.value}",
                           layer=layer, data_id=record_id, version=new_version,
                           priority=priority, source=updated_by, payload=data)
@@ -209,7 +222,8 @@ class Blackboard:
                 "SELECT data FROM bb_records WHERE layer=? AND record_id=?",
                 (layer.value, record_id),
             ).fetchone()
-        return json.loads(row["data"]) if row else None
+            from spiritscout.blackboard.provenance import evidence_view
+            return evidence_view(self._conn, json.loads(row["data"])) if row else None
 
     def read_versioned(self, layer: BlackboardLayer, record_id: str) -> tuple[dict[str, Any], int] | None:
         with self._lock:
@@ -217,7 +231,8 @@ class Blackboard:
                 "SELECT data, version FROM bb_records WHERE layer=? AND record_id=?",
                 (layer.value, record_id),
             ).fetchone()
-        return (json.loads(row["data"]), row["version"]) if row else None
+            from spiritscout.blackboard.provenance import evidence_view
+            return (evidence_view(self._conn, json.loads(row["data"])), row["version"]) if row else None
 
     def query(
         self,
@@ -242,16 +257,17 @@ class Blackboard:
         params.append(limit)
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
-        return [
-            {
-                "record_id": r["record_id"],
-                "version": r["version"],
-                "data": json.loads(r["data"]),
-                "updated_by": r["updated_by"],
-                "updated_at": r["updated_at"],
-            }
-            for r in rows
-        ]
+            from spiritscout.blackboard.provenance import evidence_view
+            return [
+                {
+                    "record_id": r["record_id"],
+                    "version": r["version"],
+                    "data": evidence_view(self._conn, json.loads(r["data"])),
+                    "updated_by": r["updated_by"],
+                    "updated_at": r["updated_at"],
+                }
+                for r in rows
+            ]
 
     def find_by_dedup_key(self, layer: BlackboardLayer, dedup_key: str) -> dict[str, Any] | None:
         results = self.query(layer, dedup_key=dedup_key, limit=1)
@@ -278,7 +294,7 @@ class Blackboard:
         self.close()
 
     async def flush_outbox(self, limit: int = 100) -> int:
-        """至少一次通知；发布成功后才能标记，重复通知由 event_id 去重。"""
+        """至少一次通知；发布成功后移除队列项，重复通知由 event_id 去重。"""
         if self._bus is None:
             return 0
         with self._lock:
@@ -289,7 +305,7 @@ class Blackboard:
         for row in rows:
             await self._bus.publish(Event.model_validate_json(row["event_json"]))
             with self.transaction() as conn:
-                conn.execute("UPDATE bb_event_outbox SET delivered=1 WHERE sequence=?",
+                conn.execute("DELETE FROM bb_event_outbox WHERE sequence=?",
                              (row["sequence"],))
             delivered += 1
         return delivered

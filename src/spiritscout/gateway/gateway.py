@@ -13,6 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from spiritscout import __version__
 from spiritscout.config.settings import GatewayConfig, ModelEntry
 from spiritscout.core.audit import AuditLogger, NullAuditLogger
 from spiritscout.core.exceptions import SpiritScoutError
@@ -26,6 +27,7 @@ from spiritscout.gateway.backends import (
     extract_json,
 )
 from spiritscout.gateway.cache import PrefixTracker, cache_summary
+from spiritscout.gateway.capabilities import EndpointCapabilities
 from spiritscout.gateway.context import DecisionMemory
 from spiritscout.gateway.pricing import estimate_deepseek_cny
 from spiritscout.gateway.registry import ModelRegistry
@@ -51,7 +53,7 @@ class ChatResponse:
 
 def output_lost(resp: ChatResponse) -> bool:
     """检查模型正文是否为空或因输出上限截断，供决策重试使用。"""
-    return (not str(resp.content or "").strip()) or resp.finish_reason in ("length", "max_tokens")
+    return (not str(resp.content or "").strip()) or getattr(resp, "finish_reason", "") in ("length", "max_tokens")
 
 
 async def chat_decision(
@@ -63,6 +65,108 @@ async def chat_decision(
     memory: DecisionMemory | None = None,
     **kwargs: Any,
 ) -> ChatResponse:
+    """主 Agent 与 JSON 子 Agent 共用按需技能通道；不额外调用路由模型。"""
+    from spiritscout.blackboard.exchange import (
+        GUIDANCE,
+        NAMES,
+        SCHEMAS,
+        execute,
+        project_rules,
+    )
+    from spiritscout.resources.runtime import (
+        SKILL_GUIDANCE,
+        SKILL_NAMES,
+        SKILL_SCHEMAS,
+        SkillRuntime,
+    )
+
+    runtime = getattr(gateway, "skill_runtime", None)
+    runtime = runtime if isinstance(runtime, SkillRuntime) else None
+    bb = getattr(memory, "blackboard", None)
+    if (runtime is None and bb is None) or kwargs.get("response_format") != "json":
+        return await _chat_decision_once(gateway, messages, audit=audit, actor=actor,
+                                         memory=memory, **kwargs)
+    memory = memory if memory is not None else DecisionMemory()
+    original = copy.deepcopy(messages)
+    schemas = (SKILL_SCHEMAS if runtime else []) + (SCHEMAS if bb is not None else [])
+    if getattr(memory.agent_type, "value", "") == "report":
+        schemas = [schema for schema in schemas if schema["function"]["name"] not in {"blackboard_write", "exploration_write", "asset_link"}]
+    legacy_systems = []
+    for message in original:
+        if message.get("role") == "system":
+            guidance = [text for enabled, text in ((runtime is not None, SKILL_GUIDANCE), (bb is not None, GUIDANCE))
+                        if enabled]
+            contract = ('\n需要读取资料或共享事实时，只返回 {"skill_requests":[{"name":"工具名",'
+                '"arguments":{}}]}；结果回灌后继续原 JSON 任务。统一工具契约：'
+                + json.dumps(schemas, ensure_ascii=False, separators=(",", ":")))
+            legacy_systems.append((message, message['content'] + '\n' + ''.join(guidance) + contract))
+            missing = ''.join(text for text in guidance if text not in message['content'])
+            message['content'] += ('\n' + missing if missing else '') + contract
+        elif message.get("role") == "user" and bb is not None:
+            message["content"] = json.dumps(project_rules(bb, json.loads(message["content"])), ensure_ascii=False)
+    if memory.messages and '\n'.join(text for _, text in legacy_systems) == memory.system:
+        # 已提交检查点的契约保持逐字不变；新阶段才使用去重后的短契约。
+        for message, text in legacy_systems:
+            message['content'] = text
+    observations: list[dict[str, Any]] = []
+    while True:
+        if runtime is not None and runtime.pause_gate is not None:
+            await runtime.pause_gate.wait()
+        prepared = copy.deepcopy(original)
+        payload = {"skill_context": memory.skills.get("context", {})}
+        if runtime:
+            payload["available_skills"] = runtime.discovery()
+        if observations:
+            payload["skill_observations"] = observations
+        prepared.append({"role": "user", "content": json.dumps(payload, ensure_ascii=False)})
+        response = await _chat_decision_once(gateway, prepared, audit=audit, actor=actor,
+                                             memory=memory, **kwargs)
+        data = extract_json(response.content)
+        requests = data.get("skill_requests") if isinstance(data, dict) else None
+        if not isinstance(requests, list) or not requests:
+            return response
+        for request in requests:
+            name = request.get("name", "") if isinstance(request, dict) else ""
+            arguments = request.get("arguments", {}) if isinstance(request, dict) else {}
+            scope = current_execution_scope.get() or ExecutionScope()
+            call_id = uuid.uuid4().hex
+            detail = {"task_id": scope.task_id, "route_id": scope.route_id}
+            if audit is not None:
+                audit.log("agent.tool_call", actor, {**detail, "calls": [
+                    {"id": call_id, "name": name if isinstance(name, str) and name in SKILL_NAMES | NAMES else "resource_request", "arguments": arguments}]})
+            if isinstance(name, str) and name in NAMES:
+                from dataclasses import replace
+
+                token = current_execution_scope.set(replace(scope, agent_id=actor,
+                    step_id=scope.step_id or memory.checkpoint_key, tool_call_id=call_id, tool_name=name))
+                try:
+                    result = execute(bb, name, arguments, actor=actor,
+                                     agent_type=memory.agent_type, source=detail)
+                finally:
+                    current_execution_scope.reset(token)
+                observations.append({"name": name, **result})
+            else:
+                result = (runtime.execute(name, arguments, memory.skills,
+                                          seen=set(memory.skills.get("context", {})))
+                          if runtime else {"ok": False, "error": "未装配技能工具"})
+                if result.get("content") is not None and result.get("ok"):
+                    memory.skills.setdefault("context", {})[result["ref"]] = result
+                observations.append({"name": name, **{k:v for k,v in result.items() if k != "content"}})
+            brief = {k: v for k, v in result.items() if k != "content"}
+            if audit is not None:
+                audit.log("agent.tool_result", actor, {**detail, "id": call_id, "name": name,
+                    "ok": result["ok"], "note": result.get("note", ""),
+                    "result": json.dumps(brief, ensure_ascii=False), "skill": brief})
+                if isinstance(name, str) and name in SKILL_NAMES and result.get("ok") and "content" in result:
+                    audit.log("skill.loaded" if name == "skill_open" else "skill.file_read", actor,
+                              {**detail, **brief})
+        memory.persist()
+
+
+async def _chat_decision_once(
+    gateway: ModelGateway, messages: list[dict[str, Any]], *, audit=None,
+    actor: str = "", memory: DecisionMemory | None = None, **kwargs: Any,
+) -> ChatResponse:
     """决策 JSON 通道：输出为空或被端点截断时加大输出余量重试一次。
 
     思考型模型可能把输出额度耗在思考上，正文为空或只剩半截 JSON——解析
@@ -71,7 +175,9 @@ async def chat_decision(
     if memory is not None:
         budget_for = getattr(gateway, "context_budget", None)
         budget = budget_for(**kwargs) if callable(budget_for) else None
-        messages = memory.prepare(messages, max_input_tokens=budget)
+        messages = memory.prepare(messages, max_input_tokens=budget,
+            compact_patches=bool(getattr(getattr(gateway, "config", None), "compact_decision_patches", False)),
+            stable_snapshot_prefix=bool(getattr(getattr(gateway, "config", None), "stable_snapshot_prefix", False)))
         # 追加式现场已由 DecisionMemory 管理；二次节选历史会改写缓存前缀。
         kwargs["preserve_context"] = True
         if audit is not None and memory.segment_changed:
@@ -92,6 +198,9 @@ async def chat_decision(
             pass
     if memory is not None and not output_lost(resp) and isinstance(extract_json(resp.content), dict):
         memory.commit(resp.content or "", reasoning=getattr(resp, "reasoning", "") or "")
+    from spiritscout.gateway.progress import publish_progress
+
+    publish_progress(audit, actor, resp.content or "")
     return resp
 
 
@@ -185,6 +294,7 @@ class ModelGateway:
         self.prefix_tracker = PrefixTracker()
         self.registry = registry
         self.config = config or GatewayConfig()
+        self.endpoint_capabilities = EndpointCapabilities(enabled=self.config.remember_endpoint_capabilities)
         self.audit = audit or NullAuditLogger()
         self.budget = BudgetTracker(
             self.config.budget_tokens, self.config.budget_usd,
@@ -192,6 +302,7 @@ class ModelGateway:
         )
         self._mock = mock_backend or MockBackend()
         self._rate_state: dict[str, list[float]] = {}
+        self.skill_runtime: Any = None
 
     def set_mode(self, mode: str) -> None:
         """设置当前运行模式（src/ctf/competition）：按模式分开计量用量。"""
@@ -215,6 +326,7 @@ class ModelGateway:
         on_delta: DeltaCallback | None = None,
         reasoning_effort: str = "",
         preserve_context: bool = False,
+        preserve_tool_order: bool = False,
     ) -> ChatResponse:
         """统一对话入口：路由 → 限流 → 调用（主备切换）→ 计量 → 审计。
 
@@ -232,7 +344,7 @@ class ModelGateway:
             task_type, prefer_model=model,
             required_capability=required_capability,
         )
-        chain = [entry, *self.registry.fallback_of(entry.model)]
+        chain = [entry, *self.registry.fallback_of(entry.key)]
 
         # 流式增量与主备切换的衔接：已吐出的增量在切换前用 reset 清屏
         emitted = False
@@ -259,7 +371,7 @@ class ModelGateway:
                     # 思考强度按每个候选模型各自声明的档位把关（主备档位可能不同）
                     reasoning_effort=self._resolve_effort(candidate, reasoning_effort),
                     task_type=task_type,
-                    preserve_context=preserve_context,
+                    preserve_context=preserve_context, preserve_tool_order=preserve_tool_order,
                 )
                 if idx > 0:
                     resp.fallback_used = True
@@ -289,7 +401,8 @@ class ModelGateway:
         """对话协议身份；不包含密钥，供显式接力核对模型与端点。"""
         entry = self.registry.route(task_type, prefer_model=model)
         return {"model": entry.model, "provider": entry.provider,
-                "base_url": entry.base_url, "api_format": entry.api_format}
+                "base_url": entry.base_url, "api_format": entry.api_format,
+                **({"model_key": entry.key, "provider_ref": entry.provider_ref} if entry.provider_ref else {})}
 
     def _resolve_effort(self, entry: ModelEntry, requested: str) -> str:
         """思考强度把关：只下发该模型自己声明过的取值。
@@ -326,8 +439,9 @@ class ModelGateway:
         reasoning_effort: str = "",
         task_type: str = "execution",
         preserve_context: bool = False,
+        preserve_tool_order: bool = False,
     ) -> ChatResponse:
-        backend: ChatBackend = backend_for(entry, self._mock)
+        backend: ChatBackend = backend_for(entry, self._mock, capabilities=self.endpoint_capabilities)
         messages = copy.deepcopy(messages)
         if entry.context_window and not preserve_context:
             from spiritscout.gateway.context import (
@@ -339,7 +453,9 @@ class ModelGateway:
             if budget is not None:
                 compact_history_tokens(messages, budget, tools=tools)
         if tools:
-            tools = sorted(copy.deepcopy(tools), key=lambda t: str(t.get("function", {}).get("name", t.get("name", ""))))
+            tools = copy.deepcopy(tools)
+            if not preserve_tool_order:
+                tools = sorted(tools, key=lambda t: str(t.get("function", {}).get("name", t.get("name", ""))))
             tools = json.loads(json.dumps(tools, ensure_ascii=False, sort_keys=True))
         # 输出上限落点：调用点显式给定值优先（小通道定值）；否则按模型档案
         # 声明下发；档案也没声明就 None（请求不带该字段，端点自定）
@@ -352,9 +468,9 @@ class ModelGateway:
         role = next((line[6:].strip() for m in messages if m.get("role") == "system"
                      for line in str(m.get("content") or "").splitlines() if line.startswith("ROLE: ")), "")
         prefix = self.prefix_tracker.observe(
-            (entry.provider, entry.base_url or "", entry.model, actor, scope.task_id or "", scope.route_id or "", task_type, role),
+            (entry.key, entry.provider, entry.base_url or "", entry.model, actor, scope.task_id or "", scope.route_id or "", task_type, role),
             messages, tools)
-        call = {"call_id": f"model-{uuid.uuid4().hex}", "model": entry.model,
+        call = {"call_id": f"model-{uuid.uuid4().hex}", "model": entry.model, "model_key": entry.key, "provider_ref": entry.provider_ref, "runtime_version": __version__,
                 "task_type": task_type, "task_id": scope.task_id, "route_id": scope.route_id, "cache_scope": role or task_type, **prefix}
         self.audit.log("model.started", actor, call)
         stream = None
@@ -393,6 +509,8 @@ class ModelGateway:
             stream.flush()
         latency = (time.perf_counter() - started) * 1000
         metrics = {key: raw.get(key) for key in ("cached_input_tokens", "cache_write_tokens", "first_delta_ms")}
+        metrics.update(runtime_version=__version__, **attempts.metrics())
+        metrics["patch_optimization_enabled"] = self.config.compact_decision_patches
         metrics.update(estimate_deepseek_cny(entry, wall, raw["prompt_tokens"],
                                              raw.get("cached_input_tokens"), raw["completion_tokens"]))
         metrics.update(cache_scope=role or task_type, task_id=scope.task_id, route_id=scope.route_id)
@@ -409,7 +527,7 @@ class ModelGateway:
             cost += min(read, raw["prompt_tokens"]) / 1e6 * (entry.cost_cached_input_per_mtok - entry.cost_input_per_mtok)
         if write is not None and entry.cost_cache_write_per_mtok is not None:
             cost += min(write, max(0, raw["prompt_tokens"] - (read or 0))) / 1e6 * (entry.cost_cache_write_per_mtok - entry.cost_input_per_mtok)
-        self.budget.record(entry.model, total_tokens, cost, ts=wall, **metrics)
+        self.budget.record(entry.key, total_tokens, cost, ts=wall, **metrics)
         self.audit.log(
             "model.call", actor,
             {**call, "tokens": total_tokens,
@@ -436,7 +554,7 @@ class ModelGateway:
     async def _rate_limit(self, entry: ModelEntry) -> None:
         """按模型 RPM 限流（注册表 rate_limit_rpm）。"""
         rpm = max(entry.rate_limit_rpm, 1)
-        window = self._rate_state.setdefault(entry.model, [])
+        window = self._rate_state.setdefault(entry.key, [])
         now = time.monotonic()
         while True:
             window[:] = [t for t in window if now - t < 60.0]
@@ -484,7 +602,8 @@ class AgentBoundGateway:
         """容量查询也必须遵从编队绑定，不能错用注册表第一个模型。"""
         if self._model and not kwargs.get("model"):
             kwargs["model"] = self._model
-        return self._inner.context_budget(**kwargs)
+        budget_for = getattr(self._inner, "context_budget", None)
+        return budget_for(**kwargs) if callable(budget_for) else None
 
     def context_identity(self, **kwargs: Any) -> dict[str, str]:
         if self._model and not kwargs.get("model"):

@@ -104,7 +104,7 @@ class LongSessionCacheTests(unittest.IsolatedAsyncioTestCase):
 
         master = test_competition_continuous.ContinuousCompetitionTests()._master(adapter, run, planning=True)
         master._llm_plan = AsyncMock(return_value={
-            'dag_nodes': [], 'defer_challenges': [{'id': 'c1', 'reason': '模型选择换题释放名额'}]})
+            'dag_nodes': [], 'defer_challenges': [{'id': 'c1', 'reason': '模型选择换题释放名额', 'release_instance': True}]})
         dag = TaskDAG()
         old = dag.add_node('CTF-WEB', 'c1', meta={
             'challenge': {'id': 'c1'}, 'retain_instance': True})
@@ -143,7 +143,7 @@ class LongSessionCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('close', operations)
         finished = TaskDAG.from_dict(dispatched['dag'])
         await master._apply_competition_decisions(finished, {
-            'defer_challenges': [{'id': 'c1', 'reason': '需要换题'}]})
+            'defer_challenges': [{'id': 'c1', 'reason': '需要换题', 'release_instance': True}]})
         self.assertEqual(adapter.active_instance_ids(), set())
         self.assertFalse(finished.get(node.node_id).meta.get('retain_instance'))
         self.assertEqual(operations.count('close'), 1)

@@ -634,10 +634,10 @@ class PlatformAdapter:
         return released
 
     async def release_idle(self, active_challenge_ids: set[str]) -> None:
-        """模型已收尾且没有同题在途任务的实例及时归还，不等待整批复盘。"""
+        """兼容入口：仅归还已完成且无在途任务的实例，阶段收尾不销毁现场。"""
         for cid in list(self._instances):
-            if cid not in active_challenge_ids:
-                await self.close_instance(cid, reason="本题执行已收尾，释放名额供后续题")
+            if cid not in active_challenge_ids and self.is_completed(cid):
+                await self.close_instance(cid, reason="平台已确认整题完成")
 
     def all_completed(self) -> bool:
         """平台视野内是否全部赛题完成（无完成态信号或无清单 → False）。

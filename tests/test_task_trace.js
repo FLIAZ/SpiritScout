@@ -65,5 +65,85 @@ explain("agent.delta",{task_id:"n",route_id:"r",turn:3,kind:"reset"});
 assert.equal(api.updatesOf(first).length,2,"重试的未完成进展被正确撤销");
 console.log("task commentary: persistent natural-language updates, structured progress, retries and honest final fallback passed");
 
+// 同一任务不同路线/回合必须分别展开，迟到的结果仍归原步骤。
+const phases=api.create();
+let phaseSeq=0;
+const phase=(type,detail)=>api.reduce(phases,{actor:"web",type,detail,seq:++phaseSeq});
+phase("agent.turn",{task_id:"one",route_id:"r1",route:"solve",turn:1});
+const grouped=phase("agent.tool_call",{task_id:"one",route_id:"r1",turn:1,calls:[{id:"late",name:"shell"}]});
+phase("agent.turn",{task_id:"one",route_id:"r1",turn:2});
+phase("agent.delta",{task_id:"one",route_id:"r1",turn:2,kind:"text",text:"新的独立验证"});
+phase("agent.tool_result",{task_id:"one",route_id:"r1",id:"late",ok:true,result:"上一回合的结果"});
+assert.equal(grouped.steps.size,2);
+const parts=[...grouped.steps.values()];
+assert.equal([...grouped.tools.values()][0].stepKey,parts[0].key);
+assert.equal(parts[1].texts.size,1);
+phase("agent.turn",{task_id:"one",route_id:"r2",turn:2});
+assert.equal(grouped.steps.size,3,"不同路线同回合不合并");
+
 first.summary="## 核实登录行为";
 assert.match(api.summaryOf(first),/最后一次进展/,"只重复任务标题的摘要不能覆盖已有进展正文");
+const skillTask=push('agent.tool_call',{task_id:'skills',calls:[{id:'skill-1',name:'skill_open',arguments:{skill_id:'facts'}}]});
+assert.equal(api.skillsOf(skillTask).length,0,'选中或发起调用不等于成功读到技能');
+push('agent.tool_result',{task_id:'skills',id:'skill-1',name:'skill_open',ok:true,skill:{skill_id:'facts',version:1,revision:'rev1',path:'SKILL.md'},note:'已载入技能「facts」'});
+assert.equal(api.skillsOf(skillTask)[0].id,'facts');
+push('agent.tool_result',{task_id:'skills',id:'skill-2',name:'skill_read',ok:true,skill:{skill_id:'facts',version:1,revision:'rev1',path:'references/rules.md'}});
+assert.equal(api.skillsOf(skillTask)[0].paths.length,2);
+push('agent.tool_result',{task_id:'skills',id:'skill-failed',name:'skill_open',ok:false,skill:{skill_id:'unavailable',version:1,path:'SKILL.md'}});
+assert.equal(api.skillsOf(skillTask).length,1,'失败读取不能生成技能使用展示');
+
+// 推进状态独立：开始下一阶段时，尚未返回的工具仍归原阶段，不能提前标为完成。
+const advancement=api.create();let tick=0;
+const advance=(type,detail)=>api.reduce(advancement,{actor:'web-progress',type,detail,seq:++tick,ts:String(tick)});
+advance('task.start',{task_id:'progress',title:'验证登录边界'});
+advance('agent.turn',{task_id:'progress',route_id:'r',turn:1});
+const progress=advance('agent.tool_call',{task_id:'progress',route_id:'r',turn:1,calls:[{id:'slow',name:'http_request'}]});
+advance('agent.turn',{task_id:'progress',route_id:'r',turn:2});
+let stages=[...progress.steps.values()];
+assert.equal(stages[0].status,'waiting');assert.equal(stages[1].status,'running');
+advance('agent.delta',{task_id:'progress',route_id:'r',turn:2,kind:'text',text:'已确认匿名访问会跳转。接下来核对认证响应。'});
+assert.equal(api.stepTitle(progress,stages[1]),'已确认匿名访问会跳转');
+advance('agent.tool_result',{task_id:'progress',route_id:'r',id:'slow',ok:true,result:'302'});
+assert.equal(stages[0].status,'done');assert.equal(stages[1].status,'running');
+assert.equal(progress.activeSteps.get('r'),stages[1],'迟到的上一阶段结果不回退当前阶段');
+advance('agent.tool_call',{task_id:'progress',route_id:'r',turn:2,calls:[{id:'blocked',name:'shell'}]});
+advance('agent.tool_result',{task_id:'progress',route_id:'r',id:'blocked',ok:false,error:'环境缺少依赖'});
+assert.equal(stages[1].status,'failed','阶段失败独立呈现，不能显示为已完成');
+advance('agent.turn',{task_id:'progress',route_id:'r',turn:3});
+advance('task.cancelled',{task_id:'progress'});
+assert.equal([...progress.steps.values()].at(-1).status,'cancelled');
+advance('agent.delta',{task_id:'progress',route_id:'r',turn:3,kind:'text',text:'迟到正文'});
+assert.equal([...progress.steps.values()].at(-1).status,'cancelled','迟到正文不重新激活已撤销阶段');
+
+// SRC/旧记录没有回合号时，仍按真实外层动作推进，而非把所有工具塞进一块。
+const actions=api.create();
+let actionSeq=0;
+const action=(type,detail)=>api.reduce(actions,{actor:'recon-actions',type,detail,seq:++actionSeq});
+const actionTask=action('agent.tool_call',{task_id:'src',route_id:'src-route',calls:[{id:'one',name:'http_probe'}]});
+action('agent.tool_result',{task_id:'src',route_id:'src-route',id:'one',ok:true,result:'入口已观测'});
+action('agent.tool_call',{task_id:'src',route_id:'src-route',calls:[{id:'two',name:'tcp_scan'}]});
+assert.equal(actionTask.steps.size,2);assert.equal([...actionTask.steps.values()][0].status,'done');
+assert.equal(api.stepTitle(actionTask,[...actionTask.steps.values()][1]),'tcp_scan');
+console.log('task advancement: independent stage lifecycle, late results, semantic titles, failures, cancellation and legacy actions passed');
+
+// 持久语义进展不被工具状态覆盖；并行路线、等待答复与迟到回执保持隔离。
+const live=api.create();let seqLive=0;
+const change=(type,detail)=>api.reduce(live,{actor:'live-worker',type,detail,seq:++seqLive});
+change('task.start',{task_id:'live',title:'核对登录后的权限边界'});
+change('agent.turn',{task_id:'live',route_id:'r1',turn:1});
+const liveTask=change('agent.progress',{task_id:'live',route_id:'r1',turn:1,text:'已确认匿名访问被拒绝，接下来核对普通成员权限。'});
+const stageOne=[...liveTask.steps.values()][0];
+change('agent.tool_call',{task_id:'live',route_id:'r1',turn:1,calls:[{id:'probe',name:'http_probe'}]});
+change('agent.tool_result',{task_id:'live',route_id:'r1',id:'probe',ok:true,note:'HTTP 200'});
+assert.match(api.liveSummary(liveTask),/已确认匿名访问被拒绝/);
+assert.match(api.stageSummary(liveTask,stageOne),/核对普通成员权限/);
+change('agent.turn',{task_id:'live',route_id:'r2',turn:1});
+change('agent.progress',{task_id:'live',route_id:'r2',turn:1,text:'第二条路线正在比对分享链接的访问条件。'});
+assert.match(api.stageSummary(liveTask,stageOne),/普通成员权限/);
+change('agent.ask_user',{task_id:'live',route_id:'r2',question:'请在浏览器完成登录'});
+assert.match(liveTask.waitingReason,/完成登录/);
+change('agent.ask_answered',{task_id:'live',route_id:'r2',answer:'已完成'});
+assert.equal(liveTask.waitingReason,'');
+change('agent.delta',{task_id:'live',route_id:'r2',turn:1,kind:'reasoning',text:'内部推理不可作为公开进展'});
+assert.doesNotMatch(api.liveSummary(liveTask),/内部推理/);
+console.log('live progress: durable narratives, tool isolation, parallel stages, user handoff and reasoning exclusion passed');

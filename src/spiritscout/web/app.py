@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import shutil
@@ -38,6 +39,7 @@ from pydantic import (
 
 from spiritscout import __version__
 from spiritscout.blackboard import Blackboard
+from spiritscout.config.model_identity import model_key, resolve_model
 from spiritscout.config.settings import GatewayConfig, ModelEntry, SystemConfig
 from spiritscout.core.audit import AuditLogger, tool_preview
 from spiritscout.core.exceptions import (
@@ -65,6 +67,13 @@ _LOGIN = _STATIC_DIR / "login.html"
 _MODEL_PUBLIC_FIELDS = tuple(
     k for k in ModelEntry.model_fields if k != "api_key")
 _PROVIDER_PUBLIC_FIELDS = ("name", "provider", "base_url", "api_format")
+
+
+class StorageCleanupPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirm: StrictBool = False
+    database: StrictBool = True
+    caches: StrictBool = True
 
 
 class LoginPayload(BaseModel):
@@ -126,6 +135,7 @@ class SessionCreatePayload(BaseModel):
     upload_ids: list[str] = Field(default_factory=list, max_length=20)
     platform: str | None = None
     flag_format: str | None = None
+    multiple_answers: StrictBool = False
     challenges_yaml: str | None = None
     platform_yaml: str | None = None
     rules_yaml: str | None = None
@@ -178,6 +188,7 @@ def _read_state(session: Session) -> dict[str, Any]:
     flags.json），输出 JSON 而非文本面板。
     """
     from spiritscout.tools.journal import read_recovery_view
+    from spiritscout.web.process_graph import project_blackboard
 
     run_summary: dict[str, Any] = session.summary.get("run", {})
     # 实时用量：运行中由网关逐笔持久化（usage.db，兼容旧 usage.json），终态回退运行汇总
@@ -197,7 +208,8 @@ def _read_state(session: Session) -> dict[str, Any]:
         "model_usage": live_usage or run_summary.get("model_usage"),
         "verify": session.summary.get("verify"),
         "business_context": None,
-        "topology": {"dag_nodes": [], "tasks": []},
+        "topology": {"dag_nodes": [], "tasks": [],
+                     "process": {"nodes": [], "edges": []}},
     }
     if not session.bb_path.exists():
         # 黑板未建（排队中）：终态摘要兜底（重开历史会话）
@@ -205,6 +217,7 @@ def _read_state(session: Session) -> dict[str, Any]:
         return state
     bb = Blackboard(session.bb_path, bus=None, readonly=True)
     try:
+        state["topology"]["process"] = project_blackboard(bb)
         for layer in BlackboardLayer:
             state["layers"][layer.value] = bb.count(layer)
         for rec in bb.query(BlackboardLayer.TASK_STATE, limit=100):
@@ -216,6 +229,7 @@ def _read_state(session: Session) -> dict[str, Any]:
             t = data.get("task", {})
             state["tasks"].append({
                 "task_id": t.get("task_id"), "task_type": t.get("task_type"),
+                "title": (t.get("payload") or {}).get("node_title", ""),
                 "agent_type": t.get("agent_type"), "status": t.get("status"),
                 "round_no": t.get("round_no"),
                 "challenge_id": str(((t.get("payload") or {}).get("challenge") or {}).get("id") or ""),
@@ -373,6 +387,8 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     manager = SessionManager(cfg, models, max_concurrent=max_concurrent,
                              resources=resource_store)
     resource_assistant = ResourceAssistant(cfg, resource_store)
+    from spiritscout.web.storage import StorageCleaner
+    storage = StorageCleaner(manager)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -387,12 +403,14 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             except (OSError,ValueError,sqlite3.Error):
                 pass
         yield
+        await storage.close()
         await resource_assistant.close()
         await manager.aclose()
 
     app = FastAPI(title="灵枢 SpiritScout 控制台", version=__version__,
                   lifespan=lifespan)
     app.state.manager = manager
+    app.state.storage = storage
     app.state.auth = admin_store
     app.state.auth_enabled = auth_enabled
     mount_resources(app, cfg, resource_store, resource_assistant)
@@ -528,6 +546,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                 allow_sensitive=bool(payload.get("allow_sensitive", False)),
                 rps=float(payload.get("rps", 10.0)),
                 flag_format=payload.get("flag_format") or None,
+                multiple_answers=bool(payload.get("multiple_answers", False)),
                 challenges_yaml=payload.get("challenges_yaml") or None,
                 platform_yaml=payload.get("platform_yaml") or None,
                 rules_yaml=payload.get("rules_yaml") or None,
@@ -582,15 +601,23 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
 
     # ------------------------------------------------------------ Agent 编队
 
+    def _visible_model_ref(entries: list[ModelEntry], ref: str) -> str:
+        try:
+            return model_key(resolve_model(entries, ref))
+        except SpiritScoutError:
+            return ref  # 展示历史失效引用供用户修正，调用时仍严格校验。
+
     def _agents_view() -> dict[str, Any]:
         from spiritscout.agents.roster import roster_view
         from spiritscout.config import load_model_config
-        models = [{"model": m.model, "provider": m.provider_ref,
+        entries = load_model_config(cfg.models_config_path)
+        models = [{"model": m.model, "key": m.key, "provider": m.provider_ref,
                    "capabilities": list(m.capabilities),
                    "context_window": m.context_window}
-                  for m in load_model_config(cfg.models_config_path)]
+                  for m in entries]
         return {"roster": roster_view(),
-                "assignments": agentcfg.read_assignments(cfg.agent_models_path),
+                "assignments": {key: _visible_model_ref(entries, value)
+                                for key, value in agentcfg.read_assignments(cfg.agent_models_path).items()},
                 "models": models,
                 "path": cfg.agent_models_path}
 
@@ -608,9 +635,11 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         profile = PROFILE_BY_KEY.get(agent_key)
         if profile is None or not profile.configurable:
             raise HTTPException(422, f"Agent 不支持模型指派: {agent_key}")
-        valid = {m.model for m in load_model_config(cfg.models_config_path)}
+        entries = load_model_config(cfg.models_config_path)
+        valid = {m.key for m in entries}
         try:
-            agentcfg.set_assignment(cfg.agent_models_path, agent_key, model, valid)
+            agentcfg.set_assignment(cfg.agent_models_path, agent_key,
+                                    model_key(resolve_model(entries, model)) if model else "", valid)
         except SpiritScoutError as exc:
             raise HTTPException(422, str(exc)) from exc
         return _agents_view()
@@ -668,6 +697,25 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     @app.get("/api/sessions/{session_id}/state")
     def session_state(session_id: str) -> dict[str, Any]:
         return _read_state(_require(session_id))
+
+    @app.get("/api/sessions/{session_id}/topology/rules")
+    def topology_rules(session_id: str, record_id: str = Query(..., max_length=300),
+                       offset: int = Query(0, ge=0), limit: int = Query(6000, ge=1, le=12000)) -> dict[str, Any]:
+        from spiritscout.web.process_graph import rules_text
+
+        session = _require(session_id)
+        if not session.bb_path.exists():
+            raise HTTPException(404, "规则尚未保存")
+        bb = Blackboard(session.bb_path, bus=None, readonly=True)
+        try:
+            row = bb.read_versioned(BlackboardLayer.TARGET_AUTH, record_id)
+        finally:
+            bb.close()
+        if row is None:
+            raise HTTPException(404, "规则记录不存在")
+        text = rules_text(row[0])
+        return {"text": text[offset:offset + limit], "version": row[1],
+                "next_offset": offset + limit if offset + limit < len(text) else None}
 
     @app.get("/api/sessions/{session_id}/deliverables")
     def session_deliverables(session_id: str, kind: str = "all",
@@ -1005,6 +1053,10 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         布置新方向即派工，与网页版大模型对话同一形态。
         """
         session = _require(session_id)
+        try:
+            manager.ensure_storage_idle(session_id)
+        except SpiritScoutError as exc:
+            raise HTTPException(409, str(exc)) from exc
         content = str(payload.get("content") or "").strip()
         if not content:
             raise HTTPException(422, "意见内容为空")
@@ -1063,6 +1115,36 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             "name": dest.name, "size": len(body), "path": str(dest)})
         return {"name": dest.name, "size": len(body), "path": str(dest)}
 
+    @app.get("/api/storage/sessions")
+    async def storage_sessions() -> dict[str, Any]:
+        rows = [{"session_id": s.session_id, "title": s.display_title(),
+                 "status": s.status, "blocked_reason": storage.blocked_reason(s)}
+                for s in manager.list()]
+        return await asyncio.to_thread(storage.overview, rows)
+
+    @app.get("/api/sessions/{session_id}/storage")
+    async def storage_preview(session_id: str) -> dict[str, Any]:
+        _require(session_id)
+        try:
+            return await asyncio.to_thread(storage.preview, session_id)
+        except (SpiritScoutError, OSError, sqlite3.Error) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/sessions/{session_id}/storage/cleanup")
+    async def storage_cleanup(session_id: str, payload: StorageCleanupPayload) -> dict[str, Any]:
+        _require(session_id)
+        if not payload.confirm:
+            raise HTTPException(422, "请先查看清理范围，再确认执行")
+        try:
+            return storage.start(session_id, database=payload.database, caches=payload.caches)
+        except SpiritScoutError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/sessions/{session_id}/storage/job")
+    async def storage_job(session_id: str) -> dict[str, Any]:
+        _require(session_id)
+        return dict(storage.jobs.get(session_id, {"status": "idle", "session_id": session_id}))
+
     @app.delete("/api/sessions/{session_id}")
     async def delete_session(session_id: str,
                              confirm: bool = Query(False)) -> dict[str, Any]:
@@ -1079,6 +1161,10 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         session = _require(session_id)
         report = session.report_path()
         if report is None:
+            from spiritscout.ctf.report_jobs import status
+            job = status(session.workspace)
+            if job:
+                return {"status": job.get("status"), "markdown": "", "error": job.get("error", "")}
             raise HTTPException(404, "报告尚未生成（任务完成后可用）")
         return {"path": str(report),
                 "markdown": report.read_text(encoding="utf-8")}
@@ -1127,7 +1213,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     def _models_view(entries: list[dict[str, Any]]) -> dict[str, Any]:
         # 读 API 只回规范公开字段：密钥字段与历史污染字段不再扩散
         return {"path": cfg.models_config_path,
-                "models": [{k: e.get(k) for k in _MODEL_PUBLIC_FIELDS}
+                "models": [{**{k: e.get(k) for k in _MODEL_PUBLIC_FIELDS}, "key": model_key(e)}
                            for e in entries]}
 
     @app.get("/api/providers")
@@ -1186,7 +1272,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             payload = modelcfg.canonical_provider({**payload, "name": payload.get("name", name)})
             new_name = payload["name"]
             modelcfg.upsert_provider(cfg.models_config_path, payload,
-                                     original_name=name)
+                                     original_name=name, assignments_path=cfg.agent_models_path)
         except SpiritScoutError as exc:
             raise _model_error(exc) from exc
         if new_name != name:
@@ -1240,7 +1326,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         ids = [str(x) for x in (payload.get("models") or []) if str(x).strip()]
         try:
             entries, added = modelcfg.add_entries(
-                cfg.models_config_path, provider_ref, ids)
+                cfg.models_config_path, provider_ref, ids, assignments_path=cfg.agent_models_path)
         except SpiritScoutError as exc:
             raise _model_error(exc) from exc
         return {**_models_view(entries), "added": added}
@@ -1256,6 +1342,9 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         """会话命名候选链（「模型」页维护的降级顺序；空 = 跟随灵枢指派）。"""
         try:
             chain = agentcfg.read_naming_chain(cfg.agent_models_path)
+            from spiritscout.config import load_model_config
+            entries = load_model_config(cfg.models_config_path)
+            chain = [_visible_model_ref(entries, ref) for ref in chain]
         except (SpiritScoutError, OSError) as exc:
             raise HTTPException(422, str(exc)) from exc
         return {"chain": chain, "path": cfg.agent_models_path}
@@ -1267,10 +1356,11 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         raw = payload.get("models")
         if not isinstance(raw, list):
             raise HTTPException(422, "models 必须是模型 ID 数组")
-        valid = {m.model for m in load_model_config(cfg.models_config_path)}
+        entries = load_model_config(cfg.models_config_path)
+        valid = {m.key for m in entries}
         try:
             chain = agentcfg.set_naming_chain(
-                cfg.agent_models_path, [str(x) for x in raw], valid)
+                cfg.agent_models_path, [model_key(resolve_model(entries, str(x))) for x in raw], valid)
         except SpiritScoutError as exc:
             raise HTTPException(422, str(exc)) from exc
         return {"chain": chain, "path": cfg.agent_models_path}
@@ -1280,7 +1370,8 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         """手动添加单个模型（自动拉取失败或列表里没有时的入口）。"""
         payload = dict(payload)
         try:
-            entries = modelcfg.upsert_entry(cfg.models_config_path, payload)
+            entries = modelcfg.upsert_entry(cfg.models_config_path, payload,
+                                            assignments_path=cfg.agent_models_path)
         except SpiritScoutError as exc:
             raise _model_error(exc) from exc
         return _models_view(entries)
@@ -1313,9 +1404,10 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
 
         model = str(payload.get("model") or "")
         entries = vault.apply_keys(load_model_config(cfg.models_config_path))
-        entry = next((e for e in entries if e.model == model), None)
-        if entry is None:
-            raise HTTPException(404, f"模型不存在: {model}")
+        try:
+            entry = resolve_model(entries, model)
+        except SpiritScoutError as exc:
+            raise HTTPException(422, str(exc)) from exc
         if not entry.api_key:
             return {"ok": False,
                     "error": "密钥未配置——在该模型所属供应商里填入密钥"

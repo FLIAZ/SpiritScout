@@ -17,12 +17,13 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.types import Implementation
 
+from spiritscout import __version__
 from spiritscout.config.settings import McpServerConfig
 from spiritscout.tools.spec import RiskLevel
 
 _HANDSHAKE_TIMEOUT = 60.0        # 握手：子进程冷启动 + initialize + tools/list
 _SESSION_READ_TIMEOUT = 3600.0   # 会话级默认读超时（单次调用超时另行覆盖）
-_CLIENT_INFO = Implementation(name="spiritscout", version="0.1.0")
+_CLIENT_INFO = Implementation(name="spiritscout", version=__version__)
 
 
 def resolve_mcp_risk(server: McpServerConfig, tool: dict[str, Any]) -> RiskLevel:
@@ -218,6 +219,29 @@ class McpStdioClient(McpClient):
         return stdio_client(self._params)
 
 
+class ChromeMcpClient(McpStdioClient):
+    """只拉取目录；首次实际调用才准备共享 Chrome，避免无网页交互的任务启动浏览器。"""
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self._browser_lock = asyncio.Lock()
+        self._browser_ready = False
+
+    async def call(self, tool: str, arguments: dict[str, Any] | None = None,
+                   *, timeout: float | None = None) -> dict[str, Any]:
+        env = dict(self._params.env or {})
+        if env.get("SPIRITSCOUT_CHROME_MODE", "cdp") == "cdp" and not self._browser_ready:
+            async with self._browser_lock:
+                if not self._browser_ready:
+                    from spiritscout.tools.browser_desktop import ensure_browser
+                    from spiritscout.tools.chrome_mcp import cdp_endpoint
+
+                    await asyncio.to_thread(ensure_browser,
+                        cdp_endpoint(env.get("SPIRITSCOUT_CHROME_CDP_URL", "")), env)
+                    self._browser_ready = True
+        return await super().call(tool, arguments, timeout=timeout)
+
+
 class McpHttpClient(McpClient):
     """Streamable HTTP 传输：POST 到单一端点，应答 JSON 或 SSE 流。"""
 
@@ -272,10 +296,15 @@ def build_client(spec: Any) -> McpClient:
         # launch.sh 直接调用 venv 解释器、不激活 PATH；本项目模块沿用当前解释器。
         command = sys.executable
     if list(spec.args[:2]) == ["-m", "spiritscout.tools.chrome_mcp"]:
-        # SDK 的子进程环境默认仅继承基础键；只显式转交该适配器的连接配置。
+        # SDK 只继承基础环境；显式转交连接配置与当前桌面的显示连接。
         env = {**{key: os.environ[key] for key in (
             "SPIRITSCOUT_CHROME_CDP_URL", "SPIRITSCOUT_CHROME_MCP_CLI",
-            "SPIRITSCOUT_CHROME_EXECUTABLE") if key in os.environ}, **env}
+            "SPIRITSCOUT_CHROME_EXECUTABLE", "SPIRITSCOUT_CHROME_PROFILE_DIR",
+            "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "XAUTHORITY",
+            "DBUS_SESSION_BUS_ADDRESS") if key in os.environ}, **env}
+        env["SPIRITSCOUT_CHROME_DEFER_START"] = "1"
+        return ChromeMcpClient(spec.name, command=command, args=list(spec.args),
+                               env=env, timeout=timeout)
     return McpStdioClient(spec.name, command=command,
                           args=list(spec.args or []),
                           env=env, timeout=timeout)

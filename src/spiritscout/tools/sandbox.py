@@ -13,6 +13,7 @@ import re
 import shutil
 import signal
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -126,10 +127,10 @@ def _build_argv(workspace: Path, rundir: Path, inner: list[str], *,
     # 整个控制目录不可见，只开放约定的产物目录；同样覆盖位于 /tmp
     # 或主目录之外的工作区，不能仅靠遮蔽 execution.key 保护数据库。
     argv += ["--tmpfs", str(workspace), "--bind", str(rundir), str(rundir)]
-    for name in ("attachments", "artifacts"):
+    for name in ("attachments", "artifacts", "http-responses"):
         directory = workspace / name
         if directory.is_dir():
-            argv += ["--ro-bind" if name == "attachments" else "--bind",
+            argv += ["--bind" if name == "artifacts" else "--ro-bind",
                      str(directory), str(directory)]
     # 空控制目录本身也只读，不能伪造同名控制文件；不递归改变产物挂载。
     argv += ["--remount-ro", str(workspace)]
@@ -278,8 +279,12 @@ async def sandbox_exec(
     # 完整输出逐块落盘（工作目录内，跨调用可查）——上下文只进头尾摘要，
     # 过程不因截断而丢失；需要细节时模型用沙箱按需读取该文件
     log_name = Path(str(log_name)).name[:160] or "last_output"
-    log_path = rundir / f"{log_name}.log"
+    log_path = None
     try:
+        # 同题分支和同回合多工具可能同名并发，返回的证据路径必须永久对应本次调用。
+        fd, filename = tempfile.mkstemp(prefix=f"{log_name}-", suffix=".log", dir=rundir)
+        os.close(fd)
+        log_path = Path(filename)
         # 日志代际轮转：单文件超限就把上一代挪到 .old——完整过程保留最近
         # 两代，磁盘占用有界；模型读取的 output_file 始终指向当前代
         log_fh = _RotatingLog(log_path)

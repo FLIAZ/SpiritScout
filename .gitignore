@@ -38,6 +38,7 @@ configs/models.yaml
 
 # 本地修复分析与实施记录，以及一次性审计的复现脚本与证据（过程材料，不提交）
 /audits/
+/COMPETITION_STRATEGY_OPTIMIZATION_2026-10-22.md
 /BROWSER_CLICK_FIX_2026-10-16.md
 /BUG_AUDIT_2026-10-15.md
 /BUG_RECHECK_2026-10-15.md
@@ -54,3 +55,7 @@ configs/models.yaml
 /home.html
 /login_sms.yml
 /login_snapshot.yml
+
+# 维护者本机的独立 Docker 验证项目；协作者无需下载，不随仓库分发
+/ctfy-docker/
+/tsecbench-docker/

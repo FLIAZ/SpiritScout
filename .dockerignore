@@ -28,3 +28,7 @@ configs/agent_models.yaml
 .idea/
 .vscode/
 *.log
+
+# 本机专用验证项目，不进入 SpiritScout 构建上下文
+ctfy-docker/
+tsecbench-docker/

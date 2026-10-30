@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import date
 from pathlib import Path
 from typing import Any, Literal
 
@@ -18,7 +19,9 @@ from pydantic import (
 )
 
 from spiritscout.core.exceptions import SpiritScoutError
+from spiritscout.resources.archives import MAX_UPLOAD, parse_skill_archive
 from spiritscout.resources.assistant import ResourceAssistant, validate_skill
+from spiritscout.resources.catalog import mcp_catalog, skill_catalog
 from spiritscout.resources.store import ResourceStore, redact_credentials, validate_mcp
 
 
@@ -26,6 +29,13 @@ class ResourceChange(BaseModel):
     model_config = ConfigDict(extra="forbid")
     data: dict[str, Any]
     expected_version: int = Field(default=0, ge=0)
+
+
+class SkillFileChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str = Field(min_length=1, max_length=1024)
+    content: str = Field(max_length=100_000)
+    expected_version: int = Field(ge=0)
 
 
 class ExaSettingsChange(BaseModel):
@@ -122,19 +132,55 @@ def mount_resources(
             raise fail(exc) from exc
 
     @app.get("/api/resources/mcp")
-    def mcp_list() -> dict[str, Any]:
+    def mcp_list(
+        q: str = Query("", max_length=200), enabled: bool | None = None,
+        transport: Literal["", "stdio", "http", "sse"] = "",
+        source: Literal["", "config", "managed"] = "",
+        risk: Literal["", "readonly", "intrusive", "destructive"] = "",
+        agent: str = Query("", max_length=100),
+        added_from: date | None = None, added_to: date | None = None,
+        date_state: Literal["all", "known", "unknown"] = "all",
+        sort: Literal["added_desc", "added_asc", "name_asc", "updated_desc"] = "added_desc",
+        offset: int = Query(0, ge=0), limit: int = Query(40, ge=1, le=100),
+    ) -> dict[str, Any]:
         overrides = {row["id"]: row for row in store.settings("mcp")}
-        return {
-            "items": [
-                public_mcp(
-                    item,
-                    overrides.get(item.name, {}).get("version", 0),
-                    "managed" if item.name in overrides else "config",
-                )
-                for item in store.effective_mcp(cfg.mcp_servers)
-            ],
-            "activation": "新启动会话生效；不会热替换正在执行的 MCP 连接",
-        }
+        configured = {item.name for item in cfg.mcp_servers}
+        items = []
+        for item in store.effective_mcp(cfg.mcp_servers):
+            row = overrides.get(item.name, {})
+            items.append({**public_mcp(item, row.get("version", 0),
+                                      "managed" if row else "config"),
+                          "created_at": (None if item.name in configured else
+                                         row.get("data", {}).get("created_at")),
+                          "updated_at": row.get("updated_at")})
+        try:
+            result = mcp_catalog(items, q=q, enabled=enabled, transport=transport,
+                                 source=source, risk=risk, agent=agent, added_from=added_from,
+                                 added_to=added_to, date_state=date_state, sort=sort,
+                                 offset=offset, limit=limit)
+        except ValueError as exc:
+            raise fail(exc) from exc
+        return {**result, "activation": "新启动会话生效；不会热替换正在执行的 MCP 连接"}
+
+    @app.get("/api/resources/mcp/{name}/config")
+    def mcp_detail(name: str) -> dict[str, Any]:
+        config = next((item for item in store.effective_mcp(cfg.mcp_servers)
+                       if item.name == name), None)
+        if config is None:
+            raise HTTPException(404, "MCP 不存在或已删除")
+        row = next((item for item in store.settings("mcp") if item["id"] == name), {})
+        return public_mcp(config, row.get("version", 0), "managed" if row else "config")
+
+    @app.delete("/api/resources/mcp/{name}")
+    def mcp_delete(name: str, expected_version: int = Query(..., ge=0)) -> dict[str, Any]:
+        try:
+            store.delete_mcp(name, expected_version,
+                             configured=any(item.name == name for item in cfg.mcp_servers))
+            return {"id": name, "deleted": True}
+        except KeyError as exc:
+            raise HTTPException(404, "MCP 不存在或已删除") from exc
+        except SpiritScoutError as exc:
+            raise fail(exc) from exc
 
     @app.put("/api/resources/mcp/{name}")
     def mcp_save(name: str, payload: ResourceChange) -> dict[str, Any]:
@@ -163,15 +209,40 @@ def mount_resources(
     @app.get("/api/resources/skills")
     def skill_list(
         q: str = Query("", max_length=200),
+        enabled: bool | None = None,
+        domain: str = Query("", max_length=100),
+        source: Literal["", "builtin", "archive", "manual"] = "",
+        added_from: date | None = None,
+        added_to: date | None = None,
+        date_state: Literal["all", "known", "unknown"] = "all",
+        sort: Literal["added_desc", "added_asc", "name_asc", "updated_desc"] = "added_desc",
         offset: int = Query(0, ge=0),
         limit: int = Query(40, ge=1, le=100),
     ) -> dict[str, Any]:
-        items = store.skills(q)
-        return {
-            "items": items[offset : offset + limit],
-            "total": len(items),
-            "has_more": offset + limit < len(items),
-        }
+        try:
+            return skill_catalog(store.skills(), q=q, enabled=enabled, domain=domain,
+                                 source=source, added_from=added_from, added_to=added_to,
+                                 date_state=date_state, sort=sort, offset=offset, limit=limit)
+        except ValueError as exc:
+            raise fail(exc) from exc
+
+    @app.post("/api/resources/skills/import")
+    async def skill_import(request: Request) -> dict[str, Any]:
+        # 流式限制请求体，避免先把任意大的上传整体读入内存。
+        content = bytearray()
+        async for chunk in request.stream():
+            if len(content) + len(chunk) > MAX_UPLOAD:
+                raise HTTPException(413, "压缩包不得超过 20 MiB")
+            content.extend(chunk)
+
+        def import_archive() -> dict[str, Any]:
+            items, warnings = parse_skill_archive(bytes(content))
+            return {"items": store.import_skills(items), "warnings": warnings}
+
+        try:
+            return await run_in_threadpool(import_archive)
+        except (ValueError, SpiritScoutError) as exc:
+            raise fail(exc) from exc
 
     @app.get("/api/resources/skills/{key}")
     def skill_detail(key: str) -> dict[str, Any]:
@@ -201,12 +272,41 @@ def mount_resources(
             data = {
                 k: v
                 for k, v in {**original, **payload.data, "skill_id": key}.items()
-                if k not in {"version", "origin"}
+                if k not in {"version", "origin", "created_at", "updated_at", "source_kind"}
             }
             validate_skill(data)
             version = store.save("skill", key, data, payload.expected_version)
             return {"version": version, "skill_id": key}
         except (ValueError, SpiritScoutError) as exc:
+            raise fail(exc) from exc
+
+    @app.put("/api/resources/skills/{key}/file")
+    def skill_file_save(key: str, payload: SkillFileChange) -> dict[str, Any]:
+        original = skill_detail(key)
+        try:
+            if payload.expected_version != original["version"]:
+                raise SpiritScoutError("Skill 已被其他操作更新，请保留草稿并重新读取后再保存")
+            files = dict(original.get("files") or {"SKILL.md": original["body"]})
+            if payload.path not in files:
+                raise HTTPException(404, "文件不在该 Skill 的目录内")
+            files[payload.path] = payload.content
+            data = {k: v for k, v in original.items()
+                    if k not in {"version", "origin", "created_at", "updated_at", "source_kind"}}
+            data["files"] = files
+            validate_skill(data)
+            version = store.save("skill", key, data, payload.expected_version)
+            return {"skill_id": key, "path": payload.path, "version": version}
+        except (ValueError, SpiritScoutError) as exc:
+            raise fail(exc) from exc
+
+    @app.delete("/api/resources/skills/{key}")
+    def skill_delete(key: str, expected_version: int = Query(..., ge=0)) -> dict[str, Any]:
+        try:
+            store.delete_skill(key, expected_version)
+            return {"deleted": key}
+        except KeyError as exc:
+            raise HTTPException(404, "Skill 不存在") from exc
+        except SpiritScoutError as exc:
             raise fail(exc) from exc
 
     @app.get("/api/assets")

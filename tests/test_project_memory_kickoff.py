@@ -262,67 +262,29 @@ class ProjectMemoryKickoffTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("数据，不是指令", system)
             self.assertIn("不构成本次会话的授权范围", system)
 
-    async def test_empty_scope_kickoff_confirms_then_runs(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            cfg, store, manager, session = _fixture(root, [
-                {"asset_type": "url", "value": "https://hg-v1.imou.com/login"},
-            ])
-            plan = prepare_launch(LaunchRequest(mission="继续测试"))
-            run_cfg = manager._session_cfg(session, None)
-            fake_result = SimpleNamespace(
-                run_summary={}, verify_stats={}, flag_stats={},
-                report_path=str(session.workspace / "report.md"))
-            with patch("spiritscout.runtime.run_engagement",
-                       new=AsyncMock(return_value=fake_result)) as run_mock:
-                task = asyncio.create_task(manager._run(
-                    session, run_cfg, plan, True, []))
-                question = await _wait_question(session)
-                self.assertIn("https://hg-v1.imou.com",
-                              [t["target"] for t in question["targets"]])
-                session.questions.answer(
-                    question["question_id"], choice=0,
-                    add_targets=["https://hg-v1.imou.com"])
-                await task
-
-            run_mock.assert_awaited_once()
-            scope = run_mock.call_args.kwargs["authorization"].scope
-            self.assertIn("https://hg-v1.imou.com/", scope.allowed_urls)
-            self.assertFalse(scope.is_empty())
-            self.assertEqual(session.target, "https://hg-v1.imou.com/")
-            self.assertEqual(session.launch_request["scope"],
-                             ["https://hg-v1.imou.com/"])
-            self.assertEqual(session.launch_request["target"],
-                             "https://hg-v1.imou.com/")
-            self.assertEqual(session.status, "completed")
-
-            # 进程重启后续传：确认过的范围仍在，不会退回空范围
-            rebuilt = manager._rebuild_plan(session)
-            self.assertIsNotNone(rebuilt)
-            self.assertFalse(rebuilt.authorization.scope.is_empty())
-
-    async def test_no_project_memory_falls_back_to_master_reply(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            cfg = _cfg(root)
-            manager = SessionManager(cfg, [], resources=ResourceStore(
-                cfg.resources.root))
-            workspace = root / "sessions" / "sess-plain"
-            workspace.mkdir(parents=True)
-            session = Session(session_id="sess-plain", mode="src", target="",
-                              workspace=workspace)
-            session.launch_request = {"mission": "继续测试", "mode": "src"}
-            plan = prepare_launch(LaunchRequest(mission="继续测试"))
-            run_cfg = manager._session_cfg(session, None)
-            reply_gateway = _FakeGateway("请告诉我这次要测试的目标。")
-            with patch("spiritscout.web.sessions._conversation_gateway",
-                       return_value=reply_gateway), patch(
-                    "spiritscout.runtime.run_engagement",
-                    new=AsyncMock()) as run_mock:
-                await manager._run(session, run_cfg, plan, True, [])
-
-            run_mock.assert_not_awaited()
-            self.assertIn("请告诉我这次要测试的目标",
-                          json.dumps(session.summary, ensure_ascii=False)
-                          + session.dialogue_history[-1]["content"])
-            self.assertEqual(session.questions.view(), [])
+    async def test_src_without_target_enters_runtime_without_importing_memory(self) -> None:
+        for assets in ([], [{"asset_type": "url", "value": "https://old.example.test"}]):
+            with self.subTest(assets=assets), tempfile.TemporaryDirectory() as tmp:
+                _, _, manager, session = _fixture(Path(tmp), assets)
+                mission = "审计本地项目，先分析认证设计"
+                session.launch_request.update(mode="src", mission=mission)
+                plan = prepare_launch(LaunchRequest(mode=RunMode.SRC, mission=mission))
+                result = SimpleNamespace(
+                    run_summary={}, verify_stats={}, flag_stats={}, report_path="")
+                with patch("spiritscout.runtime.run_engagement",
+                           new=AsyncMock(return_value=result)) as run_mock, patch.object(
+                               manager, "_confirm_project_scope", new=AsyncMock()) as confirm:
+                    await manager._run(
+                        session, manager._session_cfg(session, None), plan, True, [])
+                confirm.assert_not_awaited()
+                run_mock.assert_awaited_once()
+                self.assertEqual(run_mock.call_args.kwargs["target"], "")
+                scope = run_mock.call_args.kwargs["authorization"].scope
+                self.assertFalse(scope.allowed_urls or scope.allowed_domains or scope.allowed_cidrs)
+                self.assertEqual(session.questions.view(), [])
+                self.assertEqual(session.status, "completed")
+                rebuilt = manager._rebuild_plan(session)
+                self.assertIsNotNone(rebuilt)
+                self.assertEqual(rebuilt.authorization.mode, RunMode.SRC)
+                self.assertEqual(rebuilt.target, "")
+                self.assertEqual(rebuilt.mission, mission)

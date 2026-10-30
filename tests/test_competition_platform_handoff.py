@@ -13,7 +13,7 @@ import httpx
 from spiritscout.agents.master.agent import MasterAgent
 from spiritscout.agents.sub.base import RoutePlan
 from spiritscout.blackboard import Blackboard
-from spiritscout.core.models import AgentType, Task
+from spiritscout.core.models import AgentType, BlackboardLayer, Task
 from spiritscout.ctf.platform import PlatformAdapter, parse_platform_profile
 from spiritscout.tools.spec import ToolResult
 from tests import test_project_injection
@@ -93,7 +93,10 @@ class PlatformHandoffTests(unittest.IsolatedAsyncioTestCase):
             plan = RoutePlan(name='solve', strategy='')
             agent._seed_messages(task, plan, plan, state)
             content = state['messages'][1]['content']
-            self.assertIn(rules, content)
+            self.assertNotIn(rules, content)
+            self.assertIn("blackboard_ref", content)
+            self.assertTrue(any(row["data"].get("content") == rules
+                                for row in bb.query(BlackboardLayer.TARGET_AUTH)))
             self.assertIn(json.dumps(handoff, ensure_ascii=False), content)
             self.assertIn('全队分工执行', content)
             self.assertIn('submit_flag', content)

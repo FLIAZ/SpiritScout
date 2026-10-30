@@ -18,6 +18,7 @@ from spiritscout.ctf.agents import (
 )
 from spiritscout.ctf.flags import FlagManager, SubmitResult
 from spiritscout.runtime import _write_competition_summary
+from spiritscout.tools.spec import ToolResult
 
 
 class HTTPAddressResolutionTests(unittest.TestCase):
@@ -276,7 +277,7 @@ class SolverContextTests(unittest.TestCase):
 
 
 class RecordReplayTests(unittest.IsolatedAsyncioTestCase):
-    """已读取过的地址回放记录；refresh / POST / 分段请求不受影响。"""
+    """旧路线记录不绕过带身份、实例与完整参数的统一去重入口。"""
 
     @staticmethod
     def _agent() -> CTFBaseAgent:
@@ -289,9 +290,9 @@ class RecordReplayTests(unittest.IsolatedAsyncioTestCase):
         agent.ctx = SimpleNamespace(
             audit=Mock(), ring=None, builtin_ctx={},
             blackboard=SimpleNamespace(write=Mock(), read=Mock(return_value=None)),
-            tools=SimpleNamespace(call=AsyncMock(return_value=SimpleNamespace(
-                ok=True, parsed={"status_code": 200, "headers": {}},
-                stdout="<html><title>fresh</title></html>", error=None))))
+            tools=SimpleNamespace(call=AsyncMock(return_value=ToolResult(
+                tool="http_probe", ok=True, parsed={"status_code": 200, "headers": {}},
+                stdout="<html><title>fresh</title></html>", invocation_id="inv-fixture"))))
         return agent
 
     @staticmethod
@@ -300,7 +301,7 @@ class RecordReplayTests(unittest.IsolatedAsyncioTestCase):
                     agent_type=AgentType.CTF_WEB,
                     payload={"challenge": {"url": "http://t"}})
 
-    async def test_already_read_get_is_served_from_record(self) -> None:
+    async def test_legacy_record_does_not_bypass_context_aware_registry(self) -> None:
         agent = self._agent()
         state = {"observations": [], "fetches": {}, "flags": [], "turn": 7}
         state["fetches"][attempt_key("GET", "http://t/static/x.js", None)] = {
@@ -312,9 +313,19 @@ class RecordReplayTests(unittest.IsolatedAsyncioTestCase):
             {"path": "/static/x.js"})
 
         self.assertTrue(out.ok)
-        self.assertIn("记录回放", out.text)
-        self.assertIn("第 3 回合", out.text)
-        agent.ctx.tools.call.assert_not_awaited()
+        self.assertIn("fresh", out.text)
+        agent.ctx.tools.call.assert_awaited_once()
+
+    async def test_shared_result_is_disclosed_without_new_finding_or_reward(self) -> None:
+        agent = self._agent()
+        agent.ctx.tools.call.return_value = ToolResult(tool="http_probe", ok=True, stdout="cached form",
+            parsed={"status_code": 200}, invocation_id="inv-reader", source_invocation_id="inv-owner", reuse="cache")
+        out = await agent._tool_http(self._task(), SimpleNamespace(name="solve"),
+            {"observations": [], "fetches": {}, "turn": 2}, {"path": "/login"})
+        self.assertEqual(out.value, 0)
+        self.assertIn("本次未发送请求", out.text)
+        self.assertEqual(out.metadata["source_invocation_id"], "inv-owner")
+        agent.ctx.blackboard.write.assert_not_called()
 
     async def test_refresh_requests_again_and_updates_record(self) -> None:
         agent = self._agent()
@@ -330,7 +341,8 @@ class RecordReplayTests(unittest.IsolatedAsyncioTestCase):
         agent.ctx.tools.call.assert_awaited_once()
         self.assertTrue(out.ok)
         self.assertIn("fresh", out.text)
-        self.assertEqual(state["fetches"][key]["round"], 7)
+        self.assertTrue(agent.ctx.tools.call.call_args.kwargs["_fresh"])
+        self.assertTrue(any(record["round"] == 7 for record in state["fetches"].values()))
 
     async def test_post_and_ranged_requests_are_never_replayed(self) -> None:
         agent = self._agent()
@@ -477,11 +489,7 @@ class SpawnIdentityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CrossReplayDisclosureTests(unittest.IsolatedAsyncioTestCase):
-    """跨分支回放必须自我披露并留 refresh 逃生口；带参数 GET 不回放。
-
-    回放若无标记，模型会把旧录像当成新鲜响应（登录后再访问仍见登录前
-    快照 → 误判未登录 → 死循环）；缓存键不含参数，带参回放会答非所问。
-    """
+    """旧跨分支快照不再自动回放，统一工具层负责精确复用。"""
 
     @staticmethod
     def _agent(shared: str | None) -> CTFBaseAgent:
@@ -500,9 +508,9 @@ class CrossReplayDisclosureTests(unittest.IsolatedAsyncioTestCase):
         agent.ctx = SimpleNamespace(
             audit=Mock(), ring=None, builtin_ctx={},
             blackboard=SimpleNamespace(write=Mock(), read=Mock(return_value=None)),
-            tools=SimpleNamespace(call=AsyncMock(return_value=SimpleNamespace(
-                ok=True, parsed={"status_code": 200, "headers": {}},
-                stdout="<html><title>fresh</title></html>", error=None))))
+            tools=SimpleNamespace(call=AsyncMock(return_value=ToolResult(
+                tool="http_probe", ok=True, parsed={"status_code": 200, "headers": {}},
+                stdout="<html><title>fresh</title></html>", invocation_id="inv-fixture"))))
         return agent
 
     @staticmethod
@@ -511,16 +519,15 @@ class CrossReplayDisclosureTests(unittest.IsolatedAsyncioTestCase):
                     agent_type=AgentType.CTF_WEB,
                     payload={"challenge": {"url": "http://t"}})
 
-    async def test_cross_branch_replay_discloses_itself(self) -> None:
+    async def test_legacy_cross_branch_cache_cannot_override_registry(self) -> None:
         agent = self._agent("GET /kb → 200\n正文: 登录页快照")
         out = await agent._tool_http(
             self._task(), SimpleNamespace(name="solve"),
             {"observations": [], "fetches": {}, "flags": [], "turn": 2},
             {"path": "/kb"})
         self.assertTrue(out.ok)
-        self.assertIn("记录回放", out.text)
-        self.assertIn("refresh", out.text)
-        agent.ctx.tools.call.assert_not_awaited()
+        self.assertIn("fresh", out.text)
+        agent.ctx.tools.call.assert_awaited_once()
 
     async def test_parameterized_get_is_never_cross_replayed(self) -> None:
         agent = self._agent("GET /kb → 200\n正文: 旧答案")
@@ -567,7 +574,7 @@ class CrossReplayDisclosureTests(unittest.IsolatedAsyncioTestCase):
         agent.ctx.tools.call.assert_awaited_once()
         self.assertIn("fresh", out.text)
         put_keys = [c.args[1] for c in agent.cache.put.call_args_list]
-        self.assertIn("fetch|GET|http://t/kb", put_keys)
+        self.assertFalse([key for key in put_keys if key.startswith("fetch|")])
 
 
 class EmptyReplyRepairTests(unittest.IsolatedAsyncioTestCase):

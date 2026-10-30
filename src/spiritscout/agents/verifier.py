@@ -7,10 +7,12 @@ import contextlib
 import hashlib
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 from urllib.parse import urlsplit
 
 from spiritscout.agents.sub.base import SubAgentContext
+from spiritscout.blackboard.exchange import GUIDANCE, SCHEMAS, execute, project_rules
 from spiritscout.core.exceptions import ToolExecutionError, VersionConflict
 from spiritscout.core.models import (
     AgentType,
@@ -22,6 +24,14 @@ from spiritscout.core.models import (
 from spiritscout.gateway import world_state
 from spiritscout.gateway.backends import extract_json
 from spiritscout.gateway.context import compact_history
+from spiritscout.resources.runtime import (
+    SKILL_GUIDANCE,
+    SKILL_NAMES,
+    SKILL_SCHEMAS,
+    append_catalog,
+    native_skill_result,
+    runtime_for,
+)
 from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
 from spiritscout.tools.search_policy import search_allowed
 from spiritscout.tools.web_search import SEARCH_GUIDANCE, SEARCH_SCHEMA
@@ -54,6 +64,8 @@ class VerifierAgent:
         self.agent_id = "verifier"
 
     def schemas(self) -> list[dict[str, Any]]:
+        from spiritscout.tools.http_responses import SCHEMA as RESPONSE_SCHEMA
+
         schemas = [{"type": "function", "function": {"name": "http_probe",
             "description": "独立 HTTP 复测；非只读方法必须如实声明 action 并审批。",
             "parameters": {"type": "object", "properties": {
@@ -66,6 +78,7 @@ class VerifierAgent:
                     "multiple": {"type": "boolean",
                         "description": "仅当选项彼此不互斥、用户可能同时选多项时设 true；允许/拒绝等互斥决策省略"},
                     "targets": {"type": "array", "items": {"type": "string"}}}, "required": ["question"]}}}]
+        schemas.append(RESPONSE_SCHEMA)
         if search_allowed(self.ctx):
             schemas.append(SEARCH_SCHEMA)
         proof = {"type": "array", "items": {"type": "object", "properties": {
@@ -84,7 +97,9 @@ class VerifierAgent:
             schemas.append({"type": "function", "function": {"name": name,
                 "description": schema.get("description", "独立 MCP 复测"),
                 "parameters": schema.get("inputSchema", {"type": "object"})}})
-        return schemas
+        if runtime_for(self.ctx) is not None:
+            schemas.extend(SKILL_SCHEMAS)
+        return schemas + [s for s in SCHEMAS if s["function"]["name"] in {"blackboard_read", "graph_read"}]
 
     def rule_context(self, rules: dict[str, Any]) -> dict[str, Any]:
         """完整用户事实同时用于模型决策与引用核对，不把候选/工具正文当规则。"""
@@ -93,21 +108,25 @@ class VerifierAgent:
 
     async def review(self, candidate: Vulnerability, rules: dict[str, Any]) -> dict[str, Any]:
         previous = self.rule_context(rules)["world_state"]
-        messages = [{"role": "system", "content": _SYSTEM + (SEARCH_GUIDANCE if search_allowed(self.ctx) else "智能体模式禁止公开网页搜索。")},
-                    {"role": "user", "content": encode({
+        messages = [{"role": "system", "content": _SYSTEM + GUIDANCE + ("\n" + SKILL_GUIDANCE if runtime_for(self.ctx) else "") + (SEARCH_GUIDANCE if search_allowed(self.ctx) else "智能体模式禁止公开网页搜索。")},
+                    {"role": "user", "content": encode(project_rules(getattr(self.ctx, "blackboard", None), {
                         "world_state": previous, "candidate": candidate.model_dump(mode="json"),
-                        "user_rules": {key: value for key, value in rules.items() if key != "world_state"}})}]
+                        "user_rules": {key: value for key, value in rules.items() if key != "world_state"}}))}]
+        skill_state: dict[str, Any] = {}
         executions: dict[str, dict[str, Any]] = {}
+        turn = 0
         while True:
+            turn += 1
             if self.ctx.pause_gate is not None:
                 await self.ctx.pause_gate.wait()
             current = self.rule_context(rules)["world_state"]
-            fragment = world_state.update(previous, current)
+            fragment = world_state.update(project_rules(getattr(self.ctx, "blackboard", None), previous), project_rules(getattr(self.ctx, "blackboard", None), current))
             if fragment:
                 messages.append({"role": "user", "content": fragment})
             previous = current
+            append_catalog(runtime_for(self.ctx), skill_state, messages)
             compact_history(messages)
-            response = await self.ctx.gateway.chat(messages, task_type="verification",
+            response = await self.ctx.gateway.chat([{k:v for k,v in m.items() if not k.startswith("_")} for m in messages], task_type="verification",
                                                    tools=self.schemas(), tool_choice="auto")
             calls = response.tool_calls or []
             assistant = {"role": "assistant", "content": response.content or ""}
@@ -132,6 +151,14 @@ class VerifierAgent:
                         "instruction": "修正引用或补充独立证据；确实无法复测时提交 inconclusive。quote 只复制 result 原文。",
                         "available_executions": [{"execution_id": key, "ok": value["ok"],
                             "result": value["text"][:800]} for key, value in executions.items()]})
+                elif name in {"blackboard_read", "graph_read"}:
+                    result = execute(self.ctx.blackboard, name, args, actor=self.agent_id)
+                    tool_ok, text = result["ok"], encode(result)
+                elif name in SKILL_NAMES:
+                    result = native_skill_result(self.ctx, name, args, skill_state, messages,
+                                                 self.agent_id, {"vuln_id": candidate.vuln_id})
+                    tool_ok, text = result["ok"], encode(result)
+                    result_meta["skill"] = {key:value for key,value in result.items() if key != "content"}
                 elif name == "ask_user":
                     question = str(args.get("question") or "").strip()
                     answer = (await self.ctx.questions.ask(
@@ -147,13 +174,35 @@ class VerifierAgent:
                     try:
                         if name not in {item["function"]["name"] for item in self.schemas()}:
                             raise ToolExecutionError("工具不在独立复测目录中")
-                        result = await self.ctx.tools.call(name, args, **self.ctx.builtin_ctx)
+                        previous_scope = current_execution_scope.get() or ExecutionScope()
+                        token = current_execution_scope.set(replace(previous_scope, agent_id=self.agent_id,
+                            task_id=previous_scope.task_id or f"verify-{candidate.vuln_id}",
+                            step_id=f"verify-{candidate.vuln_id}:{turn}", turn=turn, tool_call_id=call["id"], tool_name=name))
+                        try:
+                            result = await self.ctx.tools.call(name, args, **self.ctx.builtin_ctx)
+                        finally:
+                            current_execution_scope.reset(token)
                         text = result.stdout or result.error or result.stderr or "（无输出）"
+                        if name == "http_probe" and result.ok:
+                            from spiritscout.tools.http_responses import model_preview
+
+                            text = model_preview(result)
                         tool_ok = result.ok
                         result_meta = {"invocation_id": result.invocation_id, "returncode": result.returncode}
                         execution_id = result.invocation_id or call["id"]
-                        executions[execution_id] = {"ok": result.ok, "text": text, "tool": name,
-                                                    "params": args}
+                        if name == "http_probe" and result.reuse and result.source_invocation_id:
+                            execution_id = result.source_invocation_id
+                        if name == "http_response_read" and result.ok:
+                            source_id = result.parsed.get("source_invocation_id", "")
+                            original = executions.get(source_id, {})
+                            if original.get("tool") != "http_probe":
+                                raise ToolExecutionError("本地源码不能代替本次独立 HTTP 复测，请先取得本次响应")
+                            execution_id = source_id
+                            # 多次读取同一响应仍属一次执行，不能当作独立对照。
+                            original["text"] += "\n" + text
+                        else:
+                            executions[execution_id] = {"ok": result.ok, "text": text, "tool": name,
+                                                        "params": args}
                         text = encode({"execution_id": execution_id, "ok": result.ok,
                                        "result": text[:12000], "parsed": result.parsed})
                     except asyncio.CancelledError:
@@ -161,8 +210,10 @@ class VerifierAgent:
                     except Exception as exc:  # noqa: BLE001 —— 失败如实回灌，不能当成无危害
                         text = encode({"ok": False, "error": f"{type(exc).__name__}: {exc}"[:500]})
                 self.ctx.audit.log("agent.tool_result", self.agent_id, {"id": call["id"],
-                    "ok": tool_ok, "note": text[:1500], **result_meta})
-                messages.append({"role": "tool", "tool_call_id": call["id"], "content": text})
+                    "name": name, "ok": tool_ok, "note": result_meta.get("skill", {}).get("note") or text[:1500], **result_meta})
+                messages.append({"role": "tool", "tool_call_id": call["id"], "content": text,
+                    **({"_context_contract": True, "_skill_ref": result["ref"]}
+                       if name in SKILL_NAMES and tool_ok and "content" in result else {})})
 
     @staticmethod
     def validate(raw: Any, executions: dict[str, dict[str, Any]], rules: dict[str, Any],

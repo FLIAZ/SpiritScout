@@ -248,6 +248,8 @@ class ModeAssembler:
             """CTF 元规划：首轮并行分发 + 未破题的重攻轮（Flag 状态驱动）。"""
             solved = ({f.challenge_id for f in flag_manager.accepted_flags()}
                       if flag_manager is not None else set())
+            if getattr(flag_manager, "local_only", False):
+                solved = flag_manager.completed_ids()
             if platform is not None and platform.has_completion_signal():
                 # 平台按题给出完成态：完成判定以平台为准——多 Flag 题拿到
                 # 一个 Flag 不等于完赛（未竟 Flag 仍会重攻补分），只有平台

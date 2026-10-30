@@ -60,6 +60,17 @@ class AttemptTrace:
             **self.call, **{k: v for k, v in row.items() if k not in {"started", "finished"}},
             "status": status, "latency_ms": round((time.perf_counter() - row["started"]) * 1000, 1)})
 
+    def metrics(self) -> dict[str, int | None]:
+        """已报告尝试单列，不替换最终响应账本，也不把未知尝试算成零消费。"""
+        result: dict[str, int | None] = {
+            "sdk_attempts": len(self.attempts),
+            "unreported_attempts": sum(row["usage_status"] != "reported" for row in self.attempts),
+        }
+        for field in ("input_tokens", "output_tokens"):
+            values = [row[field] for row in self.attempts if field in row]
+            result["reported_attempt_" + field] = sum(values) if values else None
+        return result
+
 
 async def tracked_request(request: Any, **kwargs: Any) -> Any:
     """记录框架发起的每次 SDK 请求，不宣称覆盖 SDK 内部不可见的 HTTP 重试。"""

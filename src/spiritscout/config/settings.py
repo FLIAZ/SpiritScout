@@ -107,6 +107,10 @@ class GatewayConfig(ValidatedConfig):
     vote_min_models: int = 2                    # 投票最少模型数（4.9.3-2：≥2 独立判断）
     request_timeout_seconds: int = Field(default=300, gt=0)  # 重推理模型单次调用可达 3~4 分钟，120s 会中途掐死
     max_retries: int = 2
+    stable_snapshot_prefix: bool = True  # 新决策段保留稳定事实前缀，历史不重写
+    shared_ctf_prefix: bool = False  # 共享布局实验关闭，真实复杂对照尚未证明命中收益
+    compact_decision_patches: bool = False  # 无损补丁短编码，真实模型对照通过后再启用
+    remember_endpoint_capabilities: bool = True  # 只复用已成功的可选参数兼容回退
 
 
 class ExecutorConfig(ValidatedConfig):
@@ -116,6 +120,7 @@ class ExecutorConfig(ValidatedConfig):
     docker_image: str = "kalilinux/kali-rolling:latest"
     default_timeout_seconds: int = Field(default=300, gt=0)
     max_output_chars: int = Field(default=20000, gt=0)         # HackSynth 输出窗口截断（3.2.4-9）
+    http_max_body_bytes: int = Field(default=8 * 1024 * 1024, gt=0)  # HTTP 解压后正文上限，与展示窗口独立
     ctf_network_isolation: bool = True    # CTF 模式网络隔离（硬约束 C7）
     # ---- Docker 沙箱加固（9.3 EXP 沙箱验证：最小权限 + 资源限额 + 只读根fs）
     docker_memory_mb: int = Field(default=512, gt=0)
@@ -305,11 +310,17 @@ class ProviderEntry(ValidatedConfig):
 class ModelEntry(ValidatedConfig):
     """模型注册表条目（4.9.4：能力画像/成本/速率/质量评分）。
 
-    模型 ID 即身份：注册表、编队指派、审计与预算都以它为主键；接入信息
+    配置身份由供应商与模型 ID 共同组成；端点模型名保持原样。接入信息
     （provider/base_url/api_key/api_format）来自所属供应商，装载时合并进来。
     """
 
-    model: str                            # 模型 ID（主键，也是发给端点的模型名）
+    @property
+    def key(self) -> str:
+        """配置唯一标识；端点请求仍使用原始 model。"""
+        from spiritscout.config.model_identity import model_key
+        return model_key(self)
+
+    model: str                            # 发给端点的原始模型 ID
     provider_ref: str = ""                # 归属供应商名（ProviderEntry.name）
     provider: str = "openai_compatible"   # 由供应商合并而来
     base_url: str = ""
@@ -331,7 +342,7 @@ class ModelEntry(ValidatedConfig):
     cost_output_per_mtok: float = Field(default=0.0, ge=0)
     rate_limit_rpm: int = Field(default=60, gt=0)
     quality_score: float = 1.0            # 基准评测动态更新
-    is_fallback_for: list[str] = Field(default_factory=list, description="主备关系：作为哪些模型的备（模型 ID）")
+    is_fallback_for: list[str] = Field(default_factory=list, description="主备关系：作为哪些模型配置的备（旧裸名仅唯一时兼容）")
 
     def validate_cache_transport(self) -> None:
         """显式缓存标记只在已声明的兼容协议上启用。"""
@@ -442,7 +453,7 @@ def load_model_config(path: str | Path) -> list[ModelEntry]:
         cfg = ModelConfigFile.model_validate(data)
     except Exception as exc:
         raise ConfigurationError(f"模型配置校验失败: {exc}") from exc
-    ids = [m.model for m in cfg.models]
+    ids = [m.key for m in cfg.models]
     if len(set(ids)) != len(ids):
         raise ConfigurationError("模型 ID 存在重复")
     names = [p.name for p in cfg.providers]

@@ -1,0 +1,14 @@
+'use strict';
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
+const source=fs.readFileSync(path.join(__dirname,'../src/spiritscout/web/static/js/resources.js'),'utf8');
+const context=vm.createContext({URL,URLSearchParams,Date,esc:text=>String(text)});
+vm.runInContext(source.slice(source.indexOf('  function skillDefaults'),source.indexOf('  function shell')),context);
+const params=new URLSearchParams(vm.runInContext("skillQuery({q:'浏览器',filters:{...mcpDefaults(),enabled:false,transport:'http',source:'managed',risk:'readonly',agent:'ctf_web'}},40).toString()",context));
+for(const [key,value] of Object.entries({enabled:'false',transport:'http',source:'managed',risk:'readonly',agent:'ctf_web',offset:'40',q:'浏览器'}))assert.equal(params.get(key),value);
+const html=vm.runInContext('mcpControlsHtml()',context);
+for(const field of ['transport','source','risk','agent','date_state','added_from','added_to','sort'])assert(html.includes(`data-mcp-filter="${field}"`));
+assert(!html.includes('data-skill-'));assert(!html.includes('value="builtin"'));assert(html.includes('data-mcp-enabled="false"'));assert(html.includes('data-mcp-reset'));
+assert.equal(vm.runInContext("mcpConnection({transport:'http',url:'https://user:password@host.test/mcp?token=hidden#private'})",context),'https://host.test/mcp');
+assert.equal(vm.runInContext("mcpConnection({transport:'stdio',command:'python'})",context),'python');
+assert.match(vm.runInContext("mcpMeta({origin:'config',created_at:null,data:{default_risk:'readonly'}})",context),/配置文件 · 只读 · 时间未知/);
+console.log('MCP catalog: compound filters, status groups, safe connection summary and provenance passed');
