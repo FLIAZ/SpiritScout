@@ -1,7 +1,8 @@
 """通过 bubblewrap 执行 shell 和 Python。
 
 宿主文件系统只读，用户目录和控制目录遮蔽；附件只读，会话 sandbox 目录可写并持久化。
-每次调用使用独立 tmpfs /tmp，清理环境变量，并限制运行时间和输出。网络保持可用。
+每次调用清理环境变量，并限制运行时间和输出。网络保持可用。
+默认 /tmp 为独立 tmpfs；合格轻量 CTF/AWDP 调用使用题级持久 /tmp。
 bwrap 不可用时返回错误，不直接在宿主执行。"""
 
 from __future__ import annotations
@@ -9,15 +10,22 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import re
+import shlex
 import shutil
 import signal
+import stat
 import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
+from spiritscout.core.models import RunMode
+from spiritscout.tools.sandbox_paths import (
+    open_directory,
+    sandbox_directory,
+    sandbox_tmp_directory,
+)
 from spiritscout.tools.spec import ToolResult
 
 _BWRAP = "bwrap"
@@ -25,7 +33,6 @@ _MIN_TIMEOUT = 5.0
 _MAX_TIMEOUT = 300.0
 _READ_CHUNK = 65536
 _LOG_ROTATE_BYTES = 10 * 1024 * 1024    # 单日志超限轮转（保留上一代 .old）
-
 
 class _RotatingLog:
     """写入中按字节轮转，两代有界；stdout/stderr 在同一事件循环共用。"""
@@ -88,13 +95,20 @@ def _venv_site_dirs(venv: Path) -> list[str]:
 
 
 def _build_argv(workspace: Path, rundir: Path, inner: list[str], *,
-                guard_root: Path | None = None) -> list[str]:
+                guard_root: Path | None = None,
+                persistent_tmp: Path | None = None,
+                directory_fds: dict[Path, int] | None = None) -> list[str]:
     """bwrap 参数：整机只读 + 控制面遮蔽 + 产物可写/附件只读 + 干净环境。
 
     工具来源：项目内 .venv（只读回挂并入 PATH/PYTHONPATH）——用户主目录、
     ~/.local、/usr/local 等私有安装层一律不进沙箱，智能体工具能力来自
     项目封装与发行版基础层。
     """
+    def source(path: Path) -> str:
+        # 目录身份已由宿主固定；不要在 bwrap 启动时再次解析可被替换的路径。
+        fd = (directory_fds or {}).get(path)
+        return f"/proc/self/fd/{fd}" if fd is not None else str(path)
+
     home = Path.home()
     argv = [
         _BWRAP,
@@ -102,7 +116,10 @@ def _build_argv(workspace: Path, rundir: Path, inner: list[str], *,
         "--dev", "/dev",
         "--unshare-pid",               # 不通过宿主 /proc/<pid>/root 绕过文件遮蔽
         "--proc", "/proc",
-        "--tmpfs", "/tmp",
+        # 轻量 × CTF：/tmp 换成题级持久目录（tmpfs 每调用即焚会让小模型
+        # 陷入"解压→下次消失→再解压"的原地循环，实测反复打转）。
+        *(('--bind', source(persistent_tmp), '/tmp') if persistent_tmp is not None
+          else ("--tmpfs", "/tmp")),
         "--tmpfs", str(home),          # 主目录遮蔽：.ssh / 密钥库不可见
         # 宿主私有安装层遮蔽：/usr/local 是手工安装落点（用户自装工具、
         # 独立分发的二进制、私有库），整层遮蔽（bin 内 sbin 是符号链接，
@@ -126,12 +143,12 @@ def _build_argv(workspace: Path, rundir: Path, inner: list[str], *,
         site_dirs = _venv_site_dirs(venv)
     # 整个控制目录不可见，只开放约定的产物目录；同样覆盖位于 /tmp
     # 或主目录之外的工作区，不能仅靠遮蔽 execution.key 保护数据库。
-    argv += ["--tmpfs", str(workspace), "--bind", str(rundir), str(rundir)]
+    argv += ["--tmpfs", str(workspace), "--bind", source(rundir), str(rundir)]
     for name in ("attachments", "artifacts", "http-responses"):
         directory = workspace / name
-        if directory.is_dir():
+        if directory in (directory_fds or {}) or directory.is_dir():
             argv += ["--bind" if name == "artifacts" else "--ro-bind",
-                     str(directory), str(directory)]
+                     source(directory), str(directory)]
     # 空控制目录本身也只读，不能伪造同名控制文件；不递归改变产物挂载。
     argv += ["--remount-ro", str(workspace)]
     argv += [
@@ -141,6 +158,8 @@ def _build_argv(workspace: Path, rundir: Path, inner: list[str], *,
         "--setenv", "PATH", ":".join(path_dirs),
         "--setenv", "HOME", str(rundir),
         "--setenv", "LANG", "C.UTF-8",
+        # TERM 留空时 gdb/pwndbg 等先报 terminfo 告警再干活——徒增噪音
+        "--setenv", "TERM", "xterm",
     ]
     if site_dirs:
         argv += ["--setenv", "PYTHONPATH", ":".join(site_dirs)]
@@ -208,6 +227,8 @@ async def sandbox_exec(
     guard_root: str | None = None,
     log_name: str = "last_output",
     max_output_chars: int = 20000,
+    _run_mode: RunMode | None = None,
+    _lightweight_local: bool = False,
     **_: Any,
 ) -> ToolResult:
     """沙箱执行：language=shell 跑 ``bash -c``；language=python 落盘后 ``python3`` 运行。
@@ -236,41 +257,74 @@ async def sandbox_exec(
     except (TypeError, ValueError):
         timeout = 60.0
     lang = "python" if str(language).lower() == "python" else "shell"
+    lightweight = _lightweight_local and _run_mode in (RunMode.CTF, RunMode.AWDP)
+    if lightweight:
+        with contextlib.suppress(TypeError, ValueError):
+            max_output_chars = min(int(max_output_chars), 4000)
     workspace = Path(workspace_root).resolve()
-    try:
-        workspace.mkdir(parents=True, exist_ok=True)
-        # 不允许旧脚本留下的目录符号链接将控制目录重新挂进沙箱。
-        for name in ("sandbox", "attachments", "artifacts"):
-            if (workspace / name).is_symlink():
-                raise OSError(f"沙箱共享目录不能是符号链接: {name}")
-        # 会话持久工作目录：workspace_root 即会话工作区，跨调用保留产物，
-        # 供后续回合与附件工具继续使用（/tmp 为每运行 tmpfs，不持久）；
-        # 题级作用域在会话工作区内再细分一层（多题并行互不覆盖）。
-        rundir = workspace / "sandbox"
-        if workspace_scope:
-            safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(workspace_scope)).strip("._-")[:80]
-            if safe:
-                rundir = rundir / safe
-        rundir.mkdir(parents=True, exist_ok=True)
-        (workspace / "artifacts").mkdir(exist_ok=True)
-    except OSError as exc:
-        return ToolResult(tool="sandbox_exec", ok=False, returncode=-1,
-                          error=f"沙箱工作区不可用: {exc}")
+    with contextlib.ExitStack() as directories:
+        try:
+            workspace.mkdir(parents=True, exist_ok=True)
+            relative = sandbox_directory(workspace_scope)
+            rundir = workspace / relative
+            directory_fds = {rundir: directories.enter_context(
+                open_directory(workspace, relative, create=True))}
+            for name in ("attachments", "artifacts", "http-responses"):
+                try:
+                    fd = directories.enter_context(open_directory(
+                        workspace, Path(name), create=name == "artifacts"))
+                except FileNotFoundError:
+                    continue
+                directory_fds[workspace / name] = fd
+            persistent_tmp = None
+            if lightweight:
+                temporary = sandbox_tmp_directory(workspace_scope)
+                persistent_tmp = workspace / temporary
+                directory_fds[persistent_tmp] = directories.enter_context(
+                    open_directory(workspace, temporary, create=True))
+        except (OSError, ValueError) as exc:
+            return ToolResult(tool="sandbox_exec", ok=False, returncode=-1,
+                              error=f"沙箱工作区不可用（目录不能是符号链接）: {exc}")
+        return await _execute_sandbox(
+            code, lang, timeout, workspace, rundir, persistent_tmp, directory_fds,
+            guard_root, log_name, max_output_chars, started)
+
+
+async def _execute_sandbox(code: str, lang: str, timeout: float, workspace: Path,
+                           rundir: Path, persistent_tmp: Path | None,
+                           directory_fds: dict[Path, int], guard_root: str | None,
+                           log_name: str, max_output_chars: int, started: float) -> ToolResult:
+    directory = Path(f"/proc/self/fd/{directory_fds[rundir]}")
+    pipeline_name = None
     if lang == "python":
-        script = rundir / f"run_{int(time.time() * 1000)}_{os.urandom(3).hex()}.py"
-        script.write_text(code, encoding="utf-8")
+        filename = f"run_{int(time.time() * 1000)}_{os.urandom(6).hex()}.py"
+        fd = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=directory_fds[rundir])
+        with os.fdopen(fd, "w", encoding="utf-8") as script:
+            script.write(code)
         venv = _project_venv()
         py = str(venv / "bin" / "python3") if venv is not None else "python3"
-        inner = [py, str(script)]
+        inner = [py, str(rundir / filename)]
     else:
-        inner = ["bash", "-c", code]
+        if persistent_tmp is not None:
+            pipeline_name = f".pipeline-{os.urandom(8).hex()}"
+            handler = ('_ss_rc=$? _ss_codes=("${PIPESTATUS[@]}"); '
+                       'printf "%s" "${_ss_codes[*]}" > ' + shlex.quote(str(rundir / pipeline_name))
+                       + '; exit "$_ss_rc"')
+            inner = ["bash", "-o", "pipefail", "-c", "trap " + shlex.quote(handler) + " EXIT\n" + code]
+        else:
+            inner = ["bash", "-c", code]
 
+    # bwrap 需要继承描述符完成挂载，但执行的程序不能据此访问宿主父目录。
+    close_fds = " ".join(f"{fd}<&-" for fd in directory_fds.values())
+    inner = ["bash", "-c", f'exec {close_fds}; exec "$@"', "sandbox", *inner]
     guard = Path(guard_root).resolve() if guard_root else None
-    argv = _build_argv(workspace, rundir, inner, guard_root=guard)
+    argv = _build_argv(workspace, rundir, inner, guard_root=guard,
+                       persistent_tmp=persistent_tmp, directory_fds=directory_fds)
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            start_new_session=True)
+            start_new_session=True, pass_fds=tuple(directory_fds.values()))
     except OSError as exc:
         return ToolResult(tool="sandbox_exec", ok=False, returncode=-1,
                           error=f"沙箱启动失败: {exc}")
@@ -282,7 +336,7 @@ async def sandbox_exec(
     log_path = None
     try:
         # 同题分支和同回合多工具可能同名并发，返回的证据路径必须永久对应本次调用。
-        fd, filename = tempfile.mkstemp(prefix=f"{log_name}-", suffix=".log", dir=rundir)
+        fd, filename = tempfile.mkstemp(prefix=f"{log_name}-", suffix=".log", dir=directory)
         os.close(fd)
         log_path = Path(filename)
         # 日志代际轮转：单文件超限就把上一代挪到 .old——完整过程保留最近
@@ -329,6 +383,26 @@ async def sandbox_exec(
         if log_fh is not None:
             log_fh.close()
     rc = proc.returncode if proc.returncode is not None else -1
+    pipeline_statuses = []
+    if pipeline_name:
+        try:
+            fd = os.open(pipeline_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         dir_fd=directory_fds[rundir])
+            try:
+                if stat.S_ISREG(os.fstat(fd).st_mode) and os.fstat(fd).st_size <= 1024:
+                    values = os.read(fd, 1024).decode().split()
+                    if len(values) <= 128 and all(v.isdigit() and 0 <= int(v) <= 255 for v in values):
+                        pipeline_statuses = [int(v) for v in values]
+            finally:
+                os.close(fd)
+        except (OSError, UnicodeError):
+            pass
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(pipeline_name, dir_fd=directory_fds[rundir])
+    pipeline_partial = (not timed_out and rc == 141 and len(pipeline_statuses) > 1
+                        and pipeline_statuses[-1] == 0 and out_total > 0 and not err_total
+                        and all(code in (0, 141) for code in pipeline_statuses))
 
     duration = (time.perf_counter() - started) * 1000
     stdout = _decode(out_b, out_total, max_output_chars)
@@ -338,9 +412,12 @@ async def sandbox_exec(
         stdout=stdout, stderr=stderr, timed_out=timed_out,
         parsed={"language": lang, "exit_code": rc,
                 "duration_ms": round(duration, 1), "workdir": str(rundir),
-                "output_file": str(log_path) if log_path else "",
+                "output_file": str(rundir / log_path.name) if log_path else "",
+                "tmp_persistent": persistent_tmp is not None,
+                **({"pipeline_statuses": pipeline_statuses, "pipeline_partial": pipeline_partial}
+                   if pipeline_name else {}),
                 "output_rotated": bool(log_fh and log_fh.rotated),
-                "previous_output_file": str(log_fh.previous)
+                "previous_output_file": str(rundir / log_fh.previous.name)
                 if log_fh and log_fh.previous.exists() else ""},
         error=(f"执行超时（{timeout:.0f}s），进程已终止" if timed_out else ""),
         duration_ms=duration,

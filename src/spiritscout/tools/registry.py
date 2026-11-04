@@ -58,7 +58,9 @@ class ToolRegistry:
         max_retries: int = 1,
         journal: ExecutionJournal | None = None,
         attempts: AttemptLedger | None = None,
+        pause_gate: Any = None,
     ):
+        self.pause_gate = pause_gate
         self.executor = executor
         self.policy = policy
         self.audit = audit or NullAuditLogger()
@@ -95,8 +97,14 @@ class ToolRegistry:
 
     async def call(self, name: str, params: dict[str, Any], **builtin_ctx) -> ToolResult:
         """每次调用独立编号，参数快照绑定审批；未决动作只留痕、不自动重放。"""
+        if self.pause_gate is not None:
+            await self.pause_gate.wait()
         spec = self.get(name)
         params = copy.deepcopy(params)
+        purpose = builtin_ctx.pop("_purpose", "")
+        if spec.approval_purpose_param:
+            purpose = params.pop(spec.approval_purpose_param, purpose)
+        purpose = purpose.strip()[:1000] if isinstance(purpose, str) else ""
         refresh = bool(builtin_ctx.pop("_fresh", False))
         if name == "http_probe":
             refresh = bool(params.pop("refresh", False)) or refresh
@@ -114,7 +122,7 @@ class ToolRegistry:
         replay_safe = self._replay_safe(spec, params)
         context = InvocationContext(invocation_id, digest,
             (lambda action, allow: self.journal.approval(invocation_id, action, allow))
-            if self.journal is not None else None)
+            if self.journal is not None else None, purpose=purpose, tool_name=name)
         token = current_invocation.set(context)
         phase = "not_started"
         registered = False
@@ -237,12 +245,22 @@ class ToolRegistry:
             try:
                 if (not self.policy.automatic_approval
                         and self.policy.requires_approval(spec, action)):
+                    context = current_invocation.get()
+                    if spec.kind == ToolKind.MCP and (not context or not context.purpose
+                            or context.purpose in {name, action}):
+                        field = spec.approval_purpose_param or "_purpose"
+                        return ToolResult(tool=name, ok=False, returncode=-4,
+                            error=f"本次操作需要用户审批。请先在 {field} 中用自然语言说明："
+                                  "对什么目标做什么操作、为什么需要，以及可能影响；只写函数名不够。")
                     transition("awaiting_approval")
                 await self.policy.ensure_tool_allowed(
                     spec, action=action)
             except PolicyViolation as exc:
                 self.audit.log("tool.denied", "registry", {"tool": name, "reason": str(exc)})
-                return ToolResult(tool=name, ok=False, error=str(exc), returncode=-3)
+                # 平台拦截与目标防御同形不同因：明示语义，避免模型把审批/策略
+                # 拒绝当成目标 WAF 去改写绕过（换路线才是正解）
+                return ToolResult(tool=name, ok=False, returncode=-3,
+                                  error=f"平台策略拦截（非目标防御；请换路线或缩小动作，不要尝试绕过）：{exc}")
         return None
 
     async def _call(self, name: str, params: dict[str, Any], *,
@@ -258,11 +276,20 @@ class ToolRegistry:
         # 侵入性工具不自动重放，避免网络抖动把一次有副作用的调用变成两次。
         replay_safe = self._replay_safe(spec, params)
         retry_limit = self.max_retries if replay_safe else 0
-        transition("running")
         while attempts <= retry_limit:
+            if self.pause_gate is not None:
+                await self.pause_gate.wait()
+            transition("running")
             attempts += 1
             if name in self._builtins:
-                last = await self._builtins[name](**params, **builtin_ctx)
+                # 普通工具数据由模型传入；保留运行身份只能由调用上下文注入。
+                arguments = {**builtin_ctx, **params}
+                for reserved in ("_run_mode", "_lightweight_local"):
+                    if reserved in builtin_ctx:
+                        arguments[reserved] = builtin_ctx[reserved]
+                    else:
+                        arguments.pop(reserved, None)
+                last = await self._builtins[name](**arguments)
             elif spec.kind in (ToolKind.CLI, ToolKind.DOCKER):
                 last = await self.executor.run(spec, params)
             elif spec.kind == ToolKind.MCP:

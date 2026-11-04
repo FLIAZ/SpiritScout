@@ -5,18 +5,21 @@ import asyncio
 import gzip
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from spiritscout.core.models import Scope
+from spiritscout.core.models import RunMode, Scope
 from spiritscout.ctf.agents import _http_observation, _obs_text
 from spiritscout.policy.scope import ScopeGuard
 from spiritscout.tools.builtin import BUILTIN_SPECS, http_probe
+from spiritscout.tools.http_responses import SPEC as HTTP_READ_SPEC
 from spiritscout.tools.http_responses import http_response_read
 from spiritscout.tools.invocation import InvocationContext, current_invocation
 from spiritscout.tools.registry import ToolRegistry
+from spiritscout.tools.sandbox import sandbox_available, sandbox_exec
 
 
 class HTTPResponseTests(unittest.IsolatedAsyncioTestCase):
@@ -66,6 +69,29 @@ class HTTPResponseTests(unittest.IsolatedAsyncioTestCase):
         result = await http_response_read(workspace_root=str(self.root), body_ref=ref, **kwargs)
         self.assertTrue(result.ok, result.error)
         return json.loads(result.stdout)
+
+    async def test_model_mode_param_does_not_collide_with_ambient_context(self):
+        # 环境 mode（RunMode）曾与工具参数 mode 同名撞成
+        # 「multiple values for keyword argument」；保留键化后模型参数直达
+        token = current_invocation.set(InvocationContext('inv-ambient-fixture', 'digest'))
+        try:
+            probed = await self.fetch('/short')
+        finally:
+            current_invocation.reset(token)
+        ref = probed.parsed['body_ref']
+        registry = ToolRegistry(SimpleNamespace(), max_retries=0)
+        registry.register_builtin('http_response_read', http_response_read, HTTP_READ_SPEC)
+        context = {'workspace_root': str(self.root), '_run_mode': RunMode.CTF, '_search': None}
+        searched = await registry.call('http_response_read',
+                                       {'body_ref': ref, 'mode': 'search', 'query': 'hidden'}, **context)
+        self.assertTrue(searched.ok, searched.error)
+        self.assertIn('matches', searched.stdout)
+        read = await registry.call('http_response_read', {'body_ref': ref}, **context)
+        self.assertTrue(read.ok, read.error)
+        self.assertIn('hidden', read.stdout)
+        bad = await registry.call('http_response_read', {'body_ref': ref, 'mode': 'scan'}, **context)
+        self.assertFalse(bad.ok)
+        self.assertIn('read 或 search', bad.error)
 
     async def test_long_gzip_saved_in_full_and_local_search_does_not_refetch(self):
         token = current_invocation.set(InvocationContext('inv-http-fixture', 'digest'))
@@ -141,6 +167,40 @@ class HTTPResponseTests(unittest.IsolatedAsyncioTestCase):
         (folder / 'body.txt').unlink()
         (folder / 'body.txt').symlink_to(self.root / 'outside.txt')
         self.assertFalse((await http_response_read(workspace_root=str(self.root), body_ref=ref)).ok)
+
+    async def test_relative_workspace_returns_absolute_source_path(self):
+        relative = os.path.relpath(self.root, Path.cwd())
+        result = await http_probe(self.base + '/short', guard=ScopeGuard(Scope(local_analysis=True)),
+                                  workspace_root=relative)
+        self.assertTrue(result.ok, result.error)
+        path = Path(result.parsed['body_path'])
+        self.assertTrue(path.is_absolute())
+        self.assertEqual(path.read_bytes(), self.short.encode())
+        self.assertEqual(path.parent.parent, self.root / 'http-responses')
+        metadata = json.loads(path.with_name('metadata.json').read_text())
+        self.assertEqual(metadata['body_path'], str(path))
+        read = await http_response_read(workspace_root=relative, body_ref=result.parsed['body_ref'])
+        self.assertTrue(read.ok, read.error)
+        self.assertEqual(json.loads(read.stdout)['text'], self.short)
+
+    @unittest.skipUnless(sandbox_available(), '需要 bubblewrap 验证真实沙箱原文读取')
+    async def test_source_path_is_readable_from_actual_challenge_sandbox(self):
+        relative = os.path.relpath(self.root, Path.cwd())
+        result = await http_probe(self.base + '/short', guard=ScopeGuard(Scope(local_analysis=True)),
+                                  workspace_root=relative)
+        path = Path(result.parsed['body_path'])
+        code = (f'from pathlib import Path\np = Path({str(path)!r})\n'
+                f'assert p.read_bytes() == {self.short.encode()!r}\n'
+                'assert Path.cwd() != p.parent\nprint("source-readable")\n'
+                'try:\n    p.write_text("overwrite")\n'
+                'except OSError:\n    print("source-readonly")\n'
+                'else:\n    raise AssertionError("snapshot must be read-only")\n')
+        sandbox = await sandbox_exec(code, language='python', workspace_root=relative,
+                                     workspace_scope='challenge-fixture')
+        self.assertTrue(sandbox.ok, sandbox.error)
+        self.assertEqual(sandbox.returncode, 0, sandbox.stderr)
+        self.assertIn('source-readable', sandbox.stdout)
+        self.assertIn('source-readonly', sandbox.stdout)
 
     async def test_cached_http_reuses_same_immutable_snapshot(self):
         registry = ToolRegistry(SimpleNamespace(), max_retries=0)

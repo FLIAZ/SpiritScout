@@ -14,7 +14,7 @@ import httpx
 
 from spiritscout.agents.recon.agent import ReconAgent
 from spiritscout.config.settings import SearchConfig
-from spiritscout.core.models import AgentType
+from spiritscout.core.models import AgentType, RunMode
 from spiritscout.tools.registry import ToolRegistry
 from spiritscout.tools.web_search import (
     SEARCH_SCHEMA,
@@ -103,15 +103,25 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
         registry = ToolRegistry(SimpleNamespace(), max_retries=5)
         registry.register_builtin('web_search', web_search, SEARCH_SPEC)
         self.status = 429
-        result = await registry.call('web_search', {'query': 'q', 'reason': '查证', 'paid': True, 'blocker': '模拟明确阻塞，免费资料不足'}, search=self.service)
+        result = await registry.call('web_search', {'query': 'q', 'reason': '查证', 'paid': True, 'blocker': '模拟明确阻塞，免费资料不足'}, _search=self.service)
         self.assertFalse(result.ok)
         self.assertEqual(result.attempts, 1)
         self.assertEqual(len(self.calls), 1)
         self.status = 200
-        result = await registry.call('web_search', {'query': 'q', 'reason': '查证', 'paid': True, 'blocker': '模拟明确阻塞，免费资料不足'}, search=self.service)
+        result = await registry.call('web_search', {'query': 'q', 'reason': '查证', 'paid': True, 'blocker': '模拟明确阻塞，免费资料不足'}, _search=self.service)
         self.assertTrue(result.ok)
         self.assertFalse(result.parsed['search_cache_hit'])
         self.assertEqual(len(self.calls), 2)
+
+    async def test_ambient_run_mode_still_gates_competition_search(self) -> None:
+        # 环境键改保留名后，智能体模式的搜索禁令依旧经 registry 分发生效
+        registry = ToolRegistry(SimpleNamespace(), max_retries=0)
+        registry.register_builtin('web_search', web_search, SEARCH_SPEC)
+        result = await registry.call('web_search', {'query': 'q', 'reason': '查证'},
+                                     _search=self.service, _run_mode=RunMode.COMPETITION)
+        self.assertFalse(result.ok)
+        self.assertIn('智能体模式禁止', result.error)
+        self.assertEqual(self.calls, [])
 
     async def test_parameter_errors_do_not_send_network_requests(self) -> None:
         for change in ({'query': ''}, {'num_results': True}, {'refresh': 'false'},
@@ -126,7 +136,7 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.ok)
         self.assertIn('未启用', result.error)
         self.service.api_key = ''
-        result = await web_search(query='q', reason='查证', paid=True, blocker='模拟明确阻塞', search=self.service)
+        result = await web_search(query='q', reason='查证', paid=True, blocker='模拟明确阻塞', _search=self.service)
         self.assertFalse(result.ok)
         self.assertIn('密钥', result.error)
         self.assertEqual(self.calls, [])
@@ -156,7 +166,7 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtin('web_search', web_search, SEARCH_SPEC)
         agent.ctx = SimpleNamespace(audit=Mock(), ring=None, blackboard=None, gateway=gateway,
-                                    tools=registry, builtin_ctx={'search': self.service})
+                                    tools=registry, builtin_ctx={'_search': self.service})
         result = await agent._llm_chat_json('path_planner', {'issue': '版本差异'}, _allow_ask=False)
         self.assertEqual(result['rationale'], '已核对版本资料')
         self.assertEqual(len(self.calls), 1)

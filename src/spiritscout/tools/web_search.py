@@ -465,16 +465,17 @@ def search_service(config: SearchConfig, root: Path, *, api_key: str | None = No
     return services[identity]
 
 
-async def web_search(*, search: SearchService | None = None, mode: RunMode | None = None, **params: Any) -> ToolResult:
-    # 内置上下文里的 guard/limiter 等不属于模型参数，不向搜索服务转发。
-    if mode == RunMode.COMPETITION:
+async def web_search(*, _search: SearchService | None = None, _run_mode: RunMode | None = None, **params: Any) -> ToolResult:
+    # 运行身份经保留键注入（registry 分发），模型参数（query/reason 等）
+    # 不与内置上下文争名，也不向搜索服务转发。
+    if _run_mode == RunMode.COMPETITION:
         return _failure("智能体模式禁止公开网页搜索，Exa 不可用")
-    if search is None or not search.config.enabled:
+    if _search is None or not _search.config.enabled:
         return _failure("公开搜索未启用；在 MCP 管理页启用搜索后可使用免费检索，付费请求另需密钥与 blocker")
     request = {key: params[key] for key in SEARCH_SPEC.allowed_params if key in params}
     if not {"query", "reason"}.issubset(request):
         return _failure("需要 query 关键词和 reason 信息缺口说明")
-    return await search.search(**request)
+    return await _search.search(**request)
 
 
 def effective_search(config: SearchConfig, resources: Any) -> tuple[SearchConfig, str]:

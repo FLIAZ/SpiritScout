@@ -102,6 +102,29 @@ class ToolBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.ok)
         self.assertEqual(executor.calls, 1)
 
+    async def test_policy_denial_error_marks_platform_semantics(self) -> None:
+        """策略拒绝标明是平台拦截而非目标防御，避免模型当 WAF 去绕。"""
+        executor = _RecordingExecutor()
+        policy = PolicyEngine(
+            RunMode.SRC,
+            ScopeGuard(Scope(allowed_urls=["https://example.test/app"])),
+        )
+        policy.forbid_tool("external_probe")
+        registry = ToolRegistry(executor, policy=policy)
+        registry.register(ToolSpec(
+            name="external_probe", kind=ToolKind.CLI,
+            command_template=["probe", "{url}"], allowed_params={"url"},
+            target_params=("url",), risk=RiskLevel.READONLY,
+        ))
+
+        result = await registry.call(
+            "external_probe", {"url": "https://example.test/app"})
+
+        self.assertFalse(result.ok)
+        self.assertIn("平台策略拦截", result.error)
+        self.assertIn("不要尝试绕过", result.error)
+        self.assertEqual(executor.calls, 0)
+
     async def test_local_executor_preserves_success_return_code(self) -> None:
         executor = LocalExecutor()
         spec = ToolSpec(

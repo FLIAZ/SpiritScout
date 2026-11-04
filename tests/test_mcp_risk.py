@@ -115,7 +115,7 @@ class McpAssemblyRiskTests(unittest.IsolatedAsyncioTestCase):
     async def test_invasive_mcp_tool_requires_declaration_and_gates_only_dangerous_actions(self) -> None:
         # 缺声明：不执行、不打扰用户
         result = await self.infra.tools.call("mcp__playwright__browser_click",
-                                            {"url": "https://allowed.invalid"}, **self.infra.builtin_ctx)
+                                            {"url": "https://allowed.invalid"}, _purpose="在隔离测试页面执行声明的操作，以核对风险审批和实际调用结果。", **self.infra.builtin_ctx)
         self.assertFalse(result.ok)
         self.assertIn("_safety_action", result.error)
         self.gate.assert_not_awaited()
@@ -124,7 +124,7 @@ class McpAssemblyRiskTests(unittest.IsolatedAsyncioTestCase):
         result = await self.infra.tools.call(
             "mcp__playwright__browser_click",
             {"url": "https://allowed.invalid", "_safety_action": "intrusive_write"},
-            **self.infra.builtin_ctx)
+            _purpose="在隔离测试页面执行声明的操作，以核对风险审批和实际调用结果。", **self.infra.builtin_ctx)
         self.assertTrue(result.ok)
         self.gate.assert_not_awaited()
         self.client.call.assert_awaited_once()
@@ -132,7 +132,7 @@ class McpAssemblyRiskTests(unittest.IsolatedAsyncioTestCase):
         result = await self.infra.tools.call(
             "mcp__playwright__browser_click",
             {"url": "https://allowed.invalid", "_safety_action": "delete_files"},
-            **self.infra.builtin_ctx)
+            _purpose="在隔离测试页面执行声明的操作，以核对风险审批和实际调用结果。", **self.infra.builtin_ctx)
         self.assertFalse(result.ok)
         self.gate.assert_awaited_once()
         self.client.call.assert_awaited_once()
@@ -140,14 +140,14 @@ class McpAssemblyRiskTests(unittest.IsolatedAsyncioTestCase):
         result = await self.infra.tools.call(
             "mcp__playwright__browser_click",
             {"url": "https://allowed.invalid", "_safety_action": "delete_files"},
-            **self.infra.builtin_ctx)
+            _purpose="在隔离测试页面执行声明的操作，以核对风险审批和实际调用结果。", **self.infra.builtin_ctx)
         self.assertTrue(result.ok)
         self.assertEqual(self.gate.await_count, 2)
         self.assertEqual(self.client.call.await_count, 2)
 
     async def test_readonly_navigation_override_cannot_approve_sensitive_declared_action(self) -> None:
         result = await self.infra.tools.call("mcp__playwright__browser_navigate",
-            {"url": "https://allowed.invalid", "action": "delete_files"}, **self.infra.builtin_ctx)
+            {"url": "https://allowed.invalid", "action": "delete_files"}, _purpose="在隔离测试页面执行声明的操作，以核对风险审批和实际调用结果。", **self.infra.builtin_ctx)
         self.assertFalse(result.ok)
         self.gate.assert_awaited_once()
         self.client.call.assert_not_awaited()

@@ -66,6 +66,7 @@ class ToolSpec:
     # 仅宿主可信配置赋值，远端工具描述不能授予角色权限。
     allowed_agents: tuple[str, ...] = ()
     internet_search: bool = False  # 宿主声明的公开网页搜索能力
+    approval_purpose_param: str = ""  # 宿主新增的审批说明字段，调用前移除，不传给远端
     reuse_ttl_seconds: float = 0.0  # 仅宿主明确声明无状态只读工具可短时复用
 
 

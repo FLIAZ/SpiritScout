@@ -1,0 +1,9 @@
+{
+  "name": "spiritscout-cyberchef-runtime",
+  "private": true,
+  "description": "Pinned official CyberChef Node API for SpiritScout",
+  "dependencies": {
+    "cyberchef": "11.5.0",
+    "terser": "5.44.1"
+  }
+}
