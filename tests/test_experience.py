@@ -63,7 +63,7 @@ class ExperienceStoreTests(unittest.TestCase):
                 first = store.add("登录接口错误回显泄露账号存在性",
                                   context="会员系统登录", tags=["web", "登录"],
                                   source_session="a.example")
-                duplicate = store.add("登录接口错误回显泄露账号存在性")
+                duplicate = store.add("登录接口错误回显泄露账号存在性", context="会员系统登录")
                 self.assertTrue(first)
                 self.assertEqual(duplicate, "")
                 self.assertEqual(store.count(), 1)
@@ -346,7 +346,7 @@ class DistillTests(unittest.IsolatedAsyncioTestCase):
                 stored = store.count()
             finally:
                 store.close()
-            self.assertEqual(result, {"result": "ok", "insights": 1})
+            self.assertEqual(result, {"result": "ok", "insights": 1, "duplicates": 0, "parsed": 1})
             self.assertEqual(stored, 1)
             self.assertEqual(len(calls), 2)
             self.assertEqual(calls[0]["max_tokens"], 8192)

@@ -12,6 +12,10 @@ from spiritscout.core.audit import AuditLogger, NullAuditLogger
 _DIGIT_BUDGET = 36000
 _NOTES_PER_ROUTE = 8
 _NOTE_CHARS = 500
+# 干净收尾的 finish_reason：chat completions 是 stop、anthropic 原生是
+# end_turn/stop_sequence、Responses 协议是 completed。流被中转站中途掐断时
+# LiteLLM 不抛错、只交回半截正文，finish_reason 停在空值——不在集合内即视为截断
+_CLEAN_FINISH = frozenset({"stop", "end_turn", "stop_sequence", "completed"})
 
 _WRITER_SYSTEM = (
     "你是灵枢，智能体集群的总负责人。整场作业已经结束，现在由你亲自为每道"
@@ -90,32 +94,49 @@ def build_digest(
 async def writeup_body(
     gateway: Any, *, digest: dict[str, Any], audit: AuditLogger | None = None,
 ) -> str | None:
-    """灵枢撰写 WriteUp 正文（Markdown）；不可用/空产出返回 None。"""
+    """灵枢撰写 WriteUp 正文（Markdown）；不可用/空产出返回 None。
+
+    半截正文宁可重写也不当作成品：截断的流重试一次，两次都不完整时保留
+    较长者并在审计里如实记 ``truncated``（而不是谎报 ok）。
+    """
     audit = audit or NullAuditLogger()
-    try:
-        resp = await gateway.chat(
-            [
-                {"role": "system", "content": _WRITER_SYSTEM + (
-                    "\n这是无提交接口的单题解答，按 local_answer_completion 说明答案完整性与证据确认状态，"
-                    "不要写等待人工提交或虚构平台判定。" if digest.get("local_answer_completion") else "")},
-                {"role": "user", "content":
-                    json.dumps(digest, ensure_ascii=False, separators=(",", ":"))[:_DIGIT_BUDGET]},
-            ],
-            task_type="meta_planning", max_tokens=8192, timeout_seconds=420,
-            # 战报综合是散文写作不是规划：限定低思考强度（不限时单次可磨
-            # 100 秒+，占收尾等待的大头）
-            reasoning_effort="low",
-        )
-        body = (resp.content or "").strip()
-        if not body:
-            audit.log("report.writeup", "master", {"result": "empty"})
+    messages = [
+        {"role": "system", "content": _WRITER_SYSTEM + (
+            "\n这是无提交接口的单题解答，按 local_answer_completion 说明答案完整性与证据确认状态，"
+            "不要写等待人工提交或虚构平台判定。" if digest.get("local_answer_completion") else "")},
+        {"role": "user", "content":
+            json.dumps(digest, ensure_ascii=False, separators=(",", ":"))[:_DIGIT_BUDGET]},
+    ]
+    best = ""
+    clean = False
+    for attempt in (1, 2):
+        try:
+            resp = await gateway.chat(
+                messages,
+                task_type="meta_planning", max_tokens=8192, timeout_seconds=420,
+                # 战报综合是散文写作不是规划：限定低思考强度（不限时单次可磨
+                # 100 秒+，占收尾等待的大头）
+                reasoning_effort="low",
+            )
+        except Exception as exc:  # noqa: BLE001 —— 写手失败回退模板，报告不缺失
+            audit.log("report.writeup", "master",
+                      {"result": "failed", "error": str(exc)[:200]})
             return None
+        body = (resp.content or "").strip()
         # 剥掉误包裹的 Markdown 代码围栏（模型偶发 ```markdown … ```）
         if body.startswith("```"):
             body = re.sub(r"^```[a-z]*\n|\n```$", "", body).strip()
-        audit.log("report.writeup", "master", {"result": "ok", "chars": len(body)})
-        return body
-    except Exception as exc:  # noqa: BLE001 —— 写手失败回退模板，报告不缺失
+        finish = str(getattr(resp, "finish_reason", "") or "").strip().lower()
+        if body and finish in _CLEAN_FINISH:
+            best, clean = body, True
+            break
         audit.log("report.writeup", "master",
-                  {"result": "failed", "error": str(exc)[:200]})
+                  {"result": "truncated" if body else "empty", "chars": len(body),
+                   "finish_reason": finish, "attempt": attempt})
+        if len(body) > len(best):
+            best = body
+    if not best:
         return None
+    audit.log("report.writeup", "master",
+              {"result": "ok" if clean else "truncated", "chars": len(best)})
+    return best

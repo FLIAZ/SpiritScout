@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from spiritscout.agents.master.agent import MasterAgent, MasterContext, MasterState
 from spiritscout.agents.master.contracts import MasterContext as SharedContext
@@ -91,3 +91,118 @@ class MasterModuleContractTests(unittest.IsolatedAsyncioTestCase):
         first, second = [item["messages"] for item in requests]
         self.assertEqual(second[: len(first)], first)
         self.assertEqual(requests[0]["options"], requests[1]["options"])
+
+
+class PlanPriorityTests(unittest.IsolatedAsyncioTestCase):
+    """方向选择归模型：LLM 规划优先，规则派单只在模型不可用时兜底。"""
+
+    async def test_llm_plan_wins_over_mode_assembly(self) -> None:
+        master = object.__new__(MasterAgent)
+        master.ctx = SimpleNamespace(
+            enable_llm_planning=True,
+            plan_override=Mock(return_value={"dag_nodes": [], "analysis": "规则派单"}),
+            extra={"mode_prompt": ""})
+        master._llm_plan = AsyncMock(return_value={"dag_nodes": [{"tactic": "X"}],
+                                                   "analysis": "模型规划"})
+
+        plan, source = await master._acquire_plan({"round_no": 0})
+
+        self.assertEqual((source, plan["analysis"]), ("llm", "模型规划"))
+        master.ctx.plan_override.assert_not_called()
+
+    async def test_mode_assembly_is_fallback_not_shortcut(self) -> None:
+        master = object.__new__(MasterAgent)
+        master.ctx = SimpleNamespace(
+            enable_llm_planning=True,
+            plan_override=Mock(return_value={"dag_nodes": [], "analysis": "规则派单"}),
+            extra={"mode_prompt": ""})
+        master._llm_plan = AsyncMock(return_value=None)  # 规划失败/不可用
+
+        plan, source = await master._acquire_plan({"round_no": 0})
+
+        self.assertEqual((source, plan["analysis"]), ("mode_assembly", "规则派单"))
+        master._llm_plan.assert_awaited_once()
+
+    async def test_planning_disabled_uses_mode_assembly_directly(self) -> None:
+        master = object.__new__(MasterAgent)
+        master.ctx = SimpleNamespace(
+            enable_llm_planning=False,
+            plan_override=Mock(return_value={"dag_nodes": [], "analysis": "规则派单"}),
+            extra={})
+        master._llm_plan = AsyncMock()
+
+        plan, source = await master._acquire_plan({"round_no": 0})
+
+        self.assertEqual((source, plan["analysis"]), ("mode_assembly", "规则派单"))
+        master._llm_plan.assert_not_awaited()
+
+    def test_non_llm_plan_orders_mode_prompt_and_rule(self) -> None:
+        master = object.__new__(MasterAgent)
+        master.ctx = SimpleNamespace(enable_llm_planning=False, plan_override=None,
+                                     extra={"mode_prompt": "竞赛策略"})
+
+        plan, source = master._non_llm_plan({})
+
+        self.assertEqual(source, "unavailable")
+        self.assertEqual(plan["dag_nodes"], [])
+
+        master.ctx = SimpleNamespace(enable_llm_planning=False, plan_override=None,
+                                     extra={})
+        master._rule_plan = Mock(return_value={"dag_nodes": [], "analysis": "规则"})
+        plan, source = master._non_llm_plan({})
+        self.assertEqual((source, plan["analysis"]), ("rule", "规则"))
+
+
+class ChallengeResolutionTests(unittest.TestCase):
+    def test_ctf_plan_node_stamps_direction(self) -> None:
+        """模型赛题节点入图时带上方向事实（战术即方向），原始清单不被就地改写。"""
+        master = object.__new__(MasterAgent)
+        master.ctx = SimpleNamespace(
+            extra={"competition_context": {"challenges": [
+                {"id": "c1", "title": "无扩展名样本", "attachments": ["/a/x"]}]}})
+
+        nodes = master._resolve_plan_challenges([
+            {"tactic": "CTF-REVERSE@1", "title": "[reverse] 无扩展名样本",
+             "challenge_id": "c1"}])
+
+        self.assertEqual(nodes[0]["meta"]["challenge"]["direction"], "reverse")
+        self.assertNotIn("direction",
+                         master.ctx.extra["competition_context"]["challenges"][0])
+
+
+class SegmentExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_segment_sequence_merges_like_the_graph(self) -> None:
+        """分段循环替代状态图后锁住等价语义：顺序、检查点、列表累加。"""
+        master = object.__new__(MasterAgent)
+        seen: list[tuple[str, dict]] = []
+
+        def node(name: str, update: dict):
+            async def handler(state):
+                seen.append((name, dict(state)))
+                return update
+            return handler
+
+        master._meta_plan = node("meta_plan", {"round_no": 1, "tasks_dispatched": [{"n": 1}]})
+        master._dispatch = node("dispatch", {"tasks_dispatched": [{"n": 2}], "plan_source": "llm"})
+        master._aggregate = node("aggregate", {"round_views": [{"r": 1}]})
+        master._review = node("review", {"continue_iteration": False, "stop_reason": "收敛"})
+        checkpoints: list[str] = []
+        master.ctx = SimpleNamespace(journal=SimpleNamespace(
+            checkpoint=lambda *args, **kwargs: checkpoints.append(args[2])))
+
+        state = {"target": "t", "round_no": 0, "dag": {}, "tasks_dispatched": [],
+                 "round_views": [], "continue_iteration": True, "stop_reason": "", "plan_source": ""}
+        final = await master._run_segment(state)
+
+        self.assertEqual([name for name, _ in seen],
+                         ["meta_plan", "dispatch", "aggregate", "review"])
+        # 列表键跨节点累加，标量键覆盖，后续节点看到前序更新
+        self.assertEqual(final["tasks_dispatched"], [{"n": 1}, {"n": 2}])
+        self.assertEqual(final["round_views"], [{"r": 1}])
+        self.assertEqual(final["round_no"], 1)
+        self.assertFalse(final["continue_iteration"])
+        self.assertEqual(seen[1][1]["round_no"], 1)
+        self.assertEqual(seen[1][1]["tasks_dispatched"], [{"n": 1}])
+        self.assertEqual(checkpoints, [
+            "before_meta_plan", "after_meta_plan", "before_dispatch", "after_dispatch",
+            "before_aggregate", "after_aggregate", "before_review", "after_review"])

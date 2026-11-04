@@ -1,0 +1,40 @@
+# 独立 Ollama 轻量部署：16GB 内存 / 8GB 显存；不覆盖正常模式配置。
+mode: ctf
+workspace:
+  root: .spiritscout-ollama
+blackboard:
+  sqlite_path: .spiritscout-ollama/blackboard.db
+knowledge:
+  sqlite_path: .spiritscout-ollama/knowledge.db
+  chroma_path: .spiritscout-ollama/chroma
+  embedding_provider: hash
+gateway:
+  request_timeout_seconds: 420
+  max_retries: 0
+  automatic_platform_extraction: false
+  lightweight_local: true
+  stable_snapshot_prefix: true
+executor:
+  backend: local
+search:
+  enabled: false
+secretary:
+  enabled: false
+experience:
+  root: .spiritscout-ollama
+  auto_distill: false
+report:
+  output_dir: .spiritscout-ollama/reports
+web:
+  host: 127.0.0.1
+  port: 8001
+  max_concurrent_sessions: 1
+  auto_name_sessions: false
+resources:
+  root: .spiritscout-ollama/resources
+mcp_servers: []
+models_config_path: .spiritscout-ollama/models.yaml
+agent_models_path: .spiritscout-ollama/agent_models.yaml
+audit_log_path: .spiritscout-ollama/audit.jsonl
+default_routes_per_agent: 1
+max_routes_per_agent: 2

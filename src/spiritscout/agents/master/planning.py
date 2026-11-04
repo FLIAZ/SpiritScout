@@ -16,6 +16,7 @@ from spiritscout.core.models import (
     AgentType,
     BlackboardLayer,
     Event,
+    RunMode,
     Task,
     TaskStatus,
 )
@@ -45,18 +46,7 @@ class MasterPlanning:
         plan_source = "llm"
 
         if not dispatch_only and (round_no == 0 or self._needs_replan(dag, state)):
-            if ctx.plan_override is not None:
-                plan = ctx.plan_override(state)
-                plan_source = "mode_assembly"
-            else:
-                plan = await self._llm_plan(state) if ctx.enable_llm_planning else None
-                if plan is None:
-                    if ctx.extra.get("mode_prompt"):
-                        plan = {"dag_nodes": [], "analysis": "模型规划不可用，不套用预设赛制流程"}
-                        plan_source = "unavailable"
-                    else:
-                        plan = self._rule_plan(state)
-                        plan_source = "rule"
+            plan, plan_source = await self._acquire_plan(state)
             plan["dag_nodes"] = self._ensure_business_gate(
                 plan.get("dag_nodes", []))
             rejected_reason = ""
@@ -73,12 +63,7 @@ class MasterPlanning:
                 self._record_plan_result(round_no, [], [], rejected=str(exc))
                 if plan_source != "llm":
                     raise
-                if ctx.extra.get("mode_prompt"):
-                    plan = {"dag_nodes": [], "analysis": "规划被拒绝，等待模型修正，不套用赛制模板"}
-                    plan_source = "unavailable"
-                else:
-                    plan = self._rule_plan(state)
-                    plan_source = "rule"
+                plan, plan_source = self._non_llm_plan(state)
                 plan["dag_nodes"] = self._ensure_business_gate(
                     plan.get("dag_nodes", []))
                 result = dag.upsert_from_plan(plan.get("dag_nodes", []), round_no)
@@ -169,6 +154,7 @@ class MasterPlanning:
                 payload={"tactic": node.tactic, "technique": node.technique or "",
                          "node_title": node.title,
                          "mission": self._mission(),
+                         "followup_goal": bool(self.ctx.extra.get("followup_goal")),
                          "execution_recovery": self.ctx.extra.get("execution_recovery", {}),
                          "rules": self._rules(),
                          "platform_handoff": self._platform_handoff(platform, challenge),
@@ -271,39 +257,26 @@ class MasterPlanning:
                         node.meta["cancel_reason"] = stop_reason
             elif llm_decision.get("dag_nodes"):
                 nodes = self._filter_plannable(llm_decision["dag_nodes"])
-                if ctx.plan_override is not None:
-                    # 模式自带规划器（CTF/渗透赛）：重攻节点由规划器按方向轮换
-                    # 统一生成并绑定赛题；LLM 建议只作方向参考，不直接入图
+                try:
+                    result = dag.upsert_from_plan(self._resolve_plan_challenges(nodes), next_round)
+                except SpiritScoutError as exc:
+                    # 复盘建议不可落图（未知依赖/成环）：留痕后不入图，
+                    # 本轮收敛判定按「模型继续但无新节点」走下方回元规划
                     ctx.audit.log("decision.change", self.agent_id, {
-                        "action": "llm_nodes_deferred", "round": state["round_no"],
-                        "count": len(nodes),
-                        "titles": [str(n.get("title", ""))[:80] for n in nodes[:6]]})
-                    # 模式规划器负责生成下一轮的完整节点，因此这里不直接把模型
-                    # 建议写入 DAG；但“延后交给下一轮规划”本身就是继续条件。
-                    # 旧逻辑随后看到 DAG 已清空，反而立刻收敛，导致明确的继续
-                    # 决策永远到不了下一轮。
-                    deferred_replan = bool(nodes)
+                        "action": "llm_nodes_rejected", "round": state["round_no"],
+                        "reason": str(exc)[:200]})
+                    self._record_plan_result(
+                        state["round_no"], [], [], rejected=str(exc))
                 else:
-                    try:
-                        result = dag.upsert_from_plan(self._resolve_plan_challenges(nodes), next_round)
-                    except SpiritScoutError as exc:
-                        # 复盘建议不可落图（未知依赖/成环）：留痕后不入图，
-                        # 本轮收敛判定按「模型继续但无新节点」走下方回元规划
-                        ctx.audit.log("decision.change", self.agent_id, {
-                            "action": "llm_nodes_rejected", "round": state["round_no"],
-                            "reason": str(exc)[:200]})
-                        self._record_plan_result(
-                            state["round_no"], [], [], rejected=str(exc))
-                    else:
-                        self._record_plan_result(
-                            state["round_no"], result.created, result.skipped)
-                        # 落图回执全量留痕：新建与跳过（含原因）都可追查——
-                        # 静默吞掉会让下一轮复盘误判「在途」而空等
-                        ctx.audit.log("decision.change", self.agent_id, {
-                            "action": "llm_nodes_applied",
-                            "round": state["round_no"],
-                            "created": [n.node_id for n in result.created],
-                            "skipped_nodes": self._skip_digest(result.skipped)})
+                    self._record_plan_result(
+                        state["round_no"], result.created, result.skipped)
+                    # 落图回执全量留痕：新建与跳过（含原因）都可追查——
+                    # 静默吞掉会让下一轮复盘误判「在途」而空等
+                    ctx.audit.log("decision.change", self.agent_id, {
+                        "action": "llm_nodes_applied",
+                        "round": state["round_no"],
+                        "created": [n.node_id for n in result.created],
+                        "skipped_nodes": self._skip_digest(result.skipped)})
 
         if (not stop_reason and not deferred_replan
                 and not dag.ready_nodes() and not dag.has_unfinished()):
@@ -338,6 +311,8 @@ class MasterPlanning:
         得分，平台视野内还有未完成题时不走快路——继续重攻剩余赛题，是否
         收手交模型复盘按全局态势裁量。
         """
+        if self.ctx.extra.get("followup_goal"):
+            return False
         if not (bool(view.get("flags")) and not self._ctf_flags_pending(view)
                 and not dag.has_unfinished()
                 and not view.get("vuln_in_pipeline")):
@@ -356,6 +331,23 @@ class MasterPlanning:
         flags = view.get("flags")
         return bool(flags) and not flags.get("accepted")
 
+    def _flag_solved_ids(self) -> list[str]:
+        """已破题集合（Flag/平台完成态）——模型派单不重派已破题的事实依据。"""
+        extra = self.ctx.extra
+        if extra.get("followup_goal"):
+            return []
+        manager = extra.get("flag_manager")
+        if getattr(manager, "local_only", False):
+            return sorted(manager.completed_ids())
+        solved = ({f.challenge_id for f in manager.accepted_flags()}
+                  if manager is not None else set())
+        platform = extra.get("platform")
+        if platform is not None and platform.has_completion_signal():
+            challenges = ((extra.get("competition_context") or {}).get("challenges") or [])
+            solved = {cid for cid in (str(ch.get("id") or "") for ch in challenges)
+                      if cid and platform.is_completed(cid)}
+        return sorted(solved)
+
     @staticmethod
     def _needs_replan(dag: TaskDAG, state: MasterState) -> bool:
         """动态重规划触发：无节点，或无就绪且无运行中节点（Incalmo 防刚性停滞）。"""
@@ -364,6 +356,27 @@ class MasterPlanning:
         return not dag.ready_nodes() and not any(
             n.status == TaskStatus.RUNNING for n in dag.all_nodes()
         )
+
+    async def _acquire_plan(self, state: MasterState) -> tuple[dict[str, Any], str]:
+        """取本轮计划：模型规划优先，规则派单只在模型不可用时兜底。
+
+        赛题派哪个方向是意图分类，由模型读了题面与附件证据判断
+        （AGENTS.md 边界）；模式规则派单（plan_override）不再短路模型，
+        保留给无模型演练与规划失败两条兜底路径。
+        """
+        plan = await self._llm_plan(state) if self.ctx.enable_llm_planning else None
+        if plan is not None:
+            return plan, "llm"
+        return self._non_llm_plan(state)
+
+    def _non_llm_plan(self, state: MasterState) -> tuple[dict[str, Any], str]:
+        ctx = self.ctx
+        if ctx.plan_override is not None:
+            return ctx.plan_override(state), "mode_assembly"
+        if ctx.extra.get("mode_prompt"):
+            return ({"dag_nodes": [], "analysis": "模型规划不可用，不套用预设赛制流程"},
+                    "unavailable")
+        return self._rule_plan(state), "rule"
 
     def _final_verdicts(self) -> list[dict[str, Any]]:
         """终审：复核独立核验（鉴真）结论（规则引擎再确认，模型仅建议）。"""
@@ -400,6 +413,17 @@ class MasterPlanning:
         try:
             tactic_map = self.ctx.tactic_map or TACTIC_AGENT_MAP
             dag = TaskDAG.from_dict(state["dag"])
+            ctf_directions = "/".join(sorted(t for t in tactic_map if t.startswith("CTF-")))
+            ctf_guidance = (
+                "存在赛题清单（competition_context.challenges）时：为每道未完成、未暂缓、"
+                "不在 flag_solved_ids 的题，按题面与附件证据选择最说得通的 1~2 个方向"
+                f"战术（{ctf_directions}）并行开工——attachment_notes 是文件头识别的"
+                "原始事实不是结论，题面关键词与 URL 的角色也由你判断；重攻换未试过的"
+                "方向（战术@轮次），已试方向见 challenge_states 各题 nodes 的 tactic。"
+                "有 user_type_hints 时，优先结合用户给出的题型快速确定首派方向，不再重复确认标签。"
+                "这些是方向提示，不是题型定论、解题步骤或角色/工具限制；IoT、AI安全等可由现有专项协作，"
+                "证据不符时可跨题型调整、增派，未选择的方向仍然可用。"
+            ) if ctf_directions else ""
             # 只调整调用强度，不替模型选择题目、战术或判定停滞。
             competition_opening = (state["round_no"] == 0 and not dag.all_nodes()
                                    and bool(self.ctx.extra.get("mode_prompt"))
@@ -414,6 +438,8 @@ class MasterPlanning:
                         "competition_status": self._competition_status(dag),
                         "queue_refill": bool(state.get("queue_refill")),
                         "planned_challenge_ids": list(self._challenge_states(dag)),
+                        "challenge_states": self._challenge_states(dag),
+                        "flag_solved_ids": self._flag_solved_ids(),
                         "platform_facts": (self.ctx.extra.get("platform_facts") or [])[-8:],
                         "world_state": self._world_state(),
                         "project_rules": self._project_rules(),
@@ -484,12 +510,12 @@ class MasterPlanning:
                             "rejected 非空表示整批被拒——按原因修正，不要原样重发。"
                             "SRC 模式先建立业务上下文；智能体模式的阶段与依赖按"
                             "实际规则理解，独立题目默认遵循列表顺序、卡题留档后跳过，"
-                            "首轮扫完再回访；用户明确指令和实际依赖优先。"),
+                            "首轮扫完再回访；用户明确指令和实际依赖优先。" + ctf_guidance),
                     }, 8000),
                 audit=self.ctx.audit, actor=self.agent_id, memory=decision_memory(self, "plan"),
                 task_type="meta_planning", response_format="json",
                 reasoning_effort=("low" if competition_opening or state.get("queue_refill")
-                                  else self._MASTER_EFFORT),
+                                  else self._master_effort),
             )
             data = extract_json(resp.content)
             if not isinstance(data, dict) or "dag_nodes" not in data:
@@ -525,8 +551,12 @@ class MasterPlanning:
             if cid:
                 if cid not in by_id:
                     raise SpiritScoutError(f"规划错误：challenge_id「{cid}」不在当前赛题清单中")
-                node["meta"] = {**meta, "challenge_id": cid,
-                                "challenge": copy.deepcopy(by_id[cid])}
+                challenge = copy.deepcopy(by_id[cid])
+                base = str(node.get("tactic", "")).split("@", 1)[0]
+                if base.startswith("CTF-"):
+                    # 战术即方向：派单对象带上方向事实，执行者与台账口径一致
+                    challenge["direction"] = base.split("-", 1)[1].lower()
+                node["meta"] = {**meta, "challenge_id": cid, "challenge": challenge}
             resolved.append(node)
         return resolved
 
@@ -788,7 +818,7 @@ class MasterPlanning:
                 decision_messages(self._system_prompt() + "\nROLE: meta_planner", payload, 16000),
                 audit=self.ctx.audit, actor=self.agent_id, memory=decision_memory(self, "review"),
                 task_type="meta_planning", response_format="json",
-                reasoning_effort=self._MASTER_EFFORT,
+                reasoning_effort=self._master_effort,
             )
             data = extract_json(resp.content)
             if isinstance(data, dict):
@@ -948,6 +978,16 @@ class MasterPlanning:
         )
         mode_prompt = str(self.ctx.extra.get("mode_prompt") or "").strip()
         mode_block = f"{mode_prompt}\n" if mode_prompt else ""
+        if (self.ctx.extra.get("lightweight_local")
+                and getattr(self.ctx.policy, "mode", None) in (RunMode.CTF, RunMode.AWDP)):
+            # Ollama 小模型 × CTF 模式：压缩主 Agent 提示（16K ctx 预算紧）；
+            # SRC 会话沿用完整提示，不受轻量部署影响。
+            return (agent_system_prompt(AgentType.MASTER, allow_search=search_allowed(self.ctx))
+                    + mode_block + "\n实际可用角色：" + (roster or "无")
+                    + "\n依据当前任务、用户原话、授权和现场证据自主规划；规则与原文按黑板引用读取。"
+                    "只派必要工作，优先复用已有证据，避免重复判读和重复执行。"
+                    "任务、依赖和后续取舍由你判断，不按固定解法或回合数收尾。"
+                    "结果未验证不能称为成功；返回当前调用约定的完整 JSON，不复述整个历史。")
         return (
             agent_system_prompt(AgentType.MASTER, allow_search=search_allowed(self.ctx))
             + "\n"

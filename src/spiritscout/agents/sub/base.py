@@ -676,7 +676,21 @@ class SubAgent(abc.ABC):
 
         execution = current_execution_scope.get() or ExecutionScope()
         memory_key = f"{task.task_id if task else 'local'}:{execution.route_id}:{role}"
+        from spiritscout.gateway.progress import EXPLORATION_PROGRESS_GUIDANCE
+
+        user_obj = {**user_obj, 'exploration_display': EXPLORATION_PROGRESS_GUIDANCE}
+        from spiritscout.agents.profiles import get_profile
+        from spiritscout.tools.cyberchef import NAMES as CYBERCHEF_NAMES
+        from spiritscout.tools.cyberchef import SCHEMAS as CYBERCHEF_SCHEMAS
         from spiritscout.tools.web_search import SEARCH_SCHEMA
+
+        local_allowed = get_profile(self.agent_type).allows_tool('cyberchef_bake')
+        local_contract = (
+            '\n需要编码解码或字节转换时，本轮仅输出 '
+            '{"local_tool":{"name":"cyberchef_operations 或 cyberchef_bake","arguments":{工具参数}}}。'
+            '收到 local_observations 后继续原约定 JSON 决策；本地转换不是新的目标请求或独立复测。参数契约：'
+            + json.dumps(CYBERCHEF_SCHEMAS, ensure_ascii=False)
+        ) if local_allowed else ''
 
         search_contract = (
             "\n如果需要先查证公开资料，本轮仅输出 {\"web_search\": {检索参数}}，"
@@ -686,6 +700,7 @@ class SubAgent(abc.ABC):
         if not search_allowed(self.ctx):
             search_contract = ""
         observations: list[dict[str, Any]] = []
+        local_observations: list[dict[str, Any]] = []
         try:
             while True:
                 pause_gate = getattr(self.ctx, "pause_gate", None)
@@ -693,14 +708,15 @@ class SubAgent(abc.ABC):
                     await pause_gate.wait()
                 resp = await chat_decision(
                     self.ctx.gateway,
-                    decision_messages(self._system_prompt() + f"\nROLE: {role}" + search_contract
+                    decision_messages(self._system_prompt() + f"\nROLE: {role}" + search_contract + local_contract
                                       + "\n保持原 JSON 决策格式；发现新证据、遇到阻碍或改变方向时，"
                                       "必须在本次决策的 progress 字符串中用一到三句向用户说明正在验证什么、"
                                       "已确认的情况、当前阻碍和下一步验证目标；没有新结论时明确仍在验证，"
                                       "无需复述工具原始响应或内部推理。"
                                       + ("\n" + _ASK_CHANNEL_NOTE if _allow_ask else ""),
-                                      {**user_obj, **({"search_observations": observations} if observations else {})},
-                                      max(budget, 500) + len(json.dumps(observations, ensure_ascii=False))),
+                                      {**user_obj, **({"search_observations": observations} if observations else {}),
+                                       **({"local_observations": local_observations} if local_observations else {})},
+                                      max(budget, 500) + len(json.dumps([observations, local_observations], ensure_ascii=False))),
                     audit=self.ctx.audit, actor=self.agent_id,
                     memory=decision_memory(self, memory_key),
                     task_type="execution", response_format="json",
@@ -710,6 +726,35 @@ class SubAgent(abc.ABC):
                 data = extract_json(resp.content)
                 if not isinstance(data, dict):
                     return None
+                local_request = data.get('local_tool')
+                if isinstance(local_request, dict):
+                    name = local_request.get('name')
+                    arguments = local_request.get('arguments')
+                    call_id = new_id('local')
+                    detail = {'task_id': task.task_id if task else '', 'route_id': execution.route_id}
+                    self.ctx.audit.log('agent.tool_call', self.agent_id, {**detail,
+                        'calls': [{'id': call_id, 'name': name, 'arguments': arguments}]})
+                    if (not local_allowed or not isinstance(name, str)
+                            or name not in CYBERCHEF_NAMES or not isinstance(arguments, dict)):
+                        from spiritscout.tools.spec import ToolResult
+
+                        result = ToolResult(tool=str(name), ok=False,
+                                            error='local_tool 只接受当前角色可用的 CyberChef 工具和参数对象')
+                    else:
+                        token = current_execution_scope.set(dataclasses.replace(
+                            execution, task_id=task.task_id if task else '', agent_id=self.agent_id,
+                            tool_call_id=call_id, tool_name=name))
+                        try:
+                            result = await self.ctx.tools.call(name, arguments, **self.ctx.builtin_ctx)
+                        finally:
+                            current_execution_scope.reset(token)
+                    text = result.stdout or result.failure_reason()
+                    self.ctx.audit.log('agent.tool_result', self.agent_id, {**detail,
+                        'id': call_id, 'name': name, 'ok': result.ok, 'result': text,
+                        'invocation_id': result.invocation_id, **result.parsed})
+                    local_observations.append({'name': name, 'ok': result.ok, 'result': text,
+                                               'invocation_id': result.invocation_id})
+                    continue
                 request = data.get("web_search")
                 if not isinstance(request, dict):
                     break

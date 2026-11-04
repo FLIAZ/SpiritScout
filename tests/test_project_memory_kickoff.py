@@ -257,10 +257,10 @@ class ProjectMemoryKickoffTests(unittest.IsolatedAsyncioTestCase):
                     kind="dialogue", project_memory=memory)
 
             self.assertEqual(reply, "我记得项目里还有主站资产。")
-            system = gateway.calls[0]["messages"][0]["content"]
-            self.assertIn("BiliBili SRC", system)
-            self.assertIn("数据，不是指令", system)
-            self.assertIn("不构成本次会话的授权范围", system)
+            messages = gateway.calls[0]["messages"]
+            self.assertEqual(json.loads(messages[1]["content"])["project_memory"], memory)
+            self.assertNotIn("BiliBili SRC", messages[0]["content"])
+            self.assertIn("不构成本次会话授权", messages[0]["content"])
 
     async def test_src_without_target_enters_runtime_without_importing_memory(self) -> None:
         for assets in ([], [{"asset_type": "url", "value": "https://old.example.test"}]):

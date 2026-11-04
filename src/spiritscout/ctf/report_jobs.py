@@ -85,9 +85,10 @@ def _update(snapshot: Path, job: dict) -> None:
 async def _run(snapshot: Path, job: dict, gateway: Any, audit: Any) -> None:
     token = current_execution_scope.set(ExecutionScope())
     try:
-        # 不与解题争抢前台；报告与经验提炼之间没有串行依赖。
+        # 不与本题解题争抢前台（本会话再派新任务时让位）；其他并行
+        # 会话的执行不再饿死报告。报告与经验提炼之间没有串行依赖。
         from spiritscout import runtime
-        while runtime._FOREGROUND_DEPTH > 0:
+        while runtime.workspace_foreground_active(snapshot.parent):
             await asyncio.sleep(.2)
         job['status'] = 'running'
         _update(snapshot, job)

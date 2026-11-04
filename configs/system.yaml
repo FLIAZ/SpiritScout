@@ -122,6 +122,31 @@ mcp_servers:
 #   .venv/bin/python3 <IDA>/idalib/python/py-activate-idalib.py -d <IDA>
 #   逆向工具带 database 参数，先用 idb_open 打开目标（库文件 .i64 生成在目标
 #   文件旁，目标需位于可写目录）；idb_open 的 mode=prefer_gui 可接管 IDA 图形端。
+# —— pwndbg（git master，PyPI 无 Python 3.14 wheel；pt 子依赖需先本地克隆安装）：
+#   git clone --depth 1 https://github.com/martinradev/gdb-pt-dump /tmp/pt-src
+#   .venv/bin/pip install /tmp/pt-src && .venv/bin/pip install --no-deps /tmp/pwndbg-src
+#   .venv/bin/pip install capstone6pwndbg==8.0.0 "unicorn==2.1.4" 等其余依赖
+#   装完 .venv/bin/pwndbg 即内置插件的 gdb（沙箱 PATH 可直呼）。
+# —— misc 工具带（venv 层对沙箱可见；家目录层不可见）：
+#   .venv/bin/pip install volatility3                 # 内存取证（vol）
+#   gem install --install-dir .venv/ruby-gems --no-document zsteg
+#   # .venv/bin/zsteg 是自定位包装器（设 GEM_HOME 指向 .venv/ruby-gems）
+#   发行版层缺口（需 sudo dnf install）：steghide foremost pngcheck
+# —— GitHub 补装带（github.com 直连不稳时走 api.github.com 资产端点
+#   curl -L -H "Accept: application/octet-stream" .../releases/assets/<id>；均落
+#   venv 层，沙箱 PATH 直呼；大文件用 curl -C - 断点续传）：
+#   ffuf 2.3.0（releases 下 linux_amd64 tar）→ .venv/bin/ffuf       # 目录/参数爆破
+#   gobuster 3.8.2（Linux_x86_64 tar）→ .venv/bin/gobuster
+#   jadx 1.5.6（zip 解至 .venv/opt/jadx，符号链 .venv/bin/jadx）    # APK/JAR 反编译（需 java）
+#   apktool 3.0.3（jar 落 .venv/opt/apktool，配 java -jar 包装器）  # APK 资源解码（需 java）
+#   stegseek 0.6（deb 内 data.tar.* 提取 usr/local/bin/stegseek）   # steghide 口令爆破
+#   .venv/bin/pip install dirsearch                   # 目录爆破（PyPI 通道）
+#   # ropper 在 Python 3.14 编不过 filebytes（ROPgadget 已覆盖）；seccomp-tools
+#   # 需 ruby-devel 原生扩展，缺头文件时装不上（可用 python 手解 BPF 规则）。
+# —— 字典（SecLists 精选 + rockyou，落 .venv/share/wordlists/ 供沙箱只读）：
+#   raw.githubusercontent.com/danielmiessler/SecLists/master/ 下取
+#   Discovery/Web-Content/{common,raft-small-directories,raft-medium-directories,
+#   quickhits}.txt 与 Passwords/Leaked-Databases/rockyou.txt.tar.gz（54MB，断点续传）
 # —— Yakit 引擎提取（一次性，来自官方 AppImage）：
 #   ./Yakit-*.AppImage --appimage-extract → squashfs-root/bins/yak.zip
 #   解出 bins/yak_linux_amd64 放入 .tools/yak/yak 并 chmod +x

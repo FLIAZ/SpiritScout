@@ -34,6 +34,8 @@ class LaunchRequest:
     rps: float = 10.0
     flag_format: str | None = None
     multiple_answers: bool = False
+    ctf_type_hints: list[str] = field(default_factory=list)
+    ctf_type_note: str = ""
     challenges_yaml: str | None = None      # CTF/渗透赛赛题 YAML 文本
     platform_yaml: str | None = None        # 平台档案 YAML 文本（托管题/跑分平台）
     rules_yaml: str | None = None           # 渗透赛赛制规则 YAML 文本
@@ -203,33 +205,33 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
         req = LaunchRequest(**{**req.__dict__, "mode": fallback_mode(req)})
     if mission and not req.target and m_urls:
         req = LaunchRequest(**{**req.__dict__, "target": m_urls[0]})
-    elif mission and not req.target and m_domains:
+    elif mission and not req.target and m_domains and req.mode != RunMode.AWDP:
         # 任务中已有纯域名时补齐工作入口；无目标的 SRC 则保留空值。
+        # AWDP 修补只认附件，任务文本里的文件名（如 fix.tar.gz）不是目标。
         req = LaunchRequest(**{**req.__dict__, "target": "https://" + m_domains[0]})
-    # SRC 可仅凭任务描述进入规划；目标缺失由模型按任务需要澄清。
-    if (req.mode == RunMode.CTF and not req.challenges_yaml and not m_urls
-            and not req.has_uploads and not req.platform_yaml and not mode_auto):
-        raise SpiritScoutError(
-            "CTF 模式需要赛题清单——粘贴赛题 YAML，写明赛题 URL，上传题目附件，"
-            "或提供平台档案（托管题由平台列题）")
-
     challenges = (parse_challenges_yaml(req.challenges_yaml)
                   if req.challenges_yaml else [])
-    if req.mode == RunMode.CTF and not challenges and m_urls:
-        # 任务描述推导赛题清单：每个 URL 合成一题，方向由分类器按
-        # 任务描述关键词判定（misc 兜底），赛题入口自动并入授权范围
-        challenges = [
-            {"id": f"mission-{i + 1}", "title": f"任务描述赛题 {urlparse(u).hostname or u}",
-             "url": u, "description": mission[:500]}
-            for i, u in enumerate(m_urls)
-        ]
-    elif req.mode == RunMode.CTF and not challenges and req.has_uploads:
-        # 只有附件的赛题（离线题常态）：题目壳由装配合成，附件文件由
-        # 会话创建流程注入 attachments 字段——此处不知道落地路径
-        challenges = [{"id": "mission-1", "title": "任务附件赛题",
-                       "description": mission[:500]}]
+    if req.mode in (RunMode.CTF, RunMode.AWDP) and not challenges:
+        # 任务里的 URL 可能是题目实例，也可能只是平台入口——不写死捆绑成
+        # 赛题地址：任务原文完整进描述，URL 的角色由模型读了判断。入口经
+        # extract_targets 并入授权范围（用户原话即授权边界），不因不绑题而丢失
+        description = mission or (f"任务入口：{req.target}" if req.target else "")
+        if description or req.has_uploads:
+            challenges = [{"id": "mission-1",
+                           "title": "任务描述赛题" if description else "任务附件赛题",
+                           "description": description}]
+        else:
+            raise SpiritScoutError(
+                "CTF 模式需要赛题内容——粘贴赛题 YAML，写明赛题 URL，上传题目附件，"
+                "或提供平台档案（托管题由平台列题）")
 
-    if req.mode == RunMode.CTF and len(challenges) == 1 and not req.platform_yaml:
+    if req.mode in (RunMode.CTF, RunMode.AWDP) and len(challenges) == 1:
+        types = list(dict.fromkeys(value.strip() for value in req.ctf_type_hints if value.strip()))
+        note = req.ctf_type_note.strip()
+        if types or note:
+            challenges[0]["user_type_hints"] = {"types": types, "extra": note, "source": "user",
+                                                "binding": "direction_hint_only"}
+    if req.mode in (RunMode.CTF, RunMode.AWDP) and len(challenges) == 1 and not req.platform_yaml:
         challenges[0]["multiple_answers"] = req.multiple_answers
 
     rules = None

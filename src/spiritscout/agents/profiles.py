@@ -27,6 +27,8 @@ class AgentProfile:
     runtime_tools: tuple[str, ...] = ()
 
     def allows_tool(self, name: str) -> bool:
+        if name in {"cyberchef_operations", "cyberchef_bake"}:
+            return self.key not in {AgentType.MASTER, AgentType.SECRETARY, AgentType.REPORT}
         if name == "http_response_read":
             return self.allows_tool("http_probe")
         if name in {"asset_memory_lookup", "web_search"}:
@@ -196,6 +198,16 @@ def agent_prompt_parts(agent: AgentType | str, *, allow_search: bool = True) -> 
         "用 `command -v`、`--version` 或 `python -c 'import ...'` 探测，"
         "不要凭记忆假设。\n"
     ) if profile.allows_tool("sandbox_exec") else ""
+    # 能力偏好事实（同 CyberChef 句式）：说明工具在手时的优选路径，
+    # 不规定解题流程——采纳与否仍由模型按现场判断
+    ida_note = (
+        "反编译与函数级分析优先 IDA MCP：先 mcp_search 检索工具与参数，"
+        "再用 mcp_call 加载附件、读伪代码和交叉引用；命令行反汇编用于"
+        "快速补位与交叉验证。\n"
+    ) if any(p.startswith("mcp__ida__") for p in profile.runtime_tools) else ""
+    dbg_note = (
+        "动态调试直接用 pwndbg 命令（内置插件的 gdb，参数用法同 gdb）。\n"
+    ) if profile.key == AgentType.CTF_PWN else ""
     from spiritscout.tools.web_search import SEARCH_GUIDANCE
 
     search_note = ("智能体模式禁止公开网页搜索，不使用 Exa 或其他外部搜索服务；只使用赛题现场和已有资料。"
@@ -209,7 +221,7 @@ def agent_prompt_parts(agent: AgentType | str, *, allow_search: bool = True) -> 
         f"标准流程：{workflow}。\n"
         f"可用工具面：{tools}。只使用当前实际提供的工具，不声称已执行"
         f"未调用的工具。\n"
-        f"{probe}{search_note}\n"
+        f"{probe}{ida_note}{dbg_note}{search_note}\n"
     )
     common = (
         "工具选择以完成当前问题的最小成本为准：网页正文、源码、接口响应优先使用 HTTP 工具；"
@@ -218,6 +230,10 @@ def agent_prompt_parts(agent: AgentType | str, *, allow_search: bool = True) -> 
         "不要为确认工具存在而打开浏览器，也不要无新问题地重复获取整页快照。"
         "脚本只输出本轮需要的状态、关键字段、错误与证据路径，原始大结果留文件按需读取；"
         "保留原文中的常量与可复现证据，避免手抄或凭摘要改写关键数据。"
+        "编码解码、哈希和字节运算必须调用工具验证，不凭心算生成结果；"
+        "有 CyberChef 工具时先查询操作参数再执行配方，复杂算法可用脚本。"
+        "转换出的变量名、参数名和路径按原字节复用，不按语义补全或纠错；"
+        "优先让后续脚本直接读取 output_file，未经验证的结果只作为假设。"
         "输出只包含当前阶段需要的决策和证据引用；不复述已给出的任务、授权、"
         "业务背景或整段工具返回。简单参数选择和无异常响应判断简洁完成，"
         "遇到矛盾或高价值证据再深入推理；无新事实时明确指出缺口，避免重复生成相同计划。"

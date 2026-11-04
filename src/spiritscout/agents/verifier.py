@@ -32,6 +32,8 @@ from spiritscout.resources.runtime import (
     native_skill_result,
     runtime_for,
 )
+from spiritscout.tools.cyberchef import NAMES as CYBERCHEF_NAMES
+from spiritscout.tools.cyberchef import SCHEMAS as CYBERCHEF_SCHEMAS
 from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
 from spiritscout.tools.search_policy import search_allowed
 from spiritscout.tools.web_search import SEARCH_GUIDANCE, SEARCH_SCHEMA
@@ -51,6 +53,8 @@ confirmed 必须有独立实际复现、不同执行的对照、明确危害及�
 超时、被拦截、审批拒绝、规则不足或无法排除假设都用 inconclusive。未复测和不符合规则的结果绝不收录。
 quote 只能是工具返回 result 字段中的连续原文子串，不要加 result 字段名、引号包装、URL 或括号说明。解释全部放在 reason。若返回 result 为 public-home，quote 就写 public-home。
 输出简洁，引用实际执行 ID，不复述整份背景。无需每轮咨询其他智能体。
+编码解码和哈希使用 CyberChef 工具，不凭心算补写变量名；先查询操作参数，后续按原字节复用 output_file。
+CyberChef 是本地数据转换，不能作为新的独立复测或对照；危害引用仍须来自独立取得的目标响应。
 """
 
 
@@ -79,6 +83,7 @@ class VerifierAgent:
                         "description": "仅当选项彼此不互斥、用户可能同时选多项时设 true；允许/拒绝等互斥决策省略"},
                     "targets": {"type": "array", "items": {"type": "string"}}}, "required": ["question"]}}}]
         schemas.append(RESPONSE_SCHEMA)
+        schemas.extend(CYBERCHEF_SCHEMAS)
         if search_allowed(self.ctx):
             schemas.append(SEARCH_SCHEMA)
         proof = {"type": "array", "items": {"type": "object", "properties": {
@@ -228,7 +233,7 @@ class VerifierAgent:
                     continue
                 ref, quote = str(item.get("execution_id", "")), str(item.get("quote", ""))
                 actual = executions.get(ref, {})
-                if (actual.get("ok") and actual.get("tool") != "web_search"
+                if (actual.get("ok") and actual.get("tool") not in CYBERCHEF_NAMES | {"web_search"}
                         and quote.strip() and quote in actual.get("text", "")):
                     out.append({"execution_id": ref, "quote": quote[:1000]})
             return out

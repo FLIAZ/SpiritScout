@@ -123,6 +123,18 @@ class Blackboard:
                 self._conn.execute("BEGIN IMMEDIATE")
             yield self._conn
 
+    @contextmanager
+    def _read_snapshot(self) -> Iterator[None]:
+        """多层依赖在同一 SQLite 快照核对；不能提交或回滚调用方的写事务。"""
+        owned = not self._conn.in_transaction
+        if owned:
+            self._conn.execute('BEGIN')
+        try:
+            yield
+        finally:
+            if owned:
+                self._conn.rollback()
+
     def write(
         self,
         layer: BlackboardLayer,
@@ -217,7 +229,7 @@ class Blackboard:
         return {str(row[0]): row[1] for row in rows}
 
     def read(self, layer: BlackboardLayer, record_id: str) -> dict[str, Any] | None:
-        with self._lock:
+        with self._lock, self._read_snapshot():
             row = self._conn.execute(
                 "SELECT data FROM bb_records WHERE layer=? AND record_id=?",
                 (layer.value, record_id),
@@ -226,7 +238,7 @@ class Blackboard:
             return evidence_view(self._conn, json.loads(row["data"])) if row else None
 
     def read_versioned(self, layer: BlackboardLayer, record_id: str) -> tuple[dict[str, Any], int] | None:
-        with self._lock:
+        with self._lock, self._read_snapshot():
             row = self._conn.execute(
                 "SELECT data, version FROM bb_records WHERE layer=? AND record_id=?",
                 (layer.value, record_id),
@@ -255,14 +267,15 @@ class Blackboard:
             params.extend((f'$.{field}', value))
         sql += " ORDER BY updated_at DESC LIMIT ?"
         params.append(limit)
-        with self._lock:
+        with self._lock, self._read_snapshot():
             rows = self._conn.execute(sql, params).fetchall()
             from spiritscout.blackboard.provenance import evidence_view
+            dependency_cache: dict = {}
             return [
                 {
                     "record_id": r["record_id"],
                     "version": r["version"],
-                    "data": evidence_view(self._conn, json.loads(r["data"])),
+                    "data": evidence_view(self._conn, json.loads(r["data"]), dependency_cache=dependency_cache),
                     "updated_by": r["updated_by"],
                     "updated_at": r["updated_at"],
                 }
