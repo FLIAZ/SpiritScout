@@ -2,7 +2,7 @@
 
 # SpiritScout · 灵枢
 
-**A multi-agent security testing workbench for vulnerability research, CTFs, and agent competitions**
+**A multi-agent security testing workbench for vulnerability research, CTFs, AWDP, and agent competitions**
 
 Assign tasks in your browser, let agents collaborate, and inspect their progress, evidence, and artifacts.
 
@@ -21,7 +21,8 @@ Assign tasks in your browser, let agents collaborate, and inspect their progress
 | Mode | Use cases | Collaboration and approval |
 | --- | --- | --- |
 | **SRC** | Authorized asset analysis, vulnerability reproduction, and penetration testing reports | Supports user clarification and manual browser takeover; dangerous operations require approval each time |
-| **CTF** | Web, Pwn, reverse engineering, cryptography, and Misc challenges | Sub-agents work autonomously with optional user guidance; tool operations are pre-authorized and audited |
+| **CTF** | Web, Pwn, reverse engineering, cryptography, and Misc challenges | Sub-agents in the standard deployment; one persistent executor in lightweight mode; tool operations are pre-authorized and audited |
+| **AWDP patching** | Local source review, minimal fixes, and patch delivery | A dedicated entry in the lightweight console; preserve normal functionality and validate patch artifacts against original paths |
 | **Agent competition** | Platform-hosted competitions, multi-challenge scheduling, and collection of completed results | Plans from user-provided rules and runs unattended; does not ask the user questions or search the public web |
 
 SRC refers to security response center / bug bounty workflows.
@@ -36,6 +37,23 @@ SRC refers to security response center / bug bounty workflows.
 
 Skill management uses cards with separate enabled/disabled groups, combined category/source/date filters, green switches, and deletion. Open a card to browse its folders, preview and edit rendered Markdown, with draft protection and version-checked saves. Multiple ZIP and TAR archives can be imported directly; RAR / 7z requires system libarchive. See [management and import details (中文)](docs/部署与配置.md#skill-目录与文件浏览).
 Main and child agents can discover Skills, load SKILL.md in full, and read supporting files on demand. Conversation traces show actual reads, while retained content is reused without duplicate injection.
+
+### Highlight: AWDP with small local models through Ollama
+
+**A patching workflow for limited-VRAM machines and disconnected competitions.** SpiritScout provides a separate lightweight CTF / AWDP mode: a local model analyzes challenges, runs tools, edits source files, and delivers downloadable patch artifacts through `submit_fix`, without a cloud-model API.
+
+- **One persistent executor:** a continuous tool loop handles the current goal without lead-agent planning, supervision, or specialist dispatch. Native Ollama tool calls and a shared inference slot reduce extra calls and contention for VRAM.
+- **Small-model context handling:** long histories are organized by complete tool exchanges, preserving authorization, rules, and current evidence; originals remain available through paginated reads. Repeated failures and identical observations feed an evidence review so the model can reconsider its next action.
+- **Competition artifacts:** preserve original relative paths and validate tar.gz format, file manifests, and actual byte changes; reject traversal, links, and cross-challenge paths. Artifact validation does not prove a vulnerability is fixed or that a competition platform accepted the submission; functional and security regression evidence is still needed.
+- **Separate deployment:** lightweight configuration, model assignments, and sessions stay separate from the standard deployment. The default profile targets `qwen3.5:9b` on 16GB RAM / 8GB VRAM; speed and repair quality depend on the challenge, model, and hardware.
+
+Prepare project dependencies, a running Ollama instance, downloaded weights, and required tools, then start:
+
+```bash
+./launch.sh start --offline
+```
+
+The console defaults to `http://127.0.0.1:8001`. Select **AWDP patching**, upload the challenge source, and describe the repair requirements. See [Ollama lightweight setup (中文)](docs/Ollama轻量配置.md) for preparation, parameters, and archive requirements, and [design rationale and related work (中文)](docs/06-创新点与技术思想.md) for the engineering choices.
 
 ----
 
