@@ -222,6 +222,31 @@ main { min-width: 0; padding: 22px 26px 40px; }
 .send-btn:active { transform: translateY(0); }
 .send-btn:disabled { opacity: .3; cursor: not-allowed; transform: none; }
 .send-btn svg { width: 18px; height: 18px; }
+.sr-only { position: absolute !important; width: 1px !important; height: 1px !important;
+  padding: 0 !important; margin: -1px !important; overflow: hidden !important;
+  clip-path: inset(50%); white-space: nowrap; border: 0 !important; }
+.action-icon, .inline-help > summary { display: inline-flex; align-items: center;
+  justify-content: center; width: 34px; height: 34px; flex: none; padding: 7px;
+  border: 1px solid transparent; border-radius: 8px; background: transparent;
+  color: var(--ink-2); cursor: pointer; list-style: none; }
+.action-icon svg, .inline-help > summary svg { width: 18px; height: 18px; flex: none; }
+.action-icon:hover, .inline-help > summary:hover { color: var(--ink); background: var(--surface-2); }
+.action-icon:focus-visible, .inline-help > summary:focus-visible,
+.page-details > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.action-icon:disabled { opacity: .4; cursor: not-allowed; }
+.inline-help { position: relative; flex: none; }
+.inline-help > summary::-webkit-details-marker { display: none; }
+.inline-help > :not(summary) { position: absolute; top: calc(100% + 6px); right: 0;
+  z-index: 60; width: min(300px, calc(100vw - 48px)); margin: 0; padding: 12px 14px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+  box-shadow: var(--shadow-raise); color: var(--ink-2); font-size: 12px; line-height: 1.7;
+  text-align: left; }
+.comp-bar > .model-picker { margin-left: auto; }
+.page-details { color: var(--ink-2); font-size: 12px; margin-block: 8px; }
+.page-details > summary { cursor: pointer; width: fit-content; }
+.page-details > p { max-width: 480px; line-height: 1.7; }
+.bind-status:empty, .console-insight-head + [role="status"]:empty { display: none; }
+#trace-jump svg { width: 18px; height: 18px; vertical-align: middle; }
 .btn {
   border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink);
   border-radius: 6px; padding: 7px 14px; font-weight: 600; font-size: 13px;

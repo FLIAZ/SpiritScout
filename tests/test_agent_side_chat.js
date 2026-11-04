@@ -2,7 +2,7 @@
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
-function element(){return {dataset:{},hidden:false,value:'',innerHTML:'',textContent:'',disabled:false,scrollTop:0,scrollHeight:0,clientHeight:0,classList:{toggle(){}},listeners:{},addEventListener(type,fn){this.listeners[type]=fn;},querySelector(s){return get(s);},querySelectorAll(){return [];},focus(){}};}
+function element(){return {dataset:{},hidden:false,value:'',innerHTML:'',textContent:'',disabled:false,scrollTop:0,scrollHeight:0,clientHeight:0,classList:{toggle(){}},listeners:{},setAttribute(key,value){this[key]=value;},addEventListener(type,fn){this.listeners[type]=fn;},querySelector(s){return get(s);},querySelectorAll(){return [];},focus(){}};}
 const elements=new Map();
 function get(s){if(!elements.has(s))elements.set(s,element());return elements.get(s);}
 const requests=[],S={cur:'parent',view:'session',tab:'chat',sessions:[]};
@@ -16,9 +16,24 @@ const context=vm.createContext({S,$:get,esc:String,mdRender:String,actorName:Str
 vm.runInContext(fs.readFileSync('src/spiritscout/web/static/js/agent-side-chat.js','utf8')+'\nglobalThis.chat=AgentSideChat;',context);
 const agent={actor:'recon',taskId:'task',status:'执行中',tasks:new Map([['task',{id:'task'}]])};
 const input=get('textarea'),form=get('form');
+const preferences=new Map();
+context.localStorage={getItem:key=>preferences.get(key),setItem:(key,value)=>preferences.set(key,value)};
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 (async()=>{
- context.chat.init();context.chat.sync([agent],{mode:'src'});context.chat.select('recon');
+ context.chat.init();
+ assert.equal(get('#session-rail-toggle')['aria-expanded'],'false','首次进入默认收起');
+ context.chat.sync([agent],{mode:'src'});context.chat.select('recon');
+ assert.equal(get('#session-rail-toggle')['aria-expanded'],'true','主动打开旁路时展开整栏');
+ input.value='旁路草稿';input.listeners.input({target:input});
+ const callsBefore=requests.length;
+ get('#session-rail-toggle').listeners.click();
+ assert.equal(get('#session-rail-toggle')['aria-expanded'],'false');
+ assert.equal(preferences.get('ss-session-rail-collapsed'),'true');
+ assert.equal(input.value,'旁路草稿','收起保留输入草稿');
+ assert.equal(requests.length,callsBefore,'折叠不发送消息或更改任务');
+ get('#session-rail-toggle').listeners.click();
+ assert.equal(input.value,'旁路草稿');
+ assert.equal(get('#agent-side-chat').hidden,false,'展开仍为原旁路会话');
  input.value='第一问';input.listeners.input({target:input});await form.listeners.submit({preventDefault(){}});await tick();
  assert.deepEqual(requests.find(r=>r.url.endsWith('/agent-sessions')).body,{actor:'recon',task_id:'task',mission:'第一问'});
  assert.equal(S.cur,'parent');assert.match(get('.side-chat-messages').innerHTML,/第一答/);
@@ -32,5 +47,5 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
  input.value='旧会话问题';input.listeners.input({target:input});const sending=form.listeners.submit({preventDefault(){}});
  S.cur='another';context.chat.sync([agent],{mode:'src'});context.chat.select('recon');input.value='新会话草稿';input.listeners.input({target:input});
  release({});await sending;assert.equal(input.value,'新会话草稿');assert.equal(S.cur,'another');
- console.log('inline side chat: create, reply, resume payload, mode guard and navigation race passed');
+ console.log('inline side chat: rail collapse, preference and draft retention, create, reply, mode guard and navigation race passed');
 })().catch(error=>{console.error(error);process.exitCode=1;});

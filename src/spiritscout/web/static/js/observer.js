@@ -72,20 +72,34 @@ const SessionObserver = (() => {
       : v.pending.length ? "模型正在生成" : "任务执行中";
     const routes = (v.task?.routes || []).filter(r => r.status === "running");
     const note = routes.map(r => r.note).filter(Boolean).join("；");
+    const facts = v.business.facts || [], gaps = v.business.gaps || v.business.unknowns || [];
+    const evidenceCount = v.evidence.length || v.business.observed_endpoints || 0;
+    const vulnCount = state.vulns?.total ?? state.vulns?.items?.length ?? 0;
+    const assets = state.layers?.asset || 0;
+    const hasFindings = evidenceCount || vulnCount || assets || facts.length || gaps.length || v.business.coverage;
+    const cost = v.cache.priced_calls ? `¥${Number(v.cache.estimated_cost_cny_min).toFixed(4)}${v.cache.estimated_cost_cny_max > v.cache.estimated_cost_cny_min ? `–¥${Number(v.cache.estimated_cost_cny_max).toFixed(4)}` : ""}` : "";
+    const taskNotes = t => [...new Set((t.routes || []).map(r => r.note?.trim()).filter(Boolean))].join("；");
+    const seen = new Set([note, ...tasks.map(taskNotes)].filter(Boolean));
+    const recent = v.recent.filter(e => {
+      const text = resultSummary(e.detail || {});
+      if (seen.has(text)) return false;
+      seen.add(text); return true;
+    });
     const signature = JSON.stringify([current, active, note, v.tokens, v.callCount, v.recentTokens,
-      v.cache, v.evidence, state.layers?.asset, v.business.facts, (v.business.gaps || v.business.unknowns), v.failed, v.recent, tasks, v.pending, latest?.ts,
+      v.cache, v.evidence, assets, evidenceCount, vulnCount, v.business, v.usage.per_model_tokens, v.failed, v.recent, tasks, v.pending, latest?.ts,
       Math.floor(Date.now() / 60000)]);
     if (box.dataset.signature === signature) return;
     const opened = new Set([...box.querySelectorAll("details[open]")].map(x => x.dataset.section));
     box.dataset.signature = signature;
-    box.innerHTML = `<div class="obs-focus"><span class="obs-label">当前实况</span>
-      <strong>${esc(current)}</strong><span>${esc(active)}</span>
-      <p>${esc(paused ? "当前步骤结束后暂停。" : terminal ? "执行已结束，可查看记录和报告。" : note || "等待执行进展。")}</p>
-      ${paused && note ? `<p class="obs-last">最近进展 · ${esc(note)}</p>` : ""}
-      <small>${latest ? `最近事件 ${esc(age(latest.ts))}` : "正在读取已有执行记录…"}</small></div>
-      <section class="obs-section"><h3>模型消耗 <span>${number(v.callCount)} 次调用</span></h3>
+    box.innerHTML = `<div class="obs-focus obs-focus-compact"><div class="obs-status"><strong>${esc(current)}</strong>
+      ${!terminal ? `<span>${esc(active)}</span>` : ""}</div>
+      ${!terminal && (paused || note) ? `<p class="obs-current-note">${esc(paused ? "当前调用结束后暂停。" : note)}</p>` : ""}
+      ${latest ? `<small>更新于 ${esc(age(latest.ts))}</small>` : ""}</div>
+      <section class="obs-section obs-overview"><h3>本次用量 <span>${number(v.callCount)} 次调用</span></h3>
         <div class="obs-tokens">${number(v.tokens)} <small>token</small></div>
-        <p>近 1 分钟 +${number(v.recentTokens)} · 生成中的调用暂未计入</p>
+        <div class="obs-key-metrics">${v.cache.hit_rate != null ? `<span>缓存命中 <b>${(v.cache.hit_rate * 100).toFixed(1)}%</b></span>` : ""}${cost ? `<span>费用估算 <b>${esc(cost)}</b>${v.cache.unpriced_calls ? '<small>（部分调用）</small>' : ''}</span>` : ""}</div>
+        <details data-section="usage-details" class="obs-details"><summary>用量详情</summary>
+        ${!terminal ? `<p>近 1 分钟 +${number(v.recentTokens)} · 生成中的调用暂未计入</p>` : ""}
         <div class="obs-cache"><span>输入缓存命中率</span><strong>${v.cache.hit_rate == null ? "端点未提供" : (v.cache.hit_rate * 100).toFixed(1) + "%"}</strong>
         <small>${v.cache.measured_calls ? number(v.cache.cached_input_tokens) : "—"} 缓存读取 · ${number(v.cache.measured_calls || 0)} 次已测量</small></div>
         ${v.cache.total_input_tokens != null ? `<p>输入 ${number(v.cache.total_input_tokens)} · 已测未命中 ${number(v.cache.uncached_input_tokens)} · 输出 ${number(v.cache.output_tokens)} token</p>` : ""}
@@ -95,19 +109,18 @@ const SessionObserver = (() => {
         <details data-section="usage"><summary>最近调用的消耗与耗时</summary>${v.calls.slice(-8).reverse().map(e => {
           const n = usageFor(e, state), d = e.detail || {};
           return `<div class="obs-call"><span>${esc(modelDisplayName(d.model_key || d.model || "模型", d.provider_ref))}</span><b>${n === null ? "未保留单次用量" : `${number(n)} token`}</b><small>${esc(names[d.task_type] || d.task_type || "历史调用未记录用途")} · ${(Number(d.latency_ms || 0) / 1000).toFixed(1)} 秒${d.first_delta_ms == null ? "" : ` · 首次响应 ${(d.first_delta_ms / 1000).toFixed(1)} 秒`} · 缓存 ${typeof d.cached_input_tokens === "number" ? number(d.cached_input_tokens) : "未提供"}${typeof d.reused_prefix_bytes === "number" ? ` · 与前次重复前缀 ${number(d.reused_prefix_bytes)} 字节（本地比较）` : ""}</small></div>`;
-        }).join("") || '<p>尚无已返回的模型调用事件</p>'}</details></section>
-      <section class="obs-section"><h3>发现与记录</h3>
-        <div class="obs-counts"><span><b>${number(v.evidence.length || v.business.observed_endpoints || 0)}</b> 接口 / 页面证据</span>
-        <span><b>${number(state.vulns?.total ?? state.vulns?.items?.length ?? 0)}</b> 漏洞记录</span></div>
-        <p>已登记 ${number(state.layers?.asset || 0)} 条资产；${v.business.coverage ? "已整理业务上下文。" : "业务分析尚未完成。"}</p>
+        }).join("") || '<p>尚无已返回的模型调用事件</p>'}</details></details></section>
+      ${hasFindings ? `<details class="obs-section obs-details" data-section="findings"><summary>发现与记录 <span>${[vulnCount ? `${number(vulnCount)} 个漏洞` : "", evidenceCount ? `${number(evidenceCount)} 条证据` : "", assets ? `${number(assets)} 条资产` : ""].filter(Boolean).join(" · ")}</span></summary>
+        <div class="obs-counts">${evidenceCount ? `<span><b>${number(evidenceCount)}</b> 接口 / 页面</span>` : ""}
+        ${vulnCount ? `<span><b>${number(vulnCount)}</b> 漏洞</span>` : ""}${assets ? `<span><b>${number(assets)}</b> 资产</span>` : ""}</div>
         ${v.business.coverage ? `<p>${esc(v.business.coverage)}</p>` : ""}
-        <details data-section="evidence"><summary>查看已观测接口与页面</summary>${v.evidence.map(e => `<div class="obs-evidence"><strong>${esc(e.method || "GET")} <span>${esc(e.status_code ?? "未记录状态")}</span></strong><code>${esc(e.url || "")}</code><p>${esc(e.note || "")}</p></div>`).join("") || '<p>尚无接口或页面记录。</p>'}</details>
-        <details data-section="facts"><summary>已知事实 · ${(v.business.facts || []).length}</summary>${(v.business.facts || []).map(f => `<p>${esc(typeof f === "string" ? f : f.statement || f.note || "")}</p>`).join("") || '<p>尚无已整理事实</p>'}</details>
-        <details data-section="unknowns"><summary>待补信息 · ${((v.business.gaps || v.business.unknowns) || []).length}</summary>${((v.business.gaps || v.business.unknowns) || []).map(x => `<p>${esc(typeof x === "string" ? x : x.statement || x.note || JSON.stringify(x))}</p>`).join("") || '<p>尚未登记</p>'}</details></section>
-      <section class="obs-section"><h3>执行情况 <span>${running.length} 个任务在途</span></h3>
-        ${tasks.map(t => `<div class="obs-task"><strong>${esc(TASK_CN[t.task_type] || t.agent_type)}</strong><span>${esc(({running:"执行中",done:"已完成",failed:"失败",cancelled:"已撤销",pruned:"已剪枝"})[t.status] || t.status)}</span><p>${esc((t.routes || []).map(r => r.note).filter(Boolean).join("；") || "尚无步骤结果")}</p></div>`).join("") || '<p>尚未派发任务</p>'}
+        ${v.evidence.length ? `<details data-section="evidence"><summary>接口与页面 · ${number(v.evidence.length)}</summary>${v.evidence.map(e => `<div class="obs-evidence"><strong>${esc(e.method || "GET")} <span>${esc(e.status_code ?? "未记录状态")}</span></strong><code>${esc(e.url || "")}</code><p>${esc(e.note || "")}</p></div>`).join("")}</details>` : ""}
+        ${facts.length ? `<details data-section="facts"><summary>已知事实 · ${facts.length}</summary>${facts.map(f => `<p>${esc(typeof f === "string" ? f : f.statement || f.note || "")}</p>`).join("")}</details>` : ""}
+        ${gaps.length ? `<details data-section="unknowns"><summary>待补信息 · ${gaps.length}</summary>${gaps.map(x => `<p>${esc(typeof x === "string" ? x : x.statement || x.note || JSON.stringify(x))}</p>`).join("")}</details>` : ""}</details>` : ""}
+      ${tasks.length || recent.length || v.failed ? `<details class="obs-section obs-details" data-section="execution"><summary>执行记录 <span>${!terminal && running.length ? `${running.length} 个任务进行中` : tasks.length ? `${tasks.length} 个任务` : "最近进展"}</span></summary>
+        ${tasks.map(t => `<div class="obs-task"><strong>${esc(TASK_CN[t.task_type] || t.agent_type)}</strong><span>${esc(({running:"执行中",done:"已完成",failed:"失败",cancelled:"已撤销",pruned:"已剪枝"})[t.status] || t.status)}</span>${taskNotes(t) ? `<p>${esc(taskNotes(t))}</p>` : ""}</div>`).join("")}
         ${v.failed ? `<button type="button" class="btn sm obs-errors">查看失败原因（${v.failed}）</button>` : ''}
-        ${v.recent.map(e => `<div class="obs-recent ${e.detail?.ok === false ? "bad" : ""}"><small>${esc(actorName(e.actor))}</small><p>${esc(resultSummary(e.detail || {}))}</p></div>`).join("")}</section>`;
+        ${recent.map(e => `<div class="obs-recent ${e.detail?.ok === false ? "bad" : ""}"><small>${esc(actorName(e.actor))}</small><p>${esc(resultSummary(e.detail || {}))}</p></div>`).join("")}</details>` : ""}`;
     for (const el of box.querySelectorAll("details")) if (opened.has(el.dataset.section)) el.open = true;
     const errors = box.querySelector(".obs-errors");
     if (errors) errors.onclick = () => {

@@ -1,15 +1,28 @@
 "use strict";
-/* 子任务保留身份；派发、推进阶段、结论按实际事件独立展示，共用历史与实时归属。 */
+/* 公开正文按意图聚合；调用与结果收进对应消息的默认折叠明细。 */
 const TaskTrace = (() => {
   const terminal = new Set(["done", "failed", "cancelled", "pruned"]);
   const statuses = {running:"执行中", done:"已完成", failed:"执行失败", cancelled:"已撤销", pruned:"已暂缓", waiting:"等待返回"};
-  const supported = /^(task\.(start|done|failed|cancelled|pruned)|agent\.(turn|delta|tool_call|tool_result|conclude|note|progress|ask_user|ask_answered|blocked|error)|model\.(started|call|failed|cancelled))$/;
+  const supported = /^(task\.(start|done|failed|cancelled|pruned)|agent\.(turn|delta|tool_call|tool_result|conclude|note|progress|ask_user|ask_answered|blocked|error)|executor\.identity|model\.(started|call|failed|cancelled))$/;
   const wrapper = name => name === "investigate" || name === "explore";
   const worker = actor => !!actor && !/^(master(?:-|$)|gateway$|runtime$|system$|user$)/.test(actor);
-  const create = () => ({tasks:new Map(), routes:new Map(), calls:new Map()});
+  const create = () => ({tasks:new Map(), routes:new Map(), calls:new Map(), singleActors:new Map()});
+  let timelineEpoch = 0, activeIntentKey = null;
   const keyOf = (actor, id) => JSON.stringify([actor, id]);
   const brief = text => String(text || "").replace(/\s+/g, " ").trim().slice(0, 180);
   const textOf = value => typeof value === "string" ? value : value == null ? "" : JSON.stringify(value, null, 2);
+  // 子 Agent 印章：名字首字 + 与时间线竖线同源的槽位色（ag-N），同一 Agent 全会话同色
+  const agentSlot = actor => {
+    if (typeof traceActorSlot === "function") return traceActorSlot(actor);
+    const base = String(actor || "?").replace(/-[0-9a-f]{8,}$/i, "");
+    let hash = 0;
+    for (let i = 0; i < base.length; i++) hash = (hash * 31 + base.charCodeAt(i)) >>> 0;
+    return (hash % 8) + 1;
+  };
+  const sealOf = actor => {
+    const name = actorName(actor) || "灵";
+    return `<i class="task-seal" style="--seal: var(--agent-${agentSlot(actor)})" aria-label="${esc(name)}" title="${esc(name)}">${esc([...name][0])}</i>`;
+  };
   function resolve(store, e) {
     const d = e.detail || {}, actor = String(e.actor || "");
     if (d.task_id) return keyOf(actor, d.task_id);
@@ -22,17 +35,33 @@ const TaskTrace = (() => {
     const candidates = [...store.tasks].filter(([, t]) => t.actor === actor && !terminal.has(t.status));
     return candidates.length === 1 ? candidates[0][0] : keyOf(actor, "");
   }
-  function reduce(store, e) {
+  function reduce(store, e, eventId = null) {
+    const identity = e.detail || {};
+    if(e.type === "system.lifecycle" && identity.action === "single_executor_start" &&
+        ["ctf","awdp"].includes(identity.mode) && identity.agent_id) {
+      store.singleActors.set(identity.agent_id,{hints:[]});
+      return null;
+    }
     if (!worker(e.actor) || !supported.test(e.type)) return null;
     const d = e.detail || {}, key = resolve(store,e);
     let task = store.tasks.get(key);
     if (!task) {
       task = {key, id:d.task_id || "", actor:e.actor, title:"", status:"running", progress:"正在准备", tools:new Map(),
-        texts:new Map(), steps:new Map(), activeSteps:new Map(), routeAliases:new Map(),
-        conclusions:new Map(), modelSteps:new Map(), started:false, summary:"", updated:e.ts, event:e, version:0};
+        texts:new Map(), steps:new Map(), segments:new Map(), activeIntents:new Map(), activeSteps:new Map(), routeAliases:new Map(),
+        conclusions:new Map(), modelSteps:new Map(), started:false, summary:"", updated:e.ts, event:e, version:0,
+        currentSegmentKey:"", segmentSerial:0, startId:eventId, endId:eventId};
       store.tasks.set(key,task);
     }
+    if(e.type === "executor.identity" && d.kind === "single") {
+      store.singleActors.set(e.actor,{hints:Array.isArray(d.user_direction_hints)
+        ? d.user_direction_hints.filter(value=>typeof value==="string") : []});
+    }
+    if(e.type === "task.start" && d.type === "ctf_single" && !store.singleActors.has(e.actor))
+      store.singleActors.set(e.actor,{hints:[]});
+    const single = store.singleActors.get(e.actor);
+    if(single) {task.singleExecutor=true;task.directionHints=single.hints;}
     task.updated=e.ts; task.version++;
+    if(eventId != null) task.endId=eventId;
     if (d.title) task.title=d.title;
     if (!task.title && d.angle) task.title=d.angle;
     for (const route of [d.route_id,d.route].filter(Boolean)) {
@@ -73,7 +102,79 @@ const TaskTrace = (() => {
     }
     if(d.call_id && step) task.modelSteps.set(d.call_id,step.key);
     if(step && !route) route=step.route;
+    let linkedTool=null;
+    if(e.type === "agent.tool_result") {
+      linkedTool=task.tools.get(JSON.stringify([route,d.id]));
+      if(!linkedTool && d.id) {
+        const matches=[...task.tools.values()].filter(tool=>tool.id===d.id);
+        if(matches.length===1) linkedTool=matches[0];
+      }
+      const owner=task.steps.get(linkedTool?.stepKey);
+      if(owner) {step=owner;route=owner.route;}
+    }
     const stem=JSON.stringify([route,d.call_id || d.turn || ""]);
+    const previousDeltaText=e.type === "agent.delta" ? task.texts.get(stem) || "" : "";
+    const nextDeltaText=previousDeltaText+(d.text || "");
+    const structuredDelta=/^\s*\{|^\s*```(?:json)?(?:\s|$)/i.test(nextDeltaText);
+    const deltaPublicText=structuredDelta ? commentaryText(nextDeltaText) : commentaryText(d.text);
+    const angle=e.type === "agent.turn" && typeof d.angle === "string" ? d.angle.trim() : "";
+    const publicText=e.type === "agent.delta" && !["reasoning","tool_call","reset"].includes(d.kind)
+      ? deltaPublicText
+      : e.type === "agent.progress" ? commentaryText(d.text)
+      : e.type === "agent.note" ? commentaryText(d.text)
+      : e.type === "agent.conclude" ? commentaryText(d.summary)
+      : ["agent.ask_user","agent.blocked"].includes(e.type) ? textOf(d.question || d.reason || d.message) : "";
+    const semantic=e.type === "agent.progress" && typeof d.exploration?.intent === "string"
+      ? d.exploration.intent.trim() : "";
+    const publicMessage=!!(publicText || angle || semantic);
+    const segmentable=!/^task\./.test(e.type) && e.type!=="model.call" &&
+      !(e.type==="agent.delta" && ["reasoning","tool_call"].includes(d.kind));
+    let segment=null;
+    if(segmentable) {
+      const linked=linkedTool?.intentKey || step?.intentKey;
+      const owner=task.segments.get(linked) || task.activeIntents.get(route);
+      const intent=semantic || angle || owner?.intent || (publicText ? brief(publicText.split(/\n|[。！？]/)[0]) : "");
+      if(publicMessage) {
+        const adopt=owner && !owner.intent;
+        const same=owner && owner.key===activeIntentKey && owner.epoch===timelineEpoch &&
+          ((!semantic && !angle) || owner.intent===intent || !owner.texts.size);
+        if(adopt || same) {
+          segment=owner;
+          if(semantic || !segment.intent) segment.intent=intent;
+          if(adopt) {segment.event=e;if(eventId != null) segment.startId=eventId;}
+          segment.epoch=timelineEpoch;
+        } else {
+          const marker=eventId ?? e.seq ?? e.ts ?? `${e.type}:${++task.segmentSerial}`;
+          const segmentKey=JSON.stringify([task.key,route,intent,String(marker)]);
+          segment={key:segmentKey,stageKey:intent,stepKey:step?.key || "",route,turn:step?.turn || 0,
+            intent,epoch:timelineEpoch,event:e,startId:eventId,endId:eventId,texts:new Map(),toolKeys:new Set(),records:new Map(),
+            status:"running",progress:"",title:angle,version:0};
+          task.segments.set(segmentKey,segment);
+        }
+        task.activeIntents.set(route,segment);
+        task.currentSegmentKey=segment.key;
+        activeIntentKey=segment.key;
+        if(step) step.intentKey=segment.key;
+      } else {
+        segment=owner;
+        if(!segment) {
+          const segmentKey=JSON.stringify([task.key,route,"pending-execution"]);
+          segment={key:segmentKey,stageKey:route,stepKey:step?.key || "",route,turn:0,intent:"",
+            epoch:timelineEpoch,event:e,startId:eventId,endId:eventId,texts:new Map(),toolKeys:new Set(),records:new Map(),
+            status:"running",progress:"",title:"",version:0};
+          task.segments.set(segmentKey,segment);task.activeIntents.set(route,segment);
+        }
+        if(step && !step.intentKey) step.intentKey=segment.key;
+      }
+      segment.version++;
+      if(eventId != null) segment.endId=eventId;
+      if(["agent.turn","model.started","model.failed","model.cancelled","agent.error"].includes(e.type)) {
+        const recordKey=JSON.stringify([e.type,step?.key || route,d.call_id || ""]);
+        const label=e.type==="agent.turn" ? `第 ${d.turn || "?"} 次调用` : e.type==="model.started" ? "模型调用开始"
+          : e.type==="model.cancelled" ? "模型调用已取消" : textOf(d.error || "调用失败");
+        segment.records.set(recordKey,label);
+      }
+    }
     if (e.type === "task.start") { task.started=true;task.status="running";task.progress="开始执行";task.target=d.target || ""; }
     if (e.type === "agent.turn") {
       task.progress="正在推进";
@@ -81,47 +182,61 @@ const TaskTrace = (() => {
     }
     if (e.type === "model.started") {task.progress="正在分析下一步";if(step) {step.progress="正在分析";if(!terminal.has(task.status)) step.status="running";}}
     if (e.type === "agent.delta") {
-      if (d.kind === "reset") {task.texts.delete(stem);step?.texts.delete(stem);}
+      if (d.kind === "reset") {task.texts.delete(stem);step?.texts.delete(stem);segment?.texts.delete(stem);}
       else if (d.kind !== "reasoning" && d.kind !== "tool_call" && d.text) {
-        const text=(task.texts.get(stem) || "")+d.text;
+        const text=nextDeltaText;
         task.texts.set(stem,text.slice(-24000)); task.progress="正在更新进展";
         if(step) {step.texts.set(stem,text.slice(-24000));step.progress="正在更新进展";}
+        if(segment) {
+          let segmentText=(segment.texts.get(stem) || "")+d.text;
+          // JSON 的公开说明只能在完整解析后提取，不能从跨段的半截协议中提取。
+          if(structuredDelta && publicText && !commentaryText(segmentText)) segmentText=text;
+          segment.texts.set(stem,segmentText.slice(-24000));
+        }
       }
     }
     if (e.type === "agent.progress") {
+      if(step && d.exploration)step.exploration=d.exploration;
       const text=commentaryText(d.text);
       if(text) {
         const publicKey=`progress:${d.call_id || e.seq || e.ts || task.version}`;
         task.texts.set(publicKey,text);
         if(step) step.texts.set(publicKey,text);
+        if(segment) segment.texts.set(publicKey,text);
       }
     }
     if (e.type === "agent.ask_user" || e.type === "agent.blocked") {
       task.waitingReasons ||= new Map();
       task.waitingReasons.set(route,textOf(d.question || d.reason || d.message || "等待补齐必要条件"));
       task.waitingReason=[...task.waitingReasons.values()].join("；");
+      task.progress=task.waitingReason;
+      if(segment) segment.texts.set(`waiting:${e.seq || e.ts}`,task.waitingReason);
       if(step && !terminal.has(task.status)) {step.status="waiting";step.progress=task.waitingReason;}
     }
     if (e.type === "agent.ask_answered") {
       task.waitingReasons?.delete(route);
       task.waitingReason=[...(task.waitingReasons?.values() || [])].join("；");
-      if(step && !terminal.has(task.status)) {step.status="running";step.progress="已收到答复，正在继续验证";}
+      task.progress="已收到答复，正在继续验证";
+      if(step && !terminal.has(task.status)) {step.status="running";step.progress=task.progress;}
     }
     if (e.type === "agent.note") {
-      task.progress="已更新进展";task.texts.set(`note:${e.seq || e.ts}`,textOf(d.text));
-      if(step) step.texts.set(`note:${e.seq || e.ts}`,textOf(d.text));
+      const noteKey=`note:${e.seq || e.ts}`, note=textOf(d.text);
+      task.progress="已更新进展";task.texts.set(noteKey,note);
+      if(step) step.texts.set(noteKey,note);
+      if(segment) segment.texts.set(noteKey,note);
     }
     if (e.type === "agent.tool_call") {
       for (const c of d.calls || []) {
         const toolKey=JSON.stringify([route,c.id || `${e.seq || e.ts}:${task.tools.size}`]);
         task.tools.set(toolKey,{key:toolKey,call:c,route,id:c.id,name:c.name,status:"running",result:"",note:"",version:1,
-          stepKey:wrapper(c.name) ? "" : step?.key || ""});
+          stepKey:wrapper(c.name) ? "" : step?.key || "", intentKey:segment?.key || ""});
+        segment?.toolKeys.add(toolKey);
       }
       if(step) {step.status=terminal.has(task.status) ? task.status : "running";step.progress="工具执行中";}
       task.progress=(d.calls || []).length ? `正在调用 ${d.calls.map(c => SessionObserver.toolName(c.name)).join("、")}` : task.progress;
     }
     if (e.type === "agent.tool_result") {
-      let tool=task.tools.get(JSON.stringify([route,d.id]));
+      let tool=linkedTool;
       if (!tool && d.id) {
         const matches=[...task.tools.values()].filter(t => t.id === d.id);
         if(matches.length === 1) tool=matches[0];
@@ -137,6 +252,7 @@ const TaskTrace = (() => {
       tool.result=raw.slice(0,24000);tool.clipped=raw.length>24000;
       tool.note=SessionObserver.resultSummary(d);
       if(d.ok !== false && d.skill?.skill_id)tool.skill=d.skill;
+      segment?.toolKeys.add(tool.key);
       task.progress=`${SessionObserver.toolName(tool.name)} · ${d.ok === false ? "失败" : "已返回"}${tool.note ? `：${brief(tool.note)}` : ""}`;
       const owner=task.steps.get(tool.stepKey);
       if(owner) {
@@ -149,7 +265,11 @@ const TaskTrace = (() => {
       }
     }
     if (e.type === "agent.conclude") {
-      if (d.summary) task.conclusions.set(route,textOf(d.summary));
+      if (d.summary) {
+        const conclusion=textOf(d.summary);
+        task.conclusions.set(route,conclusion);
+        segment?.texts.set(`conclusion:${e.seq || e.ts}`,conclusion);
+      }
       task.progress="已整理路线结论";
       if(step) {if(!terminal.has(task.status)) step.status="done";step.progress="已整理结论";}
     }
@@ -162,6 +282,7 @@ const TaskTrace = (() => {
     if (/^task\.(done|failed|cancelled|pruned)$/.test(e.type)) {
       task.endEvent=e;task.status=e.type.slice(5);task.waitingReason="";task.waitingReasons?.clear();
       for(const s of task.steps.values()) if(!terminal.has(s.status)) s.status=task.status;
+      for(const item of task.segments.values()) if(!terminal.has(item.status)) item.status=task.status;
       if(d.conclusions?.length) task.conclusions.clear();
       for (const item of d.conclusions || []) {
         if(item.text) task.conclusions.set(item.route || "",textOf(item.text));
@@ -174,6 +295,13 @@ const TaskTrace = (() => {
       }
       if (d.error) task.summary=textOf(d.error);
       task.progress=statuses[task.status];
+    }
+    if(segment) {
+      segment.status=task.waitingReason && !terminal.has(task.status) ? "waiting" : task.status;
+      segment.progress=step?.progress || task.progress;
+      segment.title=segment.title || step?.title || d.angle || "";
+      segment.route=step?.route || segment.route;
+      segment.turn=step?.turn || segment.turn;
     }
     return task;
   }
@@ -233,15 +361,55 @@ const TaskTrace = (() => {
     }
     return [...skills.values()].map(skill=>({...skill,paths:[...skill.paths]}));
   }
-  const rows=new Map(), stepRows=new Map(), summaryRows=new Map(), dirty=new Set();
+  const rows=new Map(), segmentRows=new Map(), summaryRows=new Map(), dirty=new Set();
   let timer=null;
-  const stepId=(task,step)=>JSON.stringify([task.key,step.key]);
+  const hasNarrative=segment=>!!segment.intent || [...segment.texts.values()].some(raw=>!!commentaryText(raw));
+  function segmentTitle(task,segment) {
+    if(segment.intent) return segment.intent;
+    const text=[...segment.texts.values()].map(commentaryText).find(Boolean);
+    return text ? brief(text.split(/\n|[。！？]/)[0]).slice(0,100) : task.title;
+  }
+  function segmentSummary(segment) {
+    const notes=[...new Set([...segment.texts.values()].map(commentaryText).filter(Boolean))];
+    return notes.join("\n\n");
+  }
+  function outcomeText(task) {
+    const keyOfText=value=>String(value || "").trim();
+    const shown=new Set();
+    for(const segment of task.segments.values()) {
+      for(const raw of segment.texts.values()) {
+        const text=keyOfText(commentaryText(raw));
+        if(text) shown.add(text);
+      }
+      const summary=keyOfText(segmentSummary(segment));
+      if(summary) shown.add(summary);
+    }
+    const seen=new Set(), pending=[];
+    for(const raw of [task.summary,...task.conclusions.values()]) {
+      const text=keyOfText(raw);
+      if(!text || text===keyOfText(task.title) || seen.has(text) || shown.has(text)) continue;
+      seen.add(text);pending.push(text);
+    }
+    return pending.join("\n\n");
+  }
+  function renderRecords(records,list) {
+    const text=[...records.values()].join("\n");
+    if(list.dataset.text!==text) {list.dataset.text=text;list.textContent=text;}
+    list.hidden=!text;
+  }
   function stepTitle(task,step) {
     const text=[...step.texts.values()].map(commentaryText).find(Boolean);
     if(text) return brief(text.split(/\n|[。！？]/)[0]).slice(0,100);
     if(step.title && step.title!==task.title) return brief(step.title);
     const names=[...new Set([...task.tools.values()].filter(t=>t.stepKey===step.key).map(t=>SessionObserver.toolName(t.name)))];
     return names.join("、") || "分析当前现场";
+  }
+  // 意图标签：优先事件里带出的路线名，其次该路线首个阶段的切入角度
+  function routeLabel(task,route) {
+    for(const [name,ids] of task.routeAliases) if(ids.has(route)) return name;
+    const titled=[...task.steps.values()].find(s=>s.route===route && s.title && s.title!==task.title);
+    if(titled) return brief(titled.title).slice(0,40);
+    return route ? `路线 ${String(route).slice(-6)}` : "默认路线";
   }
   function renderTools(task,tools,list) {
     for(const tool of tools) {
@@ -266,90 +434,103 @@ const TaskTrace = (() => {
       el.querySelector(".tl-output").textContent=(tool.result || "等待工具返回")+(tool.clipped ? "\n\n此处展示前 24,000 字，完整内容可导出审计查看。" : "");
     }
   }
+  function executorLabel(task) {return task.singleExecutor ? "单执行者" : actorName(task.actor);}
+  function directionLabel(task) {return task.directionHints?.length ? `用户方向：${task.directionHints.join("、")}（提示）` : "";}
+  function actorLabel(actor) {return store.singleActors.has(actor) ? "单执行者" : "";}
   function render(task) {
+    const narratives=[...task.segments.values()].filter(hasNarrative);
+    const pending=[...task.segments.values()].filter(segment=>!hasNarrative(segment));
+    const pendingTools=[...new Set(pending.flatMap(segment=>[...segment.toolKeys]))]
+      .map(key=>task.tools.get(key)).filter(tool=>tool && !wrapper(tool.name));
     let row=rows.get(task.key);
-    if(!row?.isConnected) {
-      row=traceAppend(task.event,`<section class="task-thread task-dispatch" aria-label="子任务派发">
-        <header class="task-heading"><span class="task-marker" aria-hidden="true"></span><strong></strong><span class="task-status"></span></header>
-        <p class="task-context"></p><div class="task-live-summary md" aria-live="polite"></div><p class="task-waiting" hidden></p><p class="task-skills" hidden></p>
-        <div class="task-commentary md"></div>
-        <details class="task-activity"><summary>其他执行记录</summary><div class="task-activity-body"><div class="task-tools"></div></div></details>
-      </section>`,"tl-task");
-      rows.set(task.key,row);row.dataset.taskId=task.id;row.dataset.taskPart="dispatch";
+    if(row || task.started || task.title || pendingTools.length) {
+      if(!row?.isConnected) {
+        row=traceAppend(task.event,`<details class="task-thread task-dispatch task-execution-only" aria-label="任务执行记录">
+          <summary class="task-heading">${sealOf(task.actor)}<strong></strong><span class="task-status"></span></summary>
+          <p class="task-context"></p><p class="task-skills" hidden></p>
+          <div class="task-tools"></div><pre class="task-execution-records"></pre>
+        </details>`,"tl-task");
+        rows.set(task.key,row);row.dataset.taskId=task.id;row.dataset.taskPart="dispatch";
+      }
+      if(task.startId != null) row.dataset.historyId=row.dataset.historyStart=String(task.startId);
+      if(task.endId != null) row.dataset.historyEnd=String(task.endId);
+      row.hidden=!!narratives.length && !pendingTools.length;
+      const root=row.querySelector(".task-thread");
+      root.querySelector(".task-heading strong").textContent=task.title || "此前意图的执行明细";
+      root.dataset.status=task.status;row.dataset.taskStatus=task.status;
+      root.querySelector(".task-status").textContent=statuses[task.status] || "执行中";
+      root.querySelector(".task-context").textContent=[executorLabel(task),directionLabel(task),task.target || task.id].filter(Boolean).join(" · ");
+      const skillLine=root.querySelector(".task-skills"),skills=skillsOf(task);
+      skillLine.hidden=!skills.length;skillLine.textContent=skills.map(skill=>`使用技能「${skill.id}」· v${skill.version} · 已读 ${skill.paths.length} 个文件`).join("；");
+      renderTools(task,pendingTools,root.querySelector(".task-tools"));
+      renderRecords(new Map(pending.flatMap(segment=>[...segment.records])),root.querySelector(".task-execution-records"));
     }
-    const root=row.querySelector(".task-thread");
-    root.querySelector(".task-heading strong").textContent=task.title || `${actorName(task.actor)} · ${task.id || "当前记录片段"}`;
-    root.dataset.status=task.status;
-    root.querySelector(".task-status").textContent=task.waitingReason ? "等待补充信息" : (statuses[task.status] || "执行中");
-    const live=root.querySelector(".task-live-summary"), liveText=liveSummary(task);
-    if(live.dataset.text!==liveText) {live.dataset.text=liveText;live.innerHTML=mdRender(liveText);}
-    const waiting=root.querySelector(".task-waiting");
-    waiting.hidden=!task.waitingReason || terminal.has(task.status);
-    waiting.textContent=task.waitingReason ? `等待：${task.waitingReason}` : "";
-    root.querySelector(".task-context").textContent=[actorName(task.actor),task.target || task.id].filter(Boolean).join(" · ");
-    const skillLine=root.querySelector(".task-skills"),skills=skillsOf(task);
-    skillLine.hidden=!skills.length;skillLine.textContent=skills.map(skill=>`使用技能「${skill.id}」· v${skill.version} · 已读 ${skill.paths.length} 个文件`).join("；");
-    const commentary=root.querySelector(".task-commentary");
-    commentary.hidden=task.steps.size>0;
-    if(!commentary.hidden) commentary.innerHTML=mdRender(updatesOf(task).map(u=>u.text).join("\n\n"));
-    const tools=[...task.tools.values()];
-    const other=root.querySelector(".task-activity"), ungrouped=tools.filter(t=>!t.stepKey && (!wrapper(t.name) || !task.steps.size));
-    other.hidden=!ungrouped.length;
-    renderTools(task,ungrouped,other.querySelector(".task-tools"));
-    for(const step of task.steps.values()) {
-      const id=stepId(task,step);
-      let stepRow=stepRows.get(id);
-      if(!stepRow?.isConnected) {
-        stepRow=traceAppend(step.event,`<section class="task-thread task-stage" aria-label="推进阶段">
+    for(const segment of narratives) {
+      let segmentRow=segmentRows.get(segment.key);
+      if(!segmentRow?.isConnected) {
+        segmentRow=traceAppend(segment.event,`<section class="task-thread task-stage task-continuation" aria-label="意图消息">
           <p class="task-context"></p>
-          <header class="task-heading"><span class="task-marker" aria-hidden="true"></span><strong></strong><span class="task-status"></span></header>
+          <header class="task-heading">${sealOf(task.actor)}<span class="task-marker" aria-hidden="true"></span><strong></strong><span class="task-status"></span></header>
           <div class="task-stage-summary md" aria-live="polite"></div>
           <details class="task-step"><summary>执行明细 <span class="task-tool-count"></span></summary>
-            <p class="task-progress"></p><div class="task-tools"></div>
+            <p class="task-progress"></p><div class="task-tools"></div><pre class="task-execution-records"></pre>
           </details></section>`,"tl-task tl-task-step");
-        stepRows.set(id,stepRow);stepRow.dataset.taskId=task.id;stepRow.dataset.stepKey=step.key;
+        segmentRows.set(segment.key,segmentRow);
+        segmentRow.dataset.taskId=task.id;segmentRow.dataset.stepKey=segment.key;segmentRow.dataset.taskPart="continuation";
       }
-      const stage=stepRow.querySelector(".task-stage"),group=stage.querySelector(".task-step");
-      group.dataset.stepKey=step.key;
-      stage.dataset.status=step.status;
-      // 工具默认折叠，用户展开后保留；阶段说明始终可见。
-      group.dataset.status=step.status;
-      stage.querySelector(".task-context").textContent=[task.title || task.id,step.route,step.turn ? `第 ${step.turn} 次推进` : ""].filter(Boolean).join(" · ");
-      stage.querySelector(".task-heading strong").textContent=stepTitle(task,step);
-      stage.querySelector(".task-status").textContent=statuses[step.status] || "执行中";
-      group.querySelector(".task-progress").textContent=step.progress || "";
-      const text=stageSummary(task,step), target=stage.querySelector(".task-stage-summary");
+      if(segment.startId != null) segmentRow.dataset.historyId=segmentRow.dataset.historyStart=String(segment.startId);
+      if(segment.endId != null) segmentRow.dataset.historyEnd=String(segment.endId);
+      segmentRow.dataset.taskStatus=segment.status;
+      const stage=segmentRow.querySelector(".task-stage"), group=stage.querySelector(".task-step");
+      stage.dataset.status=segment.status;group.dataset.stepKey=segment.key;group.dataset.status=segment.status;
+      stage.querySelector(".task-context").textContent=[executorLabel(task),directionLabel(task),routeLabel(task,segment.route)].filter(Boolean).join(" · ");
+      stage.querySelector(".task-heading strong").textContent=segmentTitle(task,segment);
+      stage.querySelector(".task-status").textContent=statuses[segment.status] || "执行中";
+      group.querySelector(".task-progress").textContent=segment.progress || "";
+      const text=segmentSummary(segment), target=stage.querySelector(".task-stage-summary");
       if(target.dataset.text!==text) {target.dataset.text=text;target.innerHTML=mdRender(text);}
-      const owned=tools.filter(t=>t.stepKey===step.key), list=group.querySelector(".task-tools");
+      const normalize=value=>String(value || "").trim().replace(/[。.!！]+$/u, "");
+      target.hidden=!text || normalize(text)===normalize(segmentTitle(task,segment));
+      const owned=[...segment.toolKeys].map(key=>task.tools.get(key)).filter(tool=>tool && !wrapper(tool.name)), list=group.querySelector(".task-tools");
       list.hidden=!owned.length;
-      group.querySelector(".task-tool-count").textContent=owned.length ? `· ${owned.filter(t=>t.status!=="running").length}/${owned.length} 次返回` : "· 暂无工具调用";
+      group.hidden=!owned.length && !segment.records.size;
+      group.querySelector(".task-tool-count").textContent=owned.length
+        ? `· ${owned.filter(tool=>tool.status!=="running").length}/${owned.length} 次返回` : `· ${segment.records.size} 条调用记录`;
       renderTools(task,owned,list);
+      renderRecords(segment.records,group.querySelector(".task-execution-records"));
     }
-    if(terminal.has(task.status)) {
+    if(terminal.has(task.status) && outcomeText(task)) {
       let summary=summaryRows.get(task.key);
       if(!summary?.isConnected) {
-        summary=traceAppend(task.endEvent || task.event,`<section class="task-thread task-outcome" aria-label="子任务结论"><header class="task-heading"><span class="task-marker" aria-hidden="true"></span><strong></strong><span class="task-status"></span></header><div class="task-summary md"></div></section>`,"tl-task");
+        summary=traceAppend(task.endEvent || task.event,`<section class="task-thread task-outcome" aria-label="子任务结论"><header class="task-heading">${sealOf(task.actor)}<span class="task-marker" aria-hidden="true"></span><strong></strong><span class="task-status"></span></header><div class="task-summary md"></div></section>`,"tl-task");
         summaryRows.set(task.key,summary);summary.dataset.taskId=task.id;summary.dataset.taskPart="summary";
       }
+      if(task.endId != null) summary.dataset.historyId=summary.dataset.historyStart=String(task.endId);
       const outcome=summary.querySelector(".task-thread");outcome.dataset.status=task.status;
+      summary.dataset.taskStatus=task.status;
       outcome.querySelector("strong").textContent=`${task.title || task.id || actorName(task.actor)} · 子任务结论`;
       outcome.querySelector(".task-status").textContent=statuses[task.status];
-      outcome.querySelector(".task-summary").innerHTML=mdRender(summaryOf(task));
+      outcome.querySelector(".task-summary").innerHTML=mdRender(outcomeText(task));
     }
     traceScroll();
     if (S.tab === "topo" && typeof renderTopoActivity === "function") renderTopoActivity();
   }
-  function push(e) {
-    const task=reduce(store,e);
+  function push(e, eventId = null) {
+    if(["user.message","user.attachment","master.reply","master.reply_failed","agent.reply","agent.reply_failed"].includes(e.type)) {
+      timelineEpoch++;activeIntentKey=null;return false;
+    }
+    const task=reduce(store,e,eventId);
     if(!task) return false;
     if(e.type === "agent.delta" && e.detail?.kind === "reasoning") {
       const rec=S.think.get(e.actor) || {chars:0,tail:""};
       const text=e.detail.text || "";
       rec.chars+=text.length;rec.tail=(rec.tail+text).slice(-6000);S.think.set(e.actor,rec);
     }
-    if(!rows.get(task.key)?.isConnected || [...task.steps.values()].some(step=>!stepRows.get(stepId(task,step))?.isConnected)
-        || terminal.has(task.status) && !summaryRows.get(task.key)?.isConnected) render(task);
-    else {
+    const visible=[...task.segments.values()].filter(hasNarrative);
+    const needsTaskRow=(task.started || task.title || [...task.tools.values()].some(tool=>!wrapper(tool.name))) && !rows.get(task.key)?.isConnected;
+    if(needsTaskRow || visible.some(segment=>!segmentRows.get(segment.key)?.isConnected)
+        || terminal.has(task.status) && outcomeText(task) && !summaryRows.get(task.key)?.isConnected) render(task);
+    else if(visible.length || rows.get(task.key)?.isConnected) {
       dirty.add(task.key);
       if(timer === null) timer=setTimeout(()=>{
         timer=null;
@@ -359,19 +540,19 @@ const TaskTrace = (() => {
     }
     // 与历史窗口一起释放已移出页面的任务，不影响仍在阅读的折叠块。
     if(rows.size>250) for(const [key,row] of rows) if(!row.isConnected) {
-      if([...taskSteps(key)].some(row=>row.isConnected) || summaryRows.get(key)?.isConnected) continue;
+      if([...taskSegments(key)].some(segmentRow=>segmentRow.isConnected) || summaryRows.get(key)?.isConnected) continue;
       rows.delete(key);store.tasks.delete(key);
-      for(const [id,row] of stepRows) if(!row.isConnected) stepRows.delete(id);
+      for(const [id,segmentRow] of segmentRows) if(!segmentRow.isConnected) segmentRows.delete(id);
       summaryRows.delete(key);}
     return true;
   }
-  const taskSteps=key=>[...(store.tasks.get(key)?.steps.values() || [])].map(step=>stepRows.get(JSON.stringify([key,step.key]))).filter(Boolean);
+  const taskSegments=key=>[...(store.tasks.get(key)?.segments.values() || [])].map(segment=>segmentRows.get(segment.key)).filter(Boolean);
   function routeSnapshot() {
     return [...store.tasks.values()].flatMap(task=>[...task.steps.values()].flatMap(step=>{
       const text=[...step.texts.values()].map(commentaryText).filter(Boolean).at(-1);
       return text ? [{id:`__process_route:${JSON.stringify([task.key,step.key])}`, kind:"milestone",
         title:brief(text.split(/\n/)[0]), body:text, task_id:task.id, route_id:step.route,
-        turn:step.turn, actor:task.actor, status:step.status, evidence_refs:[], parent_finding_id:""}] : [];
+        turn:step.turn, actor:task.actor, status:step.status, exploration:step.exploration, evidence_refs:[], parent_finding_id:""}] : [];
     }));
   }
   function progressSnapshot() {
@@ -379,12 +560,16 @@ const TaskTrace = (() => {
       task_id:task.id, actor:task.actor, title:task.title, status:task.status,
       text:liveSummary(task), waiting:task.waitingReason || "", updated:task.updated}));
   }
-  function reset() {if(timer !== null) clearTimeout(timer);timer=null;dirty.clear();store=create();rows.clear();stepRows.clear();summaryRows.clear();}
+  function reset() {
+    if(timer !== null) clearTimeout(timer);
+    timer=null;dirty.clear();store=create();rows.clear();segmentRows.clear();summaryRows.clear();
+    timelineEpoch=0;activeIntentKey=null;
+  }
   function flush() {
     if(timer !== null) clearTimeout(timer);
     timer=null;
     for(const key of dirty) {const task=store.tasks.get(key);if(task) render(task);}
     dirty.clear();
   }
-  return {push,reset,flush,create,reduce,summaryOf,resolve,updatesOf,commentaryText,skillsOf,stepTitle,stageSummary,liveSummary,progressSnapshot,routeSnapshot};
+  return {push,reset,flush,create,reduce,summaryOf,resolve,updatesOf,commentaryText,skillsOf,stepTitle,stageSummary,liveSummary,progressSnapshot,routeSnapshot,actorLabel};
 })();

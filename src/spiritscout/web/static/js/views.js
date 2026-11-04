@@ -1,6 +1,6 @@
 /* ================= 视图：会话详情/拓扑/报告 ================= */
 /* ================= 会话详情 ================= */
-const TABS = ["chat", "topo", "challenges", "vulns", "flags", "events", "deliverables", "report"];
+const TABS = ["chat", "topo", "assets", "challenges", "vulns", "flags", "experience", "events", "deliverables", "report"];
 const STEERING_STATUS_CN = {delivered: "已投递", accepted: "计划执行", completed: "已报告完成", blocked: "执行受阻"};
 $("#mobile-sessions-toggle").onclick = () => {
   const open = document.querySelector(".side").classList.toggle("mobile-sessions-open");
@@ -9,6 +9,10 @@ $("#mobile-sessions-toggle").onclick = () => {
 function openSession(id) {
   if (S.cur !== id) {
     S.state = null;
+    // 附件暂存是会话私有状态：切到另一会话即清空，上一会话的 chip
+    // 不能泄漏到新会话（看起来像附件还在、会随下一条消息带走）
+    S.compFiles = [];
+    renderFileChips("#comp-files", S.compFiles);
     renderChallenges();
     $("#topo-ops-apv").replaceChildren();
     delete $("#topo-ops-apv").dataset.signature;
@@ -52,9 +56,11 @@ document.querySelectorAll("#s-tabs button").forEach(b => {
     for (const t of TABS) $("#tab-" + t).hidden = t !== S.tab;
     b.scrollIntoView({block:"nearest", inline:"nearest"});
     if (S.tab === "topo") drawTopo();
+    if (S.tab === "assets") renderAssetLibrary();
     if (S.tab === "challenges") renderChallenges();
     if (S.tab === "vulns") renderVulns();
     if (S.tab === "flags") renderFlags();
+    if (S.tab === "experience" && typeof SessionExperience !== "undefined") SessionExperience.load();
     if (S.tab === "chat") { SessionObserver.render(); AgentWorkbench.render(); }
     if (S.tab === "report") loadReport();
     if (S.tab === "deliverables") SessionArchive.load();
@@ -90,15 +96,19 @@ async function refreshState() {
     const state = await api(`/api/sessions/${sessionId}/state`);
     if (S.cur !== sessionId || version !== stateRequestVersion) return;
     S.state = state;
+    if (typeof ComposerModels !== "undefined") ComposerModels.sync();
     renderSessionHead(); renderChips(); renderApprovals(); renderQuestions();
     if (S.tab === "topo") drawTopo();
+    if (S.tab === "assets") renderAssetLibrary();
     if (S.tab === "vulns") renderVulns();
     if (S.tab === "flags") renderFlags();
+    if (S.tab === "experience" && typeof SessionExperience !== "undefined") SessionExperience.load();
     renderChallenges();
     SessionObserver.render();
     AgentWorkbench.render();
     ToolParameters.refresh();
     if (S.tab === "deliverables") SessionArchive.refreshIfStale();
+    if (TERMINAL.has(state.session?.status) && !S.es) await SessionHistory.syncLatest();
   } catch (e) { if (S.cur === sessionId) toast(e.message, true); }
   finally {
     if (version === stateRequestVersion) {
@@ -159,8 +169,10 @@ function renderApprovals() {
   box.dataset.signature = signature;
   box.innerHTML = list.map(a => `
     <div class="apv">
-      <div class="apv-title">⚠ 高风险动作待确认：${esc(APV_CN[a.action] || a.action)}</div>
-      <div class="apv-detail">${esc(a.detail || "")}<br>仅允许本次调用；其他调用仍需分别确认。拒绝只拦截本次调用，其余分支照常推进。</div>
+      <div class="apv-title">⚠ 高风险动作待确认：${esc(APV_CN[a.action] || "执行外部工具操作")}</div>
+      <p class="apv-purpose">${esc(a.purpose || a.detail || "请先核实本次操作的目标和影响。")}</p>
+      <details class="apv-technical"><summary>查看工具与调用信息</summary><div class="apv-detail">${esc(a.detail || "")}</div></details>
+      <p class="apv-scope">仅允许本次调用。拒绝后，其余任务继续执行。</p>
       <div class="apv-ops">
         <button class="btn primary sm" data-apv="${esc(a.approval_id)}" data-allow="1">允许本次调用</button>
         <button class="btn sm" data-apv="${esc(a.approval_id)}" data-allow="0">拒绝</button>
@@ -354,8 +366,55 @@ async function renderDash() {
   }
 }
 
+const sessionControlPending = new Set();
+const sessionMessagePending = new Set();
+function syncComposerControl() {
+  const button = $("#comp-send"), input = $("#comp-input");
+  const state = S.state?.session, session = state?.session_id === S.cur ? state : null;
+  const draft = !!input.value.trim() || !!S.compFiles?.length;
+  const active = session && !TERMINAL.has(session.status);
+  const action = draft || !active ? "send" : session.paused ? "resume" : "pause";
+  const pending = sessionControlPending.has(S.cur) || sessionMessagePending.has(S.cur);
+  const labels = {send:"发送消息", pause:"暂停任务", resume:"继续任务"};
+  button.dataset.action = action;
+  button.setAttribute("aria-label", pending ? "正在处理" : labels[action]);
+  button.title = pending ? "正在处理…" : labels[action];
+  button.setAttribute("aria-busy", String(pending));
+  button.disabled = !S.cur || pending || (action === "send" && !draft);
+  button.classList.toggle("ready", draft || !!active);
+  const glyph = action === "pause" ? '<rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor" stroke="none"/>'
+    : action === "resume" ? '<path d="m9 5 11 7-11 7z" fill="currentColor" stroke="none"/>'
+    : '<path d="M12 19V5M5 12l7-7 7 7"/>';
+  const signature = `${action}:${pending}`;
+  if (button.dataset.signature !== signature) {
+    button.dataset.signature = signature;
+    button.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${pending ? '<circle cx="12" cy="12" r="7" stroke-dasharray="30 14"/>' : glyph}</svg>`;
+  }
+  input.disabled = sessionMessagePending.has(S.cur);
+  $("#comp-attach").disabled = input.disabled;
+}
+async function toggleTaskPause() {
+  const s = S.state?.session, sessionId = S.cur;
+  if (!s || s.session_id !== sessionId || TERMINAL.has(s.status) || sessionControlPending.has(sessionId)) return;
+  const paused = !s.paused;
+  sessionControlPending.add(sessionId);
+  syncComposerControl();
+  try {
+    const updated = await api(`/api/sessions/${encodeURIComponent(sessionId)}/${paused ? "pause" : "resume"}`,
+      {method:"POST", body:"{}"});
+    if (S.cur !== sessionId) return;
+    if (S.state?.session) Object.assign(S.state.session, updated);
+    toast(paused ? "已请求暂停，当前调用返回后暂停" : "已继续原任务");
+  } catch (e) { toast(e.message, true); }
+  finally {
+    sessionControlPending.delete(sessionId);
+    if (S.cur === sessionId) { renderSessionHead(); refreshState(); }
+  }
+}
 function renderSessionHead() {
   const s = S.state.session;
+  // 附件清单来自轮询状态（S.state.attachments），详情接口同名字段兜底
+  const attachmentsOf = () => S.state?.attachments || s.attachments || [];
   const running = !TERMINAL.has(s.status);
   $("#s-title").textContent = s.title || s.target || s.session_id;
   $("#s-title").title = s.target || "";
@@ -364,6 +423,9 @@ function renderSessionHead() {
     `<span class="pill ${s.status}">${STATUS_CN[s.status] || s.status}</span>`,
     running && s.paused ? `<span class="pill paused">已暂停</span>` : "",
     `<span class="tag blue">${MODE_CN[s.mode] || s.mode}</span>`,
+    // 附件常驻凭据：滑窗滚出首屏后用户仍能确认附件已随题交付（悬浮列名，点击回溯）
+    attachmentsOf().length ? `<button type="button" class="tag" data-attachments
+      title="${esc(attachmentsOf().map(a => a.name).join("\n"))}">附件 ${attachmentsOf().length}</button>` : "",
     `<button type="button" class="tag proj-chip" data-move-project title="项目分区 · 点击移动会话">${esc(projectName(s.project_id))}</button>`,
     // 用时扣除暂停与执行间隙区间（门内累计，实时随轮询刷新）
     s.started_at ? `<span class="tag">用时 ${fmtDur(s.started_at + (s.excluded_seconds || 0), s.finished_at)}</span>` : "",
@@ -372,37 +434,43 @@ function renderSessionHead() {
   ].join("");
   const sideParent=$("#s-meta [data-side-parent]");
   if(sideParent) sideParent.onclick=()=>openSession(s.side_session.parent_session_id);
+  const attChip=$("#s-meta [data-attachments]");
+  if(attChip) attChip.onclick=()=>{
+    // 经存档点轨道回溯：命中附件名的横条点击即定位（窗口外自动补页）
+    const names=attachmentsOf().map(a => a.name);
+    const bar=[...(document.querySelector("#um-rail")?.children || [])]
+      .find(el => names.some(n => (el.dataset.preview || "").includes(n)));
+    bar?.click();
+  };
   const moveProject = $("#s-meta [data-move-project]");
   if (moveProject) moveProject.onclick = () => ProjectsPage.moveSession(S.cur);
   $("#s-err").innerHTML = [
-    S.state?.recovery?.unresolved_count > 0
+    s.mode === "src" && S.state?.recovery?.unresolved_count > 0
       ? `<div class="pause-banner">有 ${Number(S.state.recovery.unresolved_count)} 次操作的结果尚待核对。继续任务时，灵枢会收到这些记录；请先核实效果，避免重复操作。</div>` : "",
-    running && s.paused
-      ? `<div class="pause-banner">已暂停，当前步骤完成后停止。仍可发送消息。</div>` : "",
     s.error ? `<div class="err-banner">${esc(s.error)}</div>` : "",
   ].join("");
-  $("#comp-send").disabled = false;
-  $("#comp-attach").disabled = false;
+  syncComposerControl();
   $("#comp-input").placeholder = running
-    ? "给灵枢提意见、补充线索或上传附件…"
-    : "继续对话——灵枢带着这段会话的完整上下文";
+    ? "补充消息或线索…"
+    : "继续对话…";
+  $("#comp-input").title = running
+    ? s.paused ? "任务暂停中 · 可补充消息，点击继续任务后推进" : "Enter 发送 · Shift+Enter 换行"
+    : "Enter 发送 · Shift+Enter 换行 · 发送后继续对话";
   if(s.side_session) $("#comp-input").placeholder=`与 ${agentName(s.side_session.agent)} 继续旁路对话，补充任务或线索…`;
+  const moreOpen = $("#session-more")?.open || false;
   $("#s-ops").innerHTML = `
-    ${running ? `<button class="btn sm" id="op-pause">${s.paused ? "继续" : "暂停"}</button>` : ""}
-    ${running ? `<button class="btn danger sm" id="op-stop">停止</button>` : ""}
-    <a class="btn sm" href="/api/sessions/${S.cur}/report/download" download>下载报告</a>
-    <a class="btn sm" href="/api/sessions/${S.cur}/audit/download" download>导出审计</a>
-    <button class="btn sm" id="op-storage">清理存储</button>
-    <button class="btn danger sm" id="op-del" ${running ? "disabled" : ""}>删除</button>`;
-  if (running) $("#op-pause").onclick = async () => {
-    const url = `/api/sessions/${S.cur}/${s.paused ? "resume" : "pause"}`;
-    try { await api(url, { method: "POST", body: "{}" });
-      toast(s.paused ? "已继续" : "已暂停——在途步骤跑完即停"); refreshState(); }
-    catch (e) { toast(e.message, true); }
-  };
+    <details class="session-more" id="session-more" ${moreOpen ? "open" : ""}><summary class="action-icon" title="更多操作" aria-label="更多操作"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></summary><div class="session-more-menu">
+      <a class="btn sm" href="/api/sessions/${encodeURIComponent(S.cur)}/report/download" download="报告.md">下载报告</a>
+      <a class="btn sm" href="/api/sessions/${encodeURIComponent(S.cur)}/audit/download" download>导出审计</a>
+      <button class="btn sm" id="op-storage">清理存储</button>
+      ${running ? `<button class="btn danger sm" id="op-stop">结束任务</button>` : ""}
+      <button class="btn danger sm" id="op-del" ${running ? "disabled" : ""}>删除会话</button>
+    </div></details>`;
   if (running) $("#op-stop").onclick = async () => {
-    try { await api(`/api/sessions/${S.cur}/stop`, { method: "POST", body: "{}" });
-      toast("已发送停止"); refreshState(); } catch (e) { toast(e.message, true); }
+    const sessionId = S.cur;
+    try { await api(`/api/sessions/${encodeURIComponent(sessionId)}/stop`, {method:"POST", body:"{}"});
+      toast("已结束任务，记录与成果保留"); if(S.cur === sessionId) refreshState(); }
+    catch(e) { toast(e.message, true); }
   };
   $("#op-storage").onclick = () => SessionStorage.open(S.cur);
   $("#op-del").onclick = (ev) => armDelete(ev.currentTarget, S.cur);
@@ -505,7 +573,7 @@ async function loadTopoRules(record, offset = 0) {
   const session=S.cur, key=JSON.stringify([session,record.record_id,record.version]);
   S.topoRuleCache ||= new Map();
   let cached=S.topoRuleCache.get(key);
-  const panel=$("#topo-detail");
+  const panel=SessionTopology.detailPanel();
   if (!offset && cached) {
     const target=panel?.querySelector(".topo-rule-content");
     if(target) target.textContent=cached.text || "该记录未包含用户规则或任务原话。";
@@ -532,11 +600,17 @@ function drawTopo() {
   const box = $("#topo");
   if (!S.state) { box.innerHTML = ""; return; }
   const routes = typeof TaskTrace !== "undefined" ? TaskTrace.routeSnapshot() : [];
-  DualTopology.render(S.state, routes);
+  SessionTopology.render(S.state, routes);
   renderTopoActivity(); renderApprovals(); renderQuestions();
 }
 
-function topoFocus(id) { DualTopology.focus(id); }
+function renderAssetLibrary() {
+  if(!S.state)return;
+  const routes=typeof TaskTrace!=="undefined" ? TaskTrace.routeSnapshot() : [];
+  SessionTopology.render(S.state,routes,true);
+}
+
+function topoFocus(id) { SessionTopology.focus(id); }
 
 function topoCollection(group) {
   S.topoQueries ||= {}; S.topoPages ||= {};
@@ -551,9 +625,11 @@ function topoCollection(group) {
 }
 
 function topoRecordDetail(p) {
+  if(p.projection || p.semantic_group) return SessionTopology.projectionDetail(p)
+    + (p.record_id && p.body ? `<details class="topo-original"><summary>原探索记录</summary><pre>${esc(p.body)}</pre></details>` : "");
   if(p.kind==="exploration") {
     const states={open:"待探索",running:"探索中",blocked:"受阻",supported:"有支持",refuted:"已反驳",exhausted:"已走不通",closed:"已结束"};
-    const relations=(S.topoGraph?.edges || []).filter(e=>e.source===p.id || e.target===p.id);
+    const relations=[...(S.topoGraph?.edges || []),...(S.topoGraph?.links || [])].filter(e=>e.source===p.id || e.target===p.id);
     const ids=[...new Set(relations.map(e=>e.source===p.id ? e.target : e.source))];
     return `<p class="td-note">${esc(states[p.state] || p.state)} · 探索记录，状态由 Agent 维护。</p>
       <p class="td-note topo-fact-text">${esc(p.title)}</p>${p.reason ? `<p class="td-note">原因：${esc(p.reason)}</p>` : ""}
@@ -564,7 +640,7 @@ function topoRecordDetail(p) {
   if(p.kind==="rule") return '<p class="td-note topo-rule-content">正在读取原文…</p><button class="btn sm" data-rules-more hidden>继续读取原文</button>';
   const source = p.provenance?.producer || {};
   const origins = [source.agent_id || p.actor, source.tool_name, source.step_id].filter(Boolean);
-  const relations = (S.topoGraph?.edges || []).flatMap(e => e.references).filter(e => e.target === p.id || e.source === p.id
+  const relations = [...(S.topoGraph?.edges || []),...(S.topoGraph?.links || []),...(S.topoGraph?.assets?.edges || [])].flatMap(e => e.references || [e]).filter(e => e.target === p.id || e.source === p.id
     || p.relation && e.record_id === p.record_id);
   const related = [...new Set(relations.flatMap(e => e.source === p.id ? [e.target] : e.target === p.id ? [e.source] : [e.source,e.target]))];
   const collection = S.topoGraph?.groups.find(g => g.members.some(n => n.id === p.id));
@@ -589,7 +665,10 @@ function evLine(e) {
 }
 
 function showNodeDetail(nodeId) {
-  const panel = $("#topo-detail");
+  if(S.tab==='topo' && S.topoGraph?.assets?.nodes.some(n=>n.id===nodeId)) {
+    SessionTopology.openAssets(nodeId);return;
+  }
+  const panel = SessionTopology.detailPanel();
   if (!panel) return;
   if (panel.hidden === false && panel._curId === nodeId) {
     panel.hidden = true; panel._curId = null; topoFocus(null); return;
@@ -654,12 +733,12 @@ function showNodeDetail(nodeId) {
     body = tasks.length ? tasks.map(taskDetail).join("")
                         : '<div class="td-empty">暂无任务数据</div>';
   }
-  $("#td-title").textContent = title;
-  $("#td-body").innerHTML = body;
+  panel.querySelector(".td-title").textContent = title;
+  panel.querySelector(".td-body").innerHTML = body;
   topoFocus(nodeId);
   const record=S.topoProcess?.get(nodeId);
   if(record?.kind==="rule") loadTopoRules(record);
-  panel.querySelector("#td-close").onclick = () => { panel.hidden = true; panel._curId = null; topoFocus(null); };
+  panel.querySelector(".td-close").onclick = () => { panel.hidden = true; panel._curId = null; topoFocus(null); };
   panel.querySelectorAll("[data-topo-record]").forEach(button => {
     button.onclick = () => {panel._curId = null;showNodeDetail(button.dataset.topoRecord);};
   });
@@ -780,6 +859,7 @@ function traceAppend(e, body, cls = "") {
   const row = box.lastElementChild;
   if (row.classList.contains("tl-turn")) TRACE_TURNS.set(String(e.actor || ""), row);
   row.dataset.eventTs = e.ts || "";
+  row.dataset.agent = String(e.actor || "");
   return row;
 }
 let traceScrollFrame = null, traceForceScroll = false;
@@ -878,7 +958,7 @@ function traceToolsStrip(turn) {
   flow.append(strip);   // 始终钉在回合流末尾，后续动作卡插在其前
   return strip;
 }
-function tracePush(e, {observe = true} = {}) {
+function tracePush(e, {observe = true, eventId = null} = {}) {
   const box = traceRenderTarget || $("#trace-box");
   if (!box) return;
   const d = (typeof e.detail === "object" && e.detail) || {};
@@ -886,7 +966,7 @@ function tracePush(e, {observe = true} = {}) {
   if (observe) { SessionObserver.push(e); AgentWorkbench.push(e); }
   const sideSession=S.state?.session?.side_session || S.sessions?.find(s=>s.session_id===S.cur)?.side_session;
   if(sideSession && !["user.message","user.attachment","agent.reply","agent.reply_failed","engagement.paused","engagement.resumed","system.lifecycle"].includes(e.type)) return;
-  if (typeof TaskTrace !== "undefined" && !sideSession && TaskTrace.push(e)) return;
+  if (typeof TaskTrace !== "undefined" && !sideSession && TaskTrace.push(e, eventId)) return;
   switch (e.type) {
     case "task.start":
       traceAppend(e, `<div class="m">开始执行 · ${esc(actorName(actor))}</div>`, "tl-sys");
@@ -903,7 +983,7 @@ function tracePush(e, {observe = true} = {}) {
       const kind = d.kind || "text";
       if (kind === "tool_call") break;
       const turn = traceTurn(actor) || traceAppend(e,
-        `<div class="hd"><span class="who">${esc(actorName(actor))}</span><span class="k">本页回合片段</span></div><div class="flow"></div>`, "tl-turn");
+        `<div class="hd"><span class="who">${esc(actorName(actor))}</span><span class="k">本页回合片段</span></div><div class="flow"></div>`, "tl-turn tl-frag");
       if (kind === "reset") {
         turn.querySelectorAll(".tl-say,.tl-think,.tl-thinkchip").forEach(el => el.remove());
         const rec = S.think.get(actor);
@@ -945,7 +1025,7 @@ function tracePush(e, {observe = true} = {}) {
     }
     case "agent.tool_call": {
       const turn = traceTurn(actor) || traceAppend(e,
-        `<div class="hd"><span class="who">${esc(actorName(actor))}</span><span class="k">工具执行</span></div><div class="flow"></div>`, "tl-turn");
+        `<div class="hd"><span class="who">${esc(actorName(actor))}</span><span class="k">工具执行</span></div><div class="flow"></div>`, "tl-turn tl-frag");
       traceFinishThinking(turn);
       const flow = turn.querySelector(".flow");
       for (const c of (d.calls || [])) {
@@ -1061,9 +1141,11 @@ function tracePush(e, {observe = true} = {}) {
       traceFinishThinking(traceTurn(actor));
       traceAppend(e, `<div class="m">${esc(actorName(actor))} 已完成任务</div>`, "tl-sys");
       break;
-    case "user.message":
-      traceAppend(e, `<div class="bubble"><div class="btxt">${esc(d.content || "")}</div></div>`, "tl-user");
+    case "user.message": {
+      const row = traceAppend(e, `<div class="bubble"><div class="btxt">${esc(d.content || "")}</div></div>`, "tl-user");
+      if (d.message_id) row.dataset.messageId = String(d.message_id);
       break;
+    }
     case "system.lifecycle":
       if (d.action === "session_kickoff")
         traceAppend(e, `<div class="m">${sideSession ? "子 Agent 正在准备回复…" : "灵枢开工准备中——加载任务配置…"}</div>`, "tl-sys");
@@ -1079,9 +1161,28 @@ function tracePush(e, {observe = true} = {}) {
       traceAppend(e, `<div class="m">💤 检测到执行间隙 ${fmtElapsed(d.gap_seconds || 0)}——控制台刚刚未在运行，该区间不计入用时</div>`, "tl-sys");
       break;
     case "user.attachment": {
-      const sz = fmtSize(d.size);
-      traceAppend(e, `<div class="bubble"><div class="btxt">📎 ${esc(d.name || "")}${sz ? ` <span class="k">${esc(sz)}</span>` : ""}</div>
-        ${d.path ? `<div class="bpath">${esc(d.path)}</div>` : ""}</div>`, "tl-user");
+      // 用户上传的文件同样以文件卡片呈现：可直接再预览/下载（attachments/ 一直在）
+      const rel = d.rel || (d.name ? `attachments/${d.name}` : "");
+      const row = traceAppend(e, `<div class="bubble">${FileCards.card({ rel, name: d.name, size: d.size, side: "user" })}</div>`, "tl-user");
+      if (d.message_id) row.dataset.messageId = String(d.message_id);
+      break;
+    }
+    case "file.shared": {
+      // 智能体/用户把产出文件发进会话：左侧文件卡片，可在线预览或下载
+      const who = actorName(actor) || "灵枢";
+      const seal = actor && actor !== "master" ? String(who).slice(0, 1) : "灵";
+      traceAppend(e, `<i class="seal" aria-label="${esc(who)}">${esc(seal)}</i>
+        <div class="bubble"><div class="who">${esc(who)}</div>
+        ${FileCards.card({ rel: d.path, name: d.name, size: d.size })}
+        ${d.note ? `<div class="btxt fc-note">${esc(d.note)}</div>` : ""}</div>`, "tl-master tl-conv");
+      break;
+    }
+    case "report.ready": {
+      // 异步报告完成：作为灵枢的文件消息出现，点开即可阅读/下载
+      const rname = String(d.path || "").split("/").pop() || "解题报告.md";
+      traceAppend(e, `<i class="seal" aria-label="灵枢">灵</i>
+        <div class="bubble"><div class="who">灵枢</div><div class="btxt">解题报告已生成</div>
+        ${FileCards.card({ rel: `reports/${rname}`, name: rname, size: d.size })}</div>`, "tl-master tl-conv");
       break;
     }
     case "verification.queued":
@@ -1178,8 +1279,8 @@ traceBox.addEventListener("scroll", () => {
   $("#trace-jump").hidden = traceStick || traceBox.scrollHeight <= traceBox.clientHeight + 2;
 }, {passive: true});
 $("#trace-jump").onclick = () => SessionHistory.isPast() ? SessionHistory.latest() : traceScroll(true);
-function renderAuditEvent(e, {observe = true} = {}) {
-  tracePush(e, {observe});
+function renderAuditEvent(e, {observe = true, eventId = null} = {}) {
+  tracePush(e, {observe, eventId});
   if (observe && e.type !== "agent.delta") {
     const box = $("#events");
     box.insertAdjacentHTML("afterbegin", evLine(e));

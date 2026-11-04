@@ -59,6 +59,7 @@ const moreEl = () => page.querySelector("[data-more]");
     tags: [{tag: "web", count: 2}, {tag: "越权", count: 1}],
     items: [
       {insight: "越权先比业务字段再下结论", context: "会员接口", tags: ["web", "越权"],
+       quality_status: "referenced",
        source_session: "sess-live", source_title: "会员接口越权测试",
        source_model: "master", ts: 1760000000},
       {insight: "老会话的经验", context: "历史", tags: ["历史"],
@@ -79,6 +80,8 @@ const moreEl = () => page.querySelector("[data-more]");
                       "失联会话不给点击回链");
   assert.match(cards, /会员接口越权测试/);
   assert.match(cards, /适用：会员接口/);
+  assert.match(cards, /待核验 · 有来源/);
+  assert.match(cards, /待补来源/);
   // 提炼记录：失败徽标 + 原因原样呈现
   const hist = histEl().innerHTML;
   assert.match(hist, /失败/);

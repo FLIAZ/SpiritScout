@@ -1,9 +1,9 @@
 "use strict";
 /* 单一调度器：SSE 负责即时反馈，轮询负责静默期和断线兜底。 */
 const ConsolePolling = (() => {
-  function create({refreshList, refreshState, isSession, isRunning, isVisible,
+  function create({refreshList, refreshState, refreshNotify, isSession, isRunning, isVisible,
                    now = Date.now, later = setTimeout, cancel = clearTimeout}) {
-    let timer = null, stopped = true, lastList = 0, lastState = 0;
+    let timer = null, stopped = true, lastList = 0, lastState = 0, lastNotify = 0;
     const invoke = callback => { Promise.resolve().then(callback).catch(() => {}); };
     function tick(force = false) {
       if (stopped) return;
@@ -13,6 +13,9 @@ const ConsolePolling = (() => {
       if (force || time - lastList >= listInterval) { lastList = time; invoke(refreshList); }
       if (isSession() && (force || time - lastState >= stateInterval)) {
         lastState = time; invoke(refreshState);
+      }
+      if (refreshNotify && (force || time - lastNotify >= (visible ? 15000 : 30000))) {
+        lastNotify = time; invoke(refreshNotify);
       }
       timer = later(() => tick(), visible ? 1000 : 5000);
     }

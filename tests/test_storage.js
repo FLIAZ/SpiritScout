@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const code = fs.readFileSync("src/spiritscout/web/static/js/storage.js", "utf8");
 function fixture() {
-  const nodes = new Map(), calls = [], timers = new Map();
+  const nodes = new Map(), calls = [], timers = new Map(), opened = [];
   const node = id => {
     if (!nodes.has(id)) nodes.set(id, {textContent:"", innerHTML:"", value:"", disabled:false,
       checked:true, open:false, classList:{toggle() {}}, handlers:{},
@@ -15,6 +15,7 @@ function fixture() {
     return nodes.get(id);
   };
   const ctx = vm.createContext({$:node, esc:String, selxSync() {},
+    openSession(id) { assert.equal(node("#storage-dlg").open, false); opened.push(id); },
     setTimeout:fn => { const n = timers.size + 1; timers.set(n, fn); return n; },
     clearTimeout:n => timers.delete(n),
     api: async (url, options) => {
@@ -29,7 +30,7 @@ function fixture() {
     },
   });
   vm.runInContext(code, ctx);
-  return {ctx, node, calls, timers, ui:vm.runInContext("SessionStorage", ctx)};
+  return {ctx, node, calls, timers, opened, ui:vm.runInContext("SessionStorage", ctx)};
 }
 const flush = async () => { for (let n = 0; n < 12; n++) await Promise.resolve(); };
 (async () => {
@@ -85,5 +86,26 @@ const flush = async () => { for (let n = 0; n < 12; n++) await Promise.resolve()
   await older;
   assert.equal(stale.node("#storage-select").value, "s2");
   assert.doesNotMatch(stale.node("#storage-status").textContent, /stale/);
+  stale.node("#storage-view").onclick();
+  assert.deepEqual(stale.opened, ["s2"], "跳转到当前选中的会话，先关闭弹窗");
+  assert.equal(stale.calls.some(c => c.options?.method === "POST"), false, "查看会话不能清理数据");
+
+  // 正在后台清理的会话仍可查看；离开弹窗停止前端轮询。
+  t.ctx.job = {status:"running", phase:"正在收缩"};
+  await t.ui.open("s1");
+  assert.equal(t.node("#storage-view").disabled, false);
+  t.node("#storage-view").onclick();
+  assert.deepEqual(t.opened, ["s1"]);
+  assert.equal(t.timers.size, 0);
+
+  const empty = fixture();
+  empty.ctx.handle = async () => ({sessions:[], total_bytes:0});
+  await empty.ui.open();
+  assert.equal(empty.node("#storage-view").disabled, true);
+  empty.node("#storage-view").onclick();
+  assert.deepEqual(empty.opened, []);
+  empty.ctx.handle = async () => { throw new Error("offline"); };
+  await empty.ui.open("s1");
+  assert.equal(empty.node("#storage-view").disabled, true);
   console.log("storage UI: preview-only, explicit cleanup, selection, polling, reopen, partial failure and stale responses passed");
 })().catch(error => {console.error(error); process.exitCode = 1;});

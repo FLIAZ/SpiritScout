@@ -106,6 +106,13 @@ vm.runInContext(renderer, context);
   assert.equal(floating.style.left,"268px","提示围绕柱体居中");
   box.onpointerout(hover);
   assert.equal(floating.hidden,true,"离开柱体隐藏提示");
+  context.newMetrics={generated_at:1792944000,total_tokens:120,summary:{tokens:120,input_tokens:100,output_tokens:20,calls:2,sdk_attempts:3,usage_reported_calls:1,usage_incomplete_calls:1,unreported_attempts:1,cost:{},cache:{cached_input_tokens:60,uncached_input_tokens:20,hit_rate:.75}},sessions:[],alerts:[],findings:[],cache_windows:{},cache_groups:{model:[{name:"fixture",tokens:120,calls:2}]},trend:[]};
+  vm.runInContext("Dashboard.render($(null),newMetrics)",context);
+  assert.match(node(".dash-composition").innerHTML,/缓存未测量输入/);
+  assert.match(node(".dash-composition").innerHTML,/缓存未测量输入 20 Token/);
+  assert.match(node(".dash-models").innerHTML,/fixture/);
+  assert.match(node(".dash-overview").innerHTML,/3 次 SDK 请求/);
+  assert.match(node(".dash-health").innerHTML,/计量完整 1 \/ 2/);
   console.log("dashboard live metrics, Beijing clock, unknown values and response ordering: passed");
 })().catch(error => {
   console.error(error);

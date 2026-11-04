@@ -1,4 +1,24 @@
 "use strict";
+/* 整栏只切换可见性，保留所选角色、旁路消息和未发送的草稿。 */
+const SessionRail = (() => {
+  const key="ss-session-rail-collapsed";
+  let collapsed=true;
+  function setCollapsed(value) {
+    collapsed=!!value;
+    const tab=$("#tab-chat"), button=$("#session-rail-toggle");
+    tab.classList.toggle("rail-collapsed",collapsed);
+    button.setAttribute("aria-expanded",String(!collapsed));
+    const label=collapsed ? "展开实况与旁路会话" : "收起实况与旁路会话";
+    button.setAttribute("aria-label",label);button.title=label;
+    try { localStorage.setItem(key,String(collapsed)); } catch {}
+  }
+  function init() {
+    try { collapsed=localStorage.getItem(key)!=="false"; } catch {}
+    setCollapsed(collapsed);
+    $("#session-rail-toggle").addEventListener("click",()=>setCollapsed(!collapsed));
+  }
+  return {init,setCollapsed};
+})();
 /* 旁路有自己的会话与消息历史；切换右栏不触碰主会话的 SSE、轨迹或输入框。 */
 const AgentSideChat = (() => {
   let parent="", selected="", agents=[], session=null, generation=0, timer=null;
@@ -38,6 +58,7 @@ const AgentSideChat = (() => {
   }
   function select(actor,task="") {
     if(actor && (!allowed() || !agents.some(a=>a.actor===actor && a.taskId))) return;
+    if(actor) SessionRail.setCollapsed(false);
     cancel();selected=actor;renderTabs();if(!actor)return;
     const e=entry(actor), source=agents.find(a=>a.actor===actor);
     if(!e.child) e.child=linked(actor)?.session_id || "";
@@ -108,6 +129,7 @@ const AgentSideChat = (() => {
     finally {e.busy=false;if(current()===e && S.cur===origin){render();refresh();}}
   }
   function init() {
+    SessionRail.init();
     $("#agent-chat-tabs").addEventListener("click",event=>{const button=event.target.closest("[data-side-actor]");if(button)select(button.dataset.sideActor);});
     const box=$("#agent-side-chat");box.querySelector("form").addEventListener("submit",send);
     box.querySelector("textarea").addEventListener("input",event=>{const e=current();if(e)e.draft=event.target.value;});

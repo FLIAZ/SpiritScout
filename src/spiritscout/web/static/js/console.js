@@ -47,20 +47,20 @@ async function loadAgents() {
     const apply = $("#bind-all-apply");
     apply.disabled = true;
     all.onchange = () => { apply.disabled = !all.value || !sels.length; };
-    $("#bind-status").textContent = "修改后自动保存，对新任务生效";
+    $("#bind-status").textContent = "";
     // 串行落盘，避免单角色与批量操作交错；保存时同步禁用自定义下拉。
     const save = (targets, model) => {
       const changes = targets.map(sel => ({ sel, model: model ?? sel.value }))
         .filter(item => item.model !== item.sel.dataset.orig);
       if (!changes.length) {
-        if (model != null) $("#bind-status").textContent = "所有可指派角色已使用所选模型";
+        if (model != null) $("#bind-status").textContent = "已应用";
         return Promise.resolve();
       }
       ++agentLoadVersion;
       const controls = [...sels, all];
       controls.forEach(sel => { sel.disabled = true; selxSync(sel); });
       apply.disabled = true;
-      $("#bind-status").textContent = "正在保存模型指派…";
+      $("#bind-status").textContent = "保存中…";
       const statusOf = sel => sel.closest(".acard").querySelector(".bind-status");
       changes.forEach(({ sel, model }) => {
         sel.value = model;
@@ -88,7 +88,7 @@ async function loadAgents() {
         }
         $("#bind-status").textContent = failed.length
           ? `已保存 ${saved} 个角色，${failed.length} 个失败，请重试`
-          : `已保存 ${saved} 个角色的模型指派，对新任务生效`;
+          : `已保存 · ${saved} 个角色`;
         if (failed.length) toast(failed.join("；"), true);
       }).finally(() => {
         controls.forEach(sel => {
@@ -110,7 +110,7 @@ async function loadAgents() {
 /* ================= 模型 ================= */
 /* 供应商（一个 API 地址 + 一把密钥）下挂模型，模型 ID 即身份。密钥由服务端
    密钥库加密保管（工作区 vault.db），页面不缓存、不回传。 */
-const PROVIDER_CN = { openai_compatible: "OpenAI 兼容", anthropic_compatible: "Anthropic 兼容", mock: "离线演练" };
+const PROVIDER_CN = { openai_compatible: "OpenAI 兼容", anthropic_compatible: "Anthropic 兼容", ollama: "Ollama 原生", mock: "离线演练" };
 const fmtCtx = n => n > 0 ? (n >= 1000 ? Math.round(n / 1000) + "k" : String(n)) : "—";
 /* 模型/供应商的操作按钮统一 data-* 化：动态值只进 HTML 属性（esc 转义），
    不再拼内联 onclick 字符串——值里的引号、尖括号从此进不了 JS 语境 */
@@ -135,7 +135,7 @@ function modelTile(m) {
   const q = m.quality_score;
   return `<div class="mtile">
     <div class="mt-id"><b>${esc(m.model)}</b></div>
-    <div class="mt-caps">${caps || `<span class="muted" style="font-size:11.5px">未声明能力标签</span>`}</div>
+    <div class="mt-caps">${caps}</div>
     <div class="mt-stats">
       <div class="mstat"><div class="k">上下文窗口</div><div class="v">${fmtCtx(m.context_window)}</div></div>
       <div class="mstat"><div class="k">质量分</div><div class="v">${q == null ? "—" : `<span class="qbar"><i style="width:${Math.max(0, Math.min(100, Math.round(q * 100)))}%"></i></span>${q}`}</div></div>
@@ -161,7 +161,7 @@ async function loadModels() {
     namingSaved = (nm && nm.chain) || [];
     S.namingChain = [...namingSaved];
     namingRender();
-    $("#models-path").innerHTML = `${M_ICONS.file}<span>${esc(md.path)} · 密钥加密保存在本机</span>`;
+    $("#models-path").innerHTML = `${M_ICONS.file}<span>${esc(md.path)}</span>`;
     const box = $("#providers-list");
     if (!pv.providers.length) {
       box.innerHTML = `<div class="mempty">${M_ICONS.hub}
@@ -376,7 +376,7 @@ window.providerEdit = name => {
   S.pedit = name;
   $("#p-dlg-title").textContent = `编辑供应商 ${name}`;
   $("#p-name").value = p.name;
-  $("#p-type").value = p.provider === "anthropic_compatible" ? "anthropic_compatible" : "openai_compatible";
+  $("#p-type").value = ["anthropic_compatible", "ollama"].includes(p.provider) ? p.provider : "openai_compatible";
   $("#p-baseurl").value = p.base_url || "";
   $("#p-keyval").value = "";
   $("#p-keystat").textContent =
@@ -446,7 +446,7 @@ function renderPanel(selKey) {
       $("#p-type").value = "openai_compatible";
     } else {
       $("#p-name").value = p.key;
-      $("#p-type").value = p.provider === "anthropic_compatible" ? "anthropic_compatible" : "openai_compatible";
+      $("#p-type").value = ["anthropic_compatible", "ollama"].includes(p.provider) ? p.provider : "openai_compatible";
       $("#p-baseurl").value = p.base_url || "";
     }
   });
@@ -541,7 +541,7 @@ $("#fm-add").onclick = async () => {
 /* ================= 会话输入坞：意见 + 附件（页底常驻） ================= */
 const compInput = $("#comp-input");
 compInput.addEventListener("input", () => {
-  $("#comp-send").classList.toggle("ready", !!compInput.value.trim());
+  syncComposerControl();
   autogrow(compInput, 26, 140);
 });
 function compGrow() {
@@ -556,17 +556,22 @@ function renderFileChips(sel, files) {
       <button type="button" data-i="${i}" title="移除">✕</button></span>`).join("");
   box.querySelectorAll("button").forEach(b =>
     b.onclick = () => { files.splice(+b.dataset.i, 1); renderFileChips(sel, files); });
+  if(sel === "#comp-files") syncComposerControl();
 }
-function bindAttach(btnId, inputId, files, chipsSel) {
+/* 注意传 getter：S.compFiles / S.homeFiles 在切会话、切视图、发送后都会被整体
+ * 换成新数组，若在绑定时不按引用传入，onchange 会把文件推进已废弃的旧数组，
+ * 芯片照常显示但 compSend 读到空列表——附件静默丢失 */
+function bindAttach(btnId, inputId, getFiles, chipsSel) {
   $(btnId).onclick = () => $(inputId).click();
   $(inputId).onchange = () => {
+    const files = getFiles();
     for (const f of $(inputId).files) files.push(f);
     $(inputId).value = "";
     renderFileChips(chipsSel, files);
   };
 }
-bindAttach("#comp-attach", "#comp-file", S.compFiles, "#comp-files");
-bindAttach("#home-attach", "#home-file", S.homeFiles, "#home-files");
+bindAttach("#comp-attach", "#comp-file", () => S.compFiles, "#comp-files");
+bindAttach("#home-attach", "#home-file", () => S.homeFiles, "#home-files");
 compInput.addEventListener("input", compGrow);
 compInput.addEventListener("keydown", ev => {
   if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) {
@@ -574,10 +579,14 @@ compInput.addEventListener("keydown", ev => {
     compSend();
   }
 });
-$("#comp-send").onclick = () => compSend();
+$("#comp-send").onclick = () => {
+  syncComposerControl();
+  if ($("#comp-send").disabled) return;
+  return $("#comp-send").dataset.action === "send" ? compSend() : toggleTaskPause();
+};
 
-async function uploadAttachment(file) {
-  const r = await fetch(`/api/sessions/${S.cur}/attachments?name=${encodeURIComponent(file.name)}`,
+async function uploadAttachment(file, sessionId = S.cur) {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/attachments?name=${encodeURIComponent(file.name)}`,
     { method: "POST", body: file });
   if (!r.ok) {
     let msg = r.statusText;
@@ -585,34 +594,42 @@ async function uploadAttachment(file) {
     throw new Error(msg);
   }
 }
+const composerDeliveries = new Map();
 async function compSend() {
-  const text = compInput.value.trim();
-  const files = [...S.compFiles];
-  if (!text && !files.length) return;
-  const sess = S.cur ? S.sessions.find(x => x.session_id === S.cur) : null;
-  if (!sess) {
-    toast("先选择会话或下达任务", true);
-    return;
+  if (typeof ComposerDrop !== "undefined" && ComposerDrop.pending("session")) {
+    toast("正在读取附件，请稍后发送", true); return;
   }
-  $("#comp-send").disabled = true;
+  const sessionId = S.cur, text = compInput.value.trim(), files = [...S.compFiles];
+  if ((!text && !files.length) || sessionMessagePending.has(sessionId) ||
+      (typeof ComposerModels !== "undefined" && ComposerModels.pending())) return;
+  const sess = sessionId ? S.sessions.find(x => x.session_id === sessionId) : null;
+  if (!sess) { toast("先选择会话或下达任务", true); return; }
+  let delivery = composerDeliveries.get(sessionId);
+  if (!delivery || delivery.text !== text || delivery.files.length !== files.length ||
+      delivery.files.some((file, index) => file !== files[index])) {
+    const unique = globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    delivery = {text, files, messageId: `message-${unique}`, uploadIds: null};
+    composerDeliveries.set(sessionId, delivery);
+  }
+  sessionMessagePending.add(sessionId);
+  syncComposerControl();
   try {
-    for (const f of files) await uploadAttachment(f);
-    if (text) {
-      const resp = await api(`/api/sessions/${S.cur}/messages`,
-        { method: "POST", body: JSON.stringify({ content: text }) });
-      toast("已送达灵枢");
-      if (resp.resumed) {
-        startStreams(false);
-        refreshState();
-        refreshSessions();
-      }
+    if (!delivery.uploadIds) delivery.uploadIds = await stageFiles(files);
+    const resp = await api(`/api/sessions/${encodeURIComponent(sessionId)}/messages`,
+      {method:"POST", body:JSON.stringify({content:text, upload_ids:delivery.uploadIds,
+        message_id:delivery.messageId})});
+    composerDeliveries.delete(sessionId);
+    toast("消息及附件已送达灵枢");
+    if (S.cur === sessionId && resp.resumed) {
+      startStreams(false); refreshState(); refreshSessions();
     }
-    compInput.value = "";
-    compGrow();
-    S.compFiles = [];
-    renderFileChips("#comp-files", S.compFiles);
+    if (S.cur === sessionId && compInput.value.trim() === text &&
+        S.compFiles.length === files.length && S.compFiles.every((file, index) => file === files[index])) {
+      compInput.value = ""; compGrow(); S.compFiles = [];
+      renderFileChips("#comp-files", S.compFiles);
+    }
   } catch (e) { toast(e.message, true); }
-  $("#comp-send").disabled = false;
+  finally { sessionMessagePending.delete(sessionId); syncComposerControl(); }
 }
 
 /* ================= 发起会话 ================= */
@@ -627,9 +644,17 @@ const homeSync = () => {
 const missionModeHints = {
   src: "评估已授权的网站或资产，验证漏洞并生成报告。",
   ctf: "解答题目入口或附件，获取答案并生成解题报告。",
+  awdp: "上传有漏洞的服务源码或二进制，灵枢定位漏洞、最小修复并按原始目录结构打包补丁。",
   competition: "粘贴赛方规则、目标与平台说明，灵枢按实际规则规划，支持自定义赛制。",
 };
+function ctfTypeHintPayload(mode = $("#c-mode").value) {
+  if (mode !== "ctf") return {};
+  const types = [...document.querySelectorAll('input[name="ctf-type"]:checked')].map(input => input.value);
+  const note = $("#c-ctf-type-note").value.trim();
+  return types.length || note ? {ctf_type_hints: types, ctf_type_note: note} : {};
+}
 $("#c-mode").onchange = () => {
+  $("#c-ctf-types").hidden = $("#c-mode").value !== "ctf";
   $("#c-multiple-answers-option").hidden = $("#c-mode").value !== "ctf";
   $("#c-mode-hint").textContent = missionModeHints[$("#c-mode").value] || "先选择任务类型，再填写目标与要求。";
   document.querySelectorAll('input[name="home-mode"]').forEach(input => {
@@ -670,6 +695,21 @@ $("#c-mission").addEventListener("keydown", ev => {
 async function stageFiles(files) {
   const ids = [];
   for (const f of files) {
+    if (f.directory) {
+      const staged = await api(`/api/uploads/folders?name=${encodeURIComponent(f.name)}`, {method:"POST"});
+      for (const entry of f.entries) {
+        const url = `/api/uploads/folders/${encodeURIComponent(staged.upload_id)}?path=${encodeURIComponent(entry.path)}` +
+          (entry.directory ? "&directory=true" : "");
+        const response = await fetch(url, {method:"PUT", body:entry.file || new Blob()});
+        if (!response.ok) {
+          let detail = response.statusText;
+          try { detail = (await response.json()).detail || detail; } catch {}
+          throw new Error(detail);
+        }
+      }
+      ids.push(staged.upload_id);
+      continue;
+    }
     const r = await fetch(`/api/uploads?name=${encodeURIComponent(f.name)}`,
       { method: "POST", body: f });
     if (!r.ok) {
@@ -683,6 +723,9 @@ async function stageFiles(files) {
 }
 
 async function launchMission(payload, files = []) {
+  if (typeof ComposerDrop !== "undefined" && ComposerDrop.pending("home")) {
+    toast("正在读取附件，请稍后下达任务", true); return;
+  }
   if (!payload.mode) {
     const mode = $("#c-mode").value;
     if (!mode) {
@@ -692,23 +735,37 @@ async function launchMission(payload, files = []) {
     }
     payload = { ...payload, mode };
   }
+  if (payload.mode === "ctf") payload = {...ctfTypeHintPayload("ctf"), ...payload};
   $("#c-go").disabled = true;
   try {
     if (!payload.project_id) {
       const project = $("#c-project")?.value || "";
       if (project) payload = { ...payload, project_id: project };
     }
+    const selection = typeof ComposerModels !== "undefined" ? ComposerModels.selected("home") : "";
+    if (selection && payload.model === undefined) payload = {...payload, model: selection};
     if (files.length) payload = { ...payload, upload_ids: await stageFiles(files) };
     const s = await api("/api/sessions", { method: "POST", body: JSON.stringify(payload) });
     toast(files.length ? "任务已下达，附件已交给灵枢" : "任务已下达，灵枢开始规划");
     $("#c-mission").value = "";
+    if (payload.mode === "ctf") {
+      const current = ctfTypeHintPayload("ctf");
+      if (JSON.stringify(current.ctf_type_hints || []) === JSON.stringify(payload.ctf_type_hints || []) &&
+          (current.ctf_type_note || "") === (payload.ctf_type_note || "")) {
+        document.querySelectorAll('input[name="ctf-type"]').forEach(input => { input.checked = false; });
+        $("#c-ctf-type-note").value = "";
+      }
+    }
     if (files.length) { S.homeFiles = []; renderFileChips("#home-files", S.homeFiles); }
     // 先进会话页：列表刷新是附带动作，不该挡在进场前面（服务器侧若正被
     // 长任务占住，await 列表会把进页一起压住）
     openSession(s.session_id);
     refreshSessions();
   } catch (e) {
-    if (e.detail && e.detail.code === "rule_conflict") openRuleConflict(payload, e.detail);
+    if (Array.isArray(e.detail) && e.detail.some(item => item.type === "extra_forbidden" &&
+        ["ctf_type_hints", "ctf_type_note"].includes(item.loc?.at(-1)))) {
+      toast("后端尚未加载题型提示功能。请在当前任务结束后重启服务；本次选项已保留。", true);
+    } else if (e.detail && e.detail.code === "rule_conflict") openRuleConflict(payload, e.detail);
     else toast(e.message, true);
   } finally { $("#c-go").disabled = false; }
 }
@@ -730,6 +787,11 @@ $("#rc-confirm").onclick = async () => {
 
 /* ================= 启动 ================= */
 (async function boot() {
+  // 轻量部署（Ollama 离线赛台）：只留 CTF/AWDP，隐藏 SRC/智能体入口
+  if (window.__SPIRITSCOUT_LIGHT__) {
+    document.querySelectorAll("[data-full-only]").forEach(el => { el.hidden = true; });
+    document.querySelectorAll("[data-light-only]").forEach(el => { el.hidden = false; });
+  }
   AgentSideChat.init();
   AgentWorkbench.init();
   try { S.agents = await api("/api/agents"); } catch {}
@@ -737,9 +799,13 @@ $("#rc-confirm").onclick = async () => {
   // 项目目录先于会话列表：列表里的项目标签与会话创建下拉都依赖它
   try { await ProjectsPage.loadCatalog(); } catch {}
   await refreshSessions();
+  ComposerModels.init();
+  ConsoleNotify.init();
+  ConsoleNotify.check();
   S.polling = ConsolePolling.create({refreshList: refreshSessions, refreshState,
+    refreshNotify: () => ConsoleNotify.check(),
     isSession: () => S.view === "session" && !!S.cur,
-    isRunning: () => !TERMINAL.has(S.state?.session?.status),
+    isRunning: () => S.view === "session" && !!S.cur && !TERMINAL.has(S.state?.session?.status),
     isVisible: () => document.visibilityState === "visible"});
   S.polling.start();
   const running = S.sessions.find(x => !TERMINAL.has(x.status));
