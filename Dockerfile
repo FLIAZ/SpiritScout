@@ -9,9 +9,17 @@
 FROM node:22-bookworm-slim AS chrome-mcp
 RUN npm install --prefix /opt/chrome-mcp --ignore-scripts @playwright/mcp@0.0.83
 
+FROM node:24.22.2-bookworm-slim AS cyberchef
+WORKDIR /opt/cyberchef
+COPY deploy/cyberchef/package*.json ./
+RUN npm ci --ignore-scripts --omit=dev --no-audit --no-fund \
+ && node node_modules/cyberchef/src/core/config/scripts/fixCryptoApiImports.mjs
+
 FROM debian:bookworm-slim
 COPY --from=chrome-mcp /usr/local/bin/node /usr/local/bin/node
 COPY --from=chrome-mcp /opt/chrome-mcp /opt/chrome-mcp
+COPY --from=cyberchef /opt/cyberchef /opt/cyberchef
+COPY --from=cyberchef /usr/local/bin/node /opt/cyberchef/bin/node
 
 # 依赖源：默认官方 PyPI；国内可覆盖为镜像源，例如
 #   docker compose build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple

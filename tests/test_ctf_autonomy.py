@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from spiritscout.agents.master.agent import MasterAgent
 from spiritscout.agents.master.dag import TaskDAG
 from spiritscout.agents.ring import RingLedger
+from spiritscout.config.settings import SystemConfig
 from spiritscout.core.audit import NullAuditLogger
 from spiritscout.core.models import AgentType, RunMode, Task, TaskStatus
 from spiritscout.ctf.agents import CTFBaseAgent
@@ -24,15 +25,18 @@ class CTFAutonomyTests(unittest.IsolatedAsyncioTestCase):
             root = Path(tmp)
             report = root / 'report.md'
             report.write_text('完整解题报告和来源证据', encoding='utf-8')
-            infra = SimpleNamespace(workspace=root, experience=object(), bus=None,
+            cfg = SystemConfig()
+            infra = SimpleNamespace(cfg=cfg, workspace=root, experience=object(), bus=None,
                                     audit=NullAuditLogger(), close=AsyncMock())
+            assembly = SimpleNamespace(single_executor=False, notes=[])
+            assembler = SimpleNamespace(assemble=Mock(return_value=assembly))
             pending = asyncio.get_running_loop().create_future()
 
             async def old_blocking_distill(*args, **kwargs):
                 await pending
 
             with patch('spiritscout.runtime._build_infra', AsyncMock(return_value=infra)), \
-                    patch('spiritscout.runtime._make_assembler'), \
+                    patch('spiritscout.runtime._make_assembler', return_value=assembler), \
                     patch('spiritscout.runtime._run_master', AsyncMock(return_value={
                         'rounds_executed': 1})), \
                     patch('spiritscout.runtime._render_writeup', AsyncMock(return_value=report)), \
@@ -42,7 +46,7 @@ class CTFAutonomyTests(unittest.IsolatedAsyncioTestCase):
                     patch('spiritscout.runtime._foreground_started'), \
                     patch('spiritscout.runtime._foreground_finished'):
                 result = await asyncio.wait_for(run_ctf_engagement(
-                    cfg=SimpleNamespace(), models=[], authorization=SimpleNamespace(mode=RunMode.CTF),
+                    cfg=cfg, models=[], authorization=SimpleNamespace(mode=RunMode.CTF),
                     # 多题报告在此验证；单题后台报告由 test_standalone_answers 覆盖。
                     challenges=[{'id': 'c1'}, {'id': 'c2'}], report_path=report), timeout=0.5)
                 schedule.assert_called_once()

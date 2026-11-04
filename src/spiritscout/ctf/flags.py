@@ -62,9 +62,14 @@ class FlagManager:
         store_path: str | Path | None = None,
         local_only: bool = False,
         multiple_answers: bool = False,
+        fix_mode: bool = False,
     ):
         self.local_only = local_only
         self.multiple_answers = multiple_answers
+        # AWDP 修补模式：产出不是 flag 而是补丁（tar.gz + 说明）；
+        # 复用完成度记账，answer_ids 语义映射为 fix_ids
+        self.fix_mode = fix_mode
+        self.fixes: dict[str, dict] = {}
         self.completions: dict[str, dict] = {}
         self.patterns = flag_patterns or list(DEFAULT_FLAG_PATTERNS)
         self.submit_fn = submit_fn
@@ -81,18 +86,28 @@ class FlagManager:
             self._load()
         if self.local_only and self.store_path:
             try:
-                self.completions = json.loads(self.store_path.with_suffix('.completion.json').read_text())
+                loaded = json.loads(self.store_path.with_suffix('.completion.json').read_text())
+                if isinstance(loaded, dict):
+                    self.completions = {cid: row for cid, row in loaded.items() if isinstance(row, dict)}
+            except (OSError, ValueError):
+                pass
+        if self.fix_mode and self.store_path:
+            try:
+                loaded = json.loads(self.store_path.with_suffix('.fixes.json').read_text())
+                if isinstance(loaded, dict):
+                    self.fixes = {fid: row for fid, row in loaded.items() if isinstance(row, dict)}
             except (OSError, ValueError):
                 pass
 
     def confirm_complete(self, challenge_id: str, answer_ids: list[str], reason: str,
                          expected: int = 0) -> bool:
         """单题完成由模型明确确认全部答案；已知答案数量仍须完整覆盖。"""
-        answers = {f.flag_id for f in self.all() if f.challenge_id == challenge_id}
+        answers = self.answer_ids(challenge_id)
         if (not self.local_only or not reason.strip() or not answers
                 or set(answer_ids) != answers or (expected > 0 and len(answers) < expected)):
             return False
-        self.completions[challenge_id] = {'answer_ids': sorted(answers), 'reason': reason, 'completed': True}
+        self.completions[challenge_id] = {**self.completions.get(challenge_id, {}),
+                                         'answer_ids': sorted(answers), 'reason': reason, 'completed': True}
         if self.store_path:
             path = self.store_path.with_suffix('.completion.json')
             tmp = path.with_suffix('.tmp')
@@ -100,9 +115,48 @@ class FlagManager:
             tmp.replace(path)
         return True
 
+    def answer_ids(self, challenge_id: str) -> set[str]:
+        if self.fix_mode:
+            return {fid for fid, row in self.fixes.items()
+                    if row.get("challenge_id") == challenge_id}
+        disputed = set((self.completions.get(challenge_id) or {}).get("disputed_answer_ids", []))
+        return {flag.flag_id for flag in self.all() if flag.challenge_id == challenge_id and flag.flag_id not in disputed}
+
+    def record_fix(self, challenge_id: str, files: list[str], description: str,
+                   archive: str, found_by: str) -> str:
+        """AWDP：登记一题的修复补丁（文件清单 + 说明 + 打包路径）。"""
+        from spiritscout.core.ids import new_id as _new_id
+        fix_id = _new_id("fix")
+        self.fixes[fix_id] = {"challenge_id": challenge_id,
+                              "files": list(files), "description": description,
+                              "archive": archive, "found_by": found_by}
+        if self.store_path:
+            path = self.store_path.with_suffix('.fixes.json')
+            tmp = path.with_suffix('.fixtmp')
+            tmp.write_text(json.dumps(self.fixes, ensure_ascii=False), encoding='utf-8')
+            tmp.replace(path)
+        return fix_id
+
+    def reopen(self, challenge_id: str, reason: str) -> None:
+        if not self.local_only:
+            return
+        previous = self.completions.get(challenge_id) or {}
+        self.completions[challenge_id] = {**previous, "completed": False, "reopen_reason": reason,
+            "disputed_answer_ids": sorted({flag.flag_id for flag in self.all() if flag.challenge_id == challenge_id})}
+        self._persist_completions()
+        self.audit.log("flag.completion_reopened", "flag_manager", {"challenge_id": challenge_id, "reason": reason})
+
+    def _persist_completions(self) -> None:
+        if self.store_path:
+            path = self.store_path.with_suffix('.completion.json')
+            tmp = path.with_suffix('.tmp')
+            tmp.write_text(json.dumps(self.completions, ensure_ascii=False), encoding='utf-8')
+            tmp.replace(path)
+
     def completed_ids(self) -> set[str]:
-        return {cid for cid, row in self.completions.items() if row.get('completed') and row.get('answer_ids') and set(row.get('answer_ids', [])) ==
-                {flag.flag_id for flag in self.all() if flag.challenge_id == cid}}
+        return {cid for cid, row in self.completions.items() if isinstance(row, dict)
+                and row.get('completed') and row.get('answer_ids')
+                and set(row['answer_ids']) == self.answer_ids(cid)}
 
     # ------------------------------------------------------------ 提取
 
@@ -140,7 +194,8 @@ class FlagManager:
             format_ok=bool(extract_flags(value, self.patterns)), found_by=found_by,
         )
         self._flags[value] = cand
-        self.completions.pop(challenge_id, None)
+        if not (self.completions.get(challenge_id) or {}).get("disputed_answer_ids"):
+            self.completions.pop(challenge_id, None)
         self.audit.log("flag.registered", "flag_manager", {
             "flag_id": cand.flag_id, "challenge_id": challenge_id,
             "found_by": found_by, "format_ok": cand.format_ok,

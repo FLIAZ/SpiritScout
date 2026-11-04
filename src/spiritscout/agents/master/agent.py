@@ -1,12 +1,10 @@
-"""主 Agent 入口：组装规划、协调、交互职责及 LangGraph 生命周期。"""
+"""主 Agent 入口：组装规划、协调、交互职责及分段执行生命周期。"""
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import time
 from typing import Any
-
-from langgraph.graph import END, StateGraph
 
 from spiritscout.agents.master.contracts import (
     TACTIC_AGENT_MAP,
@@ -22,6 +20,7 @@ from spiritscout.core.models import (
     AgentType,
     Authorization,
     BlackboardLayer,
+    RunMode,
 )
 
 __all__ = ["MasterAgent", "MasterContext", "MasterState", "TACTIC_AGENT_MAP"]
@@ -35,50 +34,51 @@ class MasterAgent(MasterCoordination, MasterInteraction, MasterPlanning):
     # 默认档执行（网关门禁忽略未声明值，不猜不代填）
     _MASTER_EFFORT = "max"
 
+    @property
+    def _master_effort(self) -> str:
+        """当前部署的主 Agent 档位：Ollama 轻量模型只声明 low/high，
+        max 整档会被网关忽略。实测（round1/4）该模型主 Agent 思考偶发
+        数千 token 失控（一次吞掉 4 分钟），而 low 档 93 token 即可产出
+        可用派单——轻量 × CTF 降为 low，把秒表留给解题环的思考。
+        仅限 CTF 模式（轻量部署的专属补偿），SRC 会话不受影响。"""
+        if (self.ctx.extra.get("lightweight_local")
+                and getattr(self.ctx.policy, "mode", None) in (RunMode.CTF, RunMode.AWDP)):
+            return "low"
+        return self._MASTER_EFFORT
+
     def __init__(self, ctx: MasterContext):
         self.ctx = ctx
         self.agent_id = new_id("master")
-        self._graph = self._build_graph()
 
-    # ------------------------------------------------------------ 图构建
+    # ------------------------------------------------------------ 分段执行
 
-    def _build_graph(self):
-        graph = StateGraph(MasterState)
-        graph.add_node("meta_plan", self._checkpoint_node("meta_plan", self._meta_plan))
-        graph.add_node("dispatch", self._checkpoint_node("dispatch", self._dispatch))
-        graph.add_node("aggregate", self._checkpoint_node("aggregate", self._aggregate))
-        graph.add_node("review", self._checkpoint_node("review", self._review))
-        graph.set_entry_point("meta_plan")
-        graph.add_edge("meta_plan", "dispatch")
-        graph.add_edge("dispatch", "aggregate")
-        graph.add_edge("aggregate", "review")
-        # 单段以 review 收束：继续/收手由外层分段循环携带状态决策——
-        # 框架递归深度只覆盖一段（4 个节点），不构成长期迭代的上限
-        graph.add_edge("review", END)
-        return graph.compile()
+    async def _run_segment(self, state: MasterState) -> MasterState:
+        """单段顺序执行：规划→派发→汇总→复盘。
 
-    def _checkpoint_node(self, name: str, handler: Any) -> Any:
-        async def execute(state: MasterState) -> dict[str, Any]:
-            journal = getattr(self.ctx, "journal", None)
+        单段拓扑固定线性，继续/收手由外层分段循环携带状态决策——段内
+        步数固定（4 个节点），不构成长期迭代的上限。列表键按累加语义
+        合并（tasks_dispatched / round_views），检查点 journal 落在节点
+        边界前后。
+        """
+        journal = getattr(self.ctx, "journal", None)
+        for name in ("meta_plan", "dispatch", "aggregate", "review"):
             if journal is not None:
                 journal.checkpoint("master", "master", f"before_{name}", dict(state))
-            update = await handler(state)
+            update: dict[str, Any] = await getattr(self, f"_{name}")(state)
+            appended = {key: list(state.get(key, [])) + list(update.get(key, []))
+                        for key in ("tasks_dispatched", "round_views")}
             if journal is not None:
-                merged = {**state, **update}
-                # 与图中的 operator.add reducer 保持一致，避免遗漏本轮任务/视图。
-                for key in ("tasks_dispatched", "round_views"):
-                    merged[key] = list(state.get(key, [])) + list(update.get(key, []))
-                journal.checkpoint("master", "master", f"after_{name}", merged)
-            return update
-
-        return execute
+                journal.checkpoint("master", "master", f"after_{name}",
+                                   {**state, **update, **appended})
+            state = {**state, **update, **appended}
+        return state
 
     async def run(self, authorization: Authorization, target: str) -> dict[str, Any]:
         """启动多轮闭环迭代，直至模型复盘判定收敛或用户停止。
 
         分段执行：每段一轮（规划→派发→汇总→复盘），段间状态由外层循环
-        携带——单段步数固定，框架递归上限不约束业务收敛；是否继续只由
-        复盘决策与用户停止决定，不设固定回合顶。
+        携带——单段步数固定；是否继续只由复盘决策与用户停止决定，不设
+        固定回合顶。
         """
         assert self.ctx.audit is not None
         self.ctx.audit.log("decision.change", self.agent_id, {
@@ -108,7 +108,7 @@ class MasterAgent(MasterCoordination, MasterInteraction, MasterPlanning):
         total_dispatched = 0
         try:
             while True:
-                final = await self._graph.ainvoke(state)
+                final = await self._run_segment(state)
                 total_dispatched += len(final["tasks_dispatched"])
                 if not final["continue_iteration"]:
                     break

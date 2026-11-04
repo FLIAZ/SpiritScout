@@ -115,7 +115,8 @@ class ExecutionRegressionTests(unittest.IsolatedAsyncioTestCase):
         registry = ToolRegistry(LocalExecutor(), policy=policy)
         execute = AsyncMock()
         registry.register_builtin("remote", execute, ToolSpec(name="remote", kind=ToolKind.MCP))
-        self.assertFalse((await registry.call("remote", {"action": "reverse_shell"})).ok)
+        self.assertFalse((await registry.call("remote", {"action": "reverse_shell"},
+            _purpose="对测试夹具尝试反向连接，用于验证危险动作会先征求用户同意。")).ok)
         gate.assert_awaited_once()
         execute.assert_not_awaited()
 

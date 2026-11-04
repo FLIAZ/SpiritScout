@@ -111,6 +111,8 @@ class GatewayConfig(ValidatedConfig):
     shared_ctf_prefix: bool = False  # 共享布局实验关闭，真实复杂对照尚未证明命中收益
     compact_decision_patches: bool = False  # 无损补丁短编码，真实模型对照通过后再启用
     remember_endpoint_capabilities: bool = True  # 只复用已成功的可选参数兼容回退
+    automatic_platform_extraction: bool = True
+    lightweight_local: bool = False
 
 
 class ExecutorConfig(ValidatedConfig):
@@ -152,6 +154,7 @@ class WebConfig(ValidatedConfig):
     host: str = "127.0.0.1"               # 默认仅回环
     port: int = Field(default=8000, ge=1, le=65535)
     max_concurrent_sessions: int = Field(default=4, ge=1, description="并发会话上限（信号量）")
+    auto_name_sessions: bool = True
     remote_auth_required: bool = Field(
         default=True, description="非回环绑定必须配置管理密码，否则拒绝启动")
     password_env: str = Field(
@@ -231,6 +234,7 @@ class ExperienceConfig(ValidatedConfig):
     distill_timeout_seconds: int = Field(
         default=45, gt=0, description="收尾提炼单次 LLM 调用硬顶（秒），仅终态路径使用")
     recall_limit: int = Field(default=6, gt=0, le=20, description="会话开工注入的经验条数上限")
+    auto_distill: bool = True
 
 
 class SearchConfig(ValidatedConfig):
@@ -332,6 +336,12 @@ class ModelEntry(ValidatedConfig):
     # 上限只在模型想继续说的时候决定掐在哪，设小了思考型模型会把额度耗在
     # 思考上、正文被截成半截 JSON；声明值仅作模型档案的显式覆盖
     max_output_tokens: int = 0
+    ollama_options: dict[str, Any] = Field(default_factory=dict)
+    ollama_think: bool | None = None
+    ollama_keep_alive: str = "5m"
+    ollama_resource: str = ""
+    # 显式允许本条目参与轻量 CTF/AWDP 补偿；仅在独立轻量部署中启用。
+    ollama_lightweight: bool = False
     # 思考强度取值：由每个模型自行声明（如 low/medium/high，或某模型特有的
     # ultra）——不设固定枚举，也不假设各模型档位一致；空 = 该模型不吃思考强度。
     reasoning_effort_levels: list[str] = Field(default_factory=list)

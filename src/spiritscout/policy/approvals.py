@@ -63,9 +63,12 @@ class ApprovalBroker:
         context = current_invocation.get()
         if context is not None:
             self._pending[aid].update(invocation_id=context.invocation_id,
-                                      params_digest=context.params_digest)
+                                      params_digest=context.params_digest,
+                                      purpose=context.purpose, tool=context.tool_name)
         self._audit.log("approval.requested", "approval_broker",
-                        {"approval_id": aid, "action": action, "detail": detail})
+                        {"approval_id": aid, "action": action, "detail": detail,
+                         "purpose": context.purpose if context else "",
+                         "tool": context.tool_name if context else ""})
         return aid
 
     def _detach(self, aid: str, action: str) -> None:

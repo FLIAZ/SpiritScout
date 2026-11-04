@@ -34,7 +34,7 @@ const SessionArchive = (() => {
       ${item.kind === "file" ? `<dt>文件大小</dt><dd>${esc(fmtSize(item.size) || "0 B")}</dd>` : ""}</dl>
       ${refs.length ? `<section class="archive-sources"><h5>引用来源 <span>${refs.length}</span></h5>${refs.map(ref => `<div class="archive-source"><code>${esc(ref.id || "证据")}</code><p>${esc(ref.caption)}</p>${ref.note ? `<small>${esc(ref.note)}</small>` : ""}${ref.record_id ? `<small>黑板记录 ${esc(ref.record_id)}</small>` : ""}</div>`).join("")}</section>` : item.kind !== "file" ? '<p class="archive-note">没有附带证据引用，请结合来源核验。</p>' : ""}
       ${item.record_id ? `<details class="archive-history" data-layer="${esc(item.layer)}" data-record="${esc(item.record_id)}"><summary>版本历史</summary><p>历史版本仅供参考，使用前需复核。</p><div class="archive-history-list"></div></details>` : ""}
-      ${item.kind === "file" ? `<a class="btn archive-download" download href="/api/sessions/${encodeURIComponent(session)}/artifacts/download?path=${encodeURIComponent(item.path)}">下载文件</a>` : ""}`;
+      ${item.kind === "file" ? `<div class="archive-file-ops"><a class="btn archive-download" download href="/api/sessions/${encodeURIComponent(session)}/artifacts/download?path=${encodeURIComponent(item.path)}">下载文件</a><button type="button" class="btn" data-archive-share data-path="${esc(item.path)}">发送到会话</button></div>` : ""}`;
   }
   function formatTime(value) {
     const date = new Date(typeof value === "number" ? value * 1000 : value);
@@ -180,10 +180,28 @@ const SessionArchive = (() => {
       };
       fetchPage();
     }, true);
-    $("#archive-detail").onclick = event => {
+    $("#archive-detail").onclick = async event => {
       if (event.target.closest("[data-archive-back]")) {
         $("#archive-search").scrollIntoView({block:"start"});
         $("#archive-search").focus({preventScroll:true});
+      }
+      const shareBtn = event.target.closest("[data-archive-share]");
+      if (!shareBtn || shareBtn.disabled) return;
+      const rel = shareBtn.dataset.path, id = session;
+      shareBtn.disabled = true;
+      try {
+        await FileCards.share(id, rel);
+        toast("已发送到会话");
+        // 跳回会话页并以增量流带回 file.shared 文件卡片（终态会话流会自行收尾）
+        if (S.cur === id) {
+          const tab = document.querySelector('[data-tab="chat"]');
+          if (tab && S.tab !== "chat") tab.click();
+          startStreams(false);
+        }
+      } catch (error) {
+        toast(`发送失败：${error.message}`, true);
+      } finally {
+        shareBtn.disabled = false;
       }
     };
     filters();

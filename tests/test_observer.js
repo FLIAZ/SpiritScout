@@ -54,3 +54,26 @@ assert.match(observerBox.innerHTML,/deepseek \/ deepseek-flash/);
 assert.doesNotMatch(observerBox.innerHTML,/@WyJ/);
 assert.match(observerBox.innerHTML,/196,136/);
 console.log('observer: readable cached model identities and unchanged usage totals passed');
+
+// 默认摘要不堆叠空数据；完整计量保留在原生折叠区。
+assert.doesNotMatch(observerBox.innerHTML,/data-section="findings"|data-section="execution"/);
+assert.doesNotMatch(observerBox.innerHTML,/业务分析尚未完成|等待执行进展|生成中的调用暂未计入/);
+assert.match(observerBox.innerHTML,/<details data-section="usage-details" class="obs-details"><summary>用量详情/);
+context.S.state.model_usage.cache={hit_rate:.935,priced_calls:21,estimated_cost_cny_min:.125,estimated_cost_cny_max:.125};
+context.S.state.tasks=[{task_type:'ctf_web',status:'done',routes:[{note:'本题已完成。'},{note:'本题已完成。'}]}];
+context.S.state.observed_evidence=[{url:'https://example.test/login',status_code:200}];
+vm.runInContext("SessionObserver.push({type:'agent.tool_result',actor:'ctf_web',detail:{ok:true,note:'本题已完成。'}})",Object.assign(context,{requestAnimationFrame:()=>{}}));
+vm.runInContext('SessionObserver.render()',context);
+assert.equal((observerBox.innerHTML.match(/本题已完成。/g)||[]).length,1,'合并任务与近期事件中的重复进展');
+assert.match(observerBox.innerHTML,/缓存命中 <b>93.5%/);
+assert.match(observerBox.innerHTML,/费用估算 <b>¥0.1250/);
+assert.match(observerBox.innerHTML,/<details class="obs-section obs-details" data-section="findings"><summary>发现与记录/);
+assert.match(observerBox.innerHTML,/<details class="obs-section obs-details" data-section="execution"><summary>执行记录/);
+assert.doesNotMatch(observerBox.innerHTML,/0 个任务在途|已知事实 · 0|待补信息 · 0/);
+let restored=false;
+const openedDetails={dataset:{section:'usage-details'},set open(value){restored=value;}};
+observerBox.querySelectorAll=selector=>selector==='details[open]' ? [{dataset:{section:'usage-details'}}] : selector==='details' ? [openedDetails] : [];
+context.S.state.model_usage.used_tokens++;
+vm.runInContext('SessionObserver.render()',context);
+assert.equal(restored,true,'实况刷新时保留用户展开的详情');
+console.log('observer: compact summary, optional findings, deduplicated progress and expanded-state preservation passed');

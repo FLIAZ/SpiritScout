@@ -39,7 +39,7 @@ _PROTECTED = {"constraints", "task_intent", "用户答复", "scope", "rules", "m
               "available_skills", "skill_context", "skill_observations",
               "authorization", "testing_rules", "user_replies",
               "competition_context", "platform_facts", "灵枢当前指令",
-              "active_tasks", "steering_status", "competition_status"}
+              "active_tasks", "steering_status", "competition_status", "user_type_hints"}
 
 
 def compact_json(payload: dict[str, Any], max_chars: int = 8000) -> str:

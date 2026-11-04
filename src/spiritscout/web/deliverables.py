@@ -13,12 +13,14 @@ from typing import Any, BinaryIO
 from spiritscout.core.audit import sanitize_record, tool_preview
 
 _KINDS = {"fact", "hypothesis", "evidence", "finding", "asset", "file", "outcome"}
+# 可下发的目录：智能体产物、报告，以及用户上传的原始附件（回显给本人预览/下载）
+_SERVED_DIRS = {"artifacts", "reports", "attachments"}
 
 
 def open_artifact(workspace: Path, name: str) -> BinaryIO:
     """通过目录描述符逐层打开，拒绝检查后被替换为链接的竞态。"""
     parts = Path(name).parts
-    if (Path(name).is_absolute() or not parts or parts[0] not in {"artifacts", "reports"}
+    if (Path(name).is_absolute() or not parts or parts[0] not in _SERVED_DIRS
             or any(p.startswith(".") for p in parts)):
         raise FileNotFoundError(name)
     directory = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -46,9 +48,9 @@ def _evidence(value: dict[str, Any]) -> dict[str, Any]:
 
 
 def artifact_path(workspace: Path, name: str) -> Path | None:
-    """仅允许本会话产出与报告；逐级拒绝符号链接及目录穿越。"""
+    """仅允许本会话产出、报告与附件目录；逐级拒绝符号链接及目录穿越。"""
     relative = Path(name)
-    if relative.is_absolute() or not relative.parts or relative.parts[0] not in {"artifacts", "reports"}:
+    if relative.is_absolute() or not relative.parts or relative.parts[0] not in _SERVED_DIRS:
         return None
     if any(part in {".", ".."} or part.startswith(".") for part in relative.parts):
         return None

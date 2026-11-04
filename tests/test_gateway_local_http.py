@@ -27,7 +27,10 @@ class LocalHttpGatewayTests(unittest.IsolatedAsyncioTestCase):
                      'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': 'ok'}, 'finish_reason': None}]},
                     {'id': 'local-stream', 'object': 'chat.completion.chunk', 'created': 1, 'model': 'fixture',
                      'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}],
-                     'usage': {'prompt_tokens': 10, 'completion_tokens': 1, 'total_tokens': 11}},
+                     'usage': {'prompt_tokens': 10, 'completion_tokens': 0, 'total_tokens': 10,
+                               'prompt_tokens_details': {'cached_tokens': 8}}},
+                    {'id': 'local-stream', 'object': 'chat.completion.chunk', 'created': 1, 'model': 'fixture',
+                     'choices': [], 'usage': {'prompt_tokens': 0, 'completion_tokens': 1, 'total_tokens': 1}},
                 ]
                 data = (''.join('data: ' + json.dumps(event) + '\n\n' for event in events)
                         + 'data: [DONE]\n\n').encode()
@@ -49,6 +52,10 @@ class LocalHttpGatewayTests(unittest.IsolatedAsyncioTestCase):
             response = await gateway.chat([{'role': 'user', 'content': 'fixture'}], max_tokens=16,
                                           tools=tools, on_delta=lambda kind, text: chunks.append((kind, text)))
             self.assertEqual(response.content, 'ok')
+            self.assertEqual(response.prompt_tokens, 10)
+            self.assertEqual(response.completion_tokens, 1)
+            self.assertEqual(response.cached_input_tokens, 8)
+            self.assertEqual(gateway.budget.used_tokens, 11)
             self.assertIn(('text', 'ok'), chunks)
             self.assertEqual(len(requests), 1)
             self.assertTrue(requests[0]['stream'])
@@ -104,3 +111,50 @@ class LocalHttpGatewayTests(unittest.IsolatedAsyncioTestCase):
         finally:
             server.close()
             await server.wait_closed()
+
+    async def test_responses_and_anthropic_cache_usage_over_real_http(self) -> None:
+        for api_format in ('responses', 'anthropic_messages'):
+            with self.subTest(api_format=api_format):
+                async def handle(reader, writer):
+                    try:
+                        header = await reader.readuntil(b'\r\n\r\n')
+                        size = next(int(line.split(b':', 1)[1]) for line in header.split(b'\r\n')
+                                    if line.lower().startswith(b'content-length:'))
+                        await reader.readexactly(size)
+                        if api_format == 'responses':
+                            result = {'id': 'resp_fixture', 'object': 'response', 'created_at': 1,
+                                      'status': 'completed', 'model': 'fixture',
+                                      'output': [{'id': 'msg_fixture', 'type': 'message', 'role': 'assistant',
+                                                  'status': 'completed', 'content': [{'type': 'output_text', 'text': 'ok', 'annotations': []}]}],
+                                      'usage': {'input_tokens': 110, 'output_tokens': 20, 'total_tokens': 130,
+                                                'input_tokens_details': {'cached_tokens': 60}}}
+                        else:
+                            result = {'id': 'msg_fixture', 'type': 'message', 'role': 'assistant', 'model': 'fixture',
+                                      'content': [{'type': 'text', 'text': 'ok'}], 'stop_reason': 'end_turn',
+                                      'usage': {'input_tokens': 40, 'output_tokens': 20,
+                                                'cache_read_input_tokens': 60, 'cache_creation_input_tokens': 10}}
+                        data = json.dumps(result).encode()
+                        writer.write(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: '
+                                     + str(len(data)).encode() + b'\r\nConnection: close\r\n\r\n' + data)
+                        await writer.drain()
+                    finally:
+                        writer.close()
+                        await writer.wait_closed()
+
+                server = await asyncio.start_server(handle, '127.0.0.1', 0)
+                try:
+                    port = server.sockets[0].getsockname()[1]
+                    gateway = ModelGateway(ModelRegistry([ModelEntry(model='fixture', provider='openai_compatible',
+                        api_format=api_format, base_url=f'http://127.0.0.1:{port}/v1', api_key='local-test-only')]),
+                        config=GatewayConfig(request_timeout_seconds=5))
+                    response = await gateway.chat([{'role': 'user', 'content': 'fixture'}], max_tokens=32)
+                    self.assertEqual(response.content, 'ok')
+                    self.assertEqual(response.prompt_tokens, 110, '缓存只计入输入总量一次')
+                    self.assertEqual(response.completion_tokens, 20)
+                    self.assertEqual(response.cached_input_tokens, 60)
+                    self.assertEqual(gateway.budget.used_tokens, 130)
+                    if api_format == 'anthropic_messages':
+                        self.assertEqual(response.cache_write_tokens, 10)
+                finally:
+                    server.close()
+                    await server.wait_closed()

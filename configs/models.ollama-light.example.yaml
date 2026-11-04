@@ -1,0 +1,27 @@
+providers:
+  - name: ollama-light
+    provider: ollama
+    base_url: http://127.0.0.1:11434
+    api_format: auto
+models:
+  - model: spiritscout-qwen35-9b-light:latest
+    provider_ref: ollama-light
+    context_window: 16384
+    # 0 = 不发 num_predict（生成无界）。轻量小模型偶发散场长文（一次吞掉
+    # 数百秒）；4096 兜住失控生成（思考档开启时思考+正文也在其中）。
+    max_output_tokens: 4096
+    capabilities: [code, chinese, security]
+    reasoning_effort_levels: [low, high]
+    ollama_think: false
+    ollama_lightweight: true
+    ollama_keep_alive: 30m
+    ollama_resource: ollama-local-gpu
+    ollama_options:
+      num_ctx: 16384
+      temperature: 0.3
+      top_p: 0.9
+      top_k: 20
+      repeat_penalty: 1.05
+      presence_penalty: 0.0
+      num_thread: 8
+    rate_limit_rpm: 1000

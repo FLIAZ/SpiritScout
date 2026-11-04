@@ -9,6 +9,8 @@ from typing import Any
 
 from spiritscout.core.attempts import AttemptLedger, exact_key
 from spiritscout.core.audit import AuditLogger, NullAuditLogger
+from spiritscout.core.ids import new_id
+from spiritscout.core.models import AgentType, BlackboardLayer
 
 # 判定「无产出」的价值阈值：低于此值的已完成尝试对同伴构成避让信号
 ZERO_OUTCOME = 0.1
@@ -30,6 +32,29 @@ class RingLedger:
         self._steering: dict[str, dict] = {}       # agent_key → 最新督导建议
         self._task_steering: dict[str, dict] = {}
         self._steer_sequence = 0
+        self._instructions: dict[str, dict] = {}
+        self._blackboard: Any = None
+
+    def bind_blackboard(self, blackboard: Any) -> None:
+        self._blackboard = blackboard
+        rows = blackboard.query(BlackboardLayer.TOPOLOGY, limit=10000, data_filter=("kind", "instruction"))
+        for row in sorted(rows, key=lambda item: item["data"].get("ts", 0)):
+            record = {key: value for key, value in row["data"].items() if key != "kind"}
+            self._instructions.setdefault(record["id"], record)
+            if not record.get("superseded"):
+                if record.get("task_id"):
+                    self._task_steering[record["task_id"]] = record
+                else:
+                    self._steering[record["agent"]] = record
+        for record in self._instructions.values():
+            self._persist_instruction(record)
+
+    def _persist_instruction(self, record: dict) -> None:
+        if self._blackboard is not None:
+            data = {"kind": "instruction", **record}
+            if self._blackboard.read(BlackboardLayer.TOPOLOGY, record["id"]) != data:
+                self._blackboard.write(BlackboardLayer.TOPOLOGY, record["id"], data,
+                                       agent_type=AgentType.MASTER, updated_by="ring")
 
     # ------------------------------------------------------------ 已尝试登记
 
@@ -58,28 +83,38 @@ class RingLedger:
     # ------------------------------------------------------------ 督导通道
 
     def steer(self, agent_key: str, hint: str, *, rationale: str = "",
-              task_id: str = "") -> None:
-        """仅替换同一收件任务的旧指令；未指定任务表示该类型的公共指令。"""
-        self._steer_sequence += 1
-        record = {
-            "id": f"steer-{self._steer_sequence}", "agent": agent_key,
-            "task_id": task_id, "hint": hint[:2000], "rationale": rationale[:600],
-            "feedback": {},
-            "ts": time.time(),
-        }
+              task_id: str = "", supersedes: list[str] | None = None,
+              source_id: str = "") -> str:
+        """新指令排队保留；只有明确替代同一收件人的旧指令才使其失效。"""
+        if source_id:
+            existing = next((record for record in self._instructions.values()
+                             if record.get("source_id") == source_id), None)
+            if existing is not None:
+                return existing["id"]
+        for identifier in supersedes or []:
+            old = self._instructions.get(identifier)
+            if old and old["agent"] == agent_key and old["task_id"] == task_id:
+                old["superseded"] = True
+                self._persist_instruction(old)
+        record = {"id": new_id("steer"), "agent": agent_key,
+                  "task_id": task_id, "hint": hint, "rationale": rationale,
+                  "feedback": {}, "ts": time.time(), "source_id": source_id}
+        self._instructions[record["id"]] = record
         if task_id:
             self._task_steering[task_id] = record
         else:
             self._steering[agent_key] = record
+        self._persist_instruction(record)
         self._audit.log("ring.steer", "ring", dict(record))
+        return record["id"]
 
     def steerings_for(self, agent_key: str, *, task_id: str = "") -> list[dict]:
-        """公共指令与本任务指令同时可见，别题指令不可见。"""
-        return [{**r, "feedback": {k: dict(v) for k, v in r["feedback"].copy().items()
-                                    if not task_id or v["task_id"] == task_id}}
-                for r in (self._steering.get(agent_key),
-                                  self._task_steering.get(task_id))
-                if r is not None and r["agent"] == agent_key]
+        """公共指令与本任务的未撤回指令同时可见，各路线独立反馈。"""
+        return [{**record, "feedback": {key: dict(value) for key, value in record["feedback"].copy().items()
+                                       if not task_id or value["task_id"] == task_id}}
+                for record in list(self._instructions.values())
+                if record["agent"] == agent_key and not record.get("superseded")
+                and (not record["task_id"] or record["task_id"] == task_id)]
 
     def steering_for(self, agent_key: str, *, task_id: str = "") -> dict | None:
         records = self.steerings_for(agent_key, task_id=task_id)
@@ -90,10 +125,9 @@ class RingLedger:
         """记录投递事实或模型自报结果，不把接收指令冒充已执行。"""
         if status not in {"delivered", "accepted", "completed", "blocked"}:
             return False
-        record = next((r for r in (self._steering.get(agent_key),
-                                  self._task_steering.get(task_id))
-                       if r and r["agent"] == agent_key and r["id"] == instruction_id), None)
-        if record is None:
+        record = self._instructions.get(instruction_id)
+        if (record is None or record.get("superseded") or record["agent"] != agent_key
+                or (record["task_id"] and record["task_id"] != task_id)):
             return False
         key = f"{task_id}|{route_id}"
         previous = record["feedback"].get(key)
@@ -103,6 +137,7 @@ class RingLedger:
         feedback = {"task_id": task_id, "route_id": route_id,
                     "status": status, "detail": detail[:600]}
         record["feedback"][key] = feedback
+        self._persist_instruction(record)
         self._audit.log("ring.steer_feedback", agent_key, {
             "instruction_id": instruction_id, **feedback})
         return True

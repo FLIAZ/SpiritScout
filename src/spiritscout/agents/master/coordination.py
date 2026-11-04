@@ -685,6 +685,8 @@ class MasterCoordination:
                         if adjudicated in done:
                             decision = adjudicated.result()
                             adjudicated = asyncio.create_task(decisions.get())
+                            decision['defer_challenges'] = [item for item in decision.get('defer_challenges', [])
+                                                           if isinstance(item, dict) and self._steering_decision_current(item)]
                             ids = {str(item.get("id") or "")
                                    for item in decision.get("defer_challenges", [])
                                    if isinstance(item, dict)

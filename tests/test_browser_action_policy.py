@@ -47,7 +47,8 @@ class BrowserActionPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self.infra.close)
 
     async def call(self, name: str, args: dict):
-        return await self.infra.tools.call("mcp__playwright__" + name, args, **self.infra.builtin_ctx)
+        return await self.infra.tools.call("mcp__playwright__" + name, args,
+            _purpose="针对隔离测试页面执行声明的操作，验证本次审批是否正确拦截。", **self.infra.builtin_ctx)
 
     async def test_normal_click_and_native_tab_action_require_no_human_approval(self) -> None:
         self.assertTrue((await self.call("browser_click", {"target": "e247", "_safety_action": "analysis"})).ok)

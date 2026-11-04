@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-SEED_VERSION = "2026-10-21.k1"
+SEED_VERSION = "2026-10-31.k4"
 
 V_ATTACK = "2026-10-09"   # 附录B 调研日期
 V_SRC = "2026-10-09"      # 附录C 调研日期
@@ -602,6 +602,10 @@ def _inspection_entries() -> list[dict[str, Any]]:
                ("通道隐写",
                 "zsteg x（PNG/BMP LSB）；steghide extract -sf x（先试空口令）；音频看频谱图",
                 "LSB 平面异色、口令命中、频谱可见图案"),
+               ("steghide 口令猜解",
+                "空口令不中时本机 stegseek 可配 rockyou 自动跑"
+                "（字典位置见环境工具清单；用法自查）",
+                "口令命中即出隐藏数据"),
                ("压缩包",
                 "zipinfo/7z l 看注释与加密位；伪加密改标志位",
                 "注释线索/伪加密可解")],
@@ -628,6 +632,22 @@ def _inspection_entries() -> list[dict[str, Any]]:
               "任一检查点给出可直接执行命令且回显 root 身份即完成提权",
               "逐项无果则转向凭据搜集与横向（转路径模板 2）",
               "privilege_escalation"),
+        entry("RT-ENV-TOOLS-006", "本机工具面与字典（环境事实，非步骤）", "-",
+              ["通用"],
+              [("已装工具",
+                "ffuf、gobuster、dirsearch（目录/参数爆破）、jadx、apktool"
+                "（JVM/APK 材料）、stegseek（steghide 口令猜解）、sqlmap；"
+                "发行版层另有 steghide/binwalk/zsteg/foremost/exiftool——"
+                "是否在位以 command -v 实测为准",
+                "用法看各工具 --help 或凭自身知识，本清单只报在位事实"),
+               ("字典位置",
+                "沙箱 PATH 中 venv 工具所在 bin 的相邻目录 ../share/wordlists/："
+                "common、raft-small|medium-directories、quickhits 为 Web 内容，"
+                "rockyou.txt 为口令表",
+                "选对表即用；定位不到时 find / -name rockyou.txt 兜底")],
+              "需要爆破、反编译或口令猜解时确认工具在位、字典取本处",
+              "工具不在位时用 shell/python 等价实现",
+              "env_tools"),
     ]
 
 

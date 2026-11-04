@@ -20,6 +20,7 @@ _MODE_FORBIDDEN_TOOLS: dict[RunMode, set[str]] = {
     RunMode.SRC: set(),
     RunMode.CTF: set(),                              # CTF 全自动授权，能力由题目与工具目录决定
     RunMode.COMPETITION: set(),                       # 由赛制规则动态追加
+    RunMode.AWDP: set(),                              # 修补赛同 CTF：全自动授权 + 审计
 }
 
 # 危险语义动作集（G5）：类别由模型在工具决策中如实自报（action 参数），
@@ -66,7 +67,7 @@ class PolicyEngine:
     @property
     def automatic_approval(self) -> bool:
         """CTF 与智能体模式在工具审批层逐次自动放行。"""
-        return self.mode in {RunMode.CTF, RunMode.COMPETITION}
+        return self.mode in {RunMode.CTF, RunMode.COMPETITION, RunMode.AWDP}
 
     # ------------------------------------------------------------ 工具门
 
@@ -98,8 +99,9 @@ class PolicyEngine:
                 "mode": self.mode.value, "tool": spec.name, "action": act,
                 "invocation_id": context.invocation_id if context else "",
                 "params_digest": context.params_digest if context else "",
-                "reason": "CTF 模式全自动操作预授权" if self.mode == RunMode.CTF
-                          else "智能体模式全自动操作预授权"})
+                "reason": ("CTF 模式全自动操作预授权" if self.mode == RunMode.CTF
+                           else "AWDP 修补模式全自动操作预授权" if self.mode == RunMode.AWDP
+                           else "智能体模式全自动操作预授权")})
             if context is not None and context.record_approval is not None:
                 context.record_approval(act, True)
             return
@@ -115,10 +117,16 @@ class PolicyEngine:
                                {"tool": spec.name, "action": act})
             else:
                 context = current_invocation.get()
-                detail = f"工具 {spec.name}（风险级 {spec.risk.value}）请求执行动作 {act}"
+                labels = {"reverse_shell": "建立反向连接", "webshell_upload": "上传可执行脚本",
+                          "container_escape": "尝试跨越容器边界", "brute_force": "尝试多组凭据",
+                          "delete_files": "删除文件", "intrusive_write": "修改目标数据或配置"}
+                purpose = context.purpose if context else ""
+                detail = purpose or f"请求{labels.get(act, '执行外部工具操作')}。"
+                if spec.description:
+                    detail += f"\n工具说明：{spec.description[:500]}"
+                detail += f"\n工具：{spec.name}；行为：{labels.get(act, act)}"
                 if context is not None:
-                    detail += (f"；调用 {context.invocation_id}"
-                               f"；参数摘要 {context.params_digest}")
+                    detail += f"\n调用：{context.invocation_id}；参数摘要：{context.params_digest}"
                 granted = await self.approval_gate(act, detail)
                 if context is not None and context.record_approval is not None:
                     context.record_approval(act, granted)

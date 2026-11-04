@@ -53,6 +53,12 @@ def usage_metrics(calls: list[dict[str, Any]]) -> dict[str, Any]:
                  and r.get("estimated_cost_cny_max") is not None) or float(r.get("cost_usd") or 0) > 0
                 for r in calls)
     return {"calls": len(calls), "tokens": sum(r.get("tokens", 0) for r in calls),
+            "input_tokens": sum(r.get("input_tokens", 0) for r in calls),
+            "output_tokens": sum(r.get("output_tokens", 0) for r in calls),
+            "usage_reported_calls": sum(r.get("usage_status") == "reported" for r in calls),
+            "usage_incomplete_calls": sum(r.get("usage_status") != "reported" for r in calls),
+            "sdk_attempts": sum(r.get("sdk_attempts") or 0 for r in calls),
+            "unreported_attempts": sum(r.get("unreported_attempts") or 0 for r in calls),
             "cost": {"cny_min": sum(r["estimated_cost_cny_min"] for r in cny) if cny else None,
                      "cny_max": sum(r["estimated_cost_cny_max"] for r in cny) if cny else None,
                      "usd": sum(r["cost_usd"] for r in priced_usd) if priced_usd else None,

@@ -12,6 +12,8 @@ class InvocationContext:
     invocation_id: str
     params_digest: str
     record_approval: Callable[[str, bool], None] | None = None
+    purpose: str = ""
+    tool_name: str = ""
 
 
 current_invocation: ContextVar[InvocationContext | None] = ContextVar(

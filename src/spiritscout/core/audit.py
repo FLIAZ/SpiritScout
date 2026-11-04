@@ -121,8 +121,14 @@ class AuditLogger:
             "actor": actor,
             "detail": prepare_detail(detail),
         }
-        with self._lock, self._path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        with self._lock:
+            try:
+                with self._path.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            except FileNotFoundError:
+                # 会话目录已被删除（删除会话时后台任务仍持引用）：会话事实
+                # 已随目录移除，丢弃这条记录而不是把目录复活成僵尸
+                pass
         return record
 
     def export(self, dest: str | Path) -> Path:

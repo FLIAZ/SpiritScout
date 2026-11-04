@@ -65,6 +65,26 @@ explain("agent.delta",{task_id:"n",route_id:"r",turn:3,kind:"reset"});
 assert.equal(api.updatesOf(first).length,2,"重试的未完成进展被正确撤销");
 console.log("task commentary: persistent natural-language updates, structured progress, retries and honest final fallback passed");
 
+api.reset();
+const interleaved=api.create();let interleaveSeq=0;
+const weave=(type,detail)=>api.reduce(interleaved,{actor:"parallel-worker",type,detail,seq:++interleaveSeq,ts:String(interleaveSeq)});
+weave("agent.turn",{task_id:"parallel",route_id:"a",turn:1});
+weave("agent.turn",{task_id:"parallel",route_id:"b",turn:1});
+const parallel=weave("agent.delta",{task_id:"parallel",route_id:"a",turn:1,kind:"text",text:"A 首句。"});
+weave("agent.delta",{task_id:"parallel",route_id:"b",turn:1,kind:"text",text:"B 首句。"});
+weave("agent.delta",{task_id:"parallel",route_id:"a",turn:1,kind:"text",text:"A 后续句。"});
+const segmentBodies=route=>[...parallel.segments.values()].filter(segment=>segment.route===route)
+  .map(segment=>[...segment.texts.values()].map(api.commentaryText).filter(Boolean).join("\n\n")).filter(Boolean);
+assert.deepEqual(segmentBodies("a"),["A 首句。","A 后续句。"],"恢复 A 流时不能把首句累计进后续卡");
+assert.deepEqual(segmentBodies("b"),["B 首句。"]);
+weave("agent.turn",{task_id:"parallel",route_id:"json",turn:1});
+weave("agent.delta",{task_id:"parallel",route_id:"json",turn:1,kind:"text",text:'{"progress":"结构化进'});
+weave("agent.delta",{task_id:"parallel",route_id:"b",turn:1,kind:"text",text:"B 后续句。"});
+weave("agent.delta",{task_id:"parallel",route_id:"json",turn:1,kind:"text",text:'展","commentary":"公开说明"}'});
+assert.deepEqual(segmentBodies("json"),["结构化进展\n\n公开说明"],"结构化 JSON 完整后再展示，不能按单个增量截断");
+weave("agent.delta",{task_id:"parallel",route_id:"json",turn:1,kind:"reset"});
+assert.deepEqual(segmentBodies("json"),[],"reset 仍撤销当前结构化流的公开正文");
+
 // 同一任务不同路线/回合必须分别展开，迟到的结果仍归原步骤。
 const phases=api.create();
 let phaseSeq=0;

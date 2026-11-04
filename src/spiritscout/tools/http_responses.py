@@ -28,7 +28,8 @@ def model_preview(result: ToolResult) -> str:
 
 
 def save_response(workspace: str, content: bytes, text: str, metadata: dict[str, Any]) -> dict[str, Any]:
-    root = Path(workspace) / 'http-responses'
+    # 沙箱 cwd 位于 sandbox/<题目>/；返回相对项目根的路径会让后续原文读取失败。
+    root = (Path(workspace) / 'http-responses').resolve()
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     ref = uuid.uuid4().hex
     folder = root / ref
@@ -108,6 +109,8 @@ def _read(*, workspace_root: str, body_ref: str, mode: str = 'read', offset: int
 async def http_response_read(*, workspace_root: str = '', **kwargs: Any) -> ToolResult:
     args = {k: v for k, v in kwargs.items() if k in {'body_ref', 'mode', 'offset', 'limit', 'query', 'start_line'}}
     try:
+        if args.get('mode', 'read') not in ('read', 'search'):
+            raise ValueError('mode 只支持 read 或 search')
         result = await asyncio.to_thread(_read, workspace_root=workspace_root, **args)
         return ToolResult(tool='http_response_read', ok=True,
                           stdout=json.dumps(result, ensure_ascii=False, separators=(',', ':')),

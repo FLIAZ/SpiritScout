@@ -256,7 +256,8 @@ class ExecutionJournal:
                          (self.run_id, now))
 
     def finish_run(self, status: str) -> None:
-        if status not in {"completed", "failed", "cancelled"}:
+        # interrupted：局部作答未收齐的中止（与 activate_run 抢占旧运行共用同一状态词汇）
+        if status not in {"completed", "failed", "cancelled", "interrupted"}:
             raise ValueError("无效的运行终态")
         with self.blackboard.transaction() as conn:
             conn.execute("UPDATE execution_runs SET status=?,finished_at=? "

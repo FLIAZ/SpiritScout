@@ -93,6 +93,9 @@ class BusinessContextAgent(SubAgent):
         from spiritscout.tools.http_responses import SCHEMA as RESPONSE_SCHEMA
 
         schemas.append(RESPONSE_SCHEMA)
+        from spiritscout.tools.cyberchef import SCHEMAS as CYBERCHEF_SCHEMAS
+
+        schemas.extend(CYBERCHEF_SCHEMAS)
         schemas.append({"type":"function","function":{"name":"ask_user",
             "description":(
                 "向用户提问并等待答复。遇到只有用户能提供的信息（测试账号、"

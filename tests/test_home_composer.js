@@ -17,7 +17,7 @@ class Element {
   focus() { this.focused = true; }
   closest() { return null; }
 }
-const elements = Object.fromEntries(['c-go', 'c-mode', 'c-mode-hint', 'c-mission', 'c-multiple-answers-option', 'c-multiple-answers'].map(id => [`#${id}`, new Element()]));
+const elements = Object.fromEntries(['c-go', 'c-mode', 'c-mode-hint', 'c-mission', 'c-multiple-answers-option', 'c-multiple-answers', 'c-ctf-types', 'c-ctf-type-note'].map(id => [`#${id}`, new Element()]));
 const radios = ['src', 'ctf', 'competition'].map(mode => new Element(mode));
 const examples = ['src', 'ctf', 'competition'].map(mode => {
   const element = new Element();

@@ -22,6 +22,7 @@ class RunMode(str, enum.Enum):
     SRC = "src"                # 常规渗透模式
     CTF = "ctf"                # CTF 专项模式（所有工具操作自动审批）
     COMPETITION = "competition"  # 智能渗透赛模式（赛制自适应）
+    AWDP = "awdp"              # AWDP 修补模式（找漏洞→最小修复→打包提交）
 
 
 class Severity(str, enum.Enum):

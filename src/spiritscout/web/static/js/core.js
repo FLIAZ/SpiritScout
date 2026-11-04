@@ -37,6 +37,7 @@ async function api(path, opt = {}) {
     else if (detail) msg = detail;
     const err = new Error(msg);
     err.detail = detail;               // 结构化错误（如规则冲突清单）随异常上抛
+    err.status = r.status;
     throw err;
   }
   const result = await r.json();
@@ -57,7 +58,7 @@ const MODE_CN = { src: "SRC 渗透", ctf: "CTF 解题", competition: "智能渗�
 const TASK_CN = { business_context: "业务体验与上下文", recon: "侦察测绘", port_scan: "端口扫描", web_probe: "Web 探测",
                   host_probe: "主机探测", post_exploit: "后渗透", report: "报告生成",
                   ctf_web: "Web 题", ctf_pwn: "Pwn 题", ctf_reverse: "逆向题",
-                  ctf_crypto: "密码题", ctf_misc: "杂项题" };
+                  ctf_crypto: "密码题", ctf_misc: "杂项题", ctf_single: "单执行者" };
 const SEV_CN = { critical: ["严重", "red"], high: ["高危", "red"], medium: ["中危", "orange"],
                  low: ["低危", "blue"], info: ["信息", "blue"] };
 function agentName(key) {
@@ -67,6 +68,9 @@ function agentName(key) {
 }
 /* 审计 actor 形如 ctf-web-094cd1652967（键+实例短码）：还原为编队显示名 */
 function actorName(actor) {
+  const single = typeof TaskTrace !== "undefined" && typeof TaskTrace.actorLabel === "function"
+    ? TaskTrace.actorLabel(actor) : "";
+  if (single) return single;
   const base = String(actor || "").replace(/-[0-9a-f]{8,}$/i, "").replace(/-/g, "_");
   if (!S.agents) return actor || "—";
   const a = S.agents.roster.find(x => x.key === base || x.key === actor);
@@ -99,19 +103,28 @@ function fmtDur(a, b) {
 }
 
 /* ================= 主题 ================= */
+function syncThemeButton() {
+  const dark = document.documentElement.getAttribute("data-theme") === "dark" ||
+    (!document.documentElement.hasAttribute("data-theme") && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  const button = $("#btn-theme");
+  button.querySelector(".theme-sun").toggleAttribute("hidden", dark);
+  button.querySelector(".theme-moon").toggleAttribute("hidden", !dark);
+  button.title = dark ? "切换为亮色模式" : "切换为暗色模式";
+  button.setAttribute("aria-label", button.title);
+}
 function applyTheme(t) {
   const root = document.documentElement;
   if (t === "system") root.removeAttribute("data-theme");
   else root.setAttribute("data-theme", t);
   try { localStorage.setItem("ss-theme", t); } catch {}
+  syncThemeButton();
 }
 $("#btn-theme").onclick = () => {
-  const cur = (() => { try { return localStorage.getItem("ss-theme") || "system"; } catch { return "system"; } })();
-  const next = { system: "light", light: "dark", dark: "system" }[cur];
-  applyTheme(next);
-  toast({ system: "跟随系统", light: "浅色", dark: "深色" }[next] + "主题");
+  const dark = !$("#btn-theme").querySelector(".theme-moon").hasAttribute("hidden");
+  applyTheme(dark ? "light" : "dark");
 };
-try { applyTheme(localStorage.getItem("ss-theme") || "system"); } catch {}
+try { applyTheme(localStorage.getItem("ss-theme") || "system"); } catch { applyTheme("system"); }
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", syncThemeButton);
 
 /* 退出登录：清 Cookie 后回登录页；未启用登录时 /login 会自动跳回控制台 */
 $("#btn-logout").onclick = async () => {
@@ -125,6 +138,7 @@ const VIEWS = { home: "#view-home", session: "#view-session", dash: "#view-dash"
 function show(view) {
   if(view!=="mcp" && typeof ExaSettings!=="undefined") ExaSettings.clear();
   S.view = view;
+  if (typeof ComposerModels !== "undefined") ComposerModels.close();
   for (const [k, sel] of Object.entries(VIEWS)) $(sel).hidden = k !== view;
   document.querySelectorAll(".side > nav button").forEach(b =>
     b.classList.toggle("on", b.dataset.nav === (view === "session" ? "home" : view)));
@@ -135,7 +149,14 @@ function show(view) {
   else if (typeof ProjectsPage !== "undefined") ProjectsPage.close();
   if (["mcp","skill"].includes(view) && typeof ResourceConsole !== "undefined") ResourceConsole.open(view);
   if (view === "exp" && typeof ExperiencePage !== "undefined") ExperiencePage.open();
-  if (view !== "session") { SessionHistory.cancel(); stopStreams(); }
+  if (view !== "session") {
+    SessionHistory.cancel(); stopStreams();
+    // 离开会话视图即弃置输入坞暂存附件：新任务从空白开始，不带旧会话的文件
+    if (typeof renderFileChips === "function") {
+      S.compFiles = [];
+      renderFileChips("#comp-files", S.compFiles);
+    }
+  }
 }
 document.querySelectorAll(".side > nav button").forEach(b =>
   b.onclick = () => { S.cur = null; show(b.dataset.nav); renderSessions(); });

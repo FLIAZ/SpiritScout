@@ -61,7 +61,8 @@ class MasterReviewTests(unittest.IsolatedAsyncioTestCase):
             "target": "https://bench.test", "round_no": 0, "dag": TaskDAG().to_dict()})
         task = result["tasks_dispatched"][0]["task"]
         self.assertEqual(task["target"], original["url"])
-        self.assertEqual(task["payload"]["challenge"], original)
+        # 战术即方向：解析层给赛题副本补方向事实（与规则派单的 meta 口径一致）
+        self.assertEqual(task["payload"]["challenge"], {**original, "direction": "web"})
         task["payload"]["challenge"]["attachments"][0]["path"] = "changed"
         self.assertEqual(original["attachments"][0]["path"], "sample.bin")
 
@@ -185,7 +186,9 @@ class MasterReviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(dag.all_nodes()[0].meta["deferred"])
         self.assertNotIn("defer_reason", dag.all_nodes()[0].meta)
 
-    async def test_deferred_mode_replan_continues_to_next_round(self) -> None:
+    async def test_review_nodes_enter_dag_with_mode_planner_present(self) -> None:
+        """模型规划开启时复盘建议直接入图（规则派单在场也不再延后接管），
+        继续决策由新节点自然承载到下一轮。"""
         dag = TaskDAG()
         finished = dag.add_node("FIRST", "finished direction")
         dag.mark(finished.node_id, TaskStatus.DONE)
@@ -228,11 +231,12 @@ class MasterReviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["continue_iteration"])
         self.assertEqual(result["stop_reason"], "")
         self.assertEqual(result["round_no"], 1)
-        review_events = [
-            call.args[2] for call in audit.log.call_args_list
-            if call.args[2].get("action") == "review"
-        ]
-        self.assertEqual(review_events[-1]["deferred_replan"], True)
+        # 复盘建议直接落图：下一轮有就绪节点可派
+        next_dag = TaskDAG.from_dict(result["dag"])
+        self.assertTrue(any(n.tactic == "NEXT" for n in next_dag.all_nodes()))
+        applied = [c.args[2] for c in audit.log.call_args_list
+                   if c.args[2].get("action") == "llm_nodes_applied"]
+        self.assertEqual(len(applied), 1)
 
 
 if __name__ == "__main__":

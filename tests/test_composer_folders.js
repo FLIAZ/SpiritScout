@@ -1,0 +1,21 @@
+"use strict";
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+const context=vm.createContext({});
+vm.runInContext(fs.readFileSync('src/spiritscout/web/static/js/composer-folders.js','utf8'),context);
+const collect=vm.runInContext('ComposerFolders.collect',context);
+const file=(name,size=3)=>({isFile:true,name,file:resolve=>resolve({name,size})});
+const dir=(name,batches)=>({isDirectory:true,name,createReader(){let n=0;return{readEntries:resolve=>resolve(batches[n++]||[])}}});
+(async()=>{
+ const root=dir('题目',[[file('no-extension')],[dir('子目录',[[file('unknown.anything'),file('empty',0),dir('空目录',[[]])]])],[]]);
+ const result=await collect({items:[{kind:'file',webkitGetAsEntry:()=>root,getAsFile:()=>null}]});
+ assert.equal(result[0].name,'题目');assert.equal(result[0].directory,true);assert.equal(result[0].size,6);
+ assert.equal(JSON.stringify(result[0].entries.map(e=>e.path)),JSON.stringify(['no-extension','子目录','子目录/unknown.anything','子目录/empty','子目录/空目录']));
+ const raw={name:'binary.unknown',size:3};
+ assert.equal((await collect({items:[{kind:'file',getAsFile:()=>raw}]}))[0],raw);
+ assert.equal((await collect({items:[],files:[raw]}))[0],raw);
+ const empty=await collect({items:[{kind:'file',webkitGetAsEntry:()=>dir('empty',[[]])}]});
+ assert.equal(empty[0].entries.length,0);
+ await assert.rejects(()=>collect({items:[{kind:'file',webkitGetAsEntry:()=>dir('large',[[file('big',51*1024*1024)]])}]}),/50MB/);
+ await assert.rejects(()=>collect({items:[{kind:'file',webkitGetAsEntry:()=>dir('bad',[[file('..')]])}]}),/路径/);
+ console.log('composer folders: nested/batched/empty directories, arbitrary files and size checks passed');
+})().catch(error=>{console.error(error);process.exitCode=1;});

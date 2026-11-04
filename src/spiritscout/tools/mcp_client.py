@@ -7,6 +7,8 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -101,6 +103,11 @@ class McpClient:
         raise NotImplementedError
 
     # ---- 对外接口
+
+    @property
+    def connected(self) -> bool:
+        """仅检查本地会话任务，不发网络探针或工具调用。"""
+        return self._task is not None and not self._task.done()
 
     async def start(self) -> list[dict[str, Any]]:
         """连接 + 握手 + 拉取工具清单；失败抛 McpError（调用方留痕跳过）。"""
@@ -211,12 +218,59 @@ class McpStdioClient(McpClient):
     def __init__(self, name: str, *, command: str, args: list[str],
                  env: dict[str, str] | None = None, timeout: float = 180.0):
         super().__init__(name, timeout=timeout)
+        self.capture_stderr = False
+        self._stderr_tail = b''
         self._params = StdioServerParameters(
             command=_resolve_command(command), args=list(args),
             env=dict(env) if env else None)
 
     def _connect(self) -> Any:
+        if self.capture_stderr:
+            return self._quiet_connect()
         return stdio_client(self._params)
+
+    @property
+    def diagnostic_stderr(self) -> str:
+        return self._stderr_tail.decode('utf-8', errors='replace')
+
+    @asynccontextmanager
+    async def _quiet_connect(self) -> AsyncIterator[Any]:
+        """非阻塞排空子进程 stderr，只保留 4 KiB 尾部，成功预检不刷终端。"""
+        read_fd, write_fd = os.pipe()
+        try:
+            os.set_blocking(read_fd, False)
+        except (OSError, NotImplementedError):
+            os.close(read_fd)
+            os.close(write_fd)
+            async with stdio_client(self._params) as streams:
+                yield streams
+            return
+        writer = os.fdopen(write_fd, 'w')
+        def read_available() -> bool:
+            for _ in range(16):
+                try:
+                    chunk = os.read(read_fd, 4096)
+                except BlockingIOError:
+                    return True
+                if not chunk:
+                    return False
+                self._stderr_tail = (self._stderr_tail + chunk)[-4096:]
+            return True
+        async def drain() -> None:
+            while read_available():
+                await asyncio.sleep(.02)
+        draining = asyncio.create_task(drain(), name=f'mcp-stderr[{self.name}]')
+        try:
+            async with stdio_client(self._params, errlog=writer) as streams:
+                yield streams
+        finally:
+            writer.close()
+            draining.cancel()
+            await asyncio.gather(draining, return_exceptions=True)
+            try:
+                read_available()
+            finally:
+                os.close(read_fd)
 
 
 class ChromeMcpClient(McpStdioClient):

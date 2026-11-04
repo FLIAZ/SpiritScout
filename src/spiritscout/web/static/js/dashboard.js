@@ -1,7 +1,7 @@
 "use strict";
 /* 总览只有观察与跳转操作；所有时间明确以 Asia/Shanghai 显示。 */
 const Dashboard = (() => {
-  const state={period:"today",metric:"cost",dimension:"model",query:"",mode:"all",status:"all",sort:"activity",cacheQuery:""};
+  const state={period:"today",metric:"tokens",dimension:"model",query:"",mode:"all",status:"all",sort:"activity",cacheQuery:""};
   let current=null, root=null;
   const periods={hour:"最近一小时",today:"今天", "7d":"近七天", "30d":"近三十天",all:"全部记录"};
   const phases={planning:"灵枢规划中",queued:"等待调度",starting:"准备启动",model_preflight:"检查模型",platform_profile:"读取平台规则",runtime_starting:"初始化工具",executing:"执行中",master_reply:"灵枢回复中",scope_confirmation:"等待范围确认",intent_routing:"理解任务",mode_routing:"确认模式"};
@@ -47,11 +47,14 @@ const Dashboard = (() => {
   }
   function scaffold(box) {
     box.innerHTML=`<div class="dash-console">
-      <div class="dash-toolbar"><div class="dash-periods" role="group" aria-label="统计时间范围">${Object.entries(periods).map(([key,label])=>`<button type="button" data-dash-period="${key}">${label}</button>`).join("")}</div><span class="dash-updated" role="status"></span></div>
+      <header class="dash-heading"><div><h2>用量与执行总览</h2><p>看清模型消耗，追踪测试成果。</p></div><span class="dash-updated" role="status"></span></header>
+      <div class="dash-toolbar"><div class="dash-periods" role="group" aria-label="统计时间范围">${Object.entries(periods).map(([key,label])=>`<button type="button" data-dash-period="${key}">${label}</button>`).join("")}</div><span class="dash-range-note">所有消耗指标均跟随所选时段</span></div>
       <p class="dash-notice" role="status" hidden></p>
       <div class="dash-overview"></div>
-      <div class="dash-live-grid"><section class="dash-panel"><header><h3>正在执行</h3><span class="dash-active-count"></span></header><div class="dash-active"></div></section><section class="dash-panel dash-attention-panel"><header><h3>需要关注</h3><span>提醒不影响任务运行</span></header><div class="dash-attention"></div></section></div>
+      <div class="dash-health" role="status"></div>
+      <div class="dash-usage-grid"><section class="dash-panel"><header><div><h3>Token 构成</h3><p>输入已包含缓存，输出包含端点计入的推理用量。</p></div></header><div class="dash-composition"></div></section><section class="dash-panel"><header><div><h3>模型消耗排行</h3><p>按所选时段的已记录 Token 排序。</p></div></header><div class="dash-models"></div></section></div>
       <section class="dash-panel dash-trend-panel"><header><div><h3>消耗与成果趋势</h3><p>切换费用、Token 或输入缓存趋势；成果按北京时间标注。</p></div><div class="dash-toggle" role="group" aria-label="趋势指标"><button type="button" data-dash-metric="cost">费用</button><button type="button" data-dash-metric="tokens">Token</button><button type="button" data-dash-metric="cache">缓存命中率</button></div></header><div class="dash-trend"></div></section>
+      <div class="dash-live-grid"><section class="dash-panel"><header><h3>正在执行</h3><span class="dash-active-count"></span></header><div class="dash-active"></div></section><section class="dash-panel dash-attention-panel"><header><h3>需要关注</h3><span>提醒不影响任务运行</span></header><div class="dash-attention"></div></section></div>
       <section class="dash-panel"><header><div><h3>缓存效果与消耗构成</h3><p>按已测量的输入 Token 计算命中率。</p></div></header><div class="dash-cache-windows"></div>
         <div class="dash-cache-controls"><div class="dash-toggle" role="group" aria-label="缓存统计维度"><button type="button" data-dash-dimension="model">按模型</button><button type="button" data-dash-dimension="actor">按角色</button><button type="button" data-dash-dimension="session_id">按会话</button></div><label>查找分组<input data-dash-field="cacheQuery" type="search" placeholder="模型、角色或会话名称"></label></div><div class="dash-cache-table dash-table-scroll"></div>
       </section>
@@ -62,7 +65,7 @@ const Dashboard = (() => {
         <label>排序<select data-dash-field="sort"><option value="activity">最近活动</option><option value="result">最近成果</option><option value="cost">近期费用</option><option value="cache">缓存命中率从低到高</option><option value="tokens">Token 消耗</option></select></label></div><div class="dash-sessions-table dash-table-scroll"></div>
       </section>
       <div class="dash-bottom-grid"><section class="dash-panel"><header><h3>跨会话最近发现</h3><span>每条标注来源</span></header><div class="dash-recent-findings"></div></section><section class="dash-panel"><header><h3>经验记录</h3><span class="dash-experience-count"></span></header><div class="dash-experience"></div></section></div>
-      <p class="dash-footnote">北京时间 UTC+8 · 金额均为运行记录中的估算，不是供应商账单；不同币种分别展示，不自动换算。缺少计价记录的调用显示为未知。</p>
+      <p class="dash-footnote">北京时间 UTC+8 · 金额均为运行记录中的估算，不是供应商账单；不同币种分别展示，不自动换算。缺少计价记录的调用显示为未知。Token 为端点已报告用量之和，含重试及失败 / 取消前已报告的部分；未知用量不估填，历史漏记无法自动补回。</p>
     </div>`;
     box.onclick=event=>{
       const b=event.target.closest("button");if(!b)return;
@@ -161,6 +164,15 @@ const Dashboard = (() => {
     const rows=(current.cache_groups[state.dimension] || []).map(r=>({...r,label:state.dimension === "session_id" ? byId.get(r.name)?.title || r.name : state.dimension === "actor" && typeof actorName === "function" ? actorName(r.name) : state.dimension === "model" ? modelDisplayName(r.name) : r.name})).filter(r=>r.label.toLowerCase().includes(state.cacheQuery.toLowerCase()));
     box.innerHTML=rows.length ? `<table class="list"><thead><tr><th>${({model:"模型",actor:"角色",session_id:"会话"})[state.dimension]}</th><th>输入缓存命中率</th><th>命中 / 未命中输入</th><th>输出 Token</th><th>用量完整性</th><th>费用估算</th></tr></thead><tbody>${rows.sort((a,b)=>b.tokens-a.tokens).map(r=>`<tr><td>${state.dimension === "session_id" ? jump({session_id:r.name},r.label) : esc(r.label)}<small>${num(r.calls)} 次调用 · ${compact(r.tokens)} Token</small></td><td><span class="dash-rate">${percent(r.cache?.hit_rate)}</span></td><td>${compact(r.cache?.cached_input_tokens || 0)} / ${compact(r.cache?.uncached_input_tokens || 0)}<small>未测量的输入不计入这两项</small></td><td>${compact(r.cache?.output_tokens || 0)}</td><td>${num(r.cache?.measured_calls || 0)} 次已测量<small>${num(r.cache?.unmeasured_calls || 0)} 次未提供缓存计量</small></td><td>${money(r.cost)}<small>${coverage(r)}</small></td></tr>`).join("")}</tbody></table>` : empty("当前范围没有符合条件的用量分组");
   }
+  function usageBreakdown(summary) {
+    const c=summary.cache || {}, input=summary.input_tokens ?? c.total_input_tokens ?? 0, output=summary.output_tokens ?? c.output_tokens ?? 0;
+    const cached=c.cached_input_tokens || 0, uncached=c.uncached_input_tokens || 0;
+    const unknown=Math.max(0,input-cached-uncached), total=input+output;
+    const parts=[{label:"缓存命中输入",value:cached,tone:"cache"},{label:"未命中输入",value:uncached,tone:"input"},{label:"缓存未测量输入",value:unknown,tone:"unknown"},{label:"输出",value:output,tone:"output"}];
+    root.querySelector(".dash-composition").innerHTML=total ? `<div class="dash-token-total"><strong>${num(total)}</strong><span>已报告 Token</span></div><div class="dash-stack" role="img" aria-label="${esc(parts.map(p=>`${p.label} ${num(p.value)} Token`).join('，'))}">${parts.filter(p=>p.value>0).map(p=>`<span data-tone="${p.tone}" style="width:${p.value/total*100}%" title="${p.label}：${num(p.value)}"></span>`).join("")}</div><div class="dash-composition-key">${parts.map(p=>`<div><span><i data-tone="${p.tone}"></i>${p.label}</span><strong>${num(p.value)}</strong></div>`).join("")}</div>` : empty("尚无输入 / 输出分项记录；旧记录可在 Token 总数中查看");
+    const rows=[...(current.cache_groups.model || [])].sort((a,b)=>b.tokens-a.tokens), peak=Math.max(1,...rows.map(r=>r.tokens || 0));
+    root.querySelector(".dash-models").innerHTML=rows.length ? rows.slice(0,5).map(r=>`<article class="dash-model"><div><span title="${esc(r.name)}">${esc(modelDisplayName(r.name))}</span><strong>${compact(r.tokens)}</strong></div><div class="dash-model-track"><span style="width:${Math.max(0,r.tokens || 0)/peak*100}%"></span></div><small>${num(r.calls)} 次调用 · ${summary.tokens ? (r.tokens/summary.tokens*100).toFixed(1) : '0.0'}% 的已记录用量</small></article>`).join("") : empty("本时段暂无模型用量");
+  }
   function paint() {
     const d=current;if(!d || !root)return;
     root.querySelectorAll("[data-dash-period]").forEach(b=>b.setAttribute("aria-pressed",String(b.dataset.dashPeriod === state.period)));
@@ -171,10 +183,15 @@ const Dashboard = (() => {
     if(d.unallocated_tokens) note.textContent=`累计记录 ${compact(d.total_tokens)} Token，其中 ${compact(d.unallocated_tokens)} 缺少逐笔时间，未计入时段趋势。`;
     if(d.legacy) note.textContent="当前服务尚未提供新版聚合指标，暂展示已有统计；新指标在服务下次启动后可用。";
     const o=d.sessions.reduce((a,s)=>{a.flags+=s.outcomes?.flags_accepted || 0;a.vulns+=s.outcomes?.confirmed_vulns || 0;return a;},{flags:0,vulns:0});
-    const card=(title,value,detail)=>`<article class="dash-stat"><span>${title}</span><strong>${value}</strong><small>${detail}</small></article>`;
-    const nowHour=d.recent_hour,prev=d.previous_hour;
-    const delta=nowHour?.cost?.cny_max != null && prev?.cost?.cny_max>0 ? `较上一小时 ${(((nowHour.cost.cny_max/prev.cost.cny_max)-1)*100).toFixed(0)}%（按人民币上界）` : "暂无可比较的上一小时费用";
-    root.querySelector(".dash-overview").innerHTML=card("今日费用估算",money(d.today?.cost || (d.legacy ? d.summary.cost : null)),coverage(d.today))+card("最近一小时",money(nowHour?.cost),esc(delta))+card(`${periods[state.period]} · 输入缓存命中率`,percent(d.summary.cache?.hit_rate),`${num(d.summary.cache?.measured_calls || 0)} 次已测量 · ${num(d.summary.cache?.unmeasured_calls || 0)} 次未提供`)+card("累计确认成果",`${num(o.flags)} <em>Flag</em> / ${num(o.vulns)} <em>漏洞</em>`,"已通过的 Flag / 已确认的漏洞");
+    const card=(title,value,detail,tone)=>`<article class="dash-stat" data-tone="${tone}"><span>${title}</span><strong>${value}</strong><small>${detail}</small></article>`;
+    const summary=d.summary, c=summary.cache || {};
+    root.querySelector(".dash-overview").innerHTML=
+      card(`${periods[state.period]} · Token`,compact(summary.tokens),`输入 ${compact(summary.input_tokens ?? c.total_input_tokens ?? 0)} · 输出 ${compact(summary.output_tokens ?? c.output_tokens ?? 0)}`,"input")+
+      card("模型调用",num(summary.calls),summary.sdk_attempts == null ? "SDK 请求数未提供" : `${num(summary.sdk_attempts)} 次 SDK 请求（含重试）`,"output")+
+      card("费用估算",money(summary.cost),coverage(summary),"cost")+
+      card("输入缓存命中率",percent(c.hit_rate),`${num(c.measured_calls || 0)} 次已测量 · ${num(c.unmeasured_calls || 0)} 次未提供`,"cache");
+    root.querySelector(".dash-health").innerHTML=`<span><i aria-hidden="true"></i>${num(d.sessions.filter(s=>s.status === "running" && !s.paused).length)} 个会话运行中</span><span>累计成果 <b>${num(o.flags)}</b> Flag / <b>${num(o.vulns)}</b> 漏洞</span><span class="${summary.usage_incomplete_calls ? "dash-incomplete" : ""}">${summary.usage_reported_calls == null ? "历史记录未提供计量完整性" : `计量完整 ${num(summary.usage_reported_calls)} / ${num(summary.calls)} 次调用 · ${num(summary.unreported_attempts || 0)} 次请求用量未完整返回`}</span>`;
+    usageBreakdown(summary);
     const active=d.sessions.filter(s=>["running","created"].includes(s.status));
     root.querySelector(".dash-active-count").textContent=`${active.filter(s=>s.status === "running").length} 个运行中 · ${active.reduce((n,s)=>n+(s.tasks.running || 0),0)} 个任务在途`;
     root.querySelector(".dash-active").innerHTML=active.length ? active.map(s=>`<article class="dash-live-session"><header>${jump(s,s.title)}<span class="dash-live-status">${esc(s.paused ? "已暂停" : phases[s.stage || s.phase] || STATUS_CN[s.status] || s.status)}</span></header><p>${esc(s.latest_progress)}</p><div class="dash-live-facts"><span>执行 ${num(s.tasks.running)} · 待发 ${num(s.tasks.pending)}</span><span title="${esc(s.capacity.source || "容量未记录")}">${s.capacity.limit ? `任务占用 ${s.capacity.occupied_tasks}/${s.capacity.limit} · 空闲 ${s.capacity.free}` : "容量未提供"}</span><span>最近活动 ${clock(s.latest_activity)}</span></div>${s.waiting_reason ? `<p class="dash-wait">${esc(s.waiting_reason)}</p>` : ""}<footer>${esc(outcome(s.outcomes))}${s.last_result ? ` · 最近成果 ${clock(s.last_result)}` : " · 成果时间未记录"}</footer></article>`).join("") : empty("当前没有运行或排队中的会话");

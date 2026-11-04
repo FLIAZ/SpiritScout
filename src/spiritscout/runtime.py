@@ -85,20 +85,39 @@ if TYPE_CHECKING:
 _MCP_STARTUP_GRACE = 10.0
 
 # 同一进程内：前台解题优先，后台提炼串行且仅在无前台任务时运行。
+# 前台计数同时按工作区记账：单题报告只让位于本会话的执行，
+# 不被其他并行会话的前台任务饿死。
 _FOREGROUND_DEPTH = 0
+_FOREGROUND_BY_WORKSPACE: dict[str, int] = {}
 _BACKGROUND_ACTIVE = 0
 _BACKGROUND_COOLDOWN_UNTIL = 0.0
 _BACKGROUND_COOLDOWN_SECONDS = 2.0
 
 
-def _foreground_started() -> None:
+def _foreground_started(workspace: Path | None = None) -> None:
     global _FOREGROUND_DEPTH
     _FOREGROUND_DEPTH += 1
+    if workspace is not None:
+        key = str(workspace)
+        _FOREGROUND_BY_WORKSPACE[key] = _FOREGROUND_BY_WORKSPACE.get(key, 0) + 1
 
 
-def _foreground_finished() -> None:
+def _foreground_finished(workspace: Path | None = None) -> None:
     global _FOREGROUND_DEPTH
     _FOREGROUND_DEPTH = max(0, _FOREGROUND_DEPTH - 1)
+    if workspace is None:
+        return
+    key = str(workspace)
+    left = max(0, _FOREGROUND_BY_WORKSPACE.get(key, 0) - 1)
+    if left:
+        _FOREGROUND_BY_WORKSPACE[key] = left
+    else:
+        _FOREGROUND_BY_WORKSPACE.pop(key, None)
+
+
+def workspace_foreground_active(workspace: Path | str) -> bool:
+    """该工作区（会话）当前是否有前台执行在跑。"""
+    return _FOREGROUND_BY_WORKSPACE.get(str(workspace), 0) > 0
 
 
 @contextlib.asynccontextmanager
@@ -251,6 +270,11 @@ async def _build_infra(
     resources = ResourceStore(resource_root(cfg), cfg.resources.freshness_hours)
     knowledge.resources = resources
     cfg = cfg.model_copy(deep=True)
+    from spiritscout.gateway.lightweight import lightweight_enabled
+
+    # 仅本次运行副本生效，编队包含云端模型或未标记条目时关闭补偿。
+    cfg.gateway.lightweight_local = lightweight_enabled(
+        cfg.gateway.lightweight_local, authorization.mode, models)
     cfg.mcp_servers = resources.effective_mcp(cfg.mcp_servers)
     # 以下资源在创建后任何一步失败都要回收：先置空占位，异常路径统一收口
     mcp_clients: list[Any] = []
@@ -362,14 +386,16 @@ async def _build_infra(
             executor = LocalExecutor(
                 max_output_chars=cfg.executor.max_output_chars, audit=audit,
             )
-        workspace = Path(cfg.workspace.root)
+        workspace = Path(cfg.workspace.root).resolve()
         workspace.mkdir(parents=True, exist_ok=True)
         from spiritscout.tools.journal import ExecutionJournal
 
         journal = ExecutionJournal(blackboard, workspace, new_id("run"))
         journal.activate_run(run_lock)
         shared_ring = ring if ring is not None else RingLedger(audit)
-        registry = ToolRegistry(executor, policy=policy, audit=audit, journal=journal, attempts=shared_ring.exact)
+        shared_ring.bind_blackboard(blackboard)
+        registry = ToolRegistry(executor, policy=policy, audit=audit, journal=journal, attempts=shared_ring.exact,
+                                pause_gate=pause_gate)
         from spiritscout.gateway.usage import bind_usage
 
         bind_usage(gateway, workspace / "usage.json")
@@ -415,12 +441,14 @@ async def _build_infra(
         )
 
         search_root = Path(cfg.workspace.guard_root or cfg.workspace.root)
-        builtin_ctx["mode"] = authorization.mode
-        builtin_ctx["search"] = None
+        # 运行身份用保留键注入：模型工具参数（如 http_response_read 的
+        # mode）不与环境键争名，同名不再撞「multiple values」
+        builtin_ctx["_run_mode"] = authorization.mode
+        builtin_ctx["_search"] = None
         if authorization.mode != RunMode.COMPETITION:
             search_config, search_key = effective_search(cfg.search, resources)
             if search_config.enabled:
-                builtin_ctx["search"] = search_service(search_config, search_root, api_key=search_key)
+                builtin_ctx["_search"] = search_service(search_config, search_root, api_key=search_key)
         registry.register_builtin("web_search", web_search, SEARCH_SPEC)
         # 外部 MCP 服务器：握手 + 工具清单并入智能体工具目录（失败留痕跳过，
         # 不阻断开工——MCP 是增益能力而非主链依赖；多台服务器并发握手，
@@ -448,10 +476,14 @@ async def _build_infra(
                                 or str(Path(cfg.workspace.guard_root or cfg.workspace.root) / "browser-profile")),
                             "SPIRITSCOUT_CHROME_MODE": (
                                 "cdp" if authorization.mode == RunMode.SRC else "headless")}})
-                    client = build_client(spec)
+                    from spiritscout.tools.mcp_preflight import current_preflight
+
+                    pool = current_preflight.get()
+                    warmed = await pool.take(spec) if pool is not None else None
+                    client = warmed[0] if warmed is not None else build_client(spec)
                     # 启动前登记所有权；gather 尚未完成时取消也能完整回收。
                     mcp_clients.append(client)
-                    tools = await client.start()
+                    tools = warmed[1] if warmed is not None else await client.start()
                     # 这里只确认 MCP 目录可用；浏览器连接由首次实际调用验证。
                     return spec, client, tools, ""
                 except Exception as exc:  # noqa: BLE001 —— 不可达：留痕后继续
@@ -517,6 +549,12 @@ async def _build_infra(
                             "intrusive_write；删除文件、爆破、反弹连接、WebShell、容器逃逸选对应"
                             "类别，执行前逐次审批。与原生 action 独立。"}
                         schema["required"] = list(dict.fromkeys([*schema.get("required", []), action_param]))
+                    purpose_param = "_approval_purpose"
+                    while purpose_param in properties or purpose_param == action_param:
+                        purpose_param += "_"
+                    model_tool.setdefault("inputSchema", {}).setdefault("properties", {})[purpose_param] = {
+                        "type": "string", "description": "需要用户审批时必填：用自然语言说明针对什么目标、"
+                        "执行什么操作、为什么需要，以及可能影响。不能只写工具名。此字段只供宿主展示，不传给工具。"}
                     tool_spec = ToolSpec(
                         name=exposed_name, kind=ToolKind.MCP,
                         internet_search=is_search_server(spec) or is_search_tool(t["name"]),
@@ -524,6 +562,7 @@ async def _build_infra(
                         timeout_seconds=max(1, int(spec.timeout)),
                         allowed_params=set(properties) | ({action_param} if declaration else set()),
                         action_required=declaration, action_param=action_param,
+                        approval_purpose_param=purpose_param,
                         automatic_replay=not declaration, target_params=target_params,
                         allowed_agents=tuple(role.value for role in spec.allowed_agents))
 
@@ -598,6 +637,12 @@ async def _build_infra(
 
         registry.register_builtin("http_response_read", http_response_read, RESPONSE_SPEC)
 
+        from spiritscout.tools.cyberchef import SPECS as CYBERCHEF_SPECS
+        from spiritscout.tools.cyberchef import cyberchef_bake, cyberchef_operations
+
+        for fn in (cyberchef_operations, cyberchef_bake):
+            registry.register_builtin(fn.__name__, fn, CYBERCHEF_SPECS[fn.__name__])
+
         for name, fn in (("asset_memory_lookup", asset_memory_lookup), ("http_probe", http_probe), ("dns_resolve", dns_resolve),
                          ("tcp_scan", tcp_scan), ("file_analyze", file_analyze),
                          ("sandbox_exec", sandbox_exec)):
@@ -614,6 +659,8 @@ async def _build_infra(
                 "action": "agent_model_binding_dropped", "stale": stale,
                 "reason": "模型不在注册表，按档位路由"})
             bound = {k: v for k, v in bound.items() if known_registry.has(v)}
+        # 按本次调用注入补偿资格，不能用进程全局变量串扰其他会话。
+        builtin_ctx["_lightweight_local"] = cfg.gateway.lightweight_local
         return _Infra(
             cfg=cfg, authorization=authorization, audit=audit, guard=guard,
             policy=policy, limiter=limiter, bus=bus, blackboard=blackboard,
@@ -679,6 +726,46 @@ def _make_assembler(infra: _Infra, enable_llm_planning: bool) -> ModeAssembler:
     )
 
 
+def _recall_experience(infra: _Infra, experience: ExperienceStore, query: str) -> list[dict[str, Any]]:
+    """开局只读核对来源版本；来源丢失、更新或过期不删除经验，但不自动注入。"""
+    import sqlite3
+
+    workspace = Path(infra.cfg.workspace.root).resolve()
+    checked: dict[tuple[str, str], bool] = {}
+    def valid(source: dict[str, Any]) -> bool:
+        try:
+            session = source.get('source_session', '')
+            ref = str(source.get('ref', ''))
+            layer, _, identifier = ref.partition(':')
+            key, _, version = identifier.rpartition('@')
+            if not session or Path(session).name != session or not key or not version.isdigit():
+                return False
+            identity = (session, ref)
+            if identity in checked:
+                return checked[identity]
+            checked[identity] = False
+            # 每次只持有一个外部只读连接，失效候选再多也不耗尽文件描述符。
+            with contextlib.ExitStack() as stack:
+                if session == workspace.name:
+                    bb = infra.blackboard
+                else:
+                    if not workspace.name.startswith('sess-') or not session.startswith('sess-'):
+                        return False
+                    path = workspace.parent / session / 'bb.db'
+                    if not path.is_file():
+                        return False
+                    bb = Blackboard(path, bus=None, readonly=True)
+                    stack.callback(bb.close)
+                if bb is None:
+                    return False
+                row = bb.read_versioned(BlackboardLayer(layer), key)
+                checked[identity] = bool(row and row[1] == int(version) and row[0].get('evidence_state') not in {'conflicting', 'expired'})
+                return checked[identity]
+        except (OSError, ValueError, TypeError, sqlite3.Error):
+            return False
+    return experience.recall(query, limit=infra.cfg.experience.recall_limit, source_validator=valid)
+
+
 async def _run_master(
     infra: _Infra,
     assembly,
@@ -689,11 +776,20 @@ async def _run_master(
     user_inbox: list[dict[str, Any]] | None = None,
     standing_rules: str = "",
     dialogue_history: list[dict[str, str]] | None = None,
+    on_user_feed: Any = None,
+    followup_goal: bool = False,
     experience: Any = None,
     platform: Any = None,
     platform_facts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """装配主 Agent 并运行多轮闭环，返回 run_summary。"""
+    if (infra.cfg.gateway.lightweight_local and getattr(assembly, "single_executor", False)
+            and infra.authorization.mode in (RunMode.CTF, RunMode.AWDP)):
+        from spiritscout.ctf.single import run_single
+
+        return await run_single(infra, assembly, mission=mission, standing_rules=standing_rules,
+            dialogue_history=dialogue_history, user_inbox=user_inbox, on_user_feed=on_user_feed,
+            followup_goal=followup_goal, platform=platform)
     from spiritscout.tools.journal import read_recovery_view
 
     recovery = read_recovery_view(Path(infra.cfg.blackboard.sqlite_path))
@@ -703,9 +799,9 @@ async def _run_master(
 
     # 接收时已落盘的原话按消息 ID 幂等恢复；任务更新也不能覆盖并发答复。
     sync_user_context(infra.blackboard, dialogue_history=dialogue_history,
-                      mission=mission, standing_rules=standing_rules)
-    # 开局召回：带标签与适用场景的经验，帮灵枢判断是否与本目标同场景
-    recall = (experience.recent(limit=infra.cfg.experience.recall_limit)
+                      mission=None if followup_goal else mission, standing_rules=standing_rules)
+    # 每次运行只选一次相关、有来源的观察，其他会话新增经验不改写当前前缀。
+    recall = (_recall_experience(infra, experience, ' '.join((mission, target, str(getattr(assembly, 'notes', '') or ''))))
               if experience else [])
     master_extra: dict[str, Any] = {
         "run_mode": infra.authorization.mode.value,
@@ -720,6 +816,9 @@ async def _run_master(
         "flag_manager": getattr(assembly, "flag_manager", None),
         "user_inbox": user_inbox if user_inbox is not None else [],
         "dialogue_history": dialogue_history,
+        "on_user_feed": on_user_feed,
+        "followup_goal": followup_goal,
+        "lightweight_local": infra.cfg.gateway.lightweight_local,
     }
     if platform is not None:
         # 平台适配器只在灵枢（主 Agent）侧：调度期开实例、完成期回收，
@@ -730,7 +829,7 @@ async def _run_master(
     master = MasterAgent(MasterContext(
         bus=infra.bus, blackboard=infra.blackboard, convergence=infra.convergence,
         gateway=AgentBoundGateway(
-            infra.gateway, infra.agent_models.get("master", "")),
+            infra.gateway, infra.agent_models.get("master", ""), prefer_session=True),
         policy=infra.policy, agents=assembly.agents,
         audit=infra.audit, enable_llm_planning=enable_llm_planning,
         tactic_map=assembly.tactic_map, plan_override=assembly.plan_provider,
@@ -781,10 +880,8 @@ async def _run_master(
     # 灵枢收尾提炼经验：从全场战报中提炼可复用洞察（非步骤），存入经验库。
     # 完成态提炼移到调用方与报告生成并行（两笔模型调用互不依赖，串行磨
     # 是收尾等待的大头）；取消/失败路径无报告可搭，仍在原地提炼
-    # 刷新灵枢 extra 中的经验（提炼结果立即对后续派工可见）
-    recent_exp = (experience.recent(limit=infra.cfg.experience.recall_limit)
-                  if experience else [])
-    master.ctx.extra["recent_experience"] = format_insights(recent_exp)
+    # 保持本次运行的召回快照；新的经验在下一次运行重新筛选。
+    master.ctx.extra["recent_experience"] = format_insights(recall)
     run_summary["mode_notes"] = assembly.notes
     if mission:
         run_summary["mission"] = mission
@@ -866,7 +963,7 @@ async def _render_writeup(
     body = None
     if enable_llm:
         body = await writeup_body(
-            AgentBoundGateway(infra.gateway, infra.agent_models.get("master", "")),
+            AgentBoundGateway(infra.gateway, infra.agent_models.get("master", ""), prefer_session=True),
             digest=build_digest(challenges=challenges, flags=flag_manager.all(),
                                 run_summary=run_summary, blackboard=infra.blackboard),
             audit=infra.audit)
@@ -935,6 +1032,27 @@ def _distill_digest(infra: _Infra, assembly: Any,
         if trials:
             digest["trials"] = trials[:8]
         digest["tasks_recorded"] = bb.count(BlackboardLayer.TASK_STATE)
+        # 只提供事实摘要与版本化引用，不把凭据、Flag、工具参数或原始响应搬入经验。
+        sources = []
+        for layer in (BlackboardLayer.VULN, BlackboardLayer.TOPOLOGY, BlackboardLayer.RECON_CLUE):
+            for rec in bb.query(layer, limit=80):
+                data = rec['data']
+                if layer == BlackboardLayer.TOPOLOGY and not (data.get('kind') == 'finding' and data.get('type') == 'fact'):
+                    continue
+                if layer == BlackboardLayer.RECON_CLUE and data.get('clue_type') == 'user_reply':
+                    continue
+                text = data.get('title') or data.get('text')
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                sources.append({'ref': f'{layer.value}:{rec["record_id"]}@{rec["version"]}',
+                                'summary': text[:240], 'truncated': len(text) > 240,
+                                'evidence_state': data.get('evidence_state', 'unverified')})
+                if len(sources) >= 12:
+                    break
+            if len(sources) >= 12:
+                break
+        if sources:
+            digest['evidence_catalog'] = sources
     except Exception:  # noqa: BLE001 —— 黑板读取异常时保留最小战报
         pass
     return digest
@@ -961,7 +1079,19 @@ async def _distill_experience(gateway: Any, experience: ExperienceStore,
     import json as _json
 
     from spiritscout.gateway.backends import extract_json
+    from spiritscout.gateway.context import compact_json
     from spiritscout.gateway.gateway import chat_decision
+
+    # 保持原来的系统提示及 8000 字符观察预算；投影后再校验引用，不能引用被裁掉的来源。
+    payload = {**digest, 'constraints': (
+        '每条经验提供 source_refs 数组（最多3条，无依据时为空），仅引用 evidence_catalog 中支持该陈述的 ref；'
+        '没有适用依据时不补造引用。摘要不是完整原文，引用也不代表经验已独立验证。')}
+    user_content = compact_json(payload, 8000)
+    visible = _json.loads(user_content)
+    original_catalog = {item['ref']: item for item in digest.get('evidence_catalog', [])
+                        if isinstance(item, dict) and isinstance(item.get('ref'), str)}
+    catalog = {item['ref']: original_catalog[item['ref']] for item in visible.get('evidence_catalog', [])
+               if isinstance(item, dict) and isinstance(item.get('ref'), str) and item['ref'] in original_catalog}
 
     resp = await asyncio.wait_for(chat_decision(
         gateway,
@@ -981,7 +1111,7 @@ async def _distill_experience(gateway: Any, experience: ExperienceStore,
             "技术栈），tags 写 2~4 个检索标签（如 web、登录、越权、ctf、java）。"
             '返回 JSON：{"insights": [{"insight": str, "context": str, '
             '"tags": [str]}]}')},
-         {"role": "user", "content": _json.dumps(digest, ensure_ascii=False)[:8000]}],
+         {"role": "user", "content": user_content}],
         task_type="meta_planning", response_format="json",
         # 起步额度给足：思考型模型首调常把额度耗在思考上（正文 0 字符
         # 作废重试白烧一次调用）——实测 glm-5.3 提炼可吃满 2048 额度，
@@ -990,18 +1120,38 @@ async def _distill_experience(gateway: Any, experience: ExperienceStore,
         timeout_seconds=timeout_seconds,
         audit=audit, actor="master"),
         timeout=timeout_seconds + 40)
-    data = extract_json(resp.content) or {}
-    added = 0
-    for item in (data.get("insights") or [])[:5]:
-        if isinstance(item, dict) and str(item.get("insight") or "").strip():
+    try:
+        data = extract_json(resp.content)
+    except (ValueError, TypeError):
+        return {"result": "unparsed", "insights": 0,
+                "error": "模型输出不是可解析的经验 JSON"}
+    items = data.get("insights") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return {"result": "unparsed", "insights": 0,
+                "error": "经验 JSON 缺少 insights 数组"}
+    if not items:
+        return {"result": "empty", "insights": 0}
+    added = duplicates = parsed = 0
+    for item in items[:5]:
+        if isinstance(item, dict) and isinstance(item.get("insight"), str) and item["insight"].strip():
+            parsed += 1
             tags = item.get("tags") if isinstance(item.get("tags"), list) else []
+            requested = item.get('source_refs') if isinstance(item.get('source_refs'), list) else []
+            sources = [{**catalog[ref], 'source_session': source_session} for ref in dict.fromkeys(
+                ref for ref in requested if isinstance(ref, str)) if ref in catalog][:3]
             if experience.add(str(item["insight"]),
                               context=str(item.get("context", "")),
                               tags=[str(tag) for tag in tags],
                               source_session=source_session,
-                              source_model="master"):
+                              source_model="master", sources=sources):
                 added += 1
-    return {"result": "ok" if added else "empty", "insights": added}
+            else:
+                duplicates += 1
+    if not parsed:
+        return {"result": "unparsed", "insights": 0,
+                "error": "经验数组没有有效洞察"}
+    return {"result": "ok" if added else "duplicate", "insights": added,
+            "duplicates": duplicates, "parsed": parsed}
 
 
 def _prepare_distill(infra: _Infra, assembly: Any, enabled: bool, experience: Any,
@@ -1013,7 +1163,7 @@ def _prepare_distill(infra: _Infra, assembly: Any, enabled: bool, experience: An
     同步完成是硬要求：退场路径必须在 infra 回收前拿到快照，后台任务才能
     脱离黑板/知识库等已回收资源独立跑完。
     """
-    if not enabled or experience is None:
+    if not enabled or experience is None or not getattr(getattr(infra.cfg, "experience", None), "auto_distill", True):
         return None
     digest = _distill_digest(infra, assembly, run_summary, mission, outcome, error)
     if not _worth_distilling(digest):
@@ -1025,7 +1175,7 @@ def _prepare_distill(infra: _Infra, assembly: Any, enabled: bool, experience: An
 
 
 async def _distill_run(infra: _Infra, experience: Any, digest: dict[str, Any], *,
-                       outcome: str) -> dict[str, Any]:
+                       outcome: str, trigger: str = "auto") -> dict[str, Any]:
     """一次提炼执行 + 审计留痕（完成态原地等待与退场后台任务共用）。"""
     started = time.monotonic()
     # 来源记真实会话 ID（Web 会话工作区名即 sess-xxx，经验页据此回链）
@@ -1033,7 +1183,7 @@ async def _distill_run(infra: _Infra, experience: Any, digest: dict[str, Any], *
         getattr(getattr(infra, "cfg", None), "workspace", None), "root", "")
     try:
         result = await _distill_experience(
-            AgentBoundGateway(infra.gateway, infra.agent_models.get("master", "")),
+            AgentBoundGateway(infra.gateway, infra.agent_models.get("master", ""), prefer_session=True),
             experience, digest,
             timeout_seconds=infra.cfg.experience.distill_timeout_seconds,
             audit=infra.audit,
@@ -1042,7 +1192,7 @@ async def _distill_run(infra: _Infra, experience: Any, digest: dict[str, Any], *
         result = {"result": "error", "insights": 0,
                   "error": f"{type(exc).__name__}: {exc}"[:200]}
     infra.audit.log("experience.distill", "master", {
-        **result, "outcome": outcome,
+        **result, "outcome": outcome, "trigger": trigger,
         "duration_ms": round((time.monotonic() - started) * 1000, 1)})
     return result
 
@@ -1088,7 +1238,8 @@ def _update_distill_snapshot(path: Path | None, **updates: Any) -> None:
 
 
 def _persist_distill_snapshot(
-        infra: _Infra, digest: dict[str, Any], *, outcome: str) -> Path | None:
+        infra: _Infra, digest: dict[str, Any], *, outcome: str,
+        trigger: str = "auto") -> Path | None:
     workspace = getattr(infra, "workspace", None)
     if not isinstance(workspace, Path):
         return None
@@ -1097,7 +1248,7 @@ def _persist_distill_snapshot(
         path = _distill_queue_dir(workspace) / f"{stamp}-{new_id('distill')}.json"
         _write_distill_snapshot(path, {
             "schema": 1, "status": "pending", "attempts": 0,
-            "outcome": outcome, "digest": digest,
+            "outcome": outcome, "digest": digest, "trigger": trigger,
             "session": workspace.name,
             "created_at": datetime.now(UTC).isoformat(),
         })
@@ -1159,25 +1310,40 @@ async def _background_distill(infra: _Infra, experience: Any,
     """后台提炼收尾：执行提炼并关闭托付的经验库（连接不泄漏）。
 
     任何失败只吞掉不冒泡——后台任务无人接管异常，会话终态早已落定。
+    会话可能在后台排队等待期间被删除（工作区连同快照一并移除），此时
+    审计与快照写入都会失败：留痕无门，静默收场即可。
     """
     try:
         async with _background_slot():
             prior = 0
+            trigger = "auto"
             if snapshot is not None:
                 try:
-                    prior = int(json.loads(
-                        snapshot.read_text(encoding="utf-8")).get("attempts") or 0)
+                    payload = json.loads(snapshot.read_text(encoding="utf-8"))
+                    prior = int(payload.get("attempts") or 0)
+                    trigger = str(payload.get("trigger") or "auto")
                 except (OSError, ValueError, TypeError):
                     prior = 0
                 _update_distill_snapshot(
                     snapshot, status="running", attempts=prior + 1,
                     started_at=datetime.now(UTC).isoformat())
-            result = await _distill_run(
-                infra, experience, digest, outcome=outcome)
+            guard = getattr(infra, "distill_guard", None)
+            reason = guard() if guard is not None else ""
+            if reason:
+                result = {"result": "skipped", "insights": 0, "reason": reason}
+                infra.audit.log("experience.distill", "master", {
+                    **result, "outcome": outcome, "trigger": trigger})
+            else:
+                result = await _distill_run(
+                    infra, experience, digest, outcome=outcome, trigger=trigger)
             failed = result.get("result") == "error"
             _update_distill_snapshot(
                 snapshot, status="failed" if failed else "done",
                 completed_at=datetime.now(UTC).isoformat(), result=result)
+    except Exception:  # noqa: BLE001 —— 不吞 CancelledError（停止语义优先）
+        with contextlib.suppress(Exception):
+            _update_distill_snapshot(snapshot, status="failed",
+                                     completed_at=datetime.now(UTC).isoformat())
     finally:
         with contextlib.suppress(Exception):
             experience.close()
@@ -1196,6 +1362,9 @@ async def resume_pending_distills(
         return 0
     audit = AuditLogger(cfg.audit_log_path)
     gateway = ModelGateway(ModelRegistry(models), config=cfg.gateway, audit=audit)
+    from spiritscout.gateway.usage import bind_usage
+
+    bind_usage(gateway, workspace / "usage.json")
     store = ExperienceStore(
         experience_db_path(cfg.experience.root, str(workspace)), audit=audit)
     completed = 0
@@ -1224,6 +1393,9 @@ async def resume_pending_distills(
                     result = {"result": "error", "insights": 0,
                               "error": f"{type(exc).__name__}: {exc}"[:200]}
                     failed = True
+                audit.log("experience.distill", "master", {
+                    **result, "outcome": str(payload.get("outcome") or ""),
+                    "trigger": str(payload.get("trigger") or "auto"), "recovered": True})
                 _update_distill_snapshot(
                     snapshot, status="failed" if failed else "done",
                     completed_at=datetime.now(UTC).isoformat(), result=result)
@@ -1256,6 +1428,8 @@ async def run_engagement(
     standing_rules: str = "",
     pause_gate: Any = None,
     dialogue_history: list[dict[str, str]] | None = None,
+    on_user_feed: Any = None,
+    followup_goal: bool = False,
 ) -> EngagementResult:
     """SRC 模式任务入口：侦察 → 探测 → 全链路核验 → 报告。
 
@@ -1271,13 +1445,14 @@ async def run_engagement(
                                question_broker=question_broker,
                                pause_gate=pause_gate)
     try:
-        _foreground_started()
+        _foreground_started(infra.workspace)
         assembly = _make_assembler(infra, enable_llm_planning).assemble(RunMode.SRC)
         run_summary = await _run_master(
             infra, assembly, target, enable_llm_planning=enable_llm_planning,
             mission=mission, user_inbox=user_inbox,
             standing_rules=standing_rules,
             dialogue_history=dialogue_history,
+            on_user_feed=on_user_feed, followup_goal=followup_goal,
             experience=infra.experience)
 
         # 独立复测已在候选提交时运行，不能再用模板成功覆盖用户规则裁决。
@@ -1311,7 +1486,7 @@ async def run_engagement(
         try:
             await infra.close()
         finally:
-            _foreground_finished()
+            _foreground_finished(infra.workspace)
 
 
 async def run_ctf_engagement(
@@ -1332,10 +1507,14 @@ async def run_ctf_engagement(
     standing_rules: str = "",
     pause_gate: Any = None,
     resume: bool = False,
+    mission: str = "",
+    reopen_challenges: list[str] | None = None,
     dialogue_history: list[dict[str, str]] | None = None,
+    on_user_feed: Any = None,
+    followup_goal: bool = False,
     platform_profile: dict[str, Any] | None = None,
 ) -> EngagementResult:
-    """CTF 专项任务入口：五方向专项 Agent + Flag 统一管理。
+    """CTF/AWDP 入口：普通模式五方向专项，合格轻量模式直接单执行者。
 
         CTF 模式所有工具操作自动审批并留痕；专项能力由角色工具目录提供。
         flag_submit_fn=None 时只提取不提交（提交接口由使用者按赛方规范接入）。
@@ -1344,8 +1523,8 @@ async def run_ctf_engagement(
         platform_profile：平台档案（托管题/跑分平台）——列题/开容器/完成回收/
         提交全部经适配器执行，题目源以平台清单为准；不提供时行为与原来一致。
         """
-    if authorization.mode != RunMode.CTF:
-        raise SpiritScoutError("run_ctf_engagement 要求授权模式为 CTF")
+    if authorization.mode not in (RunMode.CTF, RunMode.AWDP):
+        raise SpiritScoutError("run_ctf_engagement 要求授权模式为 CTF/AWDP")
     infra = await _build_infra(cfg, models, authorization,
                                agent_models=agent_models,
                                approval_gate=approval_gate, ring=ring,
@@ -1353,8 +1532,9 @@ async def run_ctf_engagement(
                                pause_gate=pause_gate)
     adapter: Any = None
     try:
-        _foreground_started()
+        _foreground_started(infra.workspace)
         challenges = [dict(ch) for ch in challenges]
+        type_hints = copy.deepcopy(challenges[0].get("user_type_hints")) if len(challenges) == 1 else None
         if platform_profile:
             from spiritscout.ctf.platform import (
                 PlatformAdapter,
@@ -1377,32 +1557,43 @@ async def run_ctf_engagement(
                 if listed:
                     # 平台列题即题目源：URL/文本推导的赛题不参与平台模式
                     challenges = listed
+                    if len(challenges) == 1 and type_hints:
+                        challenges[0]["user_type_hints"] = type_hints
                 else:
                     infra.audit.log("platform.fact", "runtime", {
                         "action": "list_empty",
                         "detail": ("平台未列出题目，沿用任务提供的赛题清单"
                                    if challenges else "平台未列出题目，任务未提供赛题")})
-        local_answers = adapter is None and flag_submit_fn is None and len(challenges) == 1
+        local_answers = (adapter is None and flag_submit_fn is None and
+                         (len(challenges) == 1 or (infra.cfg.gateway.lightweight_local and bool(challenges))))
         flag_manager = FlagManager(
-            local_only=local_answers,
-            multiple_answers=local_answers and challenges[0].get("multiple_answers") is True,
+            local_only=local_answers or (infra.cfg.gateway.lightweight_local and authorization.mode == RunMode.AWDP),
+            multiple_answers=(local_answers and challenges[0].get("multiple_answers") is True
+                              and authorization.mode != RunMode.AWDP),
+            fix_mode=authorization.mode == RunMode.AWDP,
             flag_patterns=flag_patterns,
             submit_fn=flag_submit_fn or (adapter.submit if adapter is not None else None),
             audit=infra.audit, bus=infra.bus,
             store_path=infra.workspace / "flags.json",
         )
+        for challenge_id in reopen_challenges or []:
+            if challenge_id not in {str(ch.get("id") or "") for ch in challenges}:
+                raise SpiritScoutError("重新确认的赛题不属于当前会话")
+            flag_manager.reopen(challenge_id, mission)
         assembly = _make_assembler(infra, enable_llm_planning).assemble(
-            RunMode.CTF, challenges=challenges, flag_manager=flag_manager,
-            resume=resume, platform=adapter)
+            authorization.mode, challenges=challenges, flag_manager=flag_manager,
+            resume=resume and not followup_goal, platform=adapter)
         target = next(
             (str(c["url"]) for c in challenges if c.get("url")),
             "ctf://challenges",
         )
         run_summary = await _run_master(
             infra, assembly, target, enable_llm_planning=enable_llm_planning,
+            mission=mission,
             user_inbox=user_inbox,
             standing_rules=standing_rules,
             dialogue_history=dialogue_history,
+            on_user_feed=on_user_feed, followup_goal=followup_goal,
             experience=infra.experience,
             platform=adapter,
             platform_facts=adapter.facts if adapter is not None else None)
@@ -1413,7 +1604,15 @@ async def run_ctf_engagement(
         if adapter is not None:
             run_summary["platform"] = adapter.summary()
         report_path = report_path or _default_report_path(infra.workspace, "ctf_writeup")
-        if local_answers:
+        if getattr(assembly, "single_executor", False):
+            if local_answers:
+                run_summary["answers_complete"] = bool(challenges) and all(
+                    str(ch.get("id") or "") in flag_manager.completed_ids() for ch in challenges)
+            out = await _render_writeup(infra, challenges, flag_manager, run_summary, report_path,
+                contest="ctf", enable_llm=False, fallback_context={"single_executor": True,
+                    "notes": assembly.notes, "flag_stats": flag_stats})
+            run_summary["report_job"] = {"status": "completed", "mode": "local"}
+        elif local_answers:
             from spiritscout.ctf.report_jobs import enqueue
             from spiritscout.web.events import read_activity_page
 
@@ -1429,7 +1628,7 @@ async def run_ctf_engagement(
                                     for row in read_activity_page(Path(infra.cfg.audit_log_path), limit=300)['items']
                                     if row['event']['type'] in {'agent.progress', 'agent.note', 'agent.tool_result'}]
             enqueue(infra.workspace, Path(report_path), digest,
-                    AgentBoundGateway(infra.gateway, infra.agent_models.get("master", "")),
+                    AgentBoundGateway(infra.gateway, infra.agent_models.get("master", ""), prefer_session=True),
                     infra.audit, enabled=enable_llm_planning)
             run_summary["report_job"] = {"status": "queued", "mode": "background"}
             out = Path(report_path)
@@ -1442,10 +1641,10 @@ async def run_ctf_engagement(
                                   "notes":assembly.notes,
                                   "current_task_ids": [task_id for node in run_summary.get("dag_nodes", [])
                                                        for task_id in node.get("task_ids", [])]})
-        outcome = "interrupted" if local_answers and not run_summary["answers_complete"] else "completed"
-        distill_task = _schedule_background_distill(
+        outcome = "interrupted" if local_answers and not run_summary.get("answers_complete", False) else "completed"
+        distill_task = (None if getattr(assembly, "single_executor", False) else _schedule_background_distill(
             infra, assembly, infra.experience, enable_llm_planning,
-            run_summary, mission="", outcome=outcome)
+            run_summary, mission="", outcome=outcome))
         run_summary["experience_distill"] = {
             "status": "queued" if distill_task is not None else "skipped",
             "mode": "background",
@@ -1470,7 +1669,7 @@ async def run_ctf_engagement(
                     await adapter.aclose()
             await infra.close()
         finally:
-            _foreground_finished()
+            _foreground_finished(infra.workspace)
 
 
 async def run_competition_engagement(
@@ -1492,6 +1691,8 @@ async def run_competition_engagement(
     standing_rules: str = "",
     pause_gate: Any = None,
     dialogue_history: list[dict[str, str]] | None = None,
+    on_user_feed: Any = None,
+    followup_goal: bool = False,
     platform_profile: dict[str, Any] | None = None,
     mission: str = "",
     preserve_instances_on_return: bool = False,
@@ -1524,7 +1725,7 @@ async def run_competition_engagement(
                                pause_gate=pause_gate)
     adapter: Any = None
     try:
-        _foreground_started()
+        _foreground_started(infra.workspace)
         # 平台档案（托管题/跑分平台）：列题即题目源；赛制（Jeopardy/AWD/靶场）
         # 不受影响——平台只换题源与提交/供给通道
         if platform_profile:
@@ -1587,6 +1788,7 @@ async def run_competition_engagement(
             user_inbox=user_inbox,
             standing_rules=standing_rules,
             dialogue_history=dialogue_history,
+            on_user_feed=on_user_feed, followup_goal=followup_goal,
             experience=infra.experience,
             platform=adapter,
             platform_facts=adapter.facts if adapter is not None else None)
@@ -1643,7 +1845,7 @@ async def run_competition_engagement(
                     await adapter.aclose()
             await infra.close()
         finally:
-            _foreground_finished()
+            _foreground_finished(infra.workspace)
 
 
 def run_engagement_sync(**kwargs: Any) -> EngagementResult:

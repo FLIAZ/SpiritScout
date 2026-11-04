@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from spiritscout.web.events import read_audit_page, stream_audit
+from spiritscout.web.events import read_audit_page, read_typed_page, stream_audit
 
 
 def line(index: int) -> bytes:
@@ -17,6 +17,44 @@ def line(index: int) -> bytes:
 
 
 class AuditHistoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_typed_page_stops_when_recent_page_has_enough_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'audit.jsonl'
+            path.write_bytes(line(1) * 1000)
+            with patch('spiritscout.web.events.read_audit_page', wraps=read_audit_page) as reader:
+                page = read_typed_page(path, {'master.reply'}, limit=10)
+            self.assertEqual(len(page['items']), 10)
+            self.assertTrue(page['has_more'])
+            self.assertEqual(reader.call_count, 1)
+
+    async def test_typed_pages_preserve_sparse_matches_and_cursor_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'audit.jsonl'
+            path.write_bytes(b''.join(
+                (json.dumps({'type': 'user.message' if i % 173 == 0 else 'agent.delta',
+                             'seq': i, 'detail': {}}) + '\n').encode()
+                for i in range(1800)))
+            before = None
+            found = set()
+            while True:
+                page = read_typed_page(path, {'user.message'}, before=before, limit=3)
+                found.update(item['event']['seq'] for item in page['items'])
+                if not page['has_more']:
+                    break
+                next_cursor = page['older_cursor']
+                self.assertTrue(before is None or next_cursor < before)
+                before = next_cursor
+            self.assertEqual(found, set(range(0, 1800, 173)))
+
+    async def test_typed_page_retains_sparse_scan_limit(self) -> None:
+        page = {'items': [{'id': 1, 'event': {'type': 'agent.delta'}}],
+                'older_cursor': 1, 'cursor': 2, 'has_more': True}
+        with patch('spiritscout.web.events.read_audit_page', return_value=page) as reader:
+            result = read_typed_page(Path('unused'), {'user.message'})
+        self.assertEqual(reader.call_count, 400)
+        self.assertTrue(result['has_more'])
+        self.assertEqual(result['items'], [])
+
     async def test_pages_cover_unicode_history_without_gaps_or_duplicates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'audit.jsonl'

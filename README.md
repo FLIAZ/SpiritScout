@@ -8,7 +8,7 @@
 
 **简体中文 · [English](README_EN.md)**
 
-[![Version](https://img.shields.io/badge/version-v0.17.0-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.20.0-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
 
 [快速开始](#快速开始) · [能力与模式](#能力与模式) · [架构](#架构) · [部署指南](docs/部署与配置.md) · [参与贡献](CONTRIBUTING.md)
 
@@ -29,7 +29,7 @@
 | 编队协作 | 主 Agent 拆分任务，子 Agent 派生路线、共享线索，按角色分配模型 |
 | 执行工作台 | 展开任务、路线与推进步骤，查看工具结果及事实／依据黑板图 |
 | 项目与产物 | 保存资产和会话；SRC 候选漏洞由「鉴真」独立复测，生成报告或 WriteUp |
-| 浏览器与工具 | 接入 MCP、Skill 和 shell/Python 沙箱；MCP 与 Skill 以卡片分组管理、组合筛选和启停；SRC 可复用登录态并人工处理验证码 |
+| 浏览器与工具 | 接入 MCP、Skill 和 shell/Python 沙箱；SRC 与 CTF 执行角色支持本地离线 CyberChef 配方与完整字节结果复用；MCP 与 Skill 以卡片分组管理、组合筛选和启停；SRC 可复用登录态并人工处理验证码 |
 | 模型与用量 | 配置供应商、编队与模型，查看费用估算、Token、端点返回的输入缓存用量 |
 
 Skill 管理采用卡片目录，支持启用分组、类型／来源／日期组合筛选、绿色开关和删除；点击卡片浏览技能目录、渲染并直接编辑 Markdown，支持草稿保护和版本校验保存。支持直接多选导入 ZIP、tar.gz 等压缩包，RAR / 7z 通过系统 libarchive 读取；参见[管理与导入说明](docs/部署与配置.md#skill-目录与文件浏览)。
@@ -133,6 +133,14 @@ shell/Python 沙箱需要 Linux 与 bubblewrap。Windows/macOS 原生控制台�
 
 侧栏底部或会话详情的「清理存储」可查看占用、精简数据库及清理下载缓存，保留会话与成果；查看范围并确认后执行。
 
+输入框右侧的圆形按钮可暂停或继续当前任务；输入消息时切换为发送。暂停保留原任务进度，“结束任务”位于更多操作菜单。
+
+发送按钮左侧的模型按钮用于本会话选模，默认“自动”跟随编队。选择按供应商与模型区分并随会话保存；后续调用生效，不中断正在返回的请求，也不覆盖子 Agent 的显式指派。选择“自动”可撤销会话覆盖。
+
+会话的「经验」页可查看产出和提炼结果，停止后可补提炼一次；「经验提炼」页可按字符相似度找候选，预览并确认整理，保留原件、质量状态和来源，支持撤销。字符相似不是语义相同，超长合并稿会被拒绝而不是截断。
+
+「用量」页按供应商和模型汇总共享及会话账本，未定价和不完整用量单独说明；「通知」页可开启已确认解题结果与待答提醒。浏览器须保持打开，系统通知不可用时退化为页面提示，关闭浏览器后不会推送。
+
 任务模式由用户选择；项目历史资产不会自动成为本次测试的授权目标。
 CTF/智能体模式使用会话独立的无头浏览器，SRC 可连接已有浏览器或启用人工接管窗口。
 
@@ -166,7 +174,7 @@ CTF/智能体模式使用会话独立的无头浏览器，SRC 可连接已有浏
 
 智能体模式默认保留未完成题的运行现场；暂缓派工、取消在途工作与释放实例分别由模型明确决策，不按固定耗时强制切题。
 
-当前代码版本 **v0.17.0**。版本唯一来源、递增规则和历史版本说明见 [版本管理](CONTRIBUTING.md#版本管理)。
+当前代码版本 **v0.20.0**。版本唯一来源、递增规则和历史版本说明见 [版本管理](CONTRIBUTING.md#版本管理)。
 
 贡献时按 [Agent 工作约定](AGENTS.md) 执行：同期功能共用一个版本，调整版本号和推送远端须先取得用户明确同意。
 

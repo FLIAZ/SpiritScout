@@ -84,6 +84,7 @@ const SessionStorage = (() => {
     const dlg = node("dlg");
     if (!dlg.open) dlg.showModal();
     node("select").disabled = true;
+    node("view").disabled = true;
     node("details").textContent = "正在扫描会话占用…";
     message("只扫描占用，不会自动删除数据。");
     try {
@@ -99,6 +100,7 @@ const SessionStorage = (() => {
       session = data.sessions.some(s => s.session_id === id) ? id : data.sessions[0].session_id;
       node("select").value = session;
       node("select").disabled = false;
+      node("view").disabled = false;
       selxSync(node("select"));
       await inspect(session, token);
     } catch (e) {
@@ -126,7 +128,13 @@ const SessionStorage = (() => {
     }
   }
   node("close").onclick = () => node("dlg").close();
-  node("dlg").addEventListener("close", () => { ++version; stop(); preview = null; });
+  node("dlg").addEventListener("close", () => { ++version; stop(); preview = null; node("view").disabled = true; });
+  node("view").onclick = () => {
+    if (node("view").disabled || !session) return;
+    const id = session;
+    node("dlg").close();
+    openSession(id);
+  };
   node("refresh").onclick = () => open(session);
   node("select").onchange = () => { session = node("select").value; inspect(session, ++version); };
   node("database").onchange = node("caches").onchange = ready;

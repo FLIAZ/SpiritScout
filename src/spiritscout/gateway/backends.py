@@ -16,6 +16,7 @@ from typing import Any
 from spiritscout.config.settings import ModelEntry
 from spiritscout.gateway.attempts import current_attempt_trace, tracked_request
 from spiritscout.gateway.capabilities import EndpointCapabilities
+from spiritscout.gateway.metering import backend_usage, merge_usage, normalize_usage
 
 # 流式增量回调：(kind, text) -> None | Awaitable[None]
 DeltaCallback = Callable[[str, str], Any]
@@ -32,19 +33,9 @@ _TRUNCATED_TOOL_ARGS_NOTE = (
 
 
 def cache_usage(usage: Any) -> dict[str, int | None]:
-    """兼容 SDK 对象和字典；未提供的指标保留 None，不能伪造零命中。"""
-    def get(obj: Any, key: str) -> Any:
-        return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
-
-    details = get(usage, "prompt_tokens_details") or get(usage, "input_tokens_details")
-    read = get(details, "cached_tokens")
-    if read is None:
-        read = get(usage, "cache_read_input_tokens")
-    if read is None:
-        read = get(usage, "prompt_cache_hit_tokens")
-    write = get(usage, "cache_creation_input_tokens")
-    return {"cached_input_tokens": read if type(read) is int and read >= 0 else None,
-            "cache_write_tokens": write if type(write) is int and write >= 0 else None}
+    """保留旧接口；全部协议共用同一份缓存字段归一化。"""
+    normalized = normalize_usage(usage)
+    return {key: normalized.get(key) for key in ("cached_input_tokens", "cache_write_tokens")}
 
 
 async def emit_delta(on_delta: DeltaCallback | None, kind: str, text: str) -> None:
@@ -350,9 +341,7 @@ class LiteLLMBackend(ChatBackend):
         return {
             "content": choice.message.content or "",
             "reasoning": str(getattr(choice.message, "reasoning_content", "") or ""),
-            **cache_usage(usage),
-            "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
-            "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+            **backend_usage(normalize_usage(usage)),
             "tool_calls": normalize_tool_calls(
                 getattr(choice.message, "tool_calls", None)),
             "finish_reason": str(getattr(choice, "finish_reason", "") or ""),
@@ -391,15 +380,15 @@ class LiteLLMBackend(ChatBackend):
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         tool_slots: dict[int, dict[str, Any]] = {}
-        usage: Any = None
+        usage: dict[str, int] = {}
         finish_reason = ""
         first_delta_ms = None
         started = started if started is not None else time.perf_counter()
         async for chunk in stream:
             if getattr(chunk, "usage", None):
-                usage = chunk.usage
+                merge_usage(usage, normalize_usage(chunk.usage))
                 if (trace := current_attempt_trace.get()) is not None:
-                    trace.usage(usage)
+                    trace.usage(chunk.usage)
             choices = getattr(chunk, "choices", None) or []
             if not choices:
                 continue
@@ -451,9 +440,7 @@ class LiteLLMBackend(ChatBackend):
             "first_delta_ms": first_delta_ms,
             "content": "".join(content_parts),
             "reasoning": "".join(reasoning_parts),
-            **cache_usage(usage),
-            "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
-            "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+            **backend_usage(usage),
             "tool_calls": normalize_tool_calls(ordered),
             "finish_reason": finish_reason,
         }
@@ -581,9 +568,7 @@ class LiteLLMBackend(ChatBackend):
             "content": content,
             "reasoning": "".join(reasoning_parts),
             # Responses 协议 usage 字段名是 input_tokens/output_tokens
-            **cache_usage(usage),
-            "prompt_tokens": int(getattr(usage, "input_tokens", 0) or 0),
-            "completion_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+            **backend_usage(normalize_usage(usage)),
             "tool_calls": normalize_tool_calls(raw_calls),
             "finish_reason": str(getattr(resp, "status", "") or ""),
         }
@@ -942,6 +927,10 @@ def entry_role_safe(role: str) -> str:
 def backend_for(entry: ModelEntry, mock_backend: MockBackend | None = None, *,
                 capabilities: EndpointCapabilities | None = None) -> ChatBackend:
     """按 provider 选择后端。provider=mock 时共用注入的 MockBackend 实例。"""
+    if entry.provider == "ollama":
+        from spiritscout.gateway.ollama import OllamaBackend
+
+        return OllamaBackend()
     if entry.provider == "mock":
         return mock_backend or MockBackend()
     return LiteLLMBackend(capabilities=capabilities)

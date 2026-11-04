@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 from spiritscout.agents.webvuln.agent import WebVulnAgent
 from spiritscout.config.settings import ModelEntry
+from spiritscout.core.audit import NullAuditLogger
 from spiritscout.gateway.backends import LiteLLMBackend
 from spiritscout.gateway.cache import PrefixTracker, cache_summary
 from spiritscout.gateway.context import (
@@ -20,6 +21,22 @@ from spiritscout.gateway.context import (
 
 
 class CacheEfficiencyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_decision_json_miss_is_audited_not_silent(self) -> None:
+        """决策通道 JSON 缺席要留痕：规则回退从静默降级变成可观测事件。"""
+        from spiritscout.gateway.gateway import chat_decision
+
+        for content, miss in (("模型自由发挥的散文，没有结构", True),
+                              ('{"tasks": [{"index": 0}]}', False)):
+            audit = NullAuditLogger()
+            gateway = SimpleNamespace(chat=AsyncMock(return_value=SimpleNamespace(
+                content=content, finish_reason="stop", reasoning="")))
+            await chat_decision(gateway,
+                                [{"role": "system", "content": "契约"},
+                                 {"role": "user", "content": "决策"}],
+                                audit=audit, actor="master", response_format="json")
+            events = [record["type"] for record in audit.records]
+            self.assertEqual("llm.json_miss" in events, miss)
+
     def test_changed_observation_keeps_full_factual_prefix(self) -> None:
         base = {"constraints": "输出结构固定", "mission": "原任务不能丢",
                 "shared_context": {"version": 2, "facts": ["真实事实" * 1000]},

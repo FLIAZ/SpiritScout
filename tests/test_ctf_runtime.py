@@ -386,6 +386,43 @@ class StepExtensionTests(unittest.TestCase):
         self.assertEqual(plan.steps, [])
 
 
+class CTFPlanningContextTests(unittest.TestCase):
+    """赛题证据进模型规划上下文：魔数注记是感知事实，方向由模型判断。"""
+
+    def test_ctf_assembly_feeds_challenges_with_attachment_facts(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from spiritscout.core.models import RunMode
+        from spiritscout.modes.assembler import ModeAssembler
+
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "crackme"
+            binary.write_bytes(b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 32)
+            original = [{"id": "c1", "title": "unknown",
+                         "description": "分析附件", "attachments": [str(binary)]}]
+
+            with (patch("spiritscout.modes.assembler.CTFWebAgent"),
+                  patch("spiritscout.modes.assembler.CTFPwnAgent"),
+                  patch("spiritscout.modes.assembler.CTFReverseAgent"),
+                  patch("spiritscout.modes.assembler.CTFCryptoAgent"),
+                  patch("spiritscout.modes.assembler.CTFMiscAgent")):
+                assembly = ModeAssembler(SimpleNamespace(),
+                                         enable_llm_planning=True).assemble(
+                    RunMode.CTF, challenges=original)
+
+            planning = assembly.competition_context["challenges"]
+            self.assertEqual(planning[0]["id"], "c1")
+            self.assertEqual(len(planning[0]["attachment_notes"]), 1)
+            self.assertIn("ELF", planning[0]["attachment_notes"][0])
+            # 原始清单不带注记（规划视图是副本，不就地改写）
+            self.assertNotIn("attachment_notes", original[0])
+            # 规则派单保留为兜底，不再短路模型规划
+            self.assertIsNotNone(assembly.plan_provider)
+
+
 class DirectionRotationTests(unittest.TestCase):
     """重攻方向按题目形态轮换：纯 URL 的 Web 题不交给杂项接手。"""
 
@@ -417,6 +454,150 @@ class DirectionRotationTests(unittest.TestCase):
 
         self.assertEqual(dirs[0], "misc")
         self.assertIn("crypto", dirs)
+
+    def test_binary_attachment_with_instance_url_is_pwn_not_web(self) -> None:
+        """附件是硬方向证据：带实例地址的二进制题不能被 http 关键词判成 Web。"""
+        from spiritscout.modes.assembler import classify_challenge
+
+        challenge = {"id": "c4", "title": "shellcode",
+                     "url": "http://1.2.3.4:1337",
+                     "description": "题面给的是 http://1.2.3.4:1337 实例地址",
+                     "attachments": ["/a/chall.elf"]}
+
+        self.assertEqual(classify_challenge(challenge), "pwn")
+
+    def test_binary_attachment_with_reverse_keywords_is_reverse(self) -> None:
+        """二进制附件给谁由题面说：逆向词指向 reverse，不再一律 pwn。"""
+        from spiritscout.modes.assembler import classify_challenge
+
+        challenge = {"id": "c8", "title": "easy crackme",
+                     "description": "逆向分析附件，还原校验算法",
+                     "attachments": ["/a/crackme"]}
+
+        with self.subTest(ext=".elf"):
+            self.assertEqual(classify_challenge(
+                {**challenge, "attachments": ["/a/crackme.elf"]}), "reverse")
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "crackme"
+            binary.write_bytes(b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 64)
+            self.assertEqual(classify_challenge(
+                {**challenge, "attachments": [str(binary)]}), "reverse")
+
+    def test_extensionless_binary_sniffed_by_magic(self) -> None:
+        """无扩展名的二进制附件按魔数识别：默认 pwn，轮换候选含 reverse。"""
+        import tempfile
+        from pathlib import Path
+
+        from spiritscout.modes.assembler import (
+            _candidate_directions,
+            classify_challenge,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "chall"
+            binary.write_bytes(b"MZ\x90\x00\x03\x00\x00\x00" + b"\x00" * 64)
+            challenge = {"id": "c9", "title": "unknown",
+                         "attachments": [str(binary)]}
+
+            self.assertEqual(classify_challenge(challenge), "pwn")
+            dirs = _candidate_directions(challenge)
+            self.assertEqual(dirs[0], "pwn")
+            self.assertIn("reverse", dirs)
+
+    def test_extensionless_forensics_file_falls_to_misc(self) -> None:
+        """无扩展名的取证文件（图片/压缩包/流量）不是二进制嗅探目标：
+        仍走 misc 兜底，且并行/轮换里 misc 常驻——魔数嗅探不得劫持杂项题。"""
+        import tempfile
+        from pathlib import Path
+
+        from spiritscout.modes.assembler import (
+            _candidate_directions,
+            _parallel_directions,
+            classify_challenge,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stego = Path(tmp) / "secret"
+            stego.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+            challenge = {"id": "c10", "title": "unknown",
+                         "attachments": [str(stego)]}
+
+            self.assertEqual(classify_challenge(challenge), "misc")
+            self.assertIn("misc", _parallel_directions(challenge))
+            self.assertIn("misc", _candidate_directions(challenge))
+
+    def test_extensionless_macho_sniffed_as_binary(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from spiritscout.modes.assembler import classify_challenge
+
+        with tempfile.TemporaryDirectory() as tmp:
+            macho = Path(tmp) / "crack"
+            macho.write_bytes(b"\xFE\xED\xFA\xCF" + b"\x00" * 64)
+
+            self.assertEqual(classify_challenge(
+                {"id": "c11", "title": "unknown",
+                 "attachments": [str(macho)]}), "pwn")
+
+    def test_url_link_in_description_does_not_hijack_forensics(self) -> None:
+        from spiritscout.modes.assembler import classify_challenge
+
+        challenge = {"id": "c5", "title": "流量分析",
+                     "url": "http://x/download",
+                     "attachments": ["/a/traffic.pcap"]}
+
+        self.assertEqual(classify_challenge(challenge), "misc")
+
+    def test_bare_url_without_other_signal_still_falls_back_to_web(self) -> None:
+        from spiritscout.modes.assembler import classify_challenge
+
+        self.assertEqual(classify_challenge(
+            {"id": "c6", "url": "http://x"}), "web")
+
+    def test_bare_url_mission_shell_classifies_web(self) -> None:
+        """裸 URL 任务合成的壳赛题（不捆绑 url 字段）仍判 web——链接活在题面原文。"""
+        from spiritscout.modes.assembler import classify_challenge
+
+        challenge = {"id": "mission-1", "title": "任务描述赛题",
+                     "description": "http://80-60acec72-53ee-4f86-a75e-dd90638bbe3f.challenge.ctfplus.cn/"}
+
+        self.assertEqual(classify_challenge(challenge), "web")
+
+    def test_web_source_zip_is_not_hijacked_by_attachment(self) -> None:
+        """www.zip 发 Web 源码：题面关键词先于弱方向附件。"""
+        from spiritscout.modes.assembler import classify_challenge
+
+        challenge = {"id": "c7", "title": "easy web",
+                     "description": "Web 源码审计题，附件是站点源码打包",
+                     "attachments": ["/a/www.zip"]}
+
+        self.assertEqual(classify_challenge(challenge), "web")
+
+    def test_misc_shell_with_text_url_rotates_to_web(self) -> None:
+        """题面原文带链接的杂项壳：轮换候选里必须有 Web 出口（不再只读 url 字段）。"""
+        from spiritscout.modes.assembler import _candidate_directions
+
+        challenge = {"id": "mission-1", "title": "神秘流量包",
+                     "description": "附件在 http://cdn.example.test/dl 线索页",
+                     "attachments": ["/a/traffic.pcap"]}
+
+        candidates = _candidate_directions(challenge)
+        self.assertEqual(candidates[0], "misc")
+        self.assertIn("web", candidates)
+
+    def test_misc_classified_with_text_url_opens_web_angle_round_zero(self) -> None:
+        """判为杂项但题面有链接：首轮就并行 Web 视角（壳赛题同样生效）。"""
+        from spiritscout.modes.assembler import _parallel_directions
+
+        challenge = {"id": "mission-2", "title": "任务附件赛题",
+                     "description": "题面线索 http://80-x.challenge.ctfplus.cn/",
+                     "attachments": ["/a/blob.zip"]}
+
+        self.assertEqual(_parallel_directions(challenge), ["web", "misc"])
 
 
 class SpawnGuardTests(unittest.IsolatedAsyncioTestCase):
@@ -885,6 +1066,51 @@ class FindingDedupKeyTests(unittest.TestCase):
         self.assertEqual(calls[0]["dedup_key"], expected)
         self.assertEqual(calls[0]["data"]["task_id"], "t1")
         self.assertEqual(calls[0]["data"]["parent_dag_node"], "dag-1")
+
+
+class SendFileToolTests(unittest.TestCase):
+    """send_file：仅放行 artifacts/ 内的真实文件，file.shared 审计留痕。"""
+
+    @staticmethod
+    def _agent(tmp: str) -> tuple[CTFBaseAgent, NullAuditLogger]:
+        audit = NullAuditLogger()
+        agent = object.__new__(CTFBaseAgent)
+        agent.agent_id = "ctf-web-test"
+        agent.ctx = SimpleNamespace(audit=audit, builtin_ctx={"workspace_root": tmp})
+        return agent, audit
+
+    @staticmethod
+    def _task() -> Task:
+        return Task(task_id="t1", task_type="ctf_solve", target="http://x",
+                    agent_type=AgentType.CTF_WEB,
+                    payload={"challenge": {"id": "e1-03"}})
+
+    def test_send_file_in_tool_catalog(self) -> None:
+        names = {schema["function"]["name"] for schema in CTFBaseAgent.tool_schemas}
+        self.assertIn("send_file", names)
+
+    def test_shares_artifact_and_rejects_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "artifacts").mkdir()
+            (Path(tmp) / "artifacts" / "exp.py").write_text("print(1)", encoding="utf-8")
+            (Path(tmp) / "meta.json").write_text("{}", encoding="utf-8")
+            agent, audit = self._agent(tmp)
+            route = SimpleNamespace(route_id="r1", name="solve")
+            out = agent._tool_send_file(self._task(), route, {"turn": 1},
+                                        {"path": "artifacts/exp.py", "note": "完整 exp"})
+            self.assertTrue(out.ok)
+            self.assertEqual(len(audit.records), 1)
+            record = audit.records[0]
+            self.assertEqual(record["type"], "file.shared")
+            self.assertEqual(record["actor"], "ctf-web-test")
+            self.assertEqual(record["detail"]["path"], "artifacts/exp.py")
+            self.assertEqual(record["detail"]["size"], len(b"print(1)"))
+            # 工作区其他文件、不存在文件、绝对路径、穿越路径都拒绝
+            for bad in ("meta.json", "artifacts/missing.txt", f"{tmp}/meta.json",
+                        "artifacts/../meta.json"):
+                with self.subTest(path=bad):
+                    self.assertFalse(agent._tool_send_file(
+                        self._task(), route, {}, {"path": bad}).ok)
 
 
 if __name__ == "__main__":

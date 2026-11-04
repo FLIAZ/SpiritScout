@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import sqlite3
 from typing import Any
 
@@ -75,37 +76,79 @@ def resolve_source(conn: sqlite3.Connection, ref: str) -> dict[str, Any]:
             'record_id': row['record_id'], 'version': version}
 
 
-def evidence_view(conn: sqlite3.Connection, data: dict[str, Any]) -> dict[str, Any]:
+def _dependency_issues(conn: sqlite3.Connection, sources: list[dict[str, Any]],
+                       cache: dict[tuple, list[dict[str, str]]]) -> list[dict[str, str]]:
+    """迭代遍历传递依赖；仅在本次读取内缓存，不改写历史版本或递归爆栈。"""
+    def identity(source: dict[str, Any]) -> tuple:
+        return source.get('layer'), source.get('record_id'), source.get('version')
+
+    roots = [s for s in sources if isinstance(s, dict) and s.get('kind') == 'blackboard']
+    stack = [(s, False) for s in roots]
+    active: set[tuple] = set()
+    children: dict[tuple, list[dict[str, Any]]] = {}
+    while stack:
+        source, exiting = stack.pop()
+        key = identity(source)
+        ref = f'{key[0]}:{key[1]}@{key[2]}'
+        if exiting:
+            issues = []
+            for child in children.get(key, []):
+                issues.extend(cache.get(identity(child), [{'ref': ref, 'reason': 'dependency_cycle'}]))
+            cache[key] = list({(i['ref'], i['reason']): i for i in issues}.values())[:8]
+            active.discard(key)
+            continue
+        if key in cache or key in active:
+            continue
+        row = conn.execute('SELECT data,version FROM bb_records WHERE layer=? AND record_id=?', key[:2]).fetchone()
+        if row is None or row['version'] != key[2]:
+            cache[key] = [{'ref': ref, 'reason': 'source_missing' if row is None else 'version_changed'}]
+            continue
+        parent = json.loads(row['data'])
+        if parent.get('assessment') in ('conflicting', 'expired') and parent.get('assessment_reason'):
+            cache[key] = [{'ref': ref, 'reason': 'source_' + parent['assessment']}]
+            continue
+        children[key] = [s for s in (parent.get('provenance') or {}).get('sources', [])
+                         if isinstance(s, dict) and s.get('kind') == 'blackboard']
+        active.add(key)
+        stack.append((source, True))
+        stack.extend((child, False) for child in children[key])
+    issues = [i for s in roots for i in cache.get(identity(s), [])]
+    return list({(i['ref'], i['reason']): i for i in issues}.values())[:8]
+
+
+def evidence_view(conn: sqlite3.Connection, data: dict[str, Any], *,
+                  dependency_cache: dict | None = None) -> dict[str, Any]:
+    dependency_cache = {} if dependency_cache is None else dependency_cache
     provenance = data.get('provenance')
     if not isinstance(provenance, dict):
         if isinstance(data.get('facts'), list) and isinstance(data.get('evidence'), list):
-            return {**data, **{key: [evidence_view(conn, item) if isinstance(item, dict) else item for item in data[key]]
+            return {**data, **{key: [evidence_view(conn, item, dependency_cache=dependency_cache) if isinstance(item, dict) else item for item in data[key]]
                               for key in ('facts', 'evidence')}}
         return data  # 旧记录不伪造来源；首次更新时由写入口补齐。
     out = copy.deepcopy(data)
     observed = False
-    stale = False
+    issues = _dependency_issues(conn, out['provenance'].get('sources', []), dependency_cache)
     for source in out['provenance'].get('sources', []):
         if source.get('kind') == 'execution':
             current = invocation_source(conn, source['invocation_id'])
             if current:
                 source['execution_status'] = current['execution_status']
                 observed |= current['execution_status'] == 'succeeded'
-        elif source.get('kind') == 'blackboard':
-            row = conn.execute('SELECT version FROM bb_records WHERE layer=? AND record_id=?',
-                               (source['layer'], source['record_id'])).fetchone()
-            stale |= row is None or row['version'] != source['version']
     assessment = out.get('assessment')
     assessment = assessment if isinstance(assessment, str) else None
     if assessment in {'conflicting', 'expired'} and out.get('assessment_reason'):
         state = assessment
-    elif stale:
+    elif issues:
         state = 'expired'
     elif out['provenance'].get('independent_verification'):
         state = 'independently_verified'
     else:
         state = ('observed' if provenance.get('origin') == 'tool' else 'supported') if observed else 'unverified'
     out['evidence_state'] = state
+    if issues:
+        out['dependency_issues'] = issues
+    else:
+        out.pop('dependency_issues', None)
     return out
 
 

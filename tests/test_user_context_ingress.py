@@ -72,7 +72,9 @@ class UserContextIngressTests(unittest.IsolatedAsyncioTestCase):
         restored = SessionManager(self.cfg, []).get(self.session.session_id)
         self.assertIsNotNone(restored)
         self.assertEqual(restored.status, "interrupted")
-        self.assertEqual(restored.user_inbox, [])
+        self.assertEqual(len(restored.user_inbox), count)
+        self.assertEqual({item["statement_id"] for item in restored.user_inbox},
+                         {item["statement_id"] for item in self.context()["statements"]})
         self.assertEqual(len(restored.dialogue_history), DIALOGUE_HISTORY_MAX)
         blackboard = Blackboard(restored.bb_path)
         try:

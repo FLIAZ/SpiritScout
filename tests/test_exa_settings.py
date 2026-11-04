@@ -170,7 +170,7 @@ class CompetitionSearchTests(unittest.IsolatedAsyncioTestCase):
                  patch('spiritscout.tools.web_search.search_service') as make_search:
                 infra = await _build_infra(cfg, [ModelEntry(model='local', provider='mock')], auth)
                 try:
-                    self.assertIsNone(infra.builtin_ctx['search'])
+                    self.assertIsNone(infra.builtin_ctx['_search'])
                     self.assertFalse(infra.mcp_tools)
                     connect.assert_not_called()
                     make_search.assert_not_called()

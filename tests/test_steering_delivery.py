@@ -40,7 +40,7 @@ class SteeringRoutingTests(unittest.TestCase):
         current = ring.steering_for('ctf_web', task_id='t1')
         self.assertEqual(current['feedback']['t1|r1']['status'], 'accepted')
         self.assertEqual(rec['feedback'], {})
-        ring.steer('ctf_web', '更新后的指令', task_id='t1')
+        ring.steer('ctf_web', '更新后的指令', task_id='t1', supersedes=[rec['id']])
         self.assertFalse(ring.steering_feedback('ctf_web', **args, status='completed'))
 
     def test_master_rejects_ambiguous_or_wrong_recipient(self) -> None:

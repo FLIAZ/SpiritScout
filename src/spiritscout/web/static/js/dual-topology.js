@@ -1,172 +1,204 @@
-/* 双图独立视口，共用记录详情；两图之间只高亮显式关联。 */
-const DualTopology = (() => {
-  let session=null, views={}, selected=null, filters={assets:'',exploration:''}, stateFilter='';
-  const width=248;
-  const types={goal:'目标',hypothesis:'假设',attempt:'尝试',finding:'事实',evidence:'依据',rule:'规则',milestone:'历史推进',
-    domain:'域名',ip:'主机',url:'网址',service:'服务',endpoint:'接口',app:'应用',asset:'资产'};
-  const states={open:'待探索',running:'探索中',blocked:'受阻',supported:'有支持',refuted:'已反驳',exhausted:'已走不通',closed:'已结束'};
-  const relations={evidence:'依据引用',derives:'派生',anchor:'关联资产',produces:'产出',progression:'推进顺序',
-    contains:'包含',resolves_to:'解析到',exposes:'暴露',redirects_to:'跳转到',related:'关联'};
-  const sideOf=id=>S.topoGraph?.assets.nodes.some(n=>n.id===id) ? 'assets' : 'exploration';
-  function apply(pane) {
-    const view=views[pane.dataset.graphPane];
-    const stage=pane.querySelector('.dual-stage');
-    if(view && stage) stage.style.transform=`translate(${view.x}px,${view.y}px) scale(${view.scale})`;
+/* 资产是独立资料图；会话画布只展示公开目标、意图与事实的探索关系。 */
+const SessionTopology = (() => {
+  const W=232;
+  const kinds={origin:['起点','flag'],goal:['目标','target'],intent:['意图','compass'],attempt:['尝试','flask'],fact:['事实','flask'],vulnerability:['漏洞候选','bug'],hint:['提示','bulb']};
+  const edgeMeta={tries:['验证方法','chain'],redirects:['转向','chain'],scope:['目标','spawn'],spawns:['派生','spawn'],stage:['展开','chain'],advance:['推进','chain'],derives:['意图链','chain'],produces:['产出','yield'],task_output:['任务产出','yield'],evidence:['依据','proof'],dependency:['目标依赖','chain'],hint:['提示','chain']};
+  const statuses={open:'待探索',pending:'待执行',created:'已创建',queued:'待执行',running:'执行中',active:'执行中',waiting:'等待中',blocked:'受阻',supported:'有支持',refuted:'已反驳',exhausted:'已走不通',closed:'已结束',done:'已完成',completed:'已完成',failed:'失败',cancelled:'已撤销',pruned:'已暂缓',stopped:'已停止',interrupted:'已中断',candidate:'候选',accepted:'已收录'};
+  const evidence={unverified:'待核实',observed:'已观察',supported:'有依据',independently_verified:'独立复测通过',conflicting:'有冲突',expired:'已过期'};
+  const assetTypes={domain:'域名',ip:'主机',url:'网址',service:'服务',endpoint:'接口',app:'应用',asset:'资产'};
+  const icons={flag:'<path d="M5 20V4m0 1c4-4 7 4 14 0v10c-7 4-10-4-14 0"/>',target:'<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1"/>',compass:'<circle cx="12" cy="12" r="8"/><path d="m15 9-2 4-4 2 2-4 4-2Z"/>',flask:'<path d="M9 3h6m-5 0v7l-5 8c-1 2 0 3 2 3h10c2 0 3-1 2-3l-5-8V3M8 15h8"/>',bug:'<path d="M9 5 7 3m8 2 2-2M4 9h4m8 0h4M4 15h4m8 0h4M12 8v12"/><rect x="8" y="6" width="8" height="14" rx="4"/>',bulb:'<path d="M9 18h6m-5 3h4M8 14a6 6 0 1 1 8 0l-1 2H9l-1-2Z"/>'};
+  const icon=name=>`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || icons.compass}</svg>`;
+  let session=null,model=null,viewport=null,layout=null,visible=null,observer=null;
+  const ui={query:'',state:'',collapsed:new Set(),manual:new Map(),assetQuery:'',assetPage:0};
+  function host() {return document.querySelector(S.tab==='assets' ? '#asset-library' : '#topo');}
+  function detailPanel() {return host()?.querySelector('.topo-detail');}
+  function detailMarkup(assets=false) {
+    return `<aside class="topo-detail rg-detail" id="${assets ? 'asset' : 'topo'}-detail" hidden aria-label="节点详情"><div class="td-head"><b class="td-title" id="${assets ? 'ad' : 'td'}-title"></b><button class="td-close" aria-label="关闭详情">×</button></div><div class="td-body"></div></aside>`;
   }
-  function fit(pane,readable=false) {
-    const stage=pane.querySelector('.dual-stage');
-    if(!stage) return;
-    const w=Number(stage.dataset.width),h=Number(stage.dataset.height);
-    const scale=Math.max(readable ? .75 : .04,Math.min((pane.clientWidth-32)/w,(pane.clientHeight-32)/h,1));
-    views[pane.dataset.graphPane]={x:(pane.clientWidth-w*scale)/2,y:Math.max(16,(pane.clientHeight-h*scale)/2),scale};
-    apply(pane);
+  function status(node) {
+    if(['fact','vulnerability'].includes(node.view_kind))return evidence[node.evidence_state] || statuses[node.status] || '待核实';
+    if(node.view_kind==='hint')return '参考线索';
+    return statuses[node.state || node.status] || '待探索';
   }
-  function zoom(pane,factor,x=pane.clientWidth/2,y=pane.clientHeight/2) {
-    const v=views[pane.dataset.graphPane];
-    if(!v) return;
-    const scale=Math.min(2.4,Math.max(.08,v.scale*factor));
-    v.x=x-(x-v.x)*scale/v.scale;v.y=y-(y-v.y)*scale/v.scale;v.scale=scale;apply(pane);
-  }
+  function relatedEdges() {return [...(model?.edges || []),...(model?.links || [])];}
   function focus(id) {
-    selected=id;
-    const related=new Set(id ? [id] : []);
-    const record=S.topoProcess?.get(id);
-    const matches=e=>e.source===id || e.target===id || record?.relation && e.references?.some(r=>r.record_id===record.record_id);
-    for(const e of S.topoGraph?.edges || []) if(matches(e)) {
-      related.add(e.source);related.add(e.target);
-    }
-    document.querySelectorAll('#topo [data-node]').forEach(el=>{
+    const canvas=document.querySelector('#topo');if(!canvas || !model)return;
+    const path=new Set(id ? [id] : []),queue=id ? [id] : [];
+    for(let i=0;i<queue.length;i++)for(const edge of model.edges)if(edge.target===queue[i] && !path.has(edge.source)){path.add(edge.source);queue.push(edge.source);}
+    for(const edge of relatedEdges())if(edge.source===id || edge.target===id){path.add(edge.source);path.add(edge.target);}
+    canvas.querySelectorAll('[data-node]').forEach(el=>{
       el.classList.toggle('is-selected',el.dataset.node===id);
-      el.classList.toggle('is-muted',!!id && !related.has(el.dataset.node));
-      el.classList.toggle('is-linked',!!id && el.dataset.node!==id && related.has(el.dataset.node));
+      el.classList.toggle('is-muted',!!id && !path.has(el.dataset.node));
     });
-    document.querySelectorAll('#topo .fact-edge').forEach(el=>{
-      el.classList.toggle('is-highlighted',el.dataset.source===id || el.dataset.target===id
-        || !!record?.relation && related.has(el.dataset.source) && related.has(el.dataset.target));
-    });
-    const text=document.querySelector('#topo [data-dual-selection]');
-    if(text) text.textContent=id ? `已选：${S.topoProcess.get(id)?.title || id} · ${related.size-1} 条关联记录` : '选择节点，联动查看两图中的关联记录';
+    canvas.querySelectorAll('.rg-edge').forEach(el=>el.classList.toggle('is-highlighted',!!id && path.has(el.dataset.source) && path.has(el.dataset.target)));
+    document.querySelectorAll('#asset-library [data-topo-record]').forEach(el=>el.classList.toggle('is-selected',el.dataset.topoRecord===id));
   }
-  function bind(pane) {
-    let drag=null,down=null;
-    pane.addEventListener('wheel',e=>{
-      e.preventDefault();const rect=pane.getBoundingClientRect();
-      zoom(pane,Math.exp(-e.deltaY*.0015),e.clientX-rect.left,e.clientY-rect.top);
-    },{passive:false});
-    pane.addEventListener('pointerdown',e=>{
-      if(e.button!==0 || e.target.closest('button') || !views[pane.dataset.graphPane]) return;
-      down={x:e.clientX,y:e.clientY,node:e.target.closest('[data-node]')?.dataset.node};
-      drag={...views[pane.dataset.graphPane]};pane.setPointerCapture(e.pointerId);pane.classList.add('grabbing');
-    });
-    pane.addEventListener('pointermove',e=>{
-      if(!drag) return;
-      views[pane.dataset.graphPane]={...drag,x:drag.x+e.clientX-down.x,y:drag.y+e.clientY-down.y};apply(pane);
-    });
-    pane.addEventListener('pointerup',e=>{
-      if(down?.node && Math.hypot(e.clientX-down.x,e.clientY-down.y)<6) showNodeDetail(down.node);
-      down=null;drag=null;pane.classList.remove('grabbing');
-    });
-    pane.addEventListener('pointercancel',()=>{down=null;drag=null;pane.classList.remove('grabbing');});
-    pane.addEventListener('dblclick',e=>{if(!e.target.closest('[data-node],button')) fit(pane);});
-    pane.querySelectorAll('[data-node]').forEach(el=>el.onkeydown=e=>{
-      if(e.key==='Enter' || e.key===' ') {e.preventDefault();showNodeDetail(el.dataset.node);}
-    });
-    pane.querySelectorAll('[data-zoom]').forEach(button=>button.onclick=()=>{
-      if(button.dataset.zoom==='fit') fit(pane);else zoom(pane,Number(button.dataset.zoom));
-    });
+  function apply() {
+    const stage=document.querySelector('#topo .rg-stage');
+    if(stage && viewport)stage.style.transform=`translate(${viewport.x}px,${viewport.y}px) scale(${viewport.scale})`;
+    miniViewport();
   }
-  function paint(pane,graph) {
-    const side=pane.dataset.graphPane,query=filters[side].toLocaleLowerCase();
-    const nodes=graph.nodes.filter(n=>(!query || `${n.title} ${n.record_id || ''}`.toLocaleLowerCase().includes(query))
-      && (side!=='exploration' || !stateFilter || n.state===stateFilter));
-    const ids=nodes.map(n=>n.id),known=new Set(ids);
-    const edges=graph.edges.filter(e=>known.has(e.source) && known.has(e.target));
-    const tools=`<div class="dual-tools"><button data-zoom="1.25" aria-label="放大">＋</button><button data-zoom="0.8" aria-label="缩小">－</button><button data-zoom="fit" aria-label="适应画布">⤢</button></div>`;
-    pane.innerHTML=tools+(nodes.length ? `<div class="dual-stage">${nodes.map(n=>{
-      const links=S.topoGraph.links.filter(e=>e.source===n.id || e.target===n.id).length;
-      const type=side==='assets' ? n.node_type || 'asset' : n.node_type || n.kind;
-      const evidence={unverified:'依据待核实',observed:'已观察',supported:'有依据记录',independently_verified:'独立复测通过',conflicting:'存在冲突',expired:'已过期'}[n.evidence_state];
-      return `<div class="tnode dual-node" data-node="${esc(n.id)}" data-kind="${esc(type)}" data-state="${esc(n.state || '')}" role="button" tabindex="0">
-        <div class="dual-node-meta"><span>${esc(types[type] || type)}</span><span>${esc(states[n.state] || (n.kind==='milestone' ? 'Agent 说明' : evidence || ''))}</span></div>
-        <b title="${esc(n.title)}">${esc(n.title)}</b>
-        <small>${esc(n.reason || n.actor || '未记录来源')}</small>
-        ${links ? `<span class="dual-anchor">${links} 条跨图关联 ↔</span>` : ''}</div>`;
-    }).join('')}<svg class="edges"></svg></div>` : `<div class="dual-empty">${query || stateFilter ? '没有匹配的节点，清除筛选可查看全部。' : side==='assets' ? '尚未登记资产。Agent 发现的资产会在这里展开。' : '尚未记录探索链路。目标、假设、尝试及产出会在这里展开。'}</div>`);
-    if(nodes.length) {
-      const stage=pane.querySelector('.dual-stage');
-      const elements=new Map([...pane.querySelectorAll('[data-node]')].map(el=>[el.dataset.node,el]));
-      const heights=new Map(ids.map(id=>[id,elements.get(id).offsetHeight]));
-      const preds=new Map(ids.map(id=>[id,edges.filter(e=>e.target===id).map(e=>e.source)]));
-      const layout=TopologyLayout.board(ids,preds,heights,width,pane.clientWidth);
-      for(const id of ids) elements.get(id).style.transform=`translate(${layout.x.get(id)}px,${layout.y.get(id)}px)`;
-      stage.dataset.width=layout.width;stage.dataset.height=layout.height;
-      stage.style.width=`${layout.width}px`;stage.style.height=`${layout.height}px`;
-      const svg=stage.querySelector('svg');
-      svg.setAttribute('width',layout.width);svg.setAttribute('height',layout.height);
-      svg.innerHTML=`<defs><marker id="dual-arrow-${side}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" class="dual-arrow"/></marker></defs>`+edges.map(e=>{
-        const down=layout.y.get(e.target)>layout.y.get(e.source),up=layout.y.get(e.target)<layout.y.get(e.source);
-        let path;
-        if(down || up) {
-          const x1=layout.x.get(e.source)+width/2,x2=layout.x.get(e.target)+width/2;
-          const y1=layout.y.get(e.source)+(down ? heights.get(e.source) : 0),y2=layout.y.get(e.target)+(down ? 0 : heights.get(e.target));
-          const bend=Math.max(24,Math.abs(y2-y1)*.4)*(down ? 1 : -1);
-          path=`M${x1},${y1} C${x1},${y1+bend} ${x2},${y2-bend} ${x2},${y2}`;
-          const obstacles=nodes.filter(n=>n.id!==e.source && n.id!==e.target
-            && layout.y.get(n.id)<Math.max(y1,y2) && layout.y.get(n.id)+heights.get(n.id)>Math.min(y1,y2)
-            && Math.abs(layout.x.get(n.id)+width/2-x1)<width/2+12);
-          if(obstacles.length) {
-            const gutter=Math.max(...obstacles.map(n=>layout.x.get(n.id)+width))+18,step=down ? 18 : -18;
-            path=`M${x1},${y1} C${x1},${y1+step} ${gutter},${y1+step} ${gutter},${y1+step*2} L${gutter},${y2-step*2} C${gutter},${y2-step} ${x2},${y2-step} ${x2},${y2}`;
-          }
-        } else {
-          const forward=layout.x.get(e.target)>layout.x.get(e.source),right=forward ? width : 0;
-          const x1=layout.x.get(e.source)+right,x2=layout.x.get(e.target)+width-right;
-          const y1=layout.y.get(e.source)+heights.get(e.source)/2,y2=layout.y.get(e.target)+heights.get(e.target)/2;
-          path=`M${x1},${y1} L${x2},${y2}`;
-        }
-        return `<path class="fact-edge ${e.kind==='progression' ? 'dual-sequence' : ''}" marker-end="url(#dual-arrow-${side})" data-source="${esc(e.source)}" data-target="${esc(e.target)}" d="${path}"><title>${esc(relations[e.kind] || '显式关联')}${e.kind==='progression' ? '（不代表证据因果）' : ''}</title></path>`;
-      }).join('');
-      if(!views[side]) fit(pane,true);else apply(pane);
+  function bounds() {
+    if(!layout || !visible?.nodes.length)return {left:0,top:0,width:320,height:240};
+    const left=Math.min(0,...layout.x.values())-12,top=Math.min(0,...layout.y.values())-12;
+    return {left,top,width:Math.max(layout.width,...visible.nodes.map(n=>layout.x.get(n.id)+W+24))-left,
+      height:Math.max(layout.height,...visible.nodes.map(n=>layout.y.get(n.id)+layout.heights.get(n.id)+24))-top};
+  }
+  function fit(readable=false) {
+    const canvas=document.querySelector('#topo .rg-canvas');if(!canvas?.clientWidth || !layout)return;
+    const top=106,bottom=48;
+    const area=bounds();
+    let scale=Math.min((canvas.clientWidth-64)/area.width,(canvas.clientHeight-top-bottom)/area.height,1);
+    scale=Math.max(readable ? .68 : .04,scale);
+    viewport={scale,x:(canvas.clientWidth-area.width*scale)/2-area.left*scale,y:top-area.top*scale};
+    if(readable && (area.width*scale>canvas.clientWidth-64 || area.height*scale>canvas.clientHeight-top-bottom)) {
+      viewport.x=24-(layout.x.get('__process_origin') || 0)*scale;
+      viewport.y=(canvas.clientHeight+top-bottom)/2-((layout.y.get('__process_origin') || 0)+(layout.heights.get('__process_origin') || 116)/2)*scale;
     }
-    bind(pane);focus(selected);
-    const count=document.querySelector(`[data-dual-count="${side}"]`);
-    if(count) count.textContent=`${nodes.length} / ${graph.nodes.length}`;
+    apply();
   }
-  function render(state,milestones=[]) {
-    if(session!==S.cur) {session=S.cur;views={};selected=null;filters={assets:'',exploration:''};stateFilter='';}
-    const box=document.querySelector('#topo'),old=box.querySelector('#topo-detail');
-    const active=document.activeElement,searchSide=active?.dataset.dualSearch;
-    const ruleSearch=active?.hasAttribute('data-topo-search');
-    const caret=searchSide || ruleSearch ? active.selectionStart : null;
-    const activityOpen=!!box.querySelector('.dual-activity[open]');
-    const detail=old && !old.hidden ? old._curId : null,scroll=old?.scrollTop || 0;
-    const original=!!old?.querySelector('.topo-original[open]');
-    const graph=TopologyLayout.dual(state.topology?.process || {},milestones);
-    S.topoGraph=graph;S.topoProcess=new Map(graph.records.map(n=>[n.id,n]));
-    box.classList.add('dual-topology');
-    box.innerHTML=`<div class="dual-header"><div><b>资产与探索</b><span data-dual-selection></span></div><span>${graph.links.length} 条跨图关联</span></div>
-      <div class="dual-grid">${['assets','exploration'].map(side=>`<section class="dual-panel"><header><div><b>${side==='assets' ? '资产图' : '探索链路'}</b><span data-dual-count="${side}"></span></div>
-        <p>${side==='assets' ? '目标、入口与资产关系' : '目标 → 假设 → 尝试 → 有依据的产出'}</p>
-        <div class="dual-filter"><input data-dual-search="${side}" type="search" aria-label="筛选${side==='assets' ? '资产' : '探索节点'}" placeholder="搜索${side==='assets' ? '地址、资产名称' : '探索节点、记录 ID'}" value="${esc(filters[side])}">
-        ${side==='exploration' ? `<select data-dual-state aria-label="筛选探索状态"><option value="">全部状态</option>${Object.entries(states).map(([key,label])=>`<option value="${key}" ${stateFilter===key ? 'selected' : ''}>${label}</option>`).join('')}</select>` : ''}</div></header>
-        <div class="dual-canvas" data-graph-pane="${side}"></div></section>`).join('')}</div>
-      <details class="dual-activity"><summary>当前推进与执行状态${state.topology?.process?.has_more ? ' · 画布记录已截断，更早记录见黑板目录' : ''}</summary><section id="topo-live" class="topo-live"></section></details>
-      <div class="topo-detail" id="topo-detail" hidden><div class="td-head"><b id="td-title"></b><button class="td-close" id="td-close" aria-label="关闭详情">×</button></div><div class="td-body" id="td-body"></div></div>`;
-    for(const side of ['assets','exploration']) paint(box.querySelector(`[data-graph-pane="${side}"]`),graph[side]);
-    box.querySelectorAll('[data-dual-search]').forEach(input=>input.oninput=()=>{
-      const side=input.dataset.dualSearch;filters[side]=input.value;views[side]=null;
-      paint(box.querySelector(`[data-graph-pane="${side}"]`),graph[side]);
-    });
-    box.querySelector('[data-dual-state]').onchange=e=>{
-      stateFilter=e.target.value;views.exploration=null;paint(box.querySelector('[data-graph-pane="exploration"]'),graph.exploration);
+  function zoom(factor,x,y) {
+    const canvas=document.querySelector('#topo .rg-canvas');if(!viewport || !canvas)return;
+    x ??= canvas.clientWidth/2;y ??= canvas.clientHeight/2;
+    const scale=Math.max(.04,Math.min(2.6,viewport.scale*factor));
+    viewport.x=x-(x-viewport.x)*scale/viewport.scale;viewport.y=y-(y-viewport.y)*scale/viewport.scale;viewport.scale=scale;apply();
+  }
+  function drawEdges() {
+    const svg=document.querySelector('#topo .rg-edges');if(!svg || !layout || !visible)return;
+    const byId=new Map(visible.nodes.map(n=>[n.id,n]));
+    svg.innerHTML=`<defs>${['spawn','chain','yield','proof'].map(type=>`<marker id="rg-arrow-${type}" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" viewBox="0 0 8 8"><path d="M0 0L8 4L0 8Z" class="rg-arrow ${type}"/></marker>`).join('')}</defs>`+visible.edges.map(edge=>{
+      const meta=edgeMeta[edge.kind] || ['关联','chain'];
+      const x1=layout.x.get(edge.source)+W,x2=layout.x.get(edge.target),y1=layout.y.get(edge.source)+layout.heights.get(edge.source)/2,y2=layout.y.get(edge.target)+layout.heights.get(edge.target)/2;
+      const back=x2<x1,bend=Math.max(36,Math.abs(x2-x1)*.48);
+      const transition=edge.kind==='redirects' && layout.x.get(edge.source)===layout.x.get(edge.target);
+      const path=transition ? `M${x1},${y1} C${x1+64},${y1} ${x1+64},${y2} ${x1},${y2}` : back ? `M${x1},${y1} C${x1+72},${y1-100} ${x2-72},${y2-100} ${x2},${y2}` : `M${x1},${y1} C${x1+bend},${y1} ${x2-bend},${y2} ${x2},${y2}`;
+      return `<g class="rg-edge ${meta[1]} ${back || ['task_output','advance'].includes(edge.kind) ? 'is-context' : ''}" data-source="${esc(edge.source)}" data-target="${esc(edge.target)}"><path d="${path}" marker-end="url(#rg-arrow-${meta[1]})"/><text x="${transition ? x1+42 : (x1+x2)/2}" y="${(y1+y2)/2-7}" text-anchor="middle">${meta[0]}</text><title>${esc(edge.detail || `${byId.get(edge.source)?.title} → ${byId.get(edge.target)?.title}`)}</title></g>`;
+    }).join('');
+  }
+  function miniViewport() {
+    const rect=document.querySelector('#topo .rg-mini-window'),canvas=document.querySelector('#topo .rg-canvas');
+    if(!rect || !viewport || !canvas || !layout)return;
+    rect.setAttribute('x',-viewport.x/viewport.scale);rect.setAttribute('y',-viewport.y/viewport.scale);
+    rect.setAttribute('width',canvas.clientWidth/viewport.scale);rect.setAttribute('height',canvas.clientHeight/viewport.scale);
+    const percent=document.querySelector('#topo [data-rg-scale]');if(percent)percent.textContent=`${Math.round(viewport.scale*100)}%`;
+  }
+  function minimap() {
+    const mini=document.querySelector('#topo .rg-minimap');if(!mini || !layout || !visible)return;
+    const area=bounds();
+    mini.innerHTML=`<span>图形导航</span><svg viewBox="${area.left} ${area.top} ${area.width} ${area.height}" preserveAspectRatio="none">${visible.nodes.map(n=>`<rect x="${layout.x.get(n.id)}" y="${layout.y.get(n.id)}" width="${W}" height="${layout.heights.get(n.id)}" class="${n.view_kind}" rx="12"/>`).join('')}<rect class="rg-mini-window" fill="none" stroke-width="8"/></svg>`;
+    miniViewport();
+    mini.onclick=event=>{
+      if(!event.detail){fit();return;}
+      const bounds=mini.querySelector('svg').getBoundingClientRect(),canvas=document.querySelector('#topo .rg-canvas');
+      viewport.x=canvas.clientWidth/2-(area.left+(event.clientX-bounds.left)/bounds.width*area.width)*viewport.scale;
+      viewport.y=canvas.clientHeight/2-(area.top+(event.clientY-bounds.top)/bounds.height*area.height)*viewport.scale;apply();
     };
-    box.querySelector('.dual-activity').open=activityOpen;
-    if(detail && S.topoProcess.has(detail)) {
-      showNodeDetail(detail);const restored=box.querySelector('#topo-detail');restored.scrollTop=scroll;
-      if(original && restored.querySelector('.topo-original')) restored.querySelector('.topo-original').open=true;
-    } else focus(null);
-    const restored=searchSide ? box.querySelector(`[data-dual-search="${searchSide}"]`) : ruleSearch ? box.querySelector('[data-topo-search]') : null;
-    if(restored) {restored.focus();if(caret!==null) restored.setSelectionRange(caret,caret);}
   }
-  return {render,focus,sideOf};
+  function bind(canvas) {
+    let drag=null;
+    canvas.onwheel=event=>{if(event.target.closest('.rg-legend,.rg-tools,.rg-minimap'))return;event.preventDefault();const r=canvas.getBoundingClientRect();zoom(Math.exp(-event.deltaY*.0014),event.clientX-r.left,event.clientY-r.top);};
+    canvas.onpointerdown=event=>{
+      if(event.button!==0 || event.target.closest('button,input,select,.rg-legend') || !viewport)return;
+      const node=event.target.closest('[data-node]');
+      drag={x:event.clientX,y:event.clientY,node:node?.dataset.node,view:{...viewport},nx:node ? layout.x.get(node.dataset.node) : 0,ny:node ? layout.y.get(node.dataset.node) : 0};
+      canvas.setPointerCapture(event.pointerId);canvas.classList.add('is-dragging');
+    };
+    canvas.onpointermove=event=>{
+      if(!drag)return;const dx=event.clientX-drag.x,dy=event.clientY-drag.y;
+      if(drag.node) {
+        const x=drag.nx+dx/viewport.scale,y=drag.ny+dy/viewport.scale;
+        layout.x.set(drag.node,x);layout.y.set(drag.node,y);ui.manual.set(drag.node,{x,y});
+        for(const el of canvas.querySelectorAll('[data-node]'))if(el.dataset.node===drag.node)el.style.transform=`translate(${x}px,${y}px)`;
+        drawEdges();
+      } else {viewport.x=drag.view.x+dx;viewport.y=drag.view.y+dy;apply();}
+    };
+    canvas.onpointerup=event=>{
+      if(drag?.node && Math.hypot(event.clientX-drag.x,event.clientY-drag.y)<6) {ui.manual.delete(drag.node);showNodeDetail(drag.node);}
+      if(drag?.node)minimap();drag=null;canvas.classList.remove('is-dragging');
+    };
+    canvas.onpointercancel=()=>{drag=null;canvas.classList.remove('is-dragging');};
+    canvas.onkeydown=event=>{
+      if(event.target!==canvas)return;
+      if(event.key==='Home'){event.preventDefault();fit();}
+      if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key) && viewport){event.preventDefault();viewport.x+=event.key==='ArrowLeft' ? 60 : event.key==='ArrowRight' ? -60 : 0;viewport.y+=event.key==='ArrowUp' ? 60 : event.key==='ArrowDown' ? -60 : 0;apply();}
+    };
+    canvas.querySelectorAll('[data-node]').forEach(el=>el.onkeydown=event=>{if(event.target===el && ['Enter',' '].includes(event.key)){event.preventDefault();showNodeDetail(el.dataset.node);}});
+    canvas.querySelectorAll('[data-collapse]').forEach(button=>button.onclick=()=>{const id=button.dataset.collapse;ui.collapsed.has(id) ? ui.collapsed.delete(id) : ui.collapsed.add(id);paint();});
+  }
+  function paint() {
+    const canvas=document.querySelector('#topo .rg-canvas');if(!canvas?.clientWidth || !model)return;
+    visible=TopologyLayout.reasoningVisible(model,ui.collapsed,ui.query,ui.state);
+    const oldOrigin=layout?.x.has('__process_origin') ? {x:layout.x.get('__process_origin'),y:layout.y.get('__process_origin')} : null;
+    canvas.innerHTML=`<div class="rg-legend"><div>${Object.entries(kinds).map(([key,[label,glyph]])=>`<span><i class="rg-icon ${key}">${icon(glyph)}</i>${label}</span>`).join('')}</div><div class="rg-edge-legend">${[['spawn','派生'],['chain','意图链'],['yield','产出'],['proof','依据']].map(([key,label])=>`<span><i class="${key}"></i>${label}</span>`).join('')}</div></div>
+      ${visible.nodes.length ? `<div class="rg-stage">${visible.nodes.map(node=>{
+        const [baseLabel,glyph]=kinds[node.view_kind] || kinds.intent,label=baseLabel,children=model.edges.filter(e=>e.source===node.id).length;
+        const assets=model.links.filter(e=>e.target===node.id || e.source===node.id).length;
+        const state=node.state || node.status || node.evidence_state || '';
+        return `<article class="rg-node ${node.view_kind}" data-node="${esc(node.id)}" data-state="${esc(state)}" role="button" tabindex="0" aria-label="${esc(label+'：'+node.title)}"><header><span><i class="rg-icon ${node.view_kind}">${icon(glyph)}</i><b>${label}</b></span>${node.node_type==='hypothesis' ? '<em>假设</em>' : ''}${children ? `<button class="rg-collapse" data-collapse="${esc(node.id)}" aria-label="${ui.collapsed.has(node.id) ? '展开' : '收起'}${esc(node.title)}的分支" aria-expanded="${!ui.collapsed.has(node.id)}">${ui.collapsed.has(node.id) ? '+' : '−'}</button>` : ''}</header><p title="${esc(node.title)}">${esc(node.title)}</p><footer><span class="rg-status" data-status="${esc(state)}"><i></i>${esc(status(node))}</span><small>${node.view_kind==='attempt' ? `${node.progress?.length || 0} 条执行记录` : assets ? `${assets} 条资产关联` : node.record_id ? '#'+esc(node.record_id.slice(-6)) : node.view_kind==='origin' ? '会话入口' : '任务记录'}</small></footer></article>`;
+      }).join('')}<svg class="rg-edges" aria-label="探索关系"></svg></div>` : '<div class="rg-empty">没有匹配的节点，可清除筛选查看完整探索链路。</div>'}
+      <div class="rg-tools"><button data-rg-zoom="1.2" aria-label="放大">＋</button><button data-rg-zoom="0.833333" aria-label="缩小">−</button><button data-rg-fit aria-label="适应画布">⤢</button><button data-rg-reset aria-label="重新布局">↻</button><span data-rg-scale></span></div>
+      ${visible.nodes.length>1 ? '<button class="rg-minimap" aria-label="图形导航，点击移动视野"></button>' : ''}`;
+    const elements=new Map([...canvas.querySelectorAll('[data-node]')].map(el=>[el.dataset.node,el]));
+    const heights=new Map(visible.nodes.map(n=>[n.id,elements.get(n.id).offsetHeight]));
+    layout={...TopologyLayout.reasoningLayout(visible.nodes,visible.edges,heights,W),heights};
+    for(const [id,position] of ui.manual)if(layout.x.has(id)){layout.x.set(id,position.x);layout.y.set(id,position.y);}
+    for(const [id,el] of elements)el.style.transform=`translate(${layout.x.get(id)}px,${layout.y.get(id)}px)`;
+    const stage=canvas.querySelector('.rg-stage');
+    if(stage){stage.style.width=`${layout.width}px`;stage.style.height=`${layout.height}px`;}
+    const svg=canvas.querySelector('.rg-edges');if(svg){svg.setAttribute('width',layout.width);svg.setAttribute('height',layout.height);}
+    drawEdges();
+    if(viewport && oldOrigin && layout.x.has('__process_origin')) {viewport.x+=(oldOrigin.x-layout.x.get('__process_origin'))*viewport.scale;viewport.y+=(oldOrigin.y-layout.y.get('__process_origin'))*viewport.scale;}
+    minimap();if(!viewport)fit(true);else apply();bind(canvas);
+    canvas.querySelectorAll('[data-rg-zoom]').forEach(button=>button.onclick=()=>zoom(Number(button.dataset.rgZoom)));
+    canvas.querySelector('[data-rg-fit]').onclick=()=>fit();
+    canvas.querySelector('[data-rg-reset]').onclick=()=>{ui.manual.clear();viewport=null;paint();};
+    focus(detailPanel()?._curId || null);
+  }
+  function openAssets(id) {
+    document.querySelector('[data-tab="assets"]')?.click();
+    if(id && S.topoProcess?.has(id))showNodeDetail(id);
+  }
+  function wireRecords(panel) {
+    panel.querySelectorAll('[data-topo-record]').forEach(button=>button.onclick=()=>showNodeDetail(button.dataset.topoRecord));
+  }
+  function assetRows() {
+    const panel=document.querySelector('#asset-library'),list=panel?.querySelector('.rg-asset-results');if(!list)return;
+    const needle=ui.assetQuery.toLocaleLowerCase(),assets=model.assets.nodes.filter(n=>`${n.title} ${n.node_type || ''}`.toLocaleLowerCase().includes(needle));
+    ui.assetPage=Math.min(ui.assetPage,Math.max(0,Math.ceil(assets.length/40)-1));
+    const rows=assets.slice(ui.assetPage*40,ui.assetPage*40+40);
+    list.innerHTML=rows.length ? `<div class="rg-asset-table"><table><thead><tr><th>类型</th><th>资产</th><th>来源状态</th><th>关联</th></tr></thead><tbody>${rows.map(n=>`<tr><td><span class="rg-asset-type">${esc(assetTypes[n.node_type] || '资产')}</span></td><td><button data-topo-record="${esc(n.id)}">${esc(n.title)}</button></td><td>${esc(evidence[n.evidence_state] || '待核实')}</td><td>${model.assets.edges.filter(e=>e.source===n.id || e.target===n.id).length} 条资产关系 · ${model.links.filter(e=>e.source===n.id || e.target===n.id).length} 条探索关联</td></tr>`).join('')}</tbody></table></div>` : '<div class="rg-asset-empty">尚无匹配的资产记录。资产发现和关系登记后会显示在这里。</div>';
+    list.innerHTML+=`<div class="rg-asset-pagination"><span>${assets.length} 条资产${model.has_more ? ' · 当前为有界目录' : ''}</span><button data-asset-page="-1" ${!ui.assetPage ? 'disabled' : ''}>上一页</button><span>${ui.assetPage+1} / ${Math.max(1,Math.ceil(assets.length/40))}</span><button data-asset-page="1" ${(ui.assetPage+1)*40>=assets.length ? 'disabled' : ''}>下一页</button></div>`;
+    wireRecords(list);list.querySelectorAll('[data-asset-page]').forEach(button=>button.onclick=()=>{ui.assetPage+=Number(button.dataset.assetPage);assetRows();});
+  }
+  function render(state,progress=[],assets=false) {
+    if(session!==S.cur){session=S.cur;viewport=null;layout=null;ui.query='';ui.state='';ui.collapsed.clear();ui.manual.clear();ui.assetQuery='';ui.assetPage=0;}
+    model=TopologyLayout.reasoning(state,progress);S.topoGraph=model;S.topoProcess=new Map(model.records.map(n=>[n.id,n]));
+    const panel=document.querySelector(assets ? '#asset-library' : '#topo');if(!panel)return;
+    const previous=panel.querySelector('.topo-detail'),detailId=previous && !previous.hidden ? previous._curId : null,scroll=previous?.scrollTop || 0;
+    const original=!!previous?.querySelector('.topo-original[open]'),activityOpen=!!panel.querySelector('.rg-activity[open]');
+    const signature=JSON.stringify([S.cur,model.nodes.map(n=>[n.id,n.title,n.description,n.state,n.status,n.reason,n.evidence_state,n.progress?.slice(-20)]),model.edges,model.assets,model.links,model.references,model.has_more,model.missing_intents,assets]);
+    if(panel.dataset.graphSignature===signature && panel.children.length)return;
+    const active=document.activeElement,search=panel.contains(active) && active.matches('input[type="search"]'),caret=search ? active.selectionStart : null;
+    panel.dataset.graphSignature=signature;
+    if(assets) {
+      panel.className='asset-library';panel.innerHTML=`<header class="rg-asset-head"><div><h3>资产</h3><p>资产与关系独立保存，探索节点通过引用关联到这里。</p></div><label>查找资产<input type="search" data-asset-search placeholder="搜索域名、网址或资产类型" value="${esc(ui.assetQuery)}"></label></header><div class="rg-asset-results"></div>${detailMarkup(true)}`;
+      assetRows();panel.querySelector('[data-asset-search]').oninput=event=>{ui.assetQuery=event.target.value;ui.assetPage=0;assetRows();};
+    } else {
+      const attempts=model.nodes.filter(n=>n.view_kind==='attempt').length;
+      panel.className='card topo reasoning-topology';panel.innerHTML=`<header class="rg-header"><div><b>探索链路</b><span>${model.nodes.filter(n=>n.view_kind==='goal').length} 个目标 · ${model.nodes.filter(n=>n.view_kind==='intent').length} 个意图 · ${attempts} 次尝试 · ${model.nodes.filter(n=>['fact','vulnerability'].includes(n.view_kind)).length} 条事实</span></div><div class="rg-header-actions"><input data-rg-search type="search" aria-label="搜索探索节点" placeholder="搜索探索节点" value="${esc(ui.query)}"><select data-rg-state aria-label="筛选探索状态"><option value="">全部状态</option>${['open','running','blocked','done','refuted','exhausted'].map(key=>`<option value="${key}" ${ui.state===key ? 'selected' : ''}>${statuses[key]}</option>`).join('')}</select><button data-rg-references>资料与规则 ${model.references.length}</button><button data-rg-assets>资产 ${model.assets.nodes.length} ↗</button></div></header>${model.missing_intents ? '<p class="rg-coverage" role="status">本会话未记录意图层级，当前展示目标与事实；公开进展和执行记录仍可展开查看。</p>' : ''}<div class="rg-canvas" tabindex="0" aria-label="探索链路画布，方向键平移，Home适应画布"></div><details class="rg-activity"><summary>执行记录与公开进展${model.has_more ? ' · 部分历史记录未载入' : ''}</summary><section id="topo-live" class="topo-live"></section></details>${detailMarkup()}`;
+      panel.querySelector('[data-rg-search]').oninput=event=>{ui.query=event.target.value;paint();};
+      panel.querySelector('[data-rg-state]').onchange=event=>{ui.state=event.target.value;paint();};
+      panel.querySelector('[data-rg-references]').onclick=()=>showNodeDetail('__process_references');
+      panel.querySelector('[data-rg-assets]').onclick=()=>openAssets();
+      panel.querySelector('.rg-activity').open=activityOpen;
+      paint();observer?.disconnect();if(typeof ResizeObserver!=='undefined'){observer=new ResizeObserver(()=>{if(S.tab==='topo' && panel.clientWidth){paint();}});observer.observe(panel.querySelector('.rg-canvas'));}
+    }
+    if(detailId && S.topoProcess.has(detailId)){showNodeDetail(detailId);const restored=detailPanel();restored.scrollTop=scroll;if(original && restored.querySelector('.topo-original'))restored.querySelector('.topo-original').open=true;}
+    if(search){const input=panel.querySelector('input[type="search"]');input?.focus();if(input && caret!==null)input.setSelectionRange(caret,caret);}
+  }
+  function projectionDetail(record) {
+    const related=model.edges.filter(e=>e.source===record.id || e.target===record.id);
+    return `<div class="td-agent">${esc(record.actor || (record.view_kind==='origin' ? '会话任务' : '已保存的任务规划'))}</div><p class="td-note topo-fact-text">${esc(record.title)}</p>${record.reason ? `<p class="td-note">${esc(record.reason)}</p>` : ''}${record.description ? `<p class="td-note">${esc(record.description)}</p>` : ''}<div class="topo-related"><b>探索关系</b>${related.map(e=>`<button data-topo-record="${esc(e.source===record.id ? e.target : e.source)}">${esc((edgeMeta[e.kind] || ['关联'])[0])} · ${esc(S.topoProcess.get(e.source===record.id ? e.target : e.source)?.title || '')}</button>`).join('') || '<p class="td-note">尚无明确关联记录。</p>'}</div>${record.progress?.length ? `<details class="topo-original"><summary>尝试内的公开说明与执行 · ${record.progress.length} 条</summary>${record.progress.map(p=>`<div class="td-note">${p.body || p.title ? `<p>${esc(p.body || p.title)}</p>` : ''}${(p.tools || []).map(t=>`<p><b>${esc(t.name)}</b> · ${esc(statuses[t.status] || t.status)}${t.note ? ` · ${esc(t.note)}` : ''}</p>`).join('')}</div>`).join('')}</details>` : ''}`;
+  }
+  return {render,focus,detailPanel,projectionDetail,openAssets};
 })();
