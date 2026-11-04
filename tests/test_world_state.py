@@ -242,7 +242,7 @@ class UserBoundaryContextTests(unittest.TestCase):
         master.ctx = SimpleNamespace(blackboard=self.bb, extra={"user_inbox": inbox})
         received = master._drain_user_feed()
         self.assertEqual(len(received), 3)
-        self.assertEqual(inbox, [])
+        self.assertEqual(inbox, received)
         self.assertEqual(world_state.snapshot(blackboard=self.bb)["user_context"]["statements"],
                          [{"kind": "message", "text": message}, {"kind": "message", "text": "谢谢"}])
 

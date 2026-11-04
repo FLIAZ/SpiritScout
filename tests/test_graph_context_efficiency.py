@@ -150,6 +150,10 @@ class GraphDeltaTests(unittest.TestCase):
             plan = RoutePlan(name='fixture', strategy='核对现场')
             fresh = {'seed': []}
             agent._seed_messages(task, plan, plan, fresh)
+            from spiritscout.gateway.progress import EXPLORATION_PROGRESS_GUIDANCE
+
+            self.assertNotIn(EXPLORATION_PROGRESS_GUIDANCE, fresh['messages'][0]['content'])
+            self.assertTrue(fresh['messages'][1]['content'].endswith(EXPLORATION_PROGRESS_GUIDANCE))
             self.assertTrue(fresh['compact_graph_context_v1'])
             self.assertTrue(json.loads(fresh['messages'][0]['content'])['compact_graph_context'])
             saved = {'state': {'shared_prefix': False, 'artifact_path_v2': True}}

@@ -44,7 +44,7 @@ def audit_attempts(workspace: Path, version: str | None) -> dict[str, Any]:
         states[str(row.get('status') or 'unknown')]+=1
     result: dict[str, Any]={'attempts':len(rows),'statuses':dict(states),
         'unreported_attempts':sum(row.get('usage_status')!='reported' for row in rows),
-        'read_errors':errors,'note':'separate attempt usage; do not add to successful logical response totals'}
+        'read_errors':errors,'note':'audit cross-check only; reported attempts are included in new ledger totals, do not add again'}
     for key in ('input_tokens','output_tokens'):
         known=[row[key] for row in rows if type(row.get(key)) is int and row[key]>=0]
         result['reported_'+key]=sum(known) if known else None
@@ -111,7 +111,7 @@ def build_report(workspace: Path, *, version: str | None = __version__) -> dict[
             'cache_hits': 'endpoint-reported usage only; unknown excluded from hit rate',
             'prefix_bytes': 'local diagnostic, not provider token counts or cache hits',
             'attempts': 'SDK requests visible to the wrapper; missing usage stays unknown',
-            'coverage': 'persisted successful logical responses; failed requests remain in audit logs',
+            'coverage': 'persisted calls include reported retry, failed and cancelled usage under the new ledger semantics; old records are unchanged',
             'legacy': 'records without runtime_version are not attributed to the current version',
         },
         'summary': summarize(rows), 'unreadable_files': errors,

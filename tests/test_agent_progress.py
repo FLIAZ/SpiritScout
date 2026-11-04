@@ -36,6 +36,50 @@ class AgentProgressTests(unittest.TestCase):
         audit.log.assert_not_called()
 
 
+    def test_recovered_conversation_appends_contract_once_without_rewriting_prefix(self):
+        import copy
+
+        from spiritscout.gateway.progress import (
+            EXPLORATION_PROGRESS_GUIDANCE,
+            ensure_exploration_progress,
+        )
+
+        state = {'messages': [{'role': 'system', 'content': '稳定系统提示'},
+                              {'role': 'user', 'content': '原任务'},
+                              {'role': 'assistant', 'content': '已有公开说明'}]}
+        before = copy.deepcopy(state['messages'])
+        ensure_exploration_progress(state)
+        self.assertEqual(state['messages'][:-1], before)
+        self.assertEqual(state['messages'][-1]['content'], EXPLORATION_PROGRESS_GUIDANCE)
+        ensure_exploration_progress(state)
+        self.assertEqual(len(state['messages']), len(before) + 1)
+        fresh = {'messages': [{'role': 'user', 'content': '题目\n' + EXPLORATION_PROGRESS_GUIDANCE}]}
+        ensure_exploration_progress(fresh)
+        self.assertEqual(len(fresh['messages']), 1)
+
+    def test_public_semantic_boundary_is_preserved_without_private_fields(self):
+        audit = Mock()
+        publish_progress(audit, 'worker',
+                         '{"progress":"对照响应后改用授权账号。",'
+                         '"exploration":{"intent":"验证访问边界","attempt":"授权账号对照",'
+                         '"from":"匿名请求","reason":"匿名请求被拒绝","state":"running",'
+                         '"analysis":"内部推理","actions":["执行参数"]}}', task_id='t')
+        detail = audit.log.call_args.args[2]
+        self.assertEqual(detail['exploration']['intent'], '验证访问边界')
+        self.assertEqual(detail['exploration']['from'], '匿名请求')
+        self.assertNotIn('内部推理', str(detail))
+        self.assertNotIn('执行参数', str(detail))
+
+    def test_malformed_semantic_metadata_does_not_break_public_progress(self):
+        audit = Mock()
+        publish_progress(audit, 'worker', '{"progress":"仍在验证","exploration":[]}', task_id='t')
+        self.assertEqual(audit.log.call_args.args[2]['text'], '仍在验证')
+        self.assertNotIn('exploration', audit.log.call_args.args[2])
+        publish_progress(audit, 'worker', '{"progress":"仍在验证",'
+                         '"exploration":{"intent":"核对边界","attempt":"对照响应","state":[]}}', task_id='t')
+        self.assertNotIn('state', audit.log.call_args.args[2]['exploration'])
+
+
 class ProgressDecisionIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_existing_json_decision_produces_progress_without_another_model_call(self) -> None:
         from unittest.mock import AsyncMock

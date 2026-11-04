@@ -31,6 +31,7 @@ from spiritscout.gateway.capabilities import EndpointCapabilities
 from spiritscout.gateway.context import DecisionMemory
 from spiritscout.gateway.pricing import estimate_deepseek_cny
 from spiritscout.gateway.registry import ModelRegistry
+from spiritscout.gateway.session_model import Selector, model_entries_source, selection
 from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
 
 
@@ -121,7 +122,10 @@ async def chat_decision(
         prepared.append({"role": "user", "content": json.dumps(payload, ensure_ascii=False)})
         response = await _chat_decision_once(gateway, prepared, audit=audit, actor=actor,
                                              memory=memory, **kwargs)
-        data = extract_json(response.content)
+        try:
+            data = extract_json(response.content)
+        except ValueError:
+            data = None
         requests = data.get("skill_requests") if isinstance(data, dict) else None
         if not isinstance(requests, list) or not requests:
             return response
@@ -196,7 +200,33 @@ async def _chat_decision_once(
                 resp = retried
         except Exception:  # noqa: BLE001, S110 —— 重试失败沿用原响应，解析端兜底
             pass
-    if memory is not None and not output_lost(resp) and isinstance(extract_json(resp.content), dict):
+    parsed: Any = None
+    if (kwargs.get("response_format") == "json" or memory is not None) and not output_lost(resp):
+        # 决策 JSON 缺席即质量事件：上层会当决策缺席走规则回退，此处留痕
+        # 让每次降级可观测（extract_json 未命中抛错，回退策略仍由调用方决定）
+        try:
+            parsed = extract_json(resp.content)
+        except ValueError:
+            parsed = None
+        if not isinstance(parsed, dict):
+            # 正文完整却不成 JSON（散文式回答）偶有发生，原样重试一次常可
+            # 恢复；重试失败沿用原响应，解析兜底交给调用方。
+            try:
+                retried = await gateway.chat(messages, **kwargs)
+                try:
+                    candidate = extract_json(retried.content)
+                except ValueError:
+                    candidate = None
+                if isinstance(candidate, dict):
+                    resp, parsed = retried, candidate
+            except Exception:  # noqa: BLE001, S110 —— 重试失败沿用原响应，解析端兜底
+                pass
+            if audit is not None and not isinstance(parsed, dict):
+                audit.log("llm.json_miss", actor, {
+                    "task_type": kwargs.get("task_type", ""),
+                    "finish_reason": resp.finish_reason,
+                    "preview": (resp.content or "")[:200]})
+    if memory is not None and not output_lost(resp) and isinstance(parsed, dict):
         memory.commit(resp.content or "", reasoning=getattr(resp, "reasoning", "") or "")
     from spiritscout.gateway.progress import publish_progress
 
@@ -303,6 +333,40 @@ class ModelGateway:
         self._mock = mock_backend or MockBackend()
         self._rate_state: dict[str, list[float]] = {}
         self.skill_runtime: Any = None
+        self._session_model: Selector = selection()
+        self._missing_selection = ""
+        self._entries_source = model_entries_source()
+        self._entries_version: list | None = None
+
+    def _refresh_selection_registry(self) -> None:
+        entries = self._entries_source() if self._entries_source else None
+        if entries and entries is not self._entries_version:
+            self.registry = ModelRegistry(entries)
+            self._entries_version = entries
+
+    def set_session_model(self, selector: Selector) -> None:
+        self._session_model = selector
+        self._missing_selection = ""
+
+    def selected_model(self) -> str:
+        self._refresh_selection_registry()
+        selector = self._session_model
+        ref = str(selector() if callable(selector) else selector).strip()
+        if not ref:
+            return ""
+        if self.registry.has(ref):
+            self._missing_selection = ""
+            return self.registry.get(ref).key
+        if ref != self._missing_selection:
+            self.audit.log("model.override_missing", "gateway", {"model": ref})
+            self._missing_selection = ref
+        return ""
+
+    def resolve_model(self, *, model: str | None = None, task_type: str = "execution",
+                      required_capability: str | None = None) -> ModelEntry:
+        self._refresh_selection_registry()
+        return self.registry.route(task_type, prefer_model=model or self.selected_model(),
+                                   required_capability=required_capability)
 
     def set_mode(self, mode: str) -> None:
         """设置当前运行模式（src/ctf/competition）：按模式分开计量用量。"""
@@ -322,7 +386,7 @@ class ModelGateway:
         response_format: str | None = None,
         timeout_seconds: int | None = None,
         tools: list[dict[str, Any]] | None = None,
-        tool_choice: str | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         on_delta: DeltaCallback | None = None,
         reasoning_effort: str = "",
         preserve_context: bool = False,
@@ -340,8 +404,8 @@ class ModelGateway:
         由模型档案声明（ModelEntry.max_output_tokens）或端点自定；上限只影响
         生成在哪停，设小了思考型模型会把额度耗在思考上、正文被截成半截。
         小通道（路由/连通性探测）可传定值收紧。"""
-        entry = self.registry.route(
-            task_type, prefer_model=model,
+        entry = self.resolve_model(
+            task_type=task_type, model=model,
             required_capability=required_capability,
         )
         chain = [entry, *self.registry.fallback_of(entry.key)]
@@ -391,15 +455,15 @@ class ModelGateway:
         """和 chat 使用同一路由，向对话所有者暴露输入整理阈值。"""
         from spiritscout.gateway.context import input_window_budget
 
-        entry = self.registry.route(task_type, prefer_model=model,
-                                    required_capability=required_capability)
+        entry = self.resolve_model(task_type=task_type, model=model,
+                                   required_capability=required_capability)
         return input_window_budget(entry.context_window, max_tokens or entry.max_output_tokens)
 
     # ------------------------------------------------------------ 内部
 
     def context_identity(self, *, model: str | None = None, task_type: str = "execution") -> dict[str, str]:
         """对话协议身份；不包含密钥，供显式接力核对模型与端点。"""
-        entry = self.registry.route(task_type, prefer_model=model)
+        entry = self.resolve_model(task_type=task_type, model=model)
         return {"model": entry.model, "provider": entry.provider,
                 "base_url": entry.base_url, "api_format": entry.api_format,
                 **({"model_key": entry.key, "provider_ref": entry.provider_ref} if entry.provider_ref else {})}
@@ -434,7 +498,7 @@ class ModelGateway:
         response_format: str | None,
         timeout_seconds: int | None = None,
         tools: list[dict[str, Any]] | None = None,
-        tool_choice: str | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         on_delta: DeltaCallback | None = None,
         reasoning_effort: str = "",
         task_type: str = "execution",
@@ -482,16 +546,20 @@ class ModelGateway:
         attempts = AttemptTrace(self.audit, actor, call)
         attempt_token = current_attempt_trace.set(attempts)
         try:
+            backend_options = ({"_lightweight_local": self.config.lightweight_local}
+                               if entry.provider == "ollama" else {})
             raw = await backend.complete(
                 entry, messages,
                 temperature=temperature, max_tokens=max_tokens,
                 timeout=timeout_seconds or self.config.request_timeout_seconds,
                 response_format=response_format,
                 tools=tools, tool_choice=tool_choice, on_delta=on_delta,
-                reasoning_effort=reasoning_effort,
+                reasoning_effort=reasoning_effort, **backend_options,
             )
         except BaseException as exc:
             attempts.finish("cancelled" if isinstance(exc, asyncio.CancelledError) else "failed")
+            self._record_usage(entry, attempts.accounted_usage(), attempts, call, actor, wall,
+                               "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed")
             if stream is not None:
                 stream.flush()
             self.audit.log("model.cancelled" if isinstance(exc, asyncio.CancelledError)
@@ -508,26 +576,8 @@ class ModelGateway:
                 stream("text", raw.get("content", ""))
             stream.flush()
         latency = (time.perf_counter() - started) * 1000
-        metrics = {key: raw.get(key) for key in ("cached_input_tokens", "cache_write_tokens", "first_delta_ms")}
-        metrics.update(runtime_version=__version__, **attempts.metrics())
-        metrics["patch_optimization_enabled"] = self.config.compact_decision_patches
-        metrics.update(estimate_deepseek_cny(entry, wall, raw["prompt_tokens"],
-                                             raw.get("cached_input_tokens"), raw["completion_tokens"]))
-        metrics.update(cache_scope=role or task_type, task_id=scope.task_id, route_id=scope.route_id)
-        metrics.update(input_tokens=raw["prompt_tokens"], output_tokens=raw["completion_tokens"],
-                       task_type=task_type, actor=actor, call_id=call["call_id"], **prefix)
-        total_tokens = raw["prompt_tokens"] + raw["completion_tokens"]
-        cost = (
-            raw["prompt_tokens"] / 1e6 * entry.cost_input_per_mtok
-            + raw["completion_tokens"] / 1e6 * entry.cost_output_per_mtok
-        )
-        read = raw.get("cached_input_tokens")
-        write = raw.get("cache_write_tokens")
-        if read is not None and entry.cost_cached_input_per_mtok is not None:
-            cost += min(read, raw["prompt_tokens"]) / 1e6 * (entry.cost_cached_input_per_mtok - entry.cost_input_per_mtok)
-        if write is not None and entry.cost_cache_write_per_mtok is not None:
-            cost += min(write, max(0, raw["prompt_tokens"] - (read or 0))) / 1e6 * (entry.cost_cache_write_per_mtok - entry.cost_input_per_mtok)
-        self.budget.record(entry.key, total_tokens, cost, ts=wall, **metrics)
+        accounted = attempts.accounted_usage(raw)
+        metrics, total_tokens, cost = self._record_usage(entry, {**raw, **accounted}, attempts, call, actor, wall, "completed")
         self.audit.log(
             "model.call", actor,
             {**call, "tokens": total_tokens,
@@ -550,6 +600,35 @@ class ModelGateway:
             tool_calls=list(raw.get("tool_calls", []) or []),
             finish_reason=str(raw.get("finish_reason", "") or ""),
         )
+
+    def _record_usage(self, entry: ModelEntry, raw: dict[str, Any], attempts: AttemptTrace,
+                      call: dict[str, Any], actor: str, wall: float, status: str) -> tuple[dict[str, Any], int, float]:
+        """一次逻辑调用入账一次，含已报告的重试、失败和取消用量。"""
+        metrics = {key: raw.get(key) for key in ("cached_input_tokens", "cache_write_tokens", "first_delta_ms")}
+        metrics.update(runtime_version=__version__, usage_status=raw.get("usage_status", "unknown"),
+                       call_status=status, **attempts.metrics())
+        metrics.update({key: raw[key] for key in ('queue_duration_ms', 'load_duration_ms',
+                        'prompt_eval_duration_ms', 'eval_duration_ms', 'eval_tokens_per_second') if key in raw})
+        metrics["patch_optimization_enabled"] = self.config.compact_decision_patches
+        metrics.update(estimate_deepseek_cny(entry, wall, raw["prompt_tokens"],
+                                             raw.get("cached_input_tokens"), raw["completion_tokens"]))
+        metrics.update({key: call[key] for key in ("cache_scope", "task_id", "route_id")})
+        metrics.update(input_tokens=raw["prompt_tokens"], output_tokens=raw["completion_tokens"],
+                       task_type=call["task_type"], actor=actor, call_id=call["call_id"])
+        metrics.update({key: call[key] for key in ("request_bytes", "reused_prefix_bytes", "new_suffix_bytes", "context_parts")})
+        total_tokens = raw["prompt_tokens"] + raw["completion_tokens"]
+        cost = (
+            raw["prompt_tokens"] / 1e6 * entry.cost_input_per_mtok
+            + raw["completion_tokens"] / 1e6 * entry.cost_output_per_mtok
+        )
+        read = raw.get("cached_input_tokens")
+        write = raw.get("cache_write_tokens")
+        if read is not None and entry.cost_cached_input_per_mtok is not None:
+            cost += min(read, raw["prompt_tokens"]) / 1e6 * (entry.cost_cached_input_per_mtok - entry.cost_input_per_mtok)
+        if write is not None and entry.cost_cache_write_per_mtok is not None:
+            cost += min(write, max(0, raw["prompt_tokens"] - (read or 0))) / 1e6 * (entry.cost_cache_write_per_mtok - entry.cost_input_per_mtok)
+        self.budget.record(entry.key, total_tokens, cost, ts=wall, **metrics)
+        return metrics, total_tokens, cost
 
     async def _rate_limit(self, entry: ModelEntry) -> None:
         """按模型 RPM 限流（注册表 rate_limit_rpm）。"""
@@ -586,26 +665,32 @@ class AgentBoundGateway:
     预算计量、限流、主备切换、降级语义不变——本包装只改「谁来答」，不改治理。
     """
 
-    def __init__(self, inner: ModelGateway, model: str = "") -> None:
+    def __init__(self, inner: ModelGateway, model: str = "", *,
+                 prefer_session: bool = False) -> None:
         self._inner = inner
         self._model = model
+        self._prefer_session = prefer_session
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 
+    def _bound_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        if not kwargs.get("model"):
+            selected = self._inner.selected_model() if self._prefer_session else ""
+            if selected or self._model:
+                kwargs["model"] = selected or self._model
+        return kwargs
+
+    def resolve_model(self, **kwargs: Any) -> ModelEntry:
+        return self._inner.resolve_model(**self._bound_kwargs(kwargs))
+
     async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> ChatResponse:
-        if self._model and not kwargs.get("model"):
-            kwargs["model"] = self._model
-        return await self._inner.chat(messages, **kwargs)
+        return await self._inner.chat(messages, **self._bound_kwargs(kwargs))
 
     def context_budget(self, **kwargs: Any) -> int | None:
         """容量查询也必须遵从编队绑定，不能错用注册表第一个模型。"""
-        if self._model and not kwargs.get("model"):
-            kwargs["model"] = self._model
         budget_for = getattr(self._inner, "context_budget", None)
-        return budget_for(**kwargs) if callable(budget_for) else None
+        return budget_for(**self._bound_kwargs(kwargs)) if callable(budget_for) else None
 
     def context_identity(self, **kwargs: Any) -> dict[str, str]:
-        if self._model and not kwargs.get("model"):
-            kwargs["model"] = self._model
-        return self._inner.context_identity(**kwargs)
+        return self._inner.context_identity(**self._bound_kwargs(kwargs))

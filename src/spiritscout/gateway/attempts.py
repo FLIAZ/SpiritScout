@@ -5,6 +5,8 @@ import time
 from contextvars import ContextVar
 from typing import Any
 
+from spiritscout.gateway.metering import merge_usage, normalize_usage
+
 current_attempt_trace: ContextVar[AttemptTrace | None] = ContextVar("model_attempt_trace", default=None)
 
 
@@ -31,21 +33,7 @@ class AttemptTrace:
         if usage is None or not self.attempts:
             return
         row = self.attempts[-1]
-        for target, names in {"input_tokens": ("prompt_tokens", "input_tokens"),
-                              "output_tokens": ("completion_tokens", "output_tokens")}.items():
-            for name in names:
-                value = _get(usage, name)
-                if type(value) is int and value >= 0:
-                    row[target] = value
-                    break
-        details = _get(usage, "prompt_tokens_details") or _get(usage, "input_tokens_details")
-        cached = _get(details, "cached_tokens")
-        if cached is None:
-            cached = _get(usage, "cache_read_input_tokens")
-        if cached is None:
-            cached = _get(usage, "prompt_cache_hit_tokens")
-        if type(cached) is int and cached >= 0:
-            row["cached_input_tokens"] = cached
+        merge_usage(row, normalize_usage(usage))
         if "input_tokens" in row and "output_tokens" in row:
             row["usage_status"] = "reported"
         elif "input_tokens" in row or "output_tokens" in row:
@@ -60,8 +48,25 @@ class AttemptTrace:
             **self.call, **{k: v for k, v in row.items() if k not in {"started", "finished"}},
             "status": status, "latency_ms": round((time.perf_counter() - row["started"]) * 1000, 1)})
 
+    def accounted_usage(self, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
+        """每次尝试内合并，尝试间求和；最终响应只用于无 SDK trace 的后端。"""
+        if not self.attempts:
+            return dict(fallback or {"prompt_tokens": 0, "completion_tokens": 0, "usage_status": "unknown"})
+        result: dict[str, Any] = {}
+        for source, target in (("input_tokens", "prompt_tokens"), ("output_tokens", "completion_tokens"),
+                               ("cached_input_tokens", "cached_input_tokens"), ("cache_write_tokens", "cache_write_tokens")):
+            values = [row[source] for row in self.attempts if source in row]
+            result[target] = sum(values) if values else (0 if source in {"input_tokens", "output_tokens"} else None)
+        # 任一次输入缺缓存计量，都不能把那部分输入当作零命中参与命中率。
+        if any(row.get("input_tokens", 0) > 0 and "cached_input_tokens" not in row for row in self.attempts):
+            result["cached_input_tokens"] = None
+        result["usage_status"] = ("reported" if all(row["usage_status"] == "reported" for row in self.attempts)
+                                  else "partial" if any("input_tokens" in row or "output_tokens" in row for row in self.attempts)
+                                  else "unknown")
+        return result
+
     def metrics(self) -> dict[str, int | None]:
-        """已报告尝试单列，不替换最终响应账本，也不把未知尝试算成零消费。"""
+        """已报告尝试合计供审计核对；未知尝试保持未知。"""
         result: dict[str, int | None] = {
             "sdk_attempts": len(self.attempts),
             "unreported_attempts": sum(row["usage_status"] != "reported" for row in self.attempts),

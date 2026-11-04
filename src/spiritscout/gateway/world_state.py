@@ -97,6 +97,8 @@ def sync_user_context(blackboard: Any, *,
             if statement_id in ids or (not statement_id and current):
                 continue
             statement = {"kind": "message", "text": str(message.get("content") or "")}
+            if message.get("attachments"):
+                statement["attachments"] = message["attachments"]
             if statement_id:
                 statement["statement_id"] = statement_id
                 ids.add(statement_id)
