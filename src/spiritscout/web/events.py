@@ -112,6 +112,35 @@ def read_activity_page(path: Path, *, before: int | None = None,
             "has_more": has_more, "activity_count": min(count, limit)}
 
 
+def read_typed_page(path: Path, types: set[str], *, before: int | None = None,
+                    limit: int = 250) -> dict[str, Any]:
+    """按事件类型筛读一页（存档点等稀疏索引用），游标语义与活动分页一致。
+
+    匹配事件稀疏时一次请求会向后多拉若干原始页；为防病态长日志拖垮请求，
+    单次最多扫 400 页（约十万行），未扫尽时 has_more 照常为真供续拉。"""
+    items: list[dict[str, Any]] = []
+    cursor = before
+    older = 0
+    has_more = False
+    for _ in range(400):
+        page = read_audit_page(path, before=cursor, limit=250)
+        # 逐页向旧端扫描：新拉到的页更旧，前插保持整体升序（与活动分页一致）
+        items = [item for item in page["items"]
+                 if item["event"].get("type") in types] + items
+        older, has_more = page["older_cursor"], page["has_more"]
+        if len(items) >= limit or not has_more or not page["items"]:
+            break
+        cursor = older
+    if len(items) > limit:
+        # 只保留最新的 limit 条；older_cursor 指向保留段最旧一条，续拉可能
+        # 与本页末尾重合一条，由调用方按 id 去重。
+        items = items[-limit:]
+        older = items[0]["id"]
+        has_more = True
+    return {"items": items, "older_cursor": older,
+            "cursor": items[-1]["id"] if items else 0, "has_more": has_more}
+
+
 def _frame(event_id: int, line: str) -> str:
     # 历史日志可能含旧版本写下的原始参数；读取时也不能直接转发。
     try:

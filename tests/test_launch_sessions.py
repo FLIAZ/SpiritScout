@@ -40,6 +40,44 @@ class LaunchRoutingTests(unittest.TestCase):
         self.assertTrue(plan.needs_mode_routing)
         self.assertEqual(len(plan.challenges), 1)
 
+    def test_explicit_ctf_without_url_builds_shell_challenge(self) -> None:
+        """CTF 不强制 URL/清单：纯描述（本地题、靶机 IP）合成题目壳开工。"""
+        plan = prepare_launch(LaunchRequest(
+            mode=RunMode.CTF, mission="靶机 192.168.38.12:8080，拿到 flag"))
+
+        self.assertEqual(plan.authorization.mode, RunMode.CTF)
+        self.assertEqual(len(plan.challenges), 1)
+        self.assertEqual(plan.challenges[0]["id"], "mission-1")
+        self.assertIn("192.168.38.12", plan.challenges[0]["description"])
+
+    def test_explicit_ctf_with_https_target_is_not_bound_as_challenge_url(self) -> None:
+        """目标 URL 不写死捆绑为题目地址：原文进描述，授权范围仍覆盖。"""
+        plan = prepare_launch(LaunchRequest(
+            mode=RunMode.CTF, mission="", target="http://10.0.0.8:8888"))
+
+        self.assertEqual(len(plan.challenges), 1)
+        self.assertNotIn("url", plan.challenges[0])
+        self.assertIn("http://10.0.0.8:8888", plan.challenges[0]["description"])
+        self.assertIn("http://10.0.0.8:8888", plan.authorization.scope.allowed_urls)
+
+    def test_mission_urls_are_not_bound_as_challenge_entries(self) -> None:
+        """任务里的 URL 可能只是平台地址：不按 URL 拆题、不捆绑题目地址。"""
+        mission = ("平台 https://ctf.example.com/login，靶机 http://10.0.0.8:8888，"
+                   "附件已上传，拿 flag。" + "背景说明。" * 200)
+        plan = prepare_launch(LaunchRequest(mode=RunMode.CTF, mission=mission))
+
+        self.assertEqual(len(plan.challenges), 1)
+        self.assertNotIn("url", plan.challenges[0])
+        self.assertEqual(plan.challenges[0]["description"], mission)
+        self.assertIn("http://10.0.0.8:8888", plan.authorization.scope.allowed_urls)
+        self.assertIn("https://ctf.example.com/login", plan.authorization.scope.allowed_urls)
+
+    def test_explicit_ctf_with_nothing_at_all_still_errors(self) -> None:
+        from spiritscout.core.exceptions import SpiritScoutError
+
+        with self.assertRaises(SpiritScoutError):
+            prepare_launch(LaunchRequest(mode=RunMode.CTF))
+
     def test_competition_raw_rules_reach_model_context_not_denied_gate(self) -> None:
         """赛方规则全文保留，不编译成后端目标拦截表。"""
         rules = ("contest_type: jeopardy\n"

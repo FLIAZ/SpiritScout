@@ -79,7 +79,10 @@ def _candidate_urls(base_url: str, provider: str) -> list[str]:
     if not base:
         return []
     urls: list[str] = []
-    if provider == "anthropic_compatible":
+    if provider == "ollama":
+        origin = base[:-3] if base.endswith('/v1') else base
+        urls += [f"{origin}/api/tags"]
+    elif provider == "anthropic_compatible":
         urls += [f"{base}/v1/models?limit=1000", f"{base}/v1/models", f"{base}/models"]
     elif "dashscope" in base or ".maas.aliyuncs.com" in base:
         origin = "/".join(base.split("/")[:3])       # scheme://host

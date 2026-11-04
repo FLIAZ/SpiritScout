@@ -94,6 +94,37 @@ class SessionArchiveTests(unittest.TestCase):
                                         params={"path": "artifacts/\x00.txt"}).status_code,
                              404)
 
+    def test_share_file_to_chat_and_attachment_serving(self) -> None:
+        cfg = SystemConfig(workspace=WorkspaceConfig(root=str(self.root)),
+                           models_config_path=str(self.root / "models.yaml"))
+        app = create_app(cfg, [])
+        session = Session(session_id="sess-archive", mode="src", target="archive.test",
+                          workspace=self.workspace, status="completed")
+        app.state.manager._sessions[session.session_id] = session
+        (self.workspace / "attachments").mkdir(exist_ok=True)
+        (self.workspace / "attachments" / "上传.txt").write_text("uploaded", encoding="utf-8")
+        with TestClient(app, base_url="http://127.0.0.1") as client:
+            prefix = "/api/sessions/sess-archive"
+            # 附件目录可回显（预览/下载自己的上传），但不进档案文件列表
+            self.assertEqual(client.get(prefix + "/artifacts/download",
+                                        params={"path": "attachments/上传.txt"}).content, b"uploaded")
+            self.assertEqual(
+                len(read_deliverables(self.workspace, kind="file")["items"]), 1)
+            # 发送到会话：file.shared 审计留痕，回包带相对路径
+            response = client.post(prefix + "/files/share",
+                                   json={"path": "artifacts/证据.txt", "note": "证据文件"})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["path"], "artifacts/证据.txt")
+            self.assertEqual(client.post(prefix + "/files/share",
+                                         json={"path": "bb.db"}).status_code, 404)
+            self.assertEqual(client.post(prefix + "/files/share",
+                                         json={"path": "../private.txt"}).status_code, 404)
+        lines = session.audit_path.read_text(encoding="utf-8").strip().splitlines()
+        shared = json.loads(lines[-1])
+        self.assertEqual(shared["type"], "file.shared")
+        self.assertEqual(shared["detail"]["path"], "artifacts/证据.txt")
+        self.assertEqual(shared["detail"]["by"], "user")
+
     def test_empty_session_does_not_create_database(self) -> None:
         empty = self.root / "empty"
         empty.mkdir()

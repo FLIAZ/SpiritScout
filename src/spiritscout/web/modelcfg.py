@@ -110,7 +110,7 @@ def _validate(providers: list[dict[str, Any]],
         except Exception as exc:
             raise SpiritScoutError(
                 f"供应商条目校验失败（{raw.get('name', '?')}）: {exc}") from exc
-        if p.provider not in (*_CLOUD_PROVIDERS, "mock"):
+        if p.provider not in (*_CLOUD_PROVIDERS, "mock", "ollama"):
             raise SpiritScoutError(
                 f"不支持的供应商类型（{p.name}）: {p.provider}——"
                 "Web 端仅配置云端兼容端点（openai_compatible / anthropic_compatible）")
