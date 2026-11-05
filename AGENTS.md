@@ -7,7 +7,7 @@
 灵枢（SpiritScout）是多智能体安全测试系统：主 Agent 通过 DAG 动态规划，专项
 Agent 并行执行，覆盖 SRC、CTF 与渗透赛。
 
-- 后端：Python 3.11+ / FastAPI / SQLite / LiteLLM / LangGraph
+- 后端：Python 3.11–3.14 / FastAPI / SQLite / LiteLLM / LangGraph
 - 前端：原生 HTML/CSS/ES2020+，直接修改 `static/`，无构建步骤
 - 沙箱：bubblewrap；MCP：官方 SDK，stdio/http/sse 三种传输
 
@@ -57,6 +57,9 @@ Agent 并行执行，覆盖 SRC、CTF 与渗透赛。
 .venv/bin/python -m ruff check <修改的 Python 文件>
 node --check src/spiritscout/web/static/js/<修改的文件>.js
 node tests/test_<相关模块>.js
+# 修改打包入口、资源清单或冻结构建路径时：
+.\scripts\build-exe.ps1        # Windows，产物 dist\SpiritScout.exe
+./scripts/build-elf.sh         # Linux，产物 dist/spiritscout
 # 确需全量后端回归时：
 .venv/bin/python -m unittest discover tests/
 ```

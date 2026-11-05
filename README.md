@@ -8,7 +8,7 @@
 
 **简体中文 · [English](README_EN.md)**
 
-[![Version](https://img.shields.io/badge/version-v0.20.0-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.20.0-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11--3.14-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
 
 [快速开始](#快速开始) · [能力与模式](#能力与模式) · [架构](#架构) · [部署指南](docs/部署与配置.md) · [参与贡献](CONTRIBUTING.md)
 
@@ -114,14 +114,14 @@ docker compose up -d --build --wait
 <details>
  <summary> 点击展开 </summary>
 
-需要 Python 3.11+。原生浏览器工具另需 Node.js 22+ 和 Chromium/Chrome，
-也可通过 `SPIRITSCOUT_CHROME_EXECUTABLE` 指定路径。
+需要 Python 3.11–3.14（LiteLLM 1.102.0 暂不支持 3.15）。推荐使用 [uv](https://docs.astral.sh/uv/) 管理环境；原生浏览器工具另需
+Node.js 22+ 和 Chromium/Chrome，也可通过 `SPIRITSCOUT_CHROME_EXECUTABLE` 指定路径。
 
 **Linux**
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -e .
+curl -LsSf https://astral.sh/uv/install.sh | sh   # 也可 pip install uv
+uv sync
 sudo apt install bubblewrap   # Debian / Ubuntu；Fedora 使用 sudo dnf install bubblewrap
 ./launch.sh
 ```
@@ -129,16 +129,40 @@ sudo apt install bubblewrap   # Debian / Ubuntu；Fedora 使用 sudo dnf install
 **Windows PowerShell**
 
 ```powershell
-py -3 -m venv .venv
-.venv\Scripts\python.exe -m pip install -e .
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+uv sync
 .\launch.ps1
 ```
+
+`uv sync` 按 `uv.lock` 在项目根创建 `.venv`，启动脚本直接复用该环境。首次启动若缺少
+`configs/models.yaml`，会自动创建空注册表，随后在「模型」页添加供应商与模型。
+不使用 uv 时，原 pip 流程仍可用：`python3 -m venv .venv && .venv/bin/python -m pip install -e .`
+（Windows 将 `python3` 换成 `py -3`，路径换成 `.venv\Scripts`）。
 
 访问 <http://127.0.0.1:8000>，按 `Ctrl+C` 停止。Linux 可用 `./launch.sh --port 10010`
 修改端口；Windows 将参数传给 `launch.ps1`。监听外部地址前需配置管理员凭据与 HTTPS。
 
 shell/Python 沙箱需要 Linux 与 bubblewrap。Windows/macOS 原生控制台无法提供这一
 完整工具链，建议使用 Docker。Windows、WSL、Linux 的虚拟环境不要混用。
+
+### 免安装可执行文件
+
+`scripts/build-exe.ps1`（Windows）和 `scripts/build-elf.sh`（Linux）使用 PyInstaller
+生成单文件控制台：`dist/SpiritScout.exe` 或 `dist/spiritscout`，目标机器不需要 Python 环境。
+
+```powershell
+.\scripts\build-exe.ps1
+```
+
+```bash
+./scripts/build-elf.sh
+```
+
+构建需要 Python 3.11–3.14；推荐安装 uv，脚本会自动创建独立的 `.venv-build`，不会改动 `.venv`。
+首次启动会在程序旁生成 `configs/`、`.spiritscout/` 与 `.env.example`，双击后访问
+<http://127.0.0.1:8000>。打包版包含控制台、模型/资源管理、知识库与报告；shell 沙箱、
+外部 MCP 和浏览器工具仍需 Docker 或带对应运行时的原生环境，详见
+[部署与配置](docs/部署与配置.md#免安装可执行文件)。
 
 </details>
 

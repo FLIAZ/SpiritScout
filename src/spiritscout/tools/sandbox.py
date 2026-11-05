@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from spiritscout.core.models import RunMode
+from spiritscout.platform_support import app_root, is_frozen
 from spiritscout.tools.sandbox_paths import (
     open_directory,
     sandbox_directory,
@@ -81,10 +82,13 @@ def sandbox_available() -> bool:
 def _project_venv() -> Path | None:
     """项目自带虚拟环境（工具库全部封装于此，不依赖用户系统安装）。
 
-    沙箱路径：src/spiritscout/tools/sandbox.py → 项目根/.venv。
+    源码运行取仓库根/.venv；冻结构建取可执行文件旁/.venv，供 portable
+    部署自行放置工具层，不继承启动终端里已激活的无关虚拟环境。
     """
-    root = Path(__file__).resolve().parents[3]
-    candidates = [Path(os.environ["VIRTUAL_ENV"])] if os.environ.get("VIRTUAL_ENV") else []
+    root = app_root()
+    candidates: list[Path] = []
+    if not is_frozen() and os.environ.get("VIRTUAL_ENV"):
+        candidates.append(Path(os.environ["VIRTUAL_ENV"]))
     candidates.append(root / ".venv")
     return next((venv for venv in candidates if (venv / "bin" / "python3").exists()
                  or (venv / "bin" / "python").exists()), None)

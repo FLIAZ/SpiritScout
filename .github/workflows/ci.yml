@@ -18,18 +18,18 @@ jobs:
       LITELLM_LOCAL_MODEL_COST_MAP: "True"
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python }}
-          cache: pip
+          enable-cache: true
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e '.[test]'
-      - run: python -m ruff check src/spiritscout tests deploy.py deploy
-      - run: python -m compileall -q src/spiritscout tests
-      - run: python -m unittest discover -s tests -v
+      - run: uv lock --check
+      - run: uv sync --extra test
+      - run: uv run --no-sync python -m ruff check src/spiritscout tests deploy.py deploy
+      - run: uv run --no-sync python -m compileall -q src/spiritscout tests
+      - run: uv run --no-sync python -m unittest discover -s tests -v
       - name: Check browser scripts
         run: |
           for file in src/spiritscout/web/static/js/*.js; do node --check "$file" || exit; done
@@ -46,18 +46,18 @@ jobs:
       PYTHON_DOTENV_DISABLED: "1"
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
-          cache: pip
+          enable-cache: true
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: python -m pip install -e '.[test]'
-      - run: python -m unittest discover -s tests -p test_platform_support.py -v
-      - run: python -m unittest discover -s tests -p test_deployment.py -v
-      - run: python -m unittest discover -s tests -p test_chrome_mcp.py -v
-      - run: python -m spiritscout --help
+      - run: uv sync --extra test
+      - run: uv run --no-sync python -m unittest discover -s tests -p test_platform_support.py -v
+      - run: uv run --no-sync python -m unittest discover -s tests -p test_deployment.py -v
+      - run: uv run --no-sync python -m unittest discover -s tests -p test_chrome_mcp.py -v
+      - run: uv run --no-sync python -m spiritscout --help
 
   docker-build:
     runs-on: ubuntu-24.04

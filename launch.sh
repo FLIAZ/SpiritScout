@@ -35,7 +35,7 @@ case "${1:-start}" in
   help|-h|--help|stop) ;;
   *)
     if [ ! -x .venv/bin/python ]; then
-      echo "缺少虚拟环境：先执行 python3 -m venv .venv，再执行 .venv/bin/python -m pip install -e ." >&2
+      echo "缺少虚拟环境：先执行 uv sync（或 python3 -m venv .venv && .venv/bin/python -m pip install -e .）" >&2
       exit 1
     fi
     ;;

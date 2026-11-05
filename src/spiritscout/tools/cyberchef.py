@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from spiritscout.core.models import RunMode
+from spiritscout.platform_support import app_root
 from spiritscout.tools.invocation import current_invocation
 from spiritscout.tools.sandbox import _kill_group, _read_capped, sandbox_available
 from spiritscout.tools.spec import RiskLevel, ToolKind, ToolResult, ToolSpec
@@ -23,7 +24,7 @@ def runtime_paths() -> tuple[Path, Path]:
     """只查找已安装的运行时；不在工具调用时联网安装。"""
     explicit = os.environ.get('SPIRITSCOUT_CYBERCHEF_ROOT')
     roots = [Path(explicit)] if explicit else [
-        Path('/opt/cyberchef'), Path(__file__).resolve().parents[3] / '.tools/cyberchef']
+        Path('/opt/cyberchef'), app_root() / '.tools/cyberchef']
     root = next((p.resolve() for p in roots
                  if (p / 'node_modules/cyberchef/src/node/index.mjs').is_file()), None)
     if root is None:
