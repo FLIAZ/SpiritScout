@@ -12,6 +12,25 @@ from pathlib import Path
 from typing import Any
 
 
+def is_frozen() -> bool:
+    """是否为 PyInstaller 等冻结构建（源码运行返回 False）。"""
+    return bool(getattr(sys, "frozen", False))
+
+
+def app_root() -> Path:
+    """运行根目录：源码为仓库根，冻结构建为可执行文件所在目录。"""
+    if is_frozen():
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
+
+
+def bundle_root() -> Path:
+    """只读资源根：源码为仓库根，冻结构建为 PyInstaller 解包目录。"""
+    if is_frozen():
+        return Path(getattr(sys, "_MEIPASS", app_root()))
+    return Path(__file__).resolve().parents[2]
+
+
 def process_options() -> dict[str, Any]:
     if sys.platform == "win32":
         return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}

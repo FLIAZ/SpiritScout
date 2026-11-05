@@ -8,7 +8,7 @@ Assign tasks in your browser, let agents collaborate, and inspect their progress
 
 **[简体中文](README.md) · English**
 
-[![Version](https://img.shields.io/badge/version-v0.20.0-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.20.0-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11--3.14-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
 
 [Quick start](#quick-start) · [Capabilities and modes](#capabilities-and-modes) · [Architecture](#architecture) · [Deployment guide (中文)](docs/部署与配置.md) · [Contributing (中文)](CONTRIBUTING.md)
 
@@ -112,14 +112,13 @@ For source development overrides, administrator recovery, reverse proxies, data 
 <details>
 <summary>Expand instructions</summary>
 
-Requires Python 3.11+. Native browser tools additionally require Node.js 22+ and Chromium/Chrome.
-You can set the browser executable path with `SPIRITSCOUT_CHROME_EXECUTABLE`.
+Requires Python 3.11–3.14 (LiteLLM 1.102.0 does not support 3.15 yet). [uv](https://docs.astral.sh/uv/) is recommended for dependency and environment management. Native browser tools additionally require Node.js 22+ and Chromium/Chrome; set the browser executable path with `SPIRITSCOUT_CHROME_EXECUTABLE`.
 
 **Linux**
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -e .
+curl -LsSf https://astral.sh/uv/install.sh | sh   # or pip install uv
+uv sync
 sudo apt install bubblewrap   # Debian / Ubuntu; use sudo dnf install bubblewrap on Fedora
 ./launch.sh
 ```
@@ -127,14 +126,30 @@ sudo apt install bubblewrap   # Debian / Ubuntu; use sudo dnf install bubblewrap
 **Windows PowerShell**
 
 ```powershell
-py -3 -m venv .venv
-.venv\Scripts\python.exe -m pip install -e .
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+uv sync
 .\launch.ps1
 ```
+
+`uv sync` creates `.venv` from `uv.lock` at the project root, and the launch scripts reuse it. If `configs/models.yaml` is missing on first start, an empty registry is created; add providers and models on the Models page. The pip flow remains supported: `python3 -m venv .venv && .venv/bin/python -m pip install -e .` (use `py -3` and `.venv\Scripts` on Windows).
 
 Visit <http://127.0.0.1:8000> and press `Ctrl+C` to stop. On Linux, use `./launch.sh --port 10010` to change the port; on Windows, pass arguments to `launch.ps1`. Configure administrator credentials and HTTPS before listening on an external address.
 
 The shell/Python sandbox requires Linux and bubblewrap. A native Windows/macOS console cannot provide this complete toolchain; Docker is recommended. Do not share virtual environments between Windows, WSL, and Linux.
+
+### Standalone executables
+
+`scripts/build-exe.ps1` (Windows) and `scripts/build-elf.sh` (Linux) build a single-file console with PyInstaller: `dist/SpiritScout.exe` or `dist/spiritscout`. The target machine does not need a Python environment.
+
+```powershell
+.\scripts\build-exe.ps1
+```
+
+```bash
+./scripts/build-elf.sh
+```
+
+Building requires Python 3.11–3.14; uv is recommended. The scripts create an isolated `.venv-build` and leave `.venv` untouched. The first launch creates `configs/`, `.spiritscout/`, and `.env.example` next to the executable; open <http://127.0.0.1:8000>. The bundle includes the console, model/resource management, knowledge base, and reports; shell sandboxing, external MCP servers, and browser tools still require Docker or a native environment with the corresponding runtimes. See [Deployment and configuration (中文)](docs/部署与配置.md#免安装可执行文件).
 
 </details>
 
