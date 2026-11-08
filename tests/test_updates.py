@@ -174,6 +174,10 @@ class SourceTests(unittest.TestCase):
 
 class ControllerTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        # 默认夹具模拟直接启动，不继承 CI Runner 的 systemd/Supervisor 标记。
+        self.enterContext(patch.dict(os.environ, {
+            "INVOCATION_ID": "", "SUPERVISOR_ENABLED": "",
+        }))
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -263,6 +267,20 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
                 await self.updater.apply(self.tag)
             popen.assert_not_called()
         self.assertFalse(self.updater.busy())
+
+    async def test_managed_service_rejects_in_app_update(self):
+        for key in ("INVOCATION_ID", "SUPERVISOR_ENABLED"):
+            with (
+                self.subTest(manager=key),
+                patch.dict(os.environ, {key: "fixture"}),
+                patch("spiritscout.updates.controller.installation",
+                      return_value={"kind": "package", "label": "pip", "supported": True}),
+                patch("spiritscout.updates.controller.subprocess.Popen") as popen,
+            ):
+                self.assertFalse((await self.updater.snapshot())["can_update"])
+                with self.assertRaisesRegex(ValueError, "进程管理器"):
+                    await self.updater.apply(self.tag)
+                popen.assert_not_called()
 
     async def test_apply_writes_private_plan_and_does_not_expose_token(self):
         with (
