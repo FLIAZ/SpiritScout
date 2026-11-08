@@ -10,13 +10,83 @@ Assign tasks in your browser, let agents collaborate, and inspect their progress
 
 [![Version](https://img.shields.io/badge/version-v0.20.0-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
 
-[Quick start](#quick-start) · [Capabilities and modes](#capabilities-and-modes) · [Architecture](#architecture) · [Deployment guide (中文)](docs/部署与配置.md) · [Contributing (中文)](CONTRIBUTING.md)
+[Interface preview](#interface-preview) · [Quick start](#quick-start) · [Capabilities and modes](#capabilities-and-modes) · [Architecture](#architecture) · [Deployment guide (中文)](docs/部署与配置.md) · [Contributing (中文)](CONTRIBUTING.md)
 
 </div>
 
 > For authorized targets and competitions. See the scope, approval, and usage notes below and the [security policy (中文)](SECURITY.md).
 
+## Interface preview
+
+Actual interface with local demo data. Click an image to enlarge.
+
+**Task entry**
+
+[![Task entry](docs/images/screenshots/task-entry.png)](docs/images/screenshots/task-entry.png)
+
+<table>
+<tr>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/dashboard.png"><img src="docs/images/screenshots/dashboard.png" alt="Dashboard" width="100%"></a><br>
+<b>Dashboard</b>
+</td>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/session-workbench.png"><img src="docs/images/screenshots/session-workbench.png" alt="Conversation" width="100%"></a><br>
+<b>Conversation</b>
+</td>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/exploration-graph.png"><img src="docs/images/screenshots/exploration-graph.png" alt="Exploration" width="100%"></a><br>
+<b>Exploration</b>
+</td>
+</tr>
+<tr>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/agent-team.png"><img src="docs/images/screenshots/agent-team.png" alt="Agent teams" width="100%"></a><br>
+<b>Agent teams</b>
+</td>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/model-settings.png"><img src="docs/images/screenshots/model-settings.png" alt="Models" width="100%"></a><br>
+<b>Models</b>
+</td>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/mcp-tools.png"><img src="docs/images/screenshots/mcp-tools.png" alt="MCP tools" width="100%"></a><br>
+<b>MCP tools</b>
+</td>
+</tr>
+<tr>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/skills.png"><img src="docs/images/screenshots/skills.png" alt="Skills" width="100%"></a><br>
+<b>Skills</b>
+</td>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/projects.png"><img src="docs/images/screenshots/projects.png" alt="Projects" width="100%"></a><br>
+<b>Projects</b>
+</td>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/experience.png"><img src="docs/images/screenshots/experience.png" alt="Experience" width="100%"></a><br>
+<b>Experience</b>
+</td>
+</tr>
+<tr>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/assets.png"><img src="docs/images/screenshots/assets.png" alt="Assets" width="100%"></a><br>
+<b>Assets</b>
+</td>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/vulnerabilities.png"><img src="docs/images/screenshots/vulnerabilities.png" alt="Vulnerabilities" width="100%"></a><br>
+<b>Vulnerabilities</b>
+</td>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/ctf-writeup.png"><img src="docs/images/screenshots/ctf-writeup.png" alt="CTF write-ups" width="100%"></a><br>
+<b>CTF write-ups</b>
+</td>
+</tr>
+</table>
+
 ## Capabilities and modes
+
+The console supports English and Simplified Chinese. Switch languages at the bottom of the sidebar or on the sign-in page; your browser remembers the selection.
+UI translations are bundled locally. Conversation content, user configuration, skill descriptions, and evidence remain in their original language.
 
 | Mode | Use cases | Collaboration and approval |
 | --- | --- | --- |
@@ -33,6 +103,7 @@ SRC refers to security response center / bug bounty workflows.
 | Execution workbench | Expand tasks, approaches, and execution steps; inspect tool results and a process graph linked to audit records |
 | Projects and artifacts | Persist assets and sessions; independently reproduce SRC vulnerability candidates with the verifier agent, Jianzhen, and generate reports or write-ups |
 | Browser and tools | Connect MCP servers, Skills, and shell/Python sandboxes; SRC and CTF execution agents can run offline CyberChef recipes and reuse complete byte outputs; manage MCP and Skill cards with status groups, combined filters, and switches; SRC can reuse authenticated browser sessions and let users handle CAPTCHAs |
+| CVE intelligence | Local official CVE List snapshots, incremental updates and offline search; on-demand NVD, KEV, EPSS and OSV queries plus local Nuclei template links. Intelligence remains separate from reproduced findings. See [setup (中文)](docs/部署与配置.md#cve-情报库). |
 | Models and usage | Configure providers, teams, and models; inspect estimated costs, tokens, and input cache usage reported by endpoints |
 
 Skill management uses cards with separate enabled/disabled groups, combined category/source/date filters, green switches, and deletion. Open a card to browse its folders, preview and edit rendered Markdown, with draft protection and version-checked saves. Multiple ZIP and TAR archives can be imported directly; RAR / 7z requires system libarchive. See [management and import details (中文)](docs/部署与配置.md#skill-目录与文件浏览).
@@ -53,21 +124,106 @@ Prepare project dependencies, a running Ollama instance, downloaded weights, and
 ./launch.sh start --offline
 ```
 
+Ollama and llama.cpp use this same entry point and share the lightweight workspace and session history. Select the backend in the model configuration.
+
 The console defaults to `http://127.0.0.1:8001`. Select **AWDP patching**, upload the challenge source, and describe the repair requirements. See [Ollama lightweight setup (中文)](docs/Ollama轻量配置.md) for preparation, parameters, and archive requirements, and [design rationale and related work (中文)](docs/06-创新点与技术思想.md) for the engineering choices.
 
-----
-
-Historical benchmark · tsecbench (2026-10-23)
+<details>
+<summary>Historical benchmark · tsecbench (2026-10-23)</summary>
 
 The original run used DeepSeek v4.1 Flash. Included for reference.
 
 <img width="1606" height="838" alt="Historical tsecbench benchmark results" src="https://github.com/user-attachments/assets/f5cea640-aa57-40d2-9d21-919960aadd64" />
 
+</details>
+
 ## Quick start
 
-### Docker · Recommended
+**For Windows, we recommend running from source inside WSL2. For Linux, we recommend running directly from source.** The project is developed from source, which makes configuration, tool installation, and troubleshooting easier to follow. Docker remains an option for users with an existing Docker setup or a preference for container-managed dependencies.
 
-Requires **Linux container mode** and **Docker Compose 2.20+**. Use Docker Desktop on Windows or Docker Engine on Linux. macOS/ARM64 compatibility is not yet supported.
+### Deploy with an Agent
+
+On the computer where you want to install SpiritScout, open a coding agent that can edit files and run terminal commands, then send it the prompt below. If you already have a local checkout, open that directory in the agent. When choosing WSL2, have the agent run installation commands inside the WSL Linux environment.
+
+```text
+Help me deploy SpiritScout. Repository: https://github.com/FLIAZ/SpiritScout.git
+First read AGENTS.md and AGENTINSTALL.md in the repository root; retrieve these guides first if there is no local checkout.
+Check the operating system, CPU architecture, dependencies, ports, and existing configuration, then confirm the installation method. Follow any choice I have already made.
+Recommend a source installation inside WSL2 on Windows, or directly on Linux. Offer Docker and Linux packages as alternatives.
+For WSL2, keep the project, virtual environment, and data under /home. Check any existing checkout before using it, preserve configuration, and do not reuse a Windows .venv.
+If there is no checkout, clone into the installation directory in the selected runtime environment.
+Confirm whether I want the standard multi-agent deployment or a lightweight local-model deployment, and whether I need remote access or the interactive SRC browser.
+Install using my chosen method, preserve existing configuration and data, and troubleshoot errors using the guide.
+When finished, provide the access URL, start and stop commands, configuration and data locations, and a list of checks that passed or remain unverified.
+```
+
+See the [Agent installation guide (中文)](AGENTINSTALL.md) for environment checks, installation steps, and troubleshooting. Enter model API keys in the local console after deployment.
+
+### Run from source on Linux / WSL2 · Recommended
+
+Requires Python 3.11+, Git, and bubblewrap. The commands below are for a new installation. Inspect and reuse existing checkouts and compatible virtual environments; preserve configuration and data before upgrading.
+
+**Prepare WSL2 on Windows**
+
+In PowerShell, list installed distributions and check that the selected distribution has `VERSION` set to `2`:
+
+```powershell
+wsl --list --verbose
+```
+
+If no distribution is installed, use `wsl --list --online` to find available names, then install one from an administrator PowerShell window, for example `wsl --install -d Ubuntu-24.04`. Restart if prompted, create a Linux user, and open that distribution's terminal. See the [Agent installation guide (中文)](AGENTINSTALL.md#4-源码安装推荐) for WSL1 conversion and troubleshooting, and [Microsoft's installation instructions](https://learn.microsoft.com/en-us/windows/wsl/install) for WSL requirements. Linux users can continue directly below.
+
+**Run the following commands in a Linux / WSL2 terminal**
+
+On Debian / Ubuntu, install the base dependencies and check that the system Python is 3.11 or newer:
+
+```bash
+sudo apt update
+sudo apt install git python3 python3-venv bubblewrap
+/usr/bin/python3 --version
+```
+
+On Fedora, use `sudo dnf install git python3 python3-pip bubblewrap`. If the system Python is too old, install a suitable version before creating the virtual environment.
+
+Keep the project, `.venv`, and `.spiritscout/` in the Linux file system, for example `~/projects/SpiritScout`. In WSL2, avoid `/mnt/c` and `/mnt/d`, and do not reuse a Windows virtual environment. See [Microsoft's file storage recommendations](https://learn.microsoft.com/en-us/windows/wsl/filesystems).
+
+```bash
+mkdir -p ~/projects
+cd ~/projects
+git clone https://github.com/FLIAZ/SpiritScout.git
+cd SpiritScout
+./install.sh
+./launch.sh
+```
+
+`install.sh` creates or reuses `.venv`, installs and checks core dependencies, and creates missing configuration files. Existing configuration and data are preserved.
+
+Visit <http://127.0.0.1:8000>; WSL2 users can open it in their Windows browser. Press `Ctrl+C` to stop, or use `./launch.sh --port 8100` to change the port. To enable login, first run `python3 deploy.py init` to create administrator credentials; this command does not start Docker. Configure administrator credentials and HTTPS separately for remote access.
+
+Browser tools additionally require Node.js 22+ and Chromium/Chrome; CyberChef requires Node.js 24–26. See the [Agent installation guide (中文)](AGENTINSTALL.md) for the CTF toolkit, MCP setup, sandbox checks, and connecting from WSL to a model service on Windows. After the console starts, verify the shell/Python, model, and browser tools you intend to use.
+
+<details>
+<summary>Native Windows: for the console and MCP only</summary>
+
+Native Windows requires Python 3.11+ and does not provide the project's Linux shell/Python sandbox. Use the WSL2 deployment above when you need the complete tool execution environment.
+
+Run in PowerShell from the repository root:
+
+```powershell
+py -3 -m venv .venv
+.venv\Scripts\python.exe -m pip install -e .
+if (-not (Test-Path configs/system.yaml)) { Copy-Item configs/system.example.yaml configs/system.yaml }
+if (-not (Test-Path configs/models.yaml)) { Set-Content -Path configs/models.yaml -Value "providers: []`nmodels: []" -Encoding utf8 }
+.\launch.ps1
+```
+
+Visit <http://127.0.0.1:8000> and press `Ctrl+C` to stop. Pass arguments to `launch.ps1`. Windows and WSL must use separate virtual environments.
+
+</details>
+
+### Docker deployment · Optional
+
+Suitable for users with an existing Docker setup, a preference for consistent dependencies, or multiple independent instances. Requires **Linux container mode** and **Docker Compose 2.20+**. Use Docker Desktop on Windows or Docker Engine on Linux. Full validation on macOS/ARM64 has not been completed.
 
 ```bash
 git clone https://github.com/FLIAZ/SpiritScout.git
@@ -107,37 +263,6 @@ For source development overrides, administrator recovery, reverse proxies, data 
 
 </details>
 
-### Run locally on Linux / Windows
-
-<details>
-<summary>Expand instructions</summary>
-
-Requires Python 3.11+. Native browser tools additionally require Node.js 22+ and Chromium/Chrome.
-You can set the browser executable path with `SPIRITSCOUT_CHROME_EXECUTABLE`.
-
-**Linux**
-
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -e .
-sudo apt install bubblewrap   # Debian / Ubuntu; use sudo dnf install bubblewrap on Fedora
-./launch.sh
-```
-
-**Windows PowerShell**
-
-```powershell
-py -3 -m venv .venv
-.venv\Scripts\python.exe -m pip install -e .
-.\launch.ps1
-```
-
-Visit <http://127.0.0.1:8000> and press `Ctrl+C` to stop. On Linux, use `./launch.sh --port 10010` to change the port; on Windows, pass arguments to `launch.ps1`. Configure administrator credentials and HTTPS before listening on an external address.
-
-The shell/Python sandbox requires Linux and bubblewrap. A native Windows/macOS console cannot provide this complete toolchain; Docker is recommended. Do not share virtual environments between Windows, WSL, and Linux.
-
-</details>
-
 ### Configure models and start a task
 
 1. On the Models page (模型), add the provider URL, API key, and model ID.
@@ -147,6 +272,8 @@ The shell/Python sandbox requires Linux and bubblewrap. A native Windows/macOS c
 Use **Clean storage (清理存储)** in the sidebar or session details to inspect sessions sorted by disk usage, compact the database, and remove download caches. Cleanup runs only after confirmation and preserves conversations, results, and the latest recovery chain. Cold archive and restore are not included.
 
 The round button beside the composer pauses or continues the current task when the draft is empty, and sends when a message or attachment is ready. Pause preserves the running task; **End task** is under **More actions**.
+
+Type `/` in the composer to filter Agent commands. Use ↑↓ to select, Tab or Enter to complete, then Enter to run. Main task sessions support `/compact` (condense context), `/status` (task and compaction status), `/pause`, `/resume`, `/model`, `/files` (deliverables), `/report` (existing report), and `/help`. Compaction runs once per context before its next model call without an extra model request. It preserves user statements, current authorization, the latest four execution replies, and original history; short histories may stay unchanged. Paused or ended tasks are not restarted. Commands do not accept attachments or extra arguments; prefix literal slash text with `//`. The home composer supports `/help` and `/model`; other commands require an open task session.
 
 The model button to the left of Send selects a model for this session. **Auto** follows the team configuration. Provider and model identities remain distinct, selections persist with the session, and changes affect subsequent calls without interrupting an in-flight response or overriding explicitly assigned sub-agent models. Choose Auto to clear the session override.
 

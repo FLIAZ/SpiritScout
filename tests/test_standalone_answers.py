@@ -74,6 +74,8 @@ class LocalAnswersTests(unittest.TestCase):
     ) -> None:
         agent = object.__new__(CTFWebAgent)
         agent.flag_manager = FlagManager(local_only=True, multiple_answers=True)
+        agent.ctx = SimpleNamespace(mode=RunMode.CTF,
+            gateway=SimpleNamespace(config=SimpleNamespace(lightweight_local=True)))
         task = Task(
             task_id="task-local", agent_type="ctf_web", task_type="ctf_web",
             target="http://fixture.test",
@@ -105,7 +107,8 @@ class BackgroundReportTests(unittest.IsolatedAsyncioTestCase):
             agent = object.__new__(CTFWebAgent)
             agent.flag_manager = FlagManager(local_only=True, multiple_answers=multiple)
             agent.agent_id = "fixture-agent"
-            agent.ctx = SimpleNamespace(blackboard=None)
+            agent.ctx = SimpleNamespace(blackboard=None, mode=RunMode.CTF,
+                gateway=SimpleNamespace(config=SimpleNamespace(lightweight_local=True)))
             agent._record_flag = Mock()
             task = Task(task_id="local", agent_type="ctf_web", task_type="ctf_web",
                         target="http://fixture.test",

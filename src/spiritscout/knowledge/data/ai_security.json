@@ -1,0 +1,70 @@
+[
+  {
+    "skill_id": "ai-offline-environment",
+    "domain": "ai-ml",
+    "description": "AI 安全离线比赛环境 PyTorch torch NumPy CUDA CPU wheel 依赖、断网、低内存、预处理、训练推理复现。",
+    "source": "SpiritScout 离线 AI 参考；2026-11-06 核对官方 API",
+    "path": "ai-ml/ai-offline-environment/SKILL.md",
+    "body": "# 离线环境与证据\n\n环境要求是能力线索，不能仅凭 torch/numpy 版本判定题型。AI 安全可能涉及数值模型、数据、序列化，也可能涉及服务的输入边界；以原始题面和验收程序为准。\nai_inspect(operation=\"environment\") 给出当前沙箱解释器与依赖元数据，不导入 torch、不加载权重、不联网。宿主 shell 能 import 不证明沙箱能 import；元数据存在也不证明动态库/ABI 可用。普通与轻量 CTF 共用该入口，轻量先 tool_lookup(name=\"ai_inspect\") 再 tool_invoke。\n断网前准备与比赛 OS、架构、Python ABI 一致的 wheel 和全部依赖；安装使用 --no-index --find-links。CPU 与 CUDA 构建不同，不能把轻量模式固定为 CPU。云端 LLM 推理与本地赛题计算独立：普通模式可以用本机 CUDA；轻量模式也可用 CUDA，但本地 LLM 与赛题模型会竞争显存，设备与 batch 依据实际剩余显存和验收需求选择。不能临场默认联网 pip、torch.hub、from_pretrained 或下载数据集。\nPython 脚本每次新进程，变量不继承；把需要复用的数据、评测条件、脚本放在实际 workdir/artifacts。轻量优先小批次 CPU 基线、mmap 和分块统计；改变 batch、dtype、设备后需重新验证数值与验收一致。AMP、量化、编译不是必需前置。\n环境证据包括 sys.executable、Python/torch/numpy 版本、设备、模型/数据哈希、预处理、随机种子。可用 torch.set_num_threads(1) 降低 CPU 争用。seed 不保证跨平台确定性；记录重复实验差异。\n资料按需读，长数组与权重留在文件；上下文只带 shape/dtype/范围、指标、错误和原文引用。工具成功只是读取成功。\n\n参考资料（离线正文已包含关键事实，链接仅为来源）：\n- https://docs.pytorch.org/docs/2.15/notes/serialization.html\n- https://numpy.org/doc/stable/reference/generated/numpy.load.html\n- https://docs.pytorch.org/tutorials/beginner/fgsm_tutorial.html\n",
+    "files": {
+      "SKILL.md": "# 离线环境与证据\n\n环境要求是能力线索，不能仅凭 torch/numpy 版本判定题型。AI 安全可能涉及数值模型、数据、序列化，也可能涉及服务的输入边界；以原始题面和验收程序为准。\nai_inspect(operation=\"environment\") 给出当前沙箱解释器与依赖元数据，不导入 torch、不加载权重、不联网。宿主 shell 能 import 不证明沙箱能 import；元数据存在也不证明动态库/ABI 可用。普通与轻量 CTF 共用该入口，轻量先 tool_lookup(name=\"ai_inspect\") 再 tool_invoke。\n断网前准备与比赛 OS、架构、Python ABI 一致的 wheel 和全部依赖；安装使用 --no-index --find-links。CPU 与 CUDA 构建不同，不能把轻量模式固定为 CPU。云端 LLM 推理与本地赛题计算独立：普通模式可以用本机 CUDA；轻量模式也可用 CUDA，但本地 LLM 与赛题模型会竞争显存，设备与 batch 依据实际剩余显存和验收需求选择。不能临场默认联网 pip、torch.hub、from_pretrained 或下载数据集。\nPython 脚本每次新进程，变量不继承；把需要复用的数据、评测条件、脚本放在实际 workdir/artifacts。轻量优先小批次 CPU 基线、mmap 和分块统计；改变 batch、dtype、设备后需重新验证数值与验收一致。AMP、量化、编译不是必需前置。\n环境证据包括 sys.executable、Python/torch/numpy 版本、设备、模型/数据哈希、预处理、随机种子。可用 torch.set_num_threads(1) 降低 CPU 争用。seed 不保证跨平台确定性；记录重复实验差异。\n资料按需读，长数组与权重留在文件；上下文只带 shape/dtype/范围、指标、错误和原文引用。工具成功只是读取成功。\n\n参考资料（离线正文已包含关键事实，链接仅为来源）：\n- https://docs.pytorch.org/docs/2.15/notes/serialization.html\n- https://numpy.org/doc/stable/reference/generated/numpy.load.html\n- https://docs.pytorch.org/tutorials/beginner/fgsm_tutorial.html\n",
+      "references/runtime_probe.py": "# 在已授权沙箱运行；只做小张量运算，不下载模型/数据。\nimport json, sys\nimport numpy as np\nimport torch\ntorch.set_num_threads(1)\nx = torch.tensor([1., 2.], requires_grad=True)\n(x.square().sum()).backward()\na = x.detach().cpu().numpy()\nassert np.array_equal(a, np.array([1., 2.], dtype=np.float32))\nassert torch.equal(x.grad, torch.tensor([2., 4.]))\nprint(json.dumps({\"python\":sys.version.split()[0], \"torch\":torch.__version__, \"numpy\":np.__version__, \"cpu_autograd\":True, \"numpy_bridge\":True}))\n",
+      "references/cuda_probe.py": "# 在真实沙箱运行；小张量核验设备，不加载题目模型或 LLM。\nimport json\nimport torch\ntorch.set_num_threads(1)\nresult = {\"torch\":torch.__version__, \"built_cuda\":torch.version.cuda, \"available\":torch.cuda.is_available()}\nif result[\"available\"]:\n    free, total = torch.cuda.mem_get_info()\n    x = torch.tensor([1., 2.], device=\"cuda\", requires_grad=True)\n    x.square().sum().backward()\n    torch.cuda.synchronize()\n    assert torch.equal(x.grad.cpu(), torch.tensor([2., 4.]))\n    result.update(name=torch.cuda.get_device_name(), free_bytes=free, total_bytes=total, autograd=True)\nprint(json.dumps(result, ensure_ascii=False))\n"
+    }
+  },
+  {
+    "skill_id": "ai-offline-pytorch-artifacts",
+    "domain": "ai-ml",
+    "description": "AI 安全 PyTorch torch .pt .pth state_dict checkpoint safetensors pickle 反序列化 模型权重 TorchScript NumPy allow_pickle 静态分析。",
+    "source": "SpiritScout 离线 AI 参考；2026-11-06 核对官方 API",
+    "path": "ai-ml/ai-offline-pytorch-artifacts/SKILL.md",
+    "body": "# 模型文件与加载边界\n\n文件后缀不能证明格式或安全性。ai_inspect 的 artifact 用真实字节识别 NPY、ZIP、pickle 操作码、safetensors 头部，返回哈希、目录/分页、next_call，不调用 torch.load/pickle.load、不解压。ZIP 条目 member 可选 .npy/.pkl；has_more 需要按需续读，不能把首屏当完整文件。\nPyTorch 新式 checkpoint 常是含 data.pkl 和张量 storage 的 ZIP。state_dict 是参数映射，不能自动等同于完整网络架构；键名、shape、dtype 与题目提供的架构/加载代码需要对应。TorchScript 或自定义 module 可能带代码。\ntorch.load 的 weights_only 在 2.6 起有默认行为变化，分析时显式说明所用参数。weights_only=True 缩小加载面，但不是完整安全沙箱；不防所有资源耗尽或内存问题。不能为消除报错而盲目换 weights_only=False、添加所有 safe_globals 或开启 trust_remote_code。\npickletools 静态反汇编不执行 reducer；GLOBAL/STACK_GLOBAL/REDUCE 等只是待追踪结构，不等于已执行漏洞。静态没有命中也不能判安全；动态构造类型可能漏出。safetensors 元数据不执行 pickle，但头部合法不证明模型无后门。\n需要读取可信的已审计 state_dict 时，可按文档在隔离环境使用 map_location=\"cpu\"、weights_only=True，适用时用 mmap=True/FakeTensorMode 降低张量内存。不是所有旧 checkpoint 都支持 mmap；错误保留原文，不反复重载整个文件。\n验证加载攻击需要证明受题目控制的输入实际到达危险加载器并产生无害可观察作用；识别到 pickle 或工具返回 ok 不算漏洞成立。\n\n参考资料（离线正文已包含关键事实，链接仅为来源）：\n- https://docs.pytorch.org/docs/2.15/notes/serialization.html\n- https://numpy.org/doc/stable/reference/generated/numpy.load.html\n- https://docs.pytorch.org/tutorials/beginner/fgsm_tutorial.html\n",
+    "files": {
+      "SKILL.md": "# 模型文件与加载边界\n\n文件后缀不能证明格式或安全性。ai_inspect 的 artifact 用真实字节识别 NPY、ZIP、pickle 操作码、safetensors 头部，返回哈希、目录/分页、next_call，不调用 torch.load/pickle.load、不解压。ZIP 条目 member 可选 .npy/.pkl；has_more 需要按需续读，不能把首屏当完整文件。\nPyTorch 新式 checkpoint 常是含 data.pkl 和张量 storage 的 ZIP。state_dict 是参数映射，不能自动等同于完整网络架构；键名、shape、dtype 与题目提供的架构/加载代码需要对应。TorchScript 或自定义 module 可能带代码。\ntorch.load 的 weights_only 在 2.6 起有默认行为变化，分析时显式说明所用参数。weights_only=True 缩小加载面，但不是完整安全沙箱；不防所有资源耗尽或内存问题。不能为消除报错而盲目换 weights_only=False、添加所有 safe_globals 或开启 trust_remote_code。\npickletools 静态反汇编不执行 reducer；GLOBAL/STACK_GLOBAL/REDUCE 等只是待追踪结构，不等于已执行漏洞。静态没有命中也不能判安全；动态构造类型可能漏出。safetensors 元数据不执行 pickle，但头部合法不证明模型无后门。\n需要读取可信的已审计 state_dict 时，可按文档在隔离环境使用 map_location=\"cpu\"、weights_only=True，适用时用 mmap=True/FakeTensorMode 降低张量内存。不是所有旧 checkpoint 都支持 mmap；错误保留原文，不反复重载整个文件。\n验证加载攻击需要证明受题目控制的输入实际到达危险加载器并产生无害可观察作用；识别到 pickle 或工具返回 ok 不算漏洞成立。\n\n参考资料（离线正文已包含关键事实，链接仅为来源）：\n- https://docs.pytorch.org/docs/2.15/notes/serialization.html\n- https://numpy.org/doc/stable/reference/generated/numpy.load.html\n- https://docs.pytorch.org/tutorials/beginner/fgsm_tutorial.html\n"
+    }
+  },
+  {
+    "skill_id": "ai-offline-adversarial-inputs",
+    "domain": "ai-ml",
+    "description": "AI 安全 对抗样本 adversarial FGSM PGD targeted untargeted L0 L2 Linf 梯度 归一化 扰动 图像 tensor PyTorch。",
+    "source": "SpiritScout 离线 AI 参考；2026-11-06 核对官方 API",
+    "path": "ai-ml/ai-offline-adversarial-inputs/SKILL.md",
+    "body": "# 对抗输入的数值与验收事实\n\n可微模型、只读概率接口、只读标签接口提供的能力不同；白盒梯度方法要求实际可求梯度，不能用其结果替代黑盒现场证据。目标类别、允许改变的输入、查询次数、范数与输出格式由题面约束。\n无目标攻击通常增加真实标签损失；定向攻击通常减少目标标签损失。符号相反会优化错方向。model.eval() 切换 dropout/batchnorm 行为，不会关闭输入梯度；torch.no_grad()/inference_mode 不适合需要输入梯度的阶段。\n梯度应对需要修改的输入求取，清除旧梯度；.detach() 后需重新 requires_grad。softmax/logits 与 loss 的输入要求不同；cross_entropy 通常接收 logits。梯度为零/None 需要定位计算图、dtype、截断或预处理，不据此判无解。\n像素 0..255、0..1 和标准化空间的 epsilon 不能混用。裁剪合法范围和投影扰动球是不同约束；最终统计应在题面指定空间、按规定的逐样本维度计算。通道顺序、resize、颜色空间、压缩编码和量化都会改变结果。\nai_inspect(operation=\"compare\", path=候选.npy, reference=原始.npy) 对落盘实数 NPY 返回全数组 L1/L2/Linf、变动数、范围和来源哈希；不会广播、不加载 object，也不把全数组 L2 冒充逐样本 L2。非 NPY 或额外约束由模型按实际格式用 python 验证。\n有效结果需同时满足扰动/格式约束和原始验收器上的分类目标。干净样本原本就错、只在自造替代模型上翻转、内存结果正确但保存重读失败都不能计作成功。\n\n参考资料（离线正文已包含关键事实，链接仅为来源）：\n- https://docs.pytorch.org/docs/2.15/notes/serialization.html\n- https://numpy.org/doc/stable/reference/generated/numpy.load.html\n- https://docs.pytorch.org/tutorials/beginner/fgsm_tutorial.html\n",
+    "files": {
+      "SKILL.md": "# 对抗输入的数值与验收事实\n\n可微模型、只读概率接口、只读标签接口提供的能力不同；白盒梯度方法要求实际可求梯度，不能用其结果替代黑盒现场证据。目标类别、允许改变的输入、查询次数、范数与输出格式由题面约束。\n无目标攻击通常增加真实标签损失；定向攻击通常减少目标标签损失。符号相反会优化错方向。model.eval() 切换 dropout/batchnorm 行为，不会关闭输入梯度；torch.no_grad()/inference_mode 不适合需要输入梯度的阶段。\n梯度应对需要修改的输入求取，清除旧梯度；.detach() 后需重新 requires_grad。softmax/logits 与 loss 的输入要求不同；cross_entropy 通常接收 logits。梯度为零/None 需要定位计算图、dtype、截断或预处理，不据此判无解。\n像素 0..255、0..1 和标准化空间的 epsilon 不能混用。裁剪合法范围和投影扰动球是不同约束；最终统计应在题面指定空间、按规定的逐样本维度计算。通道顺序、resize、颜色空间、压缩编码和量化都会改变结果。\nai_inspect(operation=\"compare\", path=候选.npy, reference=原始.npy) 对落盘实数 NPY 返回全数组 L1/L2/Linf、变动数、范围和来源哈希；不会广播、不加载 object，也不把全数组 L2 冒充逐样本 L2。非 NPY 或额外约束由模型按实际格式用 python 验证。\n有效结果需同时满足扰动/格式约束和原始验收器上的分类目标。干净样本原本就错、只在自造替代模型上翻转、内存结果正确但保存重读失败都不能计作成功。\n\n参考资料（离线正文已包含关键事实，链接仅为来源）：\n- https://docs.pytorch.org/docs/2.15/notes/serialization.html\n- https://numpy.org/doc/stable/reference/generated/numpy.load.html\n- https://docs.pytorch.org/tutorials/beginner/fgsm_tutorial.html\n"
+    }
+  },
+  {
+    "skill_id": "ai-offline-backdoor-evaluation",
+    "domain": "ai-ml",
+    "description": "AI 安全 模型后门 backdoor trigger 数据投毒 poisoning ASR clean accuracy 触发器 微调 pruning 剪枝 PyTorch。",
+    "source": "SpiritScout 离线 AI 参考；2026-11-06 核对官方 API",
+    "path": "ai-ml/ai-offline-backdoor-evaluation/SKILL.md",
+    "body": "# 后门与投毒的验证口径\n\n权重异常、可疑神经元或带标记样本只是线索。后门验证需要同一真实加载器/预处理下的干净与触发对照，并说明触发条件和攻击目标。局部花纹触发、语义触发、标签污染、训练过程污染的可观察条件不同。\nclean accuracy 的分母是干净评测集。targeted ASR 常在原本非目标类的规定样本上统计；是否仅纳入干净预测正确的样本必须按题面说明。记录总数、有效数、成功数和排除原因；不能用不同样本集制造提升。\n触发位置/大小/颜色/alpha/输入空间影响行为；随机贴片、无触发、错误触发是可用对照，选择由现场假设决定。输入改变本身破坏主体时，误分类不自动证明特定后门。\n微调、剪枝、重训练、输入变换是不同干预，会损害干净性能。AWDP 修补要验证干净功能、目标触发与未覆盖触发，同时保留原架构、字段、类别映射、输出格式和赛方加载语义。\n训练/验证集合分离；保存并重新加载修补权重，再用独立评测入口比较基线。低内存时逐批累计计数，不把全部数据和模型副本同时留在内存。缺少原始训练数据或验收器时如实标明缺口。\n\n参考资料（离线正文已包含关键事实，链接仅为来源）：\n- https://docs.pytorch.org/docs/2.15/notes/serialization.html\n- https://numpy.org/doc/stable/reference/generated/numpy.load.html\n- https://docs.pytorch.org/tutorials/beginner/fgsm_tutorial.html\n",
+    "files": {
+      "SKILL.md": "# 后门与投毒的验证口径\n\n权重异常、可疑神经元或带标记样本只是线索。后门验证需要同一真实加载器/预处理下的干净与触发对照，并说明触发条件和攻击目标。局部花纹触发、语义触发、标签污染、训练过程污染的可观察条件不同。\nclean accuracy 的分母是干净评测集。targeted ASR 常在原本非目标类的规定样本上统计；是否仅纳入干净预测正确的样本必须按题面说明。记录总数、有效数、成功数和排除原因；不能用不同样本集制造提升。\n触发位置/大小/颜色/alpha/输入空间影响行为；随机贴片、无触发、错误触发是可用对照，选择由现场假设决定。输入改变本身破坏主体时，误分类不自动证明特定后门。\n微调、剪枝、重训练、输入变换是不同干预，会损害干净性能。AWDP 修补要验证干净功能、目标触发与未覆盖触发，同时保留原架构、字段、类别映射、输出格式和赛方加载语义。\n训练/验证集合分离；保存并重新加载修补权重，再用独立评测入口比较基线。低内存时逐批累计计数，不把全部数据和模型副本同时留在内存。缺少原始训练数据或验收器时如实标明缺口。\n\n参考资料（离线正文已包含关键事实，链接仅为来源）：\n- https://docs.pytorch.org/docs/2.15/notes/serialization.html\n- https://numpy.org/doc/stable/reference/generated/numpy.load.html\n- https://docs.pytorch.org/tutorials/beginner/fgsm_tutorial.html\n"
+    }
+  },
+  {
+    "skill_id": "ai-offline-numpy-evidence",
+    "domain": "ai-ml",
+    "description": "AI 安全 NumPy numpy NPY NPZ 数组 dtype shape endian NaN Inf overflow uint8 图像预处理 epsilon 范数 验证。",
+    "source": "SpiritScout 离线 AI 参考；2026-11-06 核对官方 API",
+    "path": "ai-ml/ai-offline-numpy-evidence/SKILL.md",
+    "body": "# 数组格式与精确验证\n\nNPY 头部包含 dtype、shape、Fortran 顺序；NPZ 是 ZIP 容器，键名与数组顺序须读取实际条目。ai_inspect artifact 只读取头部，不能说明数据内容正确。object 数组可能通过 pickle 执行对象还原，数值读取使用 allow_pickle=False；不能为了方便默认打开。\nuint8 相减会溢出，比较差值前按数据范围选择合适数值类型。float64 无法精确表示所有 uint64/int64；不能用浮点转换证明大整数相等。dtype、字节序、NaN、Inf、空数组、shape 不符和隐式广播都能产生伪验证。\nnp.load(..., mmap_mode=\"r\", allow_pickle=False) 适合 NPY 分块访问；NPZ 压缩成员不能等价地零成本 mmap，读取成员可能解压整份。选择读取的 member 和 size 要依据实际元数据。\n图像 tensor 的 NCHW/NHWC、RGB/BGR、范围、均值/方差、resize/插值、标签索引和文件编码都属于验收语义。模型输出变化前先确认原始样本基线可复现。\n验证应从最终提交文件重新读取；保留原文件与候选的 SHA256、shape/dtype、非有限值数量、样本数和题面指定指标。使用明确失败条件的 assert，不能把 exit=0 或显示一个数字当作验证目标已达到。\n\n参考资料（离线正文已包含关键事实，链接仅为来源）：\n- https://docs.pytorch.org/docs/2.15/notes/serialization.html\n- https://numpy.org/doc/stable/reference/generated/numpy.load.html\n- https://docs.pytorch.org/tutorials/beginner/fgsm_tutorial.html\n",
+    "files": {
+      "SKILL.md": "# 数组格式与精确验证\n\nNPY 头部包含 dtype、shape、Fortran 顺序；NPZ 是 ZIP 容器，键名与数组顺序须读取实际条目。ai_inspect artifact 只读取头部，不能说明数据内容正确。object 数组可能通过 pickle 执行对象还原，数值读取使用 allow_pickle=False；不能为了方便默认打开。\nuint8 相减会溢出，比较差值前按数据范围选择合适数值类型。float64 无法精确表示所有 uint64/int64；不能用浮点转换证明大整数相等。dtype、字节序、NaN、Inf、空数组、shape 不符和隐式广播都能产生伪验证。\nnp.load(..., mmap_mode=\"r\", allow_pickle=False) 适合 NPY 分块访问；NPZ 压缩成员不能等价地零成本 mmap，读取成员可能解压整份。选择读取的 member 和 size 要依据实际元数据。\n图像 tensor 的 NCHW/NHWC、RGB/BGR、范围、均值/方差、resize/插值、标签索引和文件编码都属于验收语义。模型输出变化前先确认原始样本基线可复现。\n验证应从最终提交文件重新读取；保留原文件与候选的 SHA256、shape/dtype、非有限值数量、样本数和题面指定指标。使用明确失败条件的 assert，不能把 exit=0 或显示一个数字当作验证目标已达到。\n\n参考资料（离线正文已包含关键事实，链接仅为来源）：\n- https://docs.pytorch.org/docs/2.15/notes/serialization.html\n- https://numpy.org/doc/stable/reference/generated/numpy.load.html\n- https://docs.pytorch.org/tutorials/beginner/fgsm_tutorial.html\n"
+    }
+  },
+  {
+    "skill_id": "ai-offline-model-privacy",
+    "domain": "ai-ml",
+    "description": "AI 安全 模型隐私 成员推断 membership inference 模型反演 inversion extraction 模型窃取 蒸馏 黑盒 logits query。",
+    "source": "SpiritScout 离线 AI 参考；2026-11-06 核对官方 API",
+    "path": "ai-ml/ai-offline-model-privacy/SKILL.md",
+    "body": "# 模型隐私与提取的证据\n\n成员推断判断样本是否参与训练；模型反演恢复与训练特征相关的输入；模型提取近似目标决策行为。这些是不同目标，不能把高置信度、相似图片或复制了输出格式当作完成。\n成员推断需成员/非成员的独立参照、阈值选择集、误报率与样本来源；过拟合损失只是信号，分布差异可以制造虚假优势。不能用评测标签调阈值再宣称泛化。\n反演优化出的输入可能只是类别原型而非真实训练记录；隐私泄漏需要原始材料或独立相似性依据。生成“看起来合理”的图片不证明恢复了秘密。\n模型提取应记录目标允许的接口（logits/概率/top-k/仅标签）、查询预算与已缓存的真实请求、训练/验证分离及目标一致率。离线题只有本地接口时不依赖云模型；合成替代器成功不是目标服务成功。\n数据、权重与输出需要保存来源哈希和可重跑评测脚本。小模型把重复调用计数、查询回执和数值交给脚本，自己负责选择假设与判断证据。\n\n参考资料（离线正文已包含关键事实，链接仅为来源）：\n- https://docs.pytorch.org/docs/2.15/notes/serialization.html\n- https://numpy.org/doc/stable/reference/generated/numpy.load.html\n- https://docs.pytorch.org/tutorials/beginner/fgsm_tutorial.html\n",
+    "files": {
+      "SKILL.md": "# 模型隐私与提取的证据\n\n成员推断判断样本是否参与训练；模型反演恢复与训练特征相关的输入；模型提取近似目标决策行为。这些是不同目标，不能把高置信度、相似图片或复制了输出格式当作完成。\n成员推断需成员/非成员的独立参照、阈值选择集、误报率与样本来源；过拟合损失只是信号，分布差异可以制造虚假优势。不能用评测标签调阈值再宣称泛化。\n反演优化出的输入可能只是类别原型而非真实训练记录；隐私泄漏需要原始材料或独立相似性依据。生成“看起来合理”的图片不证明恢复了秘密。\n模型提取应记录目标允许的接口（logits/概率/top-k/仅标签）、查询预算与已缓存的真实请求、训练/验证分离及目标一致率。离线题只有本地接口时不依赖云模型；合成替代器成功不是目标服务成功。\n数据、权重与输出需要保存来源哈希和可重跑评测脚本。小模型把重复调用计数、查询回执和数值交给脚本，自己负责选择假设与判断证据。\n\n参考资料（离线正文已包含关键事实，链接仅为来源）：\n- https://docs.pytorch.org/docs/2.15/notes/serialization.html\n- https://numpy.org/doc/stable/reference/generated/numpy.load.html\n- https://docs.pytorch.org/tutorials/beginner/fgsm_tutorial.html\n"
+    }
+  }
+]

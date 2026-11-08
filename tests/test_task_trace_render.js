@@ -14,6 +14,13 @@ class FakeEl {
     this._q=new Map();
   }
   get lastElementChild(){return this.children[this.children.length-1]||null;}
+  get innerHTML(){return this.children.length ? this.children.map(el=>el.html.replace('</div>',`${el.innerHTML}</div>`)).join('') : this._innerHTML || '';}
+  set innerHTML(value){this._innerHTML=value;for(const child of this.children)child.isConnected=false;this.children=[];}
+  insertBefore(child,before){
+    const previous=this.children.indexOf(child);if(previous>=0)this.children.splice(previous,1);
+    const index=before ? this.children.indexOf(before) : -1;
+    this.children.splice(index<0 ? this.children.length : index,0,child);
+  }
   insertAdjacentHTML(_,html){
     const el=new FakeEl(html);el._parent=this;
     el.remove=()=>{const i=this.children.indexOf(el);if(i>=0)this.children.splice(i,1);el.isConnected=false;};
@@ -24,11 +31,11 @@ class FakeEl {
 const appended=[],topLevel=[];
 const traceAppend=(event,html,cls="")=>{const row=new FakeEl(html);row.className=`tl ${cls}`;row.dataset.agent=event.actor;row.dataset.eventTs=event.ts;topLevel.push(row);return row;};
 const S={tab:"chat",think:new Map()};
-const ctx=vm.createContext({
+const ctx=vm.createContext(require('./helpers/i18n').context({
   SessionObserver:{toolName:n=>n||"工具",cleanText:v=>String(v),resultSummary:d=>d.note||d.error||"返回结果"},
   traceAppend,traceScroll(){},mdRender:t=>String(t),esc:s=>String(s),actorName:a=>String(a||""),
   argBrief:()=>"",ToolParameters:{attach(){}},S,setTimeout,clearTimeout,
-});
+}));
 vm.runInContext(fs.readFileSync(path.join(__dirname,"../src/spiritscout/web/static/js/task-trace.js"),"utf8"),ctx);
 const api=vm.runInContext("TaskTrace",ctx);
 let seq=0;
@@ -64,8 +71,8 @@ assert.equal(topLevel.filter(row=>kind(row)==="continuation").length,3,"仅意�
 assert.equal(topLevel.filter(row=>kind(row)==="outcome").length,1,"真实结论只显示一次");
 assert.ok(topLevel[0].hidden,"已有意图正文时不重复显示派发块");
 const stageOf=row=>row.querySelector(".task-stage");
-assert.equal(stageOf(topLevel[1]).querySelector(".task-stage-summary").innerHTML,"第一段进展");
-assert.equal(stageOf(topLevel[4]).querySelector(".task-stage-summary").innerHTML,"回复后的新进展");
+assert.equal(stageOf(topLevel[1]).querySelector(".task-stage-summary").innerHTML,'<div class="task-narrative-turn">第一段进展</div>');
+assert.equal(stageOf(topLevel[4]).querySelector(".task-stage-summary").innerHTML,'<div class="task-narrative-turn">回复后的新进展</div>');
 assert.equal(stageOf(topLevel[4]).querySelector(".task-step").querySelector(".task-progress").textContent,"本次执行已返回","迟到工具结果仍收在对应意图中");
 assert.equal(appended.filter(el=>el.html.includes('class="tl-act"')).length,1,"同一工具的调用和返回只占一条折叠明细");
 assert.equal(topLevel.at(-1).querySelector(".task-thread").querySelector(".task-summary").innerHTML,"确认完成");
@@ -102,10 +109,18 @@ const intent=stageOf(intents[0]);
 assert.equal(intent.querySelector(".task-heading strong").textContent,"核对权限边界");
 assert.match(intent.querySelector(".task-stage-summary").innerHTML,/先确认成员/);
 assert.match(intent.querySelector(".task-stage-summary").innerHTML,/跨成员访问入口/);
+assert.equal((intent.querySelector(".task-stage-summary").innerHTML.match(/class="task-narrative-turn"/g)||[]).length,2,
+  "同一意图内的两次公开进展保留独立段块，不与工具调用数量绑定");
 assert.equal(intent.querySelector(".task-step").open,false,"执行明细默认折叠");
-assert.match(intent.querySelector(".task-step").querySelector(".task-execution-records").textContent,/模型调用已取消/);
+assert.equal(intent.querySelector(".task-step").querySelector(".task-execution-records").textContent,"");
+assert.equal(intent.querySelector(".task-step").querySelector(".task-execution-records").hidden,true,
+  "模型轮次、开始和取消流水不出现在工具明细后面");
 assert.equal(intent.querySelector(".task-status").textContent,"执行中","取消单次模型调用不冒充整项意图撤销");
 assert.equal(appended.filter(el=>el.html.includes('class="tl-act"')).length,50,"实际工具记录仍可完整展开");
+push("model.failed",{task_id:"intent",route_id:"r",turn:51,call_id:"failed-51",error:"服务连接中断"});
+api.flush();
+assert.equal(intent.querySelector(".task-step").querySelector(".task-execution-records").textContent,"服务连接中断",
+  "实际错误原因仍可见，不与正常生命周期流水一起删除");
 
 api.reset();topLevel.length=0;appended.length=0;
 for(let i=1;i<=50;i++) {
@@ -121,9 +136,9 @@ push("task.start",{task_id:"single",type:"ctf_single",title:"逆向附件"},"ctf
 push("agent.turn",{task_id:"single",route_id:"r",turn:1,angle:"核对输入逻辑"},"ctf-misc-single");
 push("agent.delta",{task_id:"single",route_id:"r",turn:1,kind:"text",text:"已确认文件为 PE。下一步核对输入逻辑。"},"ctf-misc-single");
 api.flush();
-assert.equal(api.actorLabel("ctf-misc-single"),"单执行者");
+assert.equal(api.actorLabel("ctf-misc-single"),"灵枢");
 const singleStage=stageOf(topLevel.find(row=>!row.hidden && kind(row)==="continuation"));
-assert.match(singleStage.querySelector(".task-context").textContent,/单执行者/);
+assert.match(singleStage.querySelector(".task-context").textContent,/灵枢/);
 assert.match(singleStage.querySelector(".task-context").textContent,/用户方向：Reverse（提示）/);
 assert.match(singleStage.querySelector(".task-stage-summary").innerHTML,/已确认文件为 PE/);
 api.reset();
@@ -144,3 +159,30 @@ assert.equal(rangeRow.dataset.historyStart,"300","跨用户消息的正文必须
 assert.equal(rangeRow.dataset.historyId,"300");
 api.reset();
 console.log("task event ranges: stable loaded interval and user-message separation passed");
+
+api.reset();topLevel.length=0;appended.length=0;
+const stableScope={task_id:"stable-body",route_id:"stable-route"};
+const body="已读取本地配置，正在核对编码。";
+push("agent.delta",{...stableScope,turn:1,kind:"text",text:body});
+push("agent.progress",{...stableScope,turn:1,streamed:true,text:body});api.flush();
+const stableStage=stageOf(topLevel.find(row=>!row.hidden && kind(row)==="continuation"));
+const prose=stableStage.querySelector(".task-stage-summary"), originalNode=prose.children[0];
+for(const chunk of ["已读取", "本地配置，", "正在核对编码。"]){
+  push("agent.delta",{...stableScope,turn:2,kind:"text",text:chunk});api.flush();
+  assert.equal(prose.children.length,1,"重复流的前缀不闪现成第二段");
+  assert.equal(prose.children[0],originalNode,"已完成段落保持同一个 DOM 节点");
+}
+push("agent.progress",{...stableScope,turn:2,streamed:true,text:body});api.flush();
+assert.equal(stableStage.querySelector(".task-repetition").hidden,false);
+assert.match(stableStage.querySelector(".task-repetition").textContent,/重复出现 1 次/);
+push("agent.delta",{...stableScope,turn:3,kind:"text",text:"已读取本地配置，发现编码不一致。"});api.flush();
+assert.equal(prose.children.length,2,"不同的新输出仍然完整展示");
+assert.equal(prose.children[0],originalNode,"后续正文不会重建已完成段落");
+const changingNode=prose.children[1];
+push("agent.delta",{...stableScope,turn:3,kind:"text",text:"需要确认文件格式。"});api.flush();
+assert.equal(prose.children[1],changingNode,"当前流也在原有节点中更新");
+push("agent.delta",{...stableScope,turn:3,kind:"reset",text:""});api.flush();
+assert.equal(prose.children.length,1,"撤回重试中的流片段");
+assert.equal(prose.children[0],originalNode,"重试不撤回更早的完整输出");
+api.reset();
+console.log("stream narratives: stable DOM, repeated-prefix suppression, repeat counts and retry isolation passed");

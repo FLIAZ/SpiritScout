@@ -10,6 +10,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from spiritscout.core.audit import read_record
+
 _LIMIT = 512
 
 
@@ -115,7 +117,7 @@ def read_public_stages(path: Path) -> dict[str, Any]:
                         break
                     cache.offset = stream.tell()
                     try:
-                        event = json.loads(line)
+                        event = read_record(line)
                         if isinstance(event, dict):
                             cache.consume(event)
                     except (ValueError, TypeError, AttributeError):

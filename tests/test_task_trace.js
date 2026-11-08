@@ -1,8 +1,20 @@
 "use strict";
 const assert=require("node:assert/strict"), fs=require("node:fs"), vm=require("node:vm"), path=require("node:path");
-const context=vm.createContext({SessionObserver:{toolName:n=>n || "工具",cleanText:v=>String(v),resultSummary:d=>d.note || d.error || "返回结果"}});
+const context=vm.createContext(require('./helpers/i18n').context({SessionObserver:{toolName:n=>n || "工具",cleanText:v=>String(v),resultSummary:d=>d.note || d.error || "返回结果"}}));
 vm.runInContext(fs.readFileSync(path.join(__dirname,"../src/spiritscout/web/static/js/task-trace.js"),"utf8"),context);
 const api=vm.runInContext("TaskTrace",context), store=api.create();
+// 轻量流式公开说明仍落持久进展事件；语义补入同一消息，不重复正文。
+const streamedStore=api.create(), streamedScope={task_id:'single-stream',route_id:'single-r',turn:1};
+const streamedContent=JSON.stringify({progress:'这条路径已被现场否定。',exploration:{intent:'核对输入约束',attempt:'空输入对照',state:'refuted'}});
+api.reduce(streamedStore,{type:'agent.delta',actor:'ctf-misc-single',seq:1,detail:{...streamedScope,kind:'text',text:streamedContent}});
+const streamedTask=api.reduce(streamedStore,{type:'agent.progress',actor:'ctf-misc-single',seq:2,detail:{...streamedScope,streamed:true,
+  text:'这条路径已被现场否定。',exploration:{intent:'核对输入约束',attempt:'空输入对照',state:'refuted'}}});
+assert.equal(streamedTask.segments.size,1,'完整进展事件只为已流式消息补语义');
+assert.equal([...streamedTask.segments.values()][0].intent,'核对输入约束');
+assert.equal([...streamedTask.segments.values()][0].texts.size,1,'流式正文不再复制一遍');
+assert.equal([...streamedTask.steps.values()][0].exploration.state,'refuted');
+assert.equal(api.commentaryText('{"progress":" 完整说明 ","commentary":"完整说明"}'),"完整说明",
+  "公开字段与服务端一样先去除首尾空白，再合并相同说明");
 let seq=0;
 const push=(type,detail,actor="recon-one")=>api.reduce(store,{type,detail,actor,seq:++seq,ts:"now"});
 assert.equal(push("agent.delta",{text:"主会话消息"},"master-123"),null);
@@ -39,6 +51,47 @@ const callsOnly=api.reduce(page,{actor:"recon-page",type:"task.done",detail:{tas
 assert.match(api.summaryOf(callsOnly),/路线完成 2\/3/);
 assert.match(api.summaryOf(callsOnly),/未包含文字结论/);
 console.log("task trace: parallel task isolation, nested tool data, truthful summaries, partial history and failures passed");
+
+const repeatStore=api.create(), repeatScope={task_id:"repeat",route_id:"repeat-route"};
+let repeatSeq=0;
+const repeat=(type,detail)=>api.reduce(repeatStore,{actor:"local-display",type,seq:++repeatSeq,
+  detail:{...repeatScope,...detail}});
+const completedText="已读取本地配置，正在核对编码。";
+repeat("agent.delta",{turn:1,kind:"text",text:completedText});
+let repeatedTask=repeat("agent.progress",{turn:1,text:completedText,streamed:true});
+const repeatedSegment=[...repeatedTask.segments.values()][0];
+const displayed=()=>api.narrativeOf(repeatedTask,repeatedSegment);
+repeat("agent.delta",{turn:2,kind:"text",text:"已读取"});
+assert.equal(displayed().notes.length,1,"待收齐的重复前缀不显示为新进展");
+assert.equal(displayed().repeated,0,"未结束的相同前缀不算一次完整重复");
+repeat("agent.delta",{turn:2,kind:"text",text:"本地配置，正在核对编码。"});
+repeat("agent.progress",{turn:2,text:completedText,streamed:true});
+assert.equal(displayed().notes.length,1);
+assert.equal(displayed().repeated,1,"真实重复输出仍以次数呈现，不隐藏停滞");
+repeat("agent.delta",{turn:3,kind:"text",text:"已读取"});
+repeat("agent.progress",{turn:3,text:"已读取",streamed:true});
+assert.equal(displayed().notes.length,2,"较短但不同的完整回复不能被前缀判断吞掉");
+repeat("agent.delta",{turn:4,kind:"text",text:"已读取本地配置，发现编码不同。"});
+assert.equal(displayed().notes.length,3,"前缀后出现新信息时立即显示完整的新段落");
+repeat("agent.delta",{turn:4,kind:"reset",text:""});
+assert.equal(displayed().notes.length,2);
+assert.equal(displayed().repeated,1);
+const otherTask=repeat("agent.delta",{route_id:"another-route",turn:1,kind:"text",text:"已读取"});
+const otherSegment=otherTask.activeIntents.get("another-route");
+assert.equal(api.narrativeOf(otherTask,otherSegment).notes.length,1,"不同路线的短前缀不互相隐藏");
+repeat("agent.delta",{turn:2,kind:"reset",text:""});
+assert.equal(displayed().repeated,0,"撤回某次输出后同步撤回重复计数");
+
+const nativeStore=api.create();
+const native=(type,detail)=>api.reduce(nativeStore,{actor:"native-display",type,
+  detail:{task_id:"native",route_id:"native-route",...detail}});
+native("agent.delta",{call_id:"one",kind:"text",text:completedText});
+native("model.call",{call_id:"one"});
+native("agent.delta",{call_id:"two",kind:"text",text:"已读取"});
+const nativeTask=native("model.call",{call_id:"two"});
+assert.equal(api.narrativeOf(nativeTask,[...nativeTask.segments.values()][0]).notes.length,2,
+  "没有 progress 事件的原生调用也在完成时保留较短的新回复");
+console.log("stream commentary: complete boundaries, partial repeats, changed text, route isolation and native calls passed");
 
 // 模型正文在工具往返后仍保留，不再被工具状态覆盖或收进工具总折叠块。
 const narrative=api.create();

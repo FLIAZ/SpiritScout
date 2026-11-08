@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from spiritscout import __version__
+from spiritscout.core.audit import read_record
+from spiritscout.gateway.cache import prefix_change_summary
+from spiritscout.gateway.costs import cost_summary
+from spiritscout.gateway.outcome_costs import session_outcome_costs
 from spiritscout.gateway.usage import read_usage
 
 
@@ -22,7 +26,7 @@ def audit_attempts(workspace: Path, version: str | None) -> dict[str, Any]:
             with source.open() as stream:
                 for line in stream:
                     try:
-                        event=json.loads(line)
+                        event=read_record(line)
                     except ValueError:
                         errors.append({'file':str(source.relative_to(workspace)),'error':'invalid_json_line'})
                         continue
@@ -76,20 +80,28 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         'reused_prefix_bytes': sum(row.get('reused_prefix_bytes') or 0 for row in prefixes),
         'new_suffix_bytes': sum(row.get('new_suffix_bytes') or 0 for row in prefixes),
         'context_parts_bytes': dict(parts),
+        'prefix_changes': prefix_change_summary(rows),
+        'cost': cost_summary(rows),
     }
 
 
-def build_report(workspace: Path, *, version: str | None = __version__) -> dict[str, Any]:
+def build_report(workspace: Path, *, version: str | None = __version__,
+                 models_config: Path | None = None) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
+    sessions = []
     errors: list[dict[str, str]] = []
     sources = set(workspace.glob('sessions/*/usage.db'))
     sources.update(path for path in workspace.glob('sessions/*/usage.json') if not path.with_suffix('.db').exists())
     for source in sorted(sources):
         try:
-            snapshot = read_usage(source.with_suffix('.json'), ledger=source.with_suffix('.db')) or {}
+            snapshot = read_usage(source.with_suffix('.json'), ledger=source.with_suffix('.db'))
+            if snapshot is None:
+                raise ValueError('unreadable usage snapshot')
         except (OSError, ValueError, sqlite3.Error) as error:
             errors.append({'file': str(source.relative_to(workspace)), 'error': type(error).__name__})
             continue
+        sessions.append({'session_id': source.parent.name,
+                         **session_outcome_costs(source.parent, snapshot, version=version)})
         seen: set[str] = set()
         for row in snapshot.get('call_series', []):
             call_id = row.get('call_id')
@@ -105,7 +117,7 @@ def build_report(workspace: Path, *, version: str | None = __version__) -> dict[
         mode = 'enabled' if enabled is True else 'disabled' if enabled is False else 'unknown'
         groups[(row.get('runtime_version') or 'legacy', row.get('model', ''),
                 row.get('cache_scope') or row.get('task_type', ''), row.get('task_type', ''), mode)].append(row)
-    return {
+    report = {
         'current_version': __version__, 'version_filter': version, 'source_files': len(sources),
         'methodology': {
             'cache_hits': 'endpoint-reported usage only; unknown excluded from hit rate',
@@ -113,13 +125,22 @@ def build_report(workspace: Path, *, version: str | None = __version__) -> dict[
             'attempts': 'SDK requests visible to the wrapper; missing usage stays unknown',
             'coverage': 'persisted calls include reported retry, failed and cancelled usage under the new ledger semantics; old records are unchanged',
             'legacy': 'records without runtime_version are not attributed to the current version',
+            'outcomes': 'current persisted session results; task done is not success; partial costs never become full cost per result',
+            'prices': 'call-time estimates, currencies separate; missing prices or usage are unknown, not free',
         },
         'summary': summarize(rows), 'unreadable_files': errors,
+        'sessions': sessions,
         'audit_attempts':audit_attempts(workspace,version),
         'groups': [dict(runtime_version=key[0], model=key[1], cache_scope=key[2], task_type=key[3],
                         patch_optimization=key[4], **summarize(items))
                    for key, items in sorted(groups.items())],
     }
+    if models_config is not None:
+        from spiritscout.config import load_model_config
+        from spiritscout.gateway.model_diagnostics import model_diagnostics
+
+        report['model_diagnostics'] = model_diagnostics(load_model_config(models_config), rows)
+    return report
 
 
 def main() -> None:
@@ -127,8 +148,10 @@ def main() -> None:
     parser.add_argument('--workspace', type=Path, default=Path('.spiritscout'))
     parser.add_argument('--version', default=__version__, help='默认仅统计当前代码版本')
     parser.add_argument('--all-versions', action='store_true', help='包括明确标为 legacy 的旧记录')
+    parser.add_argument('--models-config', type=Path, help='只读核对模型能力与计费配置，不调用端点')
     args = parser.parse_args()
-    print(json.dumps(build_report(args.workspace, version=None if args.all_versions else args.version), ensure_ascii=False, indent=2))
+    print(json.dumps(build_report(args.workspace, version=None if args.all_versions else args.version,
+                                 models_config=args.models_config), ensure_ascii=False, indent=2))
 
 
 if __name__ == '__main__':

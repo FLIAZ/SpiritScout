@@ -18,6 +18,11 @@ LAYER_WRITE_PERMISSIONS: dict[AgentType, set[BlackboardLayer]] = {
         BlackboardLayer.RECON_CLUE,
         BlackboardLayer.TASK_STATE,
     },
+    AgentType.SCANNER: {
+        BlackboardLayer.RECON_CLUE,
+        BlackboardLayer.VULN,
+        BlackboardLayer.TASK_STATE,
+    },
     AgentType.PORT_SCAN: {
         BlackboardLayer.ASSET,
         BlackboardLayer.RECON_CLUE,   # 服务指纹/技术栈线索（4.8.1 表）

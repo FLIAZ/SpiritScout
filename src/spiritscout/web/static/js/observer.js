@@ -2,18 +2,18 @@
 /* 会话实况：只展示真实事件与已持久化证据，不推测模型的内部思考。 */
 const SessionObserver = (() => {
   let events = [], scheduled = false;
-  const number = n => Number.isFinite(Number(n)) ? Number(n).toLocaleString("zh-CN") : "—";
-  const names = { skill_search: "检索技能", skill_open: "使用技能", skill_read: "读取技能文件", web_search: "搜索公开资料", explore: "业务走访", record_endpoint: "登记接口", http_probe: "HTTP 请求", http_request: "HTTP 请求",
-    shell: "执行命令", python: "运行脚本", browser_navigate: "浏览器打开页面",
-    browser_click: "点击页面元素", browser_snapshot: "读取页面快照", browser_tabs: "管理浏览器标签页",
-    meta_planning: "规划与复盘", verification: "独立危害复测", execution: "任务执行" };
+  const number = n => Number.isFinite(Number(n)) ? Number(n).toLocaleString(I18n.dateLocale) : "—";
+  const names = { skill_search: I18n.t("检索技能"), skill_open: I18n.t("使用技能"), skill_read: I18n.t("读取技能文件"), web_search: I18n.t("搜索公开资料"), cve_lookup: I18n.t("查询 CVE 情报"), explore: I18n.t("业务走访"), record_endpoint: I18n.t("登记接口"), http_probe: I18n.t("HTTP 请求"), http_request: I18n.t("HTTP 请求"),
+    shell: I18n.t("执行命令"), python: I18n.t("运行脚本"), view_image: I18n.t("查看图像"), nuclei_scan: I18n.t("Nuclei 扫描"), browser_navigate: I18n.t("浏览器打开页面"),
+    browser_click: I18n.t("点击页面元素"), browser_snapshot: I18n.t("读取页面快照"), browser_tabs: I18n.t("管理浏览器标签页"),
+    meta_planning: I18n.t("规划与复盘"), verification: I18n.t("独立危害复测"), execution: I18n.t("任务执行") };
   const toolName = name => {
-    const short = String(name || "工具").startsWith("mcp__") ? String(name).split("__").slice(2).join("__") : name;
+    const short = String(name || I18n.t("工具")).startsWith("mcp__") ? String(name).split("__").slice(2).join("__") : name;
     return names[name] || names[short] || short;
   };
   const age = ts => {
     const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(ts)) / 1000));
-    return seconds < 60 ? `${seconds} 秒前` : seconds < 3600 ? `${Math.floor(seconds / 60)} 分钟前` : `${Math.floor(seconds / 3600)} 小时前`;
+    return seconds < 60 ? I18n.t`${seconds} 秒前` : seconds < 3600 ? I18n.t`${Math.floor(seconds / 60)} 分钟前` : I18n.t`${Math.floor(seconds / 3600)} 小时前`;
   };
   function usageFor(event, state) {
     const d = event.detail || {};
@@ -30,14 +30,14 @@ const SessionObserver = (() => {
     if (detail.ok === false && detail.failure_summary) return String(detail.failure_summary);
     const text = cleanText(detail.note || detail.result || detail.error).trim();
     if (detail.ok === false && /element is outside of the viewport/i.test(text))
-      return "目标元素已找到，但位于可视区域外；自动滚动后仍无法点击。";
+      return I18n.t("目标元素已找到，但位于可视区域外；自动滚动后仍无法点击。");
     const title = text.match(/<title[^>]*>([^<]+)/i);
-    if (title) return `返回网页 · ${title[1]}`;
-    if (/^\s*<!doctype|^\s*<html/i.test(text)) return "返回 HTML 页面，展开查看响应摘要";
+    if (title) return I18n.t`返回网页 · ${title[1]}`;
+    if (/^\s*<!doctype|^\s*<html/i.test(text)) return I18n.t("返回 HTML 页面，展开查看响应摘要");
     const code = text.match(/"code"\s*:\s*(-?\d+)/);
     const message = text.match(/"message"\s*:\s*"([^"\n]*)"/);
-    if (code && code[1] !== "0") return `业务返回 ${code[1]}${message ? ` · ${message[1]}` : ""}`;
-    return text.slice(0, 220) || (detail.ok ? "调用已返回，未提供结果摘要" : "调用失败，未提供原因");
+    if (code && code[1] !== "0") return I18n.t`业务返回 ${code[1]}${message ? ` · ${message[1]}` : ""}`;
+    return text.slice(0, 220) || (detail.ok ? I18n.t("调用已返回，未提供结果摘要") : I18n.t("调用失败，未提供原因"));
   }
   function derive(state, history = events) {
     const usage = state?.model_usage || {}, business = state?.business_context || {};
@@ -67,9 +67,9 @@ const SessionObserver = (() => {
     const v = derive(state), paused = state.session.paused, terminal = TERMINAL.has(state.session.status);
     const tasks = state.tasks || [], running = tasks.filter(t => t.status === "running");
     const latest = events[events.length - 1];
-    const active = v.task ? (TASK_CN[v.task.task_type] || agentName(v.task.agent_type)) : "灵枢";
-    const current = paused ? "已暂停" : terminal ? (STATUS_CN[state.session.status] || "已结束")
-      : v.pending.length ? "模型正在生成" : "任务执行中";
+    const active = v.task ? (TASK_CN[v.task.task_type] || agentName(v.task.agent_type)) : I18n.t("灵枢");
+    const current = paused ? I18n.t("已暂停") : terminal ? (STATUS_CN[state.session.status] || I18n.t("已结束"))
+      : v.pending.length ? I18n.t("模型正在生成") : I18n.t("任务执行中");
     const routes = (v.task?.routes || []).filter(r => r.status === "running");
     const note = routes.map(r => r.note).filter(Boolean).join("；");
     const facts = v.business.facts || [], gaps = v.business.gaps || v.business.unknowns || [];
@@ -91,35 +91,35 @@ const SessionObserver = (() => {
     if (box.dataset.signature === signature) return;
     const opened = new Set([...box.querySelectorAll("details[open]")].map(x => x.dataset.section));
     box.dataset.signature = signature;
-    box.innerHTML = `<div class="obs-focus obs-focus-compact"><div class="obs-status"><strong>${esc(current)}</strong>
+    box.innerHTML = I18n.html`<div class="obs-focus obs-focus-compact"><div class="obs-status"><strong>${esc(current)}</strong>
       ${!terminal ? `<span>${esc(active)}</span>` : ""}</div>
-      ${!terminal && (paused || note) ? `<p class="obs-current-note">${esc(paused ? "当前调用结束后暂停。" : note)}</p>` : ""}
-      ${latest ? `<small>更新于 ${esc(age(latest.ts))}</small>` : ""}</div>
+      ${!terminal && (paused || note) ? `<p class="obs-current-note">${esc(paused ? I18n.t("当前调用结束后暂停。") : note)}</p>` : ""}
+      ${latest ? I18n.html`<small>更新于 ${esc(age(latest.ts))}</small>` : ""}</div>
       <section class="obs-section obs-overview"><h3>本次用量 <span>${number(v.callCount)} 次调用</span></h3>
         <div class="obs-tokens">${number(v.tokens)} <small>token</small></div>
-        <div class="obs-key-metrics">${v.cache.hit_rate != null ? `<span>缓存命中 <b>${(v.cache.hit_rate * 100).toFixed(1)}%</b></span>` : ""}${cost ? `<span>费用估算 <b>${esc(cost)}</b>${v.cache.unpriced_calls ? '<small>（部分调用）</small>' : ''}</span>` : ""}</div>
+        <div class="obs-key-metrics">${v.cache.hit_rate != null ? I18n.html`<span>缓存命中 <b>${(v.cache.hit_rate * 100).toFixed(1)}%</b></span>` : ""}${cost ? I18n.html`<span>费用估算 <b>${esc(cost)}</b>${v.cache.unpriced_calls ? I18n.html('<small>（部分调用）</small>') : ''}</span>` : ""}</div>
         <details data-section="usage-details" class="obs-details"><summary>用量详情</summary>
-        ${!terminal ? `<p>近 1 分钟 +${number(v.recentTokens)} · 生成中的调用暂未计入</p>` : ""}
-        <div class="obs-cache"><span>输入缓存命中率</span><strong>${v.cache.hit_rate == null ? "端点未提供" : (v.cache.hit_rate * 100).toFixed(1) + "%"}</strong>
+        ${!terminal ? I18n.html`<p>近 1 分钟 +${number(v.recentTokens)} · 生成中的调用暂未计入</p>` : ""}
+        <div class="obs-cache"><span>输入缓存命中率</span><strong>${v.cache.hit_rate == null ? I18n.t("端点未提供") : (v.cache.hit_rate * 100).toFixed(1) + "%"}</strong>
         <small>${v.cache.measured_calls ? number(v.cache.cached_input_tokens) : "—"} 缓存读取 · ${number(v.cache.measured_calls || 0)} 次已测量</small></div>
-        ${v.cache.total_input_tokens != null ? `<p>输入 ${number(v.cache.total_input_tokens)} · 已测未命中 ${number(v.cache.uncached_input_tokens)} · 输出 ${number(v.cache.output_tokens)} token</p>` : ""}
-        ${v.cache.priced_calls ? `<p>DeepSeek 费用估算：¥${Number(v.cache.estimated_cost_cny_min).toFixed(4)}${v.cache.estimated_cost_cny_max > v.cache.estimated_cost_cny_min ? `–¥${Number(v.cache.estimated_cost_cny_max).toFixed(4)}` : ""} · ${number(v.cache.priced_calls)} 次可估算调用${v.cache.unpriced_calls ? `，${number(v.cache.unpriced_calls)} 次未计入` : ""}。按 2026-10-23 价格快照估算，以账单为准。</p>` : ""}
-        <details data-section="cache"><summary>按角色查看缓存与输出消耗</summary>${(v.cache.groups || []).map(g => `<div class="obs-call"><span>${esc(actorName(g.actor))} · ${esc(g.cache_scope || names[g.task_type] || g.task_type)} · ${esc(modelDisplayName(g.model))}</span><b>${g.hit_rate == null ? "缓存未提供" : `${(g.hit_rate * 100).toFixed(1)}% 输入命中`}</b><small>输入 ${number(g.total_input_tokens)} · 缓存 ${number(g.cached_input_tokens)} · 输出 ${number(g.output_tokens)} · ${number(g.measured_calls)} 次已测量${g.unmeasured_calls ? ` / ${number(g.unmeasured_calls)} 次未提供` : ""}</small></div>`).join("") || '<p>历史调用未保留分角色用量</p>'}<p>命中率按端点返回的输入用量计算。</p></details>
+        ${v.cache.total_input_tokens != null ? I18n.html`<p>输入 ${number(v.cache.total_input_tokens)} · 已测未命中 ${number(v.cache.uncached_input_tokens)} · 输出 ${number(v.cache.output_tokens)} token</p>` : ""}
+        ${v.cache.priced_calls ? I18n.html`<p>DeepSeek 费用估算：¥${Number(v.cache.estimated_cost_cny_min).toFixed(4)}${v.cache.estimated_cost_cny_max > v.cache.estimated_cost_cny_min ? `–¥${Number(v.cache.estimated_cost_cny_max).toFixed(4)}` : ""} · ${number(v.cache.priced_calls)} 次可估算调用${v.cache.unpriced_calls ? I18n.t`，${number(v.cache.unpriced_calls)} 次未计入` : ""}。按 2026-10-23 价格快照估算，以账单为准。</p>` : ""}
+        <details data-section="cache"><summary>按角色查看缓存与输出消耗</summary>${(v.cache.groups || []).map(g => I18n.html`<div class="obs-call"><span>${esc(actorName(g.actor))} · ${esc(g.cache_scope || names[g.task_type] || g.task_type)} · ${esc(modelDisplayName(g.model))}</span><b>${g.hit_rate == null ? I18n.t("缓存未提供") : I18n.t`${(g.hit_rate * 100).toFixed(1)}% 输入命中`}</b><small>输入 ${number(g.total_input_tokens)} · 缓存 ${number(g.cached_input_tokens)} · 输出 ${number(g.output_tokens)} · ${number(g.measured_calls)} 次已测量${g.unmeasured_calls ? I18n.t` / ${number(g.unmeasured_calls)} 次未提供` : ""}</small></div>`).join("") || I18n.html('<p>历史调用未保留分角色用量</p>')}<p>命中率按端点返回的输入用量计算。</p></details>
         <div class="obs-models">${Object.entries(v.usage.per_model_tokens || {}).map(([m,n]) => `<div><span>${esc(modelDisplayName(m))}</span><b>${number(n)}</b></div>`).join("")}</div>
         <details data-section="usage"><summary>最近调用的消耗与耗时</summary>${v.calls.slice(-8).reverse().map(e => {
           const n = usageFor(e, state), d = e.detail || {};
-          return `<div class="obs-call"><span>${esc(modelDisplayName(d.model_key || d.model || "模型", d.provider_ref))}</span><b>${n === null ? "未保留单次用量" : `${number(n)} token`}</b><small>${esc(names[d.task_type] || d.task_type || "历史调用未记录用途")} · ${(Number(d.latency_ms || 0) / 1000).toFixed(1)} 秒${d.first_delta_ms == null ? "" : ` · 首次响应 ${(d.first_delta_ms / 1000).toFixed(1)} 秒`} · 缓存 ${typeof d.cached_input_tokens === "number" ? number(d.cached_input_tokens) : "未提供"}${typeof d.reused_prefix_bytes === "number" ? ` · 与前次重复前缀 ${number(d.reused_prefix_bytes)} 字节（本地比较）` : ""}</small></div>`;
-        }).join("") || '<p>尚无已返回的模型调用事件</p>'}</details></details></section>
-      ${hasFindings ? `<details class="obs-section obs-details" data-section="findings"><summary>发现与记录 <span>${[vulnCount ? `${number(vulnCount)} 个漏洞` : "", evidenceCount ? `${number(evidenceCount)} 条证据` : "", assets ? `${number(assets)} 条资产` : ""].filter(Boolean).join(" · ")}</span></summary>
-        <div class="obs-counts">${evidenceCount ? `<span><b>${number(evidenceCount)}</b> 接口 / 页面</span>` : ""}
-        ${vulnCount ? `<span><b>${number(vulnCount)}</b> 漏洞</span>` : ""}${assets ? `<span><b>${number(assets)}</b> 资产</span>` : ""}</div>
+          return I18n.html`<div class="obs-call"><span>${esc(modelDisplayName(d.model_key || d.model || I18n.t("模型"), d.provider_ref))}</span><b>${n === null ? I18n.t("未保留单次用量") : `${number(n)} token`}</b><small>${esc(names[d.task_type] || d.task_type || I18n.t("历史调用未记录用途"))} · ${(Number(d.latency_ms || 0) / 1000).toFixed(1)} 秒${d.first_delta_ms == null ? "" : I18n.t` · 首次响应 ${(d.first_delta_ms / 1000).toFixed(1)} 秒`} · 缓存 ${typeof d.cached_input_tokens === "number" ? number(d.cached_input_tokens) : I18n.t("未提供")}${typeof d.reused_prefix_bytes === "number" ? I18n.t` · 与前次重复前缀 ${number(d.reused_prefix_bytes)} 字节（本地比较）` : ""}</small></div>`;
+        }).join("") || I18n.html('<p>尚无已返回的模型调用事件</p>')}</details></details></section>
+      ${hasFindings ? I18n.html`<details class="obs-section obs-details" data-section="findings"><summary>发现与记录 <span>${[vulnCount ? I18n.t`${number(vulnCount)} 个漏洞` : "", evidenceCount ? I18n.t`${number(evidenceCount)} 条证据` : "", assets ? I18n.t`${number(assets)} 条资产` : ""].filter(Boolean).join(" · ")}</span></summary>
+        <div class="obs-counts">${evidenceCount ? I18n.html`<span><b>${number(evidenceCount)}</b> 接口 / 页面</span>` : ""}
+        ${vulnCount ? I18n.html`<span><b>${number(vulnCount)}</b> 漏洞</span>` : ""}${assets ? I18n.html`<span><b>${number(assets)}</b> 资产</span>` : ""}</div>
         ${v.business.coverage ? `<p>${esc(v.business.coverage)}</p>` : ""}
-        ${v.evidence.length ? `<details data-section="evidence"><summary>接口与页面 · ${number(v.evidence.length)}</summary>${v.evidence.map(e => `<div class="obs-evidence"><strong>${esc(e.method || "GET")} <span>${esc(e.status_code ?? "未记录状态")}</span></strong><code>${esc(e.url || "")}</code><p>${esc(e.note || "")}</p></div>`).join("")}</details>` : ""}
-        ${facts.length ? `<details data-section="facts"><summary>已知事实 · ${facts.length}</summary>${facts.map(f => `<p>${esc(typeof f === "string" ? f : f.statement || f.note || "")}</p>`).join("")}</details>` : ""}
-        ${gaps.length ? `<details data-section="unknowns"><summary>待补信息 · ${gaps.length}</summary>${gaps.map(x => `<p>${esc(typeof x === "string" ? x : x.statement || x.note || JSON.stringify(x))}</p>`).join("")}</details>` : ""}</details>` : ""}
-      ${tasks.length || recent.length || v.failed ? `<details class="obs-section obs-details" data-section="execution"><summary>执行记录 <span>${!terminal && running.length ? `${running.length} 个任务进行中` : tasks.length ? `${tasks.length} 个任务` : "最近进展"}</span></summary>
-        ${tasks.map(t => `<div class="obs-task"><strong>${esc(TASK_CN[t.task_type] || t.agent_type)}</strong><span>${esc(({running:"执行中",done:"已完成",failed:"失败",cancelled:"已撤销",pruned:"已剪枝"})[t.status] || t.status)}</span>${taskNotes(t) ? `<p>${esc(taskNotes(t))}</p>` : ""}</div>`).join("")}
-        ${v.failed ? `<button type="button" class="btn sm obs-errors">查看失败原因（${v.failed}）</button>` : ''}
+        ${v.evidence.length ? I18n.html`<details data-section="evidence"><summary>接口与页面 · ${number(v.evidence.length)}</summary>${v.evidence.map(e => `<div class="obs-evidence"><strong>${esc(e.method || "GET")} <span>${esc(e.status_code ?? I18n.t("未记录状态"))}</span></strong><code>${esc(e.url || "")}</code><p>${esc(e.note || "")}</p></div>`).join("")}</details>` : ""}
+        ${facts.length ? I18n.html`<details data-section="facts"><summary>已知事实 · ${facts.length}</summary>${facts.map(f => `<p>${esc(typeof f === "string" ? f : f.statement || f.note || "")}</p>`).join("")}</details>` : ""}
+        ${gaps.length ? I18n.html`<details data-section="unknowns"><summary>待补信息 · ${gaps.length}</summary>${gaps.map(x => `<p>${esc(typeof x === "string" ? x : x.statement || x.note || JSON.stringify(x))}</p>`).join("")}</details>` : ""}</details>` : ""}
+      ${tasks.length || recent.length || v.failed ? I18n.html`<details class="obs-section obs-details" data-section="execution"><summary>执行记录 <span>${!terminal && running.length ? I18n.t`${running.length} 个任务进行中` : tasks.length ? I18n.t`${tasks.length} 个任务` : I18n.t("最近进展")}</span></summary>
+        ${tasks.map(t => `<div class="obs-task"><strong>${esc(TASK_CN[t.task_type] || t.agent_type)}</strong><span>${esc(({running:I18n.t("执行中"),done:I18n.t("已完成"),failed:I18n.t("失败"),cancelled:I18n.t("已撤销"),pruned:I18n.t("已剪枝")})[t.status] || t.status)}</span>${taskNotes(t) ? `<p>${esc(taskNotes(t))}</p>` : ""}</div>`).join("")}
+        ${v.failed ? I18n.html`<button type="button" class="btn sm obs-errors">查看失败原因（${v.failed}）</button>` : ''}
         ${recent.map(e => `<div class="obs-recent ${e.detail?.ok === false ? "bad" : ""}"><small>${esc(actorName(e.actor))}</small><p>${esc(resultSummary(e.detail || {}))}</p></div>`).join("")}</details>` : ""}`;
     for (const el of box.querySelectorAll("details")) if (opened.has(el.dataset.section)) el.open = true;
     const errors = box.querySelector(".obs-errors");

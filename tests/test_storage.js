@@ -14,7 +14,7 @@ function fixture() {
     });
     return nodes.get(id);
   };
-  const ctx = vm.createContext({$:node, esc:String, selxSync() {},
+  const ctx = vm.createContext(require('./helpers/i18n').context({$:node, esc:String, selxSync() {},
     openSession(id) { assert.equal(node("#storage-dlg").open, false); opened.push(id); },
     setTimeout:fn => { const n = timers.size + 1; timers.set(n, fn); return n; },
     clearTimeout:n => timers.delete(n),
@@ -28,7 +28,7 @@ function fixture() {
       return {bytes:80000, cache_bytes:2000, database:{bytes:70000, old_dag_versions:5, delivered_events:3},
         blocked_reason:ctx.blocked || ""};
     },
-  });
+  }));
   vm.runInContext(code, ctx);
   return {ctx, node, calls, timers, opened, ui:vm.runInContext("SessionStorage", ctx)};
 }

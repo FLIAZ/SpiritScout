@@ -28,21 +28,21 @@ const ConsoleNotify = (() => {
     }
     const unread = () => unreadItems().length;
     function raise(item) {
-      const body = `${item.message || "点击查看会话"}${item.session_title ? `（${item.session_title}）` : ""}`;
+      const body = `${item.message || I18n.t("点击查看会话")}${item.session_title ? `（${item.session_title}）` : ""}`;
       if (systemEnabled() && permission() === "granted") {
         try {
-          const note = new notifyCtor(item.title || "灵枢通知", {body, tag: item.id});
+          const note = new notifyCtor(item.title || I18n.t("灵枢通知"), {body, tag: item.id});
           note.onclick = () => { win.focus(); markRead([item.id]); onUpdate(); if (item.session_id) openSession(item.session_id); note.close?.(); };
           return true;
         } catch {}
       }
-      toastFn(`${item.title || "灵枢通知"}：${body}`);
-      doc.title = `有新提醒 · ${baseTitle}`;
+      toastFn(`${item.title || I18n.t("灵枢通知")}：${body}`);
+      doc.title = I18n.t`有新提醒 · ${baseTitle}`;
       return false;
     }
     async function checkOnce() {
       try { snapshot = await fetchItems(); error = ""; }
-      catch { error = "提醒读取失败，请重试"; onUpdate(); return []; }
+      catch { error = I18n.t("提醒读取失败，请重试"); onUpdate(); return []; }
       for (const id of loadIds(SEEN_KEY)) seen.add(id);
       const fresh = items().filter(item => !seen.has(item.id));
       let raised = 0, overflow = 0;
@@ -52,7 +52,7 @@ const ConsoleNotify = (() => {
         if (raised >= 3) { overflow++; continue; }
         raise(item); raised++;
       }
-      if (overflow) raise({id: "notify-burst", title: "还有新提醒", message: `另有 ${overflow} 条，点击铃铛查看。`});
+      if (overflow) raise({id: "notify-burst", title: I18n.t("还有新提醒"), message: I18n.t`另有 ${overflow} 条，点击铃铛查看。`});
       if (doc.visibilityState === "visible") {
         const currentIds = items().filter(item => isCurrent(item.session_id)).map(item => item.id);
         if (currentIds.length) markRead(currentIds);
@@ -75,7 +75,7 @@ const ConsoleNotify = (() => {
       async requestPermission() { if (notifyCtor?.requestPermission) await notifyCtor.requestPermission(); return permission(); },
       clearFlash() { doc.title = baseTitle; },
       clearSeen() { seen.clear(); write(SEEN_KEY, "[]"); },
-      selfTest() { return raise({id: "notify-test", title: "通知测试", message: "解题完成或需要你回答时，会这样提醒。"}); },
+      selfTest() { return raise({id: "notify-test", title: I18n.t("通知测试"), message: I18n.t("解题完成或需要你回答时，会这样提醒。")}); },
     };
   }
   let instance;
@@ -90,10 +90,10 @@ const ConsoleNotify = (() => {
     const ctl = instance, button = $("#btn-system-notify");
     if (!ctl || !button) return;
     const on = ctl.systemEnabled() && ctl.permission() === "granted";
-    const labels = {denied: "系统通知已被浏览器拒绝，可在站点设置中修改", unsupported: "当前浏览器不支持系统通知"};
+    const labels = {denied: I18n.t("系统通知已被浏览器拒绝，可在站点设置中修改"), unsupported: I18n.t("当前浏览器不支持系统通知")};
     button.setAttribute("aria-checked", String(on));
     button.disabled = ctl.permission() === "unsupported";
-    button.title = labels[ctl.permission()] || `系统通知：${on ? "已开启，点击关闭" : "已关闭，点击开启"}`;
+    button.title = labels[ctl.permission()] || I18n.t`系统通知：${on ? I18n.t("已开启，点击关闭") : I18n.t("已关闭，点击开启")}`;
     button.setAttribute("aria-label", button.title);
   }
   function paint() {
@@ -102,23 +102,23 @@ const ConsoleNotify = (() => {
     const count = instance.unread();
     if (bell) {
       bell.querySelector(".notify-dot").hidden = !count;
-      bell.setAttribute("aria-label", count ? `通知，${count} 条未读提醒` : "通知");
+      bell.setAttribute("aria-label", count ? I18n.t`通知，${count} 条未读提醒` : I18n.t("通知"));
     }
-    const mobile = $("#mobile-sessions-toggle");
-    if (mobile) {
-      mobile.dataset.notifyUnread = count ? "true" : "false";
-      mobile.setAttribute("aria-label", count ? "会话列表，有未读提醒" : "会话列表");
+    const toggle = $("#sidebar-sessions-toggle");
+    if (toggle) {
+      toggle.dataset.notifyUnread = count ? "true" : "false";
+      toggle.setAttribute("aria-description", count ? I18n.t("会话列表，有未读提醒") : "");
     }
     syncSystemButton();
     if (root) root.querySelector("[data-notify-read]").disabled = !count;
     if (!root || root.hidden) return;
     const data = instance.snapshot(), rows = instance.unreadItems(), list = root.querySelector("[data-notify-items]");
-    root.querySelector("[data-notify-status]").textContent = instance.error() || (data.truncated ? "仅展示最近记录中的未读提醒" : "");
+    root.querySelector("[data-notify-status]").textContent = instance.error() || (data.truncated ? I18n.t("仅展示最近记录中的未读提醒") : "");
     const signature = JSON.stringify([rows, instance.error()]);
     if (list.dataset.snapshot !== signature) {
       const focused = list.contains(document.activeElement) ? document.activeElement.dataset.notifyId : null;
       list.dataset.snapshot = signature;
-      list.innerHTML = rows.map(item => `<button type="button" class="notify-item${item.type === "question_pending" ? " pending" : ""}" data-notify-id="${esc(item.id)}" data-session="${esc(item.session_id)}"><strong>${esc(item.title)}</strong>${item.session_title ? `<span class="notify-session">${esc(item.session_title)}</span>` : ""}<span>${esc(item.message || "")}</span></button>`).join("") || (instance.error() ? "" : '<p class="notify-empty">暂无未读提醒</p>');
+      list.innerHTML = rows.map(item => `<button type="button" class="notify-item${item.type === "question_pending" ? " pending" : ""}" data-notify-id="${esc(item.id)}" data-session="${esc(item.session_id)}"><strong>${esc(item.title)}</strong>${item.session_title ? `<span class="notify-session">${esc(item.session_title)}</span>` : ""}<span>${esc(item.message || "")}</span></button>`).join("") || (instance.error() ? "" : I18n.html('<p class="notify-empty">暂无未读提醒</p>'));
       list.querySelectorAll("[data-session]").forEach(button => {
         button.onclick = () => { instance.markRead([button.dataset.notifyId]); close(); paint(); openSession(button.dataset.session); };
         if (focused && button.dataset.notifyId === focused) button.focus();
@@ -137,7 +137,7 @@ const ConsoleNotify = (() => {
     root.hidden = false;
     $("#btn-notify").setAttribute("aria-expanded", "true");
     paint();
-    root.querySelector("[data-notify-status]").textContent = "正在读取…";
+    root.querySelector("[data-notify-status]").textContent = I18n.t("正在读取…");
     root.querySelector("[data-notify-close]").focus();
     await ctl.check();
   }
@@ -164,8 +164,8 @@ const ConsoleNotify = (() => {
       try {
         const permission = instance.permission() === "default" ? await instance.requestPermission() : instance.permission();
         instance.setSystemEnabled(permission === "granted");
-        if (permission !== "granted") toast("系统通知未开启；仍可通过铃铛查看提醒", true);
-      } catch { toast("系统通知权限申请失败", true); }
+        if (permission !== "granted") toast(I18n.t("系统通知未开启；仍可通过铃铛查看提醒"), true);
+      } catch { toast(I18n.t("系统通知权限申请失败"), true); }
       finally { system.disabled = false; syncSystemButton(); }
     };
     document.addEventListener("click", event => {

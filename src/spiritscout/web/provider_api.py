@@ -23,15 +23,17 @@ PROVIDER_PRESETS: list[dict[str, str]] = [
      "base_url": "https://ark.cn-beijing.volces.com/api/plan/v3",
      "brand": "#f53f3f", "mark": "火"},
     {"key": "deepseek", "name": "DeepSeek", "provider": "openai_compatible",
-     "base_url": "https://api.deepseek.com", "brand": "#4d6bfe", "mark": "DS"},
+     "base_url": "https://api.deepseek.com", "brand": "#4d6bfe", "mark": "DS", "billing_scheme": "deepseek_api"},
     {"key": "qwen", "name": "阿里百炼", "provider": "openai_compatible",
      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
      "brand": "#7c5cfc", "mark": "百"},
     {"key": "zhipu", "name": "智谱", "provider": "openai_compatible",
-     "base_url": "https://open.bigmodel.cn/api/paas/v4",
+     "base_url": "https://open.bigmodel.cn/api/paas/v4", "billing_scheme": "glm_api",
      "brand": "#2f54eb", "mark": "智"},
     {"key": "moonshot", "name": "Kimi（Moonshot）", "provider": "openai_compatible",
-     "base_url": "https://api.moonshot.cn/v1", "brand": "#1a1a1a", "mark": "K"},
+     "base_url": "https://api.moonshot.cn/v1", "brand": "#1a1a1a", "mark": "K", "billing_scheme": "kimi_api"},
+    {"key": "kimi-code", "name": "Kimi Code / Token Plan", "provider": "openai_compatible",
+     "base_url": "https://api.kimi.com/coding/v1", "brand": "#1a1a1a", "mark": "K", "billing_scheme": "kimi_token_plan"},
     {"key": "minimax", "name": "MiniMax", "provider": "openai_compatible",
      "base_url": "https://api.minimax.cn/v1", "brand": "#6554f0", "mark": "M"},
     {"key": "qianfan", "name": "百度千帆", "provider": "openai_compatible",
@@ -62,6 +64,78 @@ PROVIDER_PRESETS: list[dict[str, str]] = [
     {"key": "ollama", "name": "Ollama（本地）", "provider": "openai_compatible",
      "base_url": "http://127.0.0.1:11434/v1", "brand": "#3c3c3c", "mark": "Ol"},
 ]
+
+# 同一厂商的接入版本独立保存，前端按 family 展开二级菜单。
+# 目录只描述端点，不承诺该账户具备订阅权益或公开 OAuth。
+# 端点交叉参考官方文档与 CC Switch 的 claude/codexProviderPresets（2026-11-07）。
+_FAMILIES = {p['key']: p for p in PROVIDER_PRESETS}
+for _p in PROVIDER_PRESETS:
+    _p.update(family=_p['key'], family_name=_p['name'], edition='按量 API')
+_FAMILIES['ark'].update(edition='Agent Plan', billing_scheme='other_token_plan', quota_query='ark_plan')
+_FAMILIES['kimi-code'].update(family='moonshot', family_name='Kimi', edition='Token Plan · 国内')
+_FAMILIES['moonshot'].update(family_name='Kimi', edition='按量 API · 国内')
+_FAMILIES['qwen'].update(family_name='千问 / 阿里百炼')
+_FAMILIES['ollama'].update(edition='本地', provider='ollama')
+
+
+def _variant(key: str, family: str, edition: str, base_url: str, *, billing: str = 'manual',
+             quota: str = 'auto', protocol: str = 'openai_compatible') -> None:
+    parent = _FAMILIES[family]
+    PROVIDER_PRESETS.append({'key': key, 'name': f"{parent['family_name']} · {edition}",
+        'family': family, 'family_name': parent['family_name'], 'edition': edition,
+        'provider': protocol, 'base_url': base_url, 'billing_scheme': billing, 'quota_query': quota,
+        'brand': parent['brand'], 'mark': parent['mark']})
+
+
+for _key, _name, _url, _mark, _color in [
+    ('astron', '讯飞星辰 Astron', 'https://maas-api.cn-huabei-1.xf-yun.com/v1', '讯', '#ee7638'),
+    ('bailing', '蚂蚁百灵', 'https://api.ant-ling.com/v1', '灵', '#527bd9'),
+    ('byteplus', 'BytePlus', 'https://ark.ap-southeast.bytepluses.com/api/v3', 'B', '#3370ff'),
+    ('longcat', '美团 LongCat', 'https://api.longcat.chat/openai/v1', 'L', '#21b873'),
+    ('meta', 'Meta Model API', 'https://api.meta.ai/anthropic', '∞', '#0866ff'),
+    ('qwencloud', 'QwenCloud', 'https://ap-southeast-1.maas.qwencloudapi.com/compatible-mode/v1', 'Q', '#6336e7'),
+    ('streamlake', '快手万擎 StreamLake', 'https://wanqing.streamlakeapi.com/api/gateway/v1/endpoints', '万', '#2587cf'),
+    ('mimo', '小米 MiMo', 'https://api.xiaomimimo.com/v1', '米', '#f27922'),
+    ('opencode', 'OpenCode', 'https://opencode.ai/zen/v1', 'OC', '#555555'),
+]:
+    _p = {'key': _key, 'name': _name, 'family': _key, 'family_name': _name, 'edition': '按量 API',
+          'base_url': _url, 'provider': 'anthropic_compatible' if _key == 'meta' else 'openai_compatible',
+          'brand': _color, 'mark': _mark}
+    # Meta 的 Messages 路径为 /v1/messages，基址不额外拼 /anthropic。
+    if _key == 'meta':
+        _p['base_url'] = 'https://api.meta.ai'
+    PROVIDER_PRESETS.append(_p)
+    _FAMILIES[_key] = _p
+
+for _key, _family, _edition, _url, _billing, _quota in [
+    ('ark-api', 'ark', '按量 API', 'https://ark.cn-beijing.volces.com/api/v3', 'manual', 'auto'),
+    ('ark-coding', 'ark', 'Coding Plan', 'https://ark.cn-beijing.volces.com/api/coding/v3', 'other_token_plan', 'ark_plan'),
+    ('zhipu-plan', 'zhipu', 'Token Plan · 国内', 'https://open.bigmodel.cn/api/coding/paas/v4', 'glm_token_plan', 'glm_plan'),
+    ('zai-plan', 'zhipu', 'Coding Plan · 国际', 'https://api.z.ai/api/coding/paas/v4', 'other_token_plan', 'glm_plan'),
+    ('kimi-api-global', 'moonshot', '按量 API · 国际', 'https://api.moonshot.ai/v1', 'manual', 'moonshot_balance'),
+    ('kimi-code-global', 'moonshot', 'Token Plan · 国际', 'https://api.kimi.ai/coding/v1', 'other_token_plan', 'kimi_plan'),
+    ('minimax-plan', 'minimax', 'Token Plan · 国内', 'https://api.minimax.cn/v1', 'other_token_plan', 'minimax_plan'),
+    ('minimax-api-global', 'minimax', '按量 API · 国际', 'https://api.minimax.io/v1', 'manual', 'auto'),
+    ('minimax-plan-global', 'minimax', 'Coding Plan · 国际', 'https://api.minimax.io/v1', 'other_token_plan', 'minimax_plan'),
+    ('qwen-coding', 'qwen', 'Coding Plan', 'https://coding.dashscope.aliyuncs.com/v1', 'other_token_plan', 'auto'),
+    ('qwen-token', 'qwen', 'Token Plan', 'https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1', 'other_token_plan', 'auto'),
+    ('qwencloud-coding', 'qwencloud', 'Coding Plan', 'https://coding-intl.dashscope.aliyuncs.com/v1', 'other_token_plan', 'auto'),
+    ('qwencloud-token', 'qwencloud', 'Token Plan', 'https://token-plan.maas.qwencloudapi.com/compatible-mode/v1', 'other_token_plan', 'auto'),
+    ('qianfan-coding', 'qianfan', 'Coding Plan', 'https://qianfan.baidubce.com/v2/coding', 'other_token_plan', 'auto'),
+    ('qianfan-token', 'qianfan', 'Token Plan', 'https://qianfan.baidubce.com/v2/tokenplan/personal', 'other_token_plan', 'auto'),
+    ('tencent-plan', 'hunyuan', 'Token Plan · 个人版', 'https://api.lkeap.cloud.tencent.com/plan/v3', 'other_token_plan', 'auto'),
+    ('tencent-enterprise', 'hunyuan', 'Token Plan · 企业版', 'https://tokenhub.tencentmaas.com/plan/v3', 'other_token_plan', 'auto'),
+    ('stepfun-plan', 'stepfun', 'Step Plan · 国内', 'https://api.stepfun.com/step_plan/v1', 'other_token_plan', 'stepfun_balance'),
+    ('stepfun-global', 'stepfun', '按量 API · 国际', 'https://api.stepfun.ai/v1', 'manual', 'stepfun_balance'),
+    ('stepfun-plan-global', 'stepfun', 'Step Plan · 国际', 'https://api.stepfun.ai/step_plan/v1', 'other_token_plan', 'stepfun_balance'),
+    ('siliconflow-global', 'siliconflow', '按量 API · 国际', 'https://api.siliconflow.com/v1', 'manual', 'siliconflow_balance'),
+    ('astron-coding', 'astron', 'Coding Plan', 'https://maas-coding-api.cn-huabei-1.xf-yun.com/v1', 'other_token_plan', 'auto'),
+    ('byteplus-coding', 'byteplus', 'Coding Plan', 'https://ark.ap-southeast.bytepluses.com/api/coding/v3', 'other_token_plan', 'auto'),
+    ('streamlake-global', 'streamlake', '按量 API · 国际', 'https://vanchin.streamlake.ai/api/gateway/v1/endpoints', 'manual', 'auto'),
+    ('mimo-token', 'mimo', 'Token Plan · 国内', 'https://token-plan-cn.xiaomimimo.com/v1', 'other_token_plan', 'auto'),
+    ('opencode-go', 'opencode', 'Go 订阅', 'https://opencode.ai/inference/go/v1', 'other_token_plan', 'opencode_plan'),
+]:
+    _variant(_key, _family, _edition, _url, billing=_billing, quota=_quota)
 
 
 def _candidate_urls(base_url: str, provider: str) -> list[str]:

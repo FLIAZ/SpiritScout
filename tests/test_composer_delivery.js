@@ -5,7 +5,7 @@ const sendSource=source.slice(source.indexOf('const composerDeliveries'),source.
 const file={name:'evidence.txt'}, input={value:'分析附件'}, pending=new Set();
 const S={cur:'sess-a',sessions:[{session_id:'sess-a',status:'running'}],compFiles:[file]};
 let stages=0, fail=true, edit=false, requests=[];
-const ctx=vm.createContext({S,compInput:input,sessionMessagePending:pending,
+const ctx=vm.createContext(require('./helpers/i18n').context({S,compInput:input,sessionMessagePending:pending,
   syncComposerControl(){},compGrow(){},renderFileChips(){},toast(){},
   startStreams(){},refreshState(){},refreshSessions(){},
   stageFiles:async files=>{stages++;return files.map((_,i)=>`upload-${i}`);},
@@ -15,7 +15,7 @@ const ctx=vm.createContext({S,compInput:input,sessionMessagePending:pending,
     if(edit)input.value='下一条草稿';
     return {queued:true,resumed:false};
   },
-});
+}));
 vm.runInContext(sendSource,ctx);
 (async()=>{
   await ctx.compSend();

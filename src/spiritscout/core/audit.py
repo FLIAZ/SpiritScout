@@ -1,15 +1,47 @@
 """JSONL 审计记录与工具调用摘要。
 
-同一路径共享递增序号；工具参数附加展示摘要，读取时移除加密副本字段。"""
+同一路径共享递增序号；大 detail 无损压缩，读取时透明还原旧、新记录。"""
 
 from __future__ import annotations
 
+import base64
 import json
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+from spiritscout.core.storage_codec import compress_bytes, unpack_json
+
+
+def encode_record(record: dict[str, Any]) -> str:
+    """保留可检索的事件头和逐行字节游标，压缩只发生在新行首次写入时。"""
+    raw = json.dumps(record.get("detail", {}), ensure_ascii=False, separators=(",", ":")).encode()
+    packed = compress_bytes(raw)
+    if len(packed) * 4 // 3 + 96 < len(raw):
+        record = {key: value for key, value in record.items() if key != "detail"}
+        record["_detail_zlib"] = base64.b64encode(packed).decode("ascii")
+    return json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+
+
+def decode_record(record: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(record, dict):
+        raise ValueError("审计记录不是对象")
+    if "_detail_zlib" not in record:
+        return record
+    try:
+        detail = unpack_json(base64.b64decode(record["_detail_zlib"], validate=True))
+    except (ValueError, TypeError) as exc:
+        raise ValueError("审计压缩记录损坏") from exc
+    if not isinstance(detail, dict):
+        raise ValueError("审计 detail 不是对象")
+    return {**{key: value for key, value in record.items() if key != "_detail_zlib"}, "detail": detail}
+
+
+def read_record(line: str | bytes) -> dict[str, Any]:
+    """所有审计消费者使用此入口；返回完整原文，保留旧加密参数副本。"""
+    return decode_record(json.loads(line))
 
 
 def tool_preview(arguments: Any) -> str:
@@ -55,6 +87,7 @@ def sanitize_record(record: dict[str, Any]) -> dict[str, Any]:
     脱敏时代落盘的旧记录读出来仍是当时写下的 REDACTED 形态——有损不可
     逆；新记录起原文落盘、原文转播。
     """
+    record = decode_record(record)
     detail = record.get("detail", {})
     if isinstance(detail, dict) and isinstance(detail.get("calls"), list):
         detail = {**detail, "calls": [
@@ -73,13 +106,15 @@ class AuditLogger:
 
     _file_seqs: ClassVar[dict[str, int]] = {}
     _file_seqs_lock: ClassVar[threading.Lock] = threading.Lock()
+    _file_locks: ClassVar[dict[str, Any]] = {}
 
     def __init__(self, path: str | Path):
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
-        self._key = str(self._path)
+        self._key = str(self._path.resolve())
         with AuditLogger._file_seqs_lock:
+            self._lock = AuditLogger._file_locks.setdefault(self._key, threading.RLock())
+        with self._lock, AuditLogger._file_seqs_lock:
             if self._key not in AuditLogger._file_seqs:
                 # 续接磁盘已有行数（重启/后到的写入实例不从 0 重排）
                 n = 0
@@ -96,35 +131,23 @@ class AuditLogger:
         flag.submit / scope.violation / policy.violation / model.call /
         budget.exceeded / human.approval / system.lifecycle
         """
-        if event_type == "agent.tool_call" and isinstance(detail.get("calls"), list):
-            # 模型入口参数另存加密副本（执行台账），供旧审计记录的参数查看
-            # 兼容读取；新记录的 arguments 已原文落盘，SSE 直达。
-            key = self._path.parent / "execution.key"
-            if key.is_file():
-                from cryptography.fernet import Fernet
-
-                cipher = Fernet(key.read_bytes())
-                calls = []
-                for call in detail["calls"]:
-                    if isinstance(call, dict) and isinstance(call.get("arguments"), dict):
-                        payload = json.dumps(call["arguments"], ensure_ascii=False).encode()
-                        call = {**call, "arguments_cipher": cipher.encrypt(payload).decode()}
-                    calls.append(call)
-                detail = {**detail, "calls": calls}
-        with AuditLogger._file_seqs_lock:
-            AuditLogger._file_seqs[self._key] += 1
-            seq = AuditLogger._file_seqs[self._key]
-        record = {
-            "seq": seq,
-            "ts": datetime.now(UTC).isoformat(),
-            "type": event_type,
-            "actor": actor,
-            "detail": prepare_detail(detail),
-        }
+        # arguments 已保留原文；不再给同一审计行制造不可压缩的加密副本。
+        # 执行台账仍独立加密存储参数，旧审计中的副本由读取口兼容。
         with self._lock:
+            # 序号分配、压缩和追加共用路径锁，多个 Logger 不会写出倒序或半行。
+            with AuditLogger._file_seqs_lock:
+                AuditLogger._file_seqs[self._key] += 1
+                seq = AuditLogger._file_seqs[self._key]
+            record = {
+                "seq": seq,
+                "ts": datetime.now(UTC).isoformat(),
+                "type": event_type,
+                "actor": actor,
+                "detail": prepare_detail(detail),
+            }
             try:
                 with self._path.open("a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    fh.write(encode_record(record) + "\n")
             except FileNotFoundError:
                 # 会话目录已被删除（删除会话时后台任务仍持引用）：会话事实
                 # 已随目录移除，丢弃这条记录而不是把目录复活成僵尸

@@ -357,7 +357,13 @@ def build_client(spec: Any) -> McpClient:
             "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "XAUTHORITY",
             "DBUS_SESSION_BUS_ADDRESS") if key in os.environ}, **env}
         env["SPIRITSCOUT_CHROME_DEFER_START"] = "1"
-        return ChromeMcpClient(spec.name, command=command, args=list(spec.args),
+        args = ["--run-chrome-mcp", *list(spec.args[2:])] if getattr(sys, "frozen", False) and command == sys.executable else list(spec.args)
+        client_type = ChromeMcpClient
+        if env.get('SPIRITSCOUT_BROWSER_ACCOUNT'):
+            from spiritscout.tools.browser_accounts import AccountChromeMcpClient
+
+            client_type = AccountChromeMcpClient
+        return client_type(spec.name, command=command, args=args,
                                env=env, timeout=timeout)
     return McpStdioClient(spec.name, command=command,
                           args=list(spec.args or []),

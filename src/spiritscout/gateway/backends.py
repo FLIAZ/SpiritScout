@@ -95,6 +95,23 @@ def normalize_tool_calls(raw: Any) -> list[dict[str, Any]]:
     return out
 
 
+def encode_failed_tool_history(messages: list[dict[str, Any]]) -> None:
+    """只编码发送副本中的坏历史，避免 llama.cpp 在渲染模板前拒绝整个请求。"""
+    for message in messages:
+        if message.get('role') != 'assistant':
+            continue
+        for call in message.get('tool_calls') or []:
+            function = call.get('function') or {}
+            raw = function.get('arguments')
+            if not isinstance(raw, str):
+                continue
+            try:
+                json.loads(raw)
+            except (ValueError, RecursionError):
+                # 这是失败调用的记录，不猜补缺失参数，也不重新执行。原历史/审计保留原串。
+                function['arguments'] = json.dumps({'_invalid_json_not_executed': raw}, ensure_ascii=False)
+
+
 class ChatBackend(abc.ABC):
     @abc.abstractmethod
     async def complete(
@@ -233,6 +250,8 @@ class LiteLLMBackend(ChatBackend):
 
         messages = copy.deepcopy(messages)
         tools = copy.deepcopy(tools)
+        if entry.local_runtime == 'llama_cpp':
+            encode_failed_tool_history(messages)
         if entry.prompt_caching == "anthropic_ephemeral":
             if not anthropic:
                 raise ValueError("显式 Anthropic 缓存需要 anthropic_messages 协议")
@@ -268,6 +287,9 @@ class LiteLLMBackend(ChatBackend):
             kwargs["api_base"] = entry.base_url
         if entry.api_key:
             kwargs["api_key"] = entry.api_key
+        elif entry.local_runtime == "llama_cpp" and entry.base_url and not anthropic:
+            # OpenAI SDK 要求非空 key；显式本地端点用占位值，避免读取宿主云端凭据。
+            kwargs["api_key"] = "no-key"
         # 发给 litellm 的模型名必须带可路由前缀：裸名解析不出供应商时
         # litellm 打红字横幅且调用必败（前缀规则见 _routed_model_name）
         kwargs["model"] = self._routed_model_name(
@@ -491,7 +513,20 @@ class LiteLLMBackend(ChatBackend):
                     "output": str(m.get("content", "") or ""),
                 })
             else:
-                input_items.append({"role": role, "content": m.get("content", "")})
+                content = m.get("content", "")
+                if isinstance(content, list):
+                    parts = []
+                    for part in content:
+                        if part.get("type") == "text":
+                            parts.append({"type": "input_text", "text": part.get("text", "")})
+                        elif part.get("type") == "image_url":
+                            image = part.get("image_url") or {}
+                            parts.append({"type": "input_image", "image_url": image.get("url", ""),
+                                          "detail": image.get("detail", "auto")})
+                        else:
+                            raise ValueError("Responses 不支持此多模态内容类型")
+                    content = parts
+                input_items.append({"role": role, "content": content})
         # 工具清单同步转 Responses 形状：扁平 {name,description,parameters}，
         # 不带 Chat Completions 的 function 包装层
         responses_tools = [

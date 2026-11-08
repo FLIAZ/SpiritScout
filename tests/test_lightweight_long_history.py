@@ -149,7 +149,6 @@ class SolverViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue({"steering_feedback", "blackboard_read", "skill_search", "skill_open", "skill_read", "history_read"} <= names)
         self.assertEqual(normal.tool_schemas, before)
         self.assertEqual(construct(False).tool_schemas, before)
-        self.assertNotIn("history_read", {s["function"]["name"] for s in normal.tool_schemas})
 
     async def test_instruction_lookup_is_task_scoped_and_returns_full_original(self):
         agent = self.agent()

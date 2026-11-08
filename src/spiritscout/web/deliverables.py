@@ -11,10 +11,11 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from spiritscout.core.audit import sanitize_record, tool_preview
+from spiritscout.core.storage_codec import unpack_json
 
 _KINDS = {"fact", "hypothesis", "evidence", "finding", "asset", "file", "outcome"}
-# 可下发的目录：智能体产物、报告，以及用户上传的原始附件（回显给本人预览/下载）
-_SERVED_DIRS = {"artifacts", "reports", "attachments"}
+# 可下发的目录：智能体产物、报告、原始附件及 HTTP 复测证据（会话内预览/下载）。
+_SERVED_DIRS = {"artifacts", "reports", "attachments", "http-responses"}
 
 
 def open_artifact(workspace: Path, name: str) -> BinaryIO:
@@ -191,7 +192,7 @@ def read_record_history(workspace: Path, layer: str, record_id: str,
             "WHERE layer=? AND record_id=? AND (?=0 OR version<?) ORDER BY version DESC LIMIT ?",
             (layer, record_id, before, before, limit + 1)).fetchall()
     items = [{"version": row["version"], "updated_by": row["updated_by"],
-              "updated_at": row["updated_at"], "data": json.loads(row["data"])} for row in rows[:limit]]
+              "updated_at": row["updated_at"], "data": unpack_json(row["data"])} for row in rows[:limit]]
     return {"items": sanitize_record({"detail": {"items": items}})["detail"]["items"],
             "has_more": len(rows) > limit}
 
@@ -205,8 +206,21 @@ def read_vulnerability_page(workspace: Path, offset: int = 0, limit: int = 50) -
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='bb_records'").fetchone():
             return {"items": [], "total": 0}
         total = conn.execute("SELECT COUNT(*) FROM bb_records WHERE layer='vuln'").fetchone()[0]
-        rows = conn.execute("SELECT data FROM bb_records WHERE layer='vuln' "
+        rows = conn.execute("SELECT data,version FROM bb_records WHERE layer='vuln' "
                             "ORDER BY updated_at DESC,record_id LIMIT ? OFFSET ?", (limit, offset)).fetchall()
-    fields = ("vuln_id", "title", "vuln_type", "severity", "status", "cvss_score", "poc_verified", "endpoint", "verification", "false_positive_reason")
-    items = [{key: data.get(key) for key in fields} for row in rows if isinstance(data := json.loads(row[0]), dict)]
+    fields = ("vuln_id", "title", "vuln_type", "severity", "status", "cvss_score", "poc_verified", "endpoint", "verification", "false_positive_reason", "vulnerability_ids")
+    items = [{**{key: data.get(key) for key in fields}, "version": row[1]} for row in rows if isinstance(data := json.loads(row[0]), dict)]
     return {"items": sanitize_record({"detail": {"items": items}})["detail"]["items"], "total": total}
+
+
+def read_vulnerability_detail(workspace: Path, vuln_id: str) -> dict | None:
+    db = workspace / 'bb.db'
+    if not db.is_file():
+        return None
+    with closing(sqlite3.connect(db.resolve().as_uri() + '?mode=ro', uri=True)) as conn:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='bb_records'").fetchone():
+            return None
+        row = conn.execute("SELECT data,version FROM bb_records WHERE layer='vuln' AND record_id=?", (vuln_id,)).fetchone()
+    if row is None:
+        return None
+    return {'version': row[1], 'data': sanitize_record({'detail': json.loads(row[0])})['detail']}

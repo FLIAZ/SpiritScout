@@ -76,10 +76,11 @@ class QuestionBroker:
 
     async def ask(self, agent: str, question: str, options: list[str],
                   targets: list[Any] | None = None, *,
-                  multiple: bool = False) -> dict[str, Any]:
+                  multiple: bool = False, secret: bool = False) -> dict[str, Any]:
         """提交一个用户问题；挂起直到作答/停止。返回 {"answer", "scope_added"}。
 
         multiple=True 表示选项可多选（前端勾选后统一提交），默认单选。
+        secret=True 用于受控工具的一次性验证，不合并挑战，不把答复写入共享历史。
         """
         question = str(question or "").strip()[:2000]
         if not self.interactive:
@@ -90,13 +91,14 @@ class QuestionBroker:
                     "比赛规则、已有授权与现场证据自主决策并继续；缺少必要条件时"
                     "记录阻塞并推进其他任务，无法继续则如实报告结果，不等待用户。",
                     "scope_added": [], "autonomous": True}
-        fingerprint = f"{agent}|{question}"
+        # 验证码属于单次挑战；即使两个账号同名，也不能合并后共用一次答复。
+        fingerprint = f"{agent}|{question}" + ('|' + new_id('verification') if secret else '')
         existing = self._by_question.get(fingerprint)
         if existing and existing in self._waiters:
             qid = existing                            # 同一问题已在询问：共用裁决
         else:
             qid = self._create(agent, question, fingerprint, options, targets,
-                               multiple=multiple)
+                               multiple=multiple, secret=secret)
         fut = self._waiters[qid]
         self._consumers[qid] = self._consumers.get(qid, 0) + 1
         try:
@@ -107,7 +109,7 @@ class QuestionBroker:
 
     def _create(self, agent: str, question: str, fingerprint: str,
                 options: list[str], targets: list[Any] | None,
-                *, multiple: bool = False) -> str:
+                *, multiple: bool = False, secret: bool = False) -> str:
         qid = new_id("ask")
         fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._waiters[qid] = fut
@@ -118,6 +120,7 @@ class QuestionBroker:
             "options": [str(o).strip()[:200] for o in (options or [])[:6]
                         if str(o).strip()],
             "multiple": bool(multiple),
+            "secret": bool(secret),
             "targets": normalize_targets(targets),
             "requested_at": time.time(),
         }
@@ -198,6 +201,14 @@ class QuestionBroker:
             answer = ""
         if not answer and not add_targets:
             raise ValueError("请选择有效选项或填写答复")
+        if rec.get('secret'):
+            if add_targets or len(answer) > 256:
+                raise ValueError('验证答复最多 256 字符，不能附加授权目标')
+            # 一次性验证材料只交回等待的浏览器工具，不进入黑板、模型或审计原文。
+            self._audit.log('user.answered', 'web', {'question_id': question_id,
+                'answer': '已提交验证材料', 'secret': True, 'scope_added': []})
+            self._resolve(question_id, {'answer': answer, 'scope_added': []})
+            return True
         added: list[str] = []
         if add_targets and self._guard is not None:
             valid = {t["target"] for t in rec["targets"] if isinstance(t, dict)}

@@ -15,6 +15,8 @@ ASSET_LABELS = dict(zip(ASSET_RELATIONS, ('包含', '解析到', '暴露', '跳�
 GUIDANCE = (
     '探索图与事实分开：用 exploration_write 记录目标、假设、尝试及状态，'
     '保留失败/阻塞原因，以 parent_refs 表达模型判断的派生关系，以 asset_refs 关联已有资产。'
+    '可用 identity 标明本次实际身份（账号标识/角色，不含凭据），test_type 标明测试方向；'
+    'evidence_refs 使用实际执行 ID、文件或 layer:record_id@version，确认结果可引用对应漏洞记录。'
     'graph_read 可按图、状态、资产或父节点查找，完整记录用 blackboard_read 按引用读取。'
     '有依据的产出仍用 blackboard_write 发布，可附 exploration_refs/asset_refs；'
     'asset_link 登记已有资产之间的包含、解析、暴露、跳转或关联关系，必须附依据；'
@@ -44,6 +46,8 @@ SCHEMAS = [
             'node_type': {'type': 'string', 'enum': list(KINDS)},
             'text': {'type': 'string'}, 'state': {'type': 'string', 'enum': list(STATES)},
             'reason': {'type': 'string'},
+            'identity': {'type': 'string', 'maxLength': 100, 'description': '本次实际身份或账号标识，不填写密码、Cookie 或验证码'},
+            'test_type': {'type': 'string', 'maxLength': 100, 'description': '模型判断的测试方向，例如对象级权限或会话管理'},
             **{name: {'type': 'array', 'items': {'type': 'string'}}
                for name in ('parent_refs', 'asset_refs', 'evidence_refs')}},
             'required': ['node_type', 'text', 'state']}}},
@@ -191,7 +195,11 @@ def execute(bb: Any, name: str, args: dict[str, Any], *, actor: str,
         raise ValueError('新节点不能指定 version')
     key = key or 'exploration-' + uuid.uuid4().hex
     old = existing[0] if existing else {}
+    dimensions = {key: args.get(key, old.get(key, '')) for key in ('identity', 'test_type')}
+    if any(not isinstance(v, str) or len(v) > 100 for v in dimensions.values()):
+        raise ValueError('identity 与 test_type 须为最多 100 字符的文本')
     data = {**old, **(source or {}), 'kind': 'exploration', 'node_type': node_type,
+            **{key: value.strip() for key, value in dimensions.items() if value or key in args or key in old},
             'text': text.strip(), 'state': state, 'reason': reason,
             'parent_refs': refs(bb, args.get('parent_refs', old.get('parent_refs', [])), exploration=True),
             'asset_refs': refs(bb, args.get('asset_refs', old.get('asset_refs', [])), asset=True)}

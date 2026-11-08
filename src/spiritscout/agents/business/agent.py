@@ -25,6 +25,7 @@ from spiritscout.resources.runtime import (
     runtime_for,
 )
 from spiritscout.tools.catalog import MCP_PROXY_SCHEMAS, search_mcp_tools
+from spiritscout.tools.cve import SCHEMA as CVE_SCHEMA
 from spiritscout.tools.invocation import current_execution_scope
 from spiritscout.tools.search_policy import search_allowed
 from spiritscout.tools.web_search import SEARCH_SCHEMA
@@ -93,9 +94,13 @@ class BusinessContextAgent(SubAgent):
         from spiritscout.tools.http_responses import SCHEMA as RESPONSE_SCHEMA
 
         schemas.append(RESPONSE_SCHEMA)
+        schemas.append(CVE_SCHEMA)
         from spiritscout.tools.cyberchef import SCHEMAS as CYBERCHEF_SCHEMAS
 
         schemas.extend(CYBERCHEF_SCHEMAS)
+        from spiritscout.tools.images import SCHEMA as IMAGE_SCHEMA
+
+        schemas.append(IMAGE_SCHEMA)
         schemas.append({"type":"function","function":{"name":"ask_user",
             "description":(
                 "向用户提问并等待答复。遇到只有用户能提供的信息（测试账号、"
@@ -203,8 +208,24 @@ class BusinessContextAgent(SubAgent):
             compact_history(st["messages"])
             size = len(json.dumps(st["messages"], ensure_ascii=False))
             st["compact_at"] = size + max(16000, size // 2)
-        messages = [{k: v for k, v in m.items() if not k.startswith("_")}
-                    for m in st["messages"]]
+        from spiritscout.gateway.context import estimate_input_tokens
+        from spiritscout.gateway.manual_context import (
+            archive_boundary,
+            excerpt_view,
+            pending_request,
+            record_result,
+        )
+
+        request = pending_request(self.ctx.blackboard, st.get("manual_compaction_id", ""))
+        previous = excerpt_view(st["messages"], st.get("manual_archive_before", 0))
+        if request:
+            st["manual_archive_before"] = archive_boundary(st["messages"])
+            st["manual_compaction_id"] = request["request_id"]
+        view = excerpt_view(st["messages"], st.get("manual_archive_before", 0))
+        messages = [{k: v for k, v in m.items() if not k.startswith("_")} for m in view]
+        if request:
+            record_result(self.ctx.blackboard, request, f"business:{task.task_id}",
+                estimate_input_tokens(previous), estimate_input_tokens(view), audit=self.ctx.audit, actor=self.agent_id)
         st["turn"] += 1
         self.ctx.audit.log("agent.turn", self.agent_id, {
             "turn": st["turn"], "task_id": task.task_id,
@@ -326,6 +347,8 @@ class BusinessContextAgent(SubAgent):
                     result_meta.update(res.parsed)
                 result_meta.update(invocation_id=res.invocation_id, returncode=res.returncode,
                                    attempts=res.attempts)
+                if name == "view_image":
+                    result_meta.update(res.parsed)
                 result_meta.update({key: res.parsed[key] for key in ("failure_kind", "failure_summary")
                                     if key in res.parsed and not res.ok})
                 if res.ok and name.endswith("browser_navigate"):

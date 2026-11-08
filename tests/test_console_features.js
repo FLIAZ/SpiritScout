@@ -7,7 +7,7 @@ const root = path.resolve(__dirname, "../src/spiritscout/web/static/js");
 const escape = value => String(value ?? "").replace(/[&<>\"]/g, char => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[char]));
 function load(file, name) {
   const context = {console, esc: escape, modelDisplayName: value => String(value)};
-  return vm.runInNewContext(fs.readFileSync(path.join(root, file), "utf8") + `\n${name}`, context);
+  return vm.runInNewContext(fs.readFileSync(path.join(root, file), "utf8") + `\n${name}`, require('./helpers/i18n').context(context));
 }
 async function main() {
   const models = load("composer-model.js", "ComposerModels");

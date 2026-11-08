@@ -8,7 +8,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from spiritscout.ctf.report_evidence import save_writeup
 from spiritscout.ctf.writeup import writeup_body
+from spiritscout.ctf.writeup_style import fallback_writeup
 from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
 
 _TASKS: dict[str, asyncio.Task] = {}
@@ -95,16 +97,12 @@ async def _run(snapshot: Path, job: dict, gateway: Any, audit: Any) -> None:
         digest = job['digest']
         body = await writeup_body(gateway, digest=digest, audit=audit) if job.get('enabled') else None
         if not body:
-            answers = '\n'.join('- ' + str(row.get('value', '')) for row in digest.get('flags', []))
-            stages = '\n\n'.join(str(row.get('text', '')) for row in digest.get('chronology', []))
-            body = '# 解题报告\n\n以下由已有执行记录整理，未补造缺失过程。\n\n## 答案\n\n' + answers + '\n\n## 过程与依据\n\n' + stages
+            body = fallback_writeup(digest)
         if json.loads(snapshot.read_text()).get('job_id') != job.get('job_id'):
             return
         path = Path(job['report_path'])
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix('.tmp')
-        temporary.write_text(body, encoding='utf-8')
-        temporary.replace(path)
+        save_writeup(path, body)
         job.update(status='done', error='')
         _update(snapshot, job)
         audit.log('report.ready', 'report', {'path': str(path)})

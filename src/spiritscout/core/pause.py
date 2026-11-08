@@ -58,6 +58,7 @@ class PauseGate:
 
     def resume(self) -> None:
         if self._paused_at is None:
+            self._gate.set()
             return
         span = time.time() - self._paused_at
         self.excluded_seconds += span
@@ -69,9 +70,11 @@ class PauseGate:
     def restore(self, paused: bool, excluded_seconds: float = 0.0) -> None:
         """从持久化状态静默恢复（控制台重启/续传重建）：不记审计、不补扣账。"""
         self.excluded_seconds = max(0.0, float(excluded_seconds))
-        if paused and self._paused_at is None:
-            self._paused_at = time.time()
+        self._paused_at = time.time() if paused else None
+        if paused:
             self._gate.clear()
+        else:
+            self._gate.set()
 
     # ------------------------------------------------------------ 间隙检测
 

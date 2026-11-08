@@ -8,7 +8,9 @@ bwrap 不可用时返回错误，不直接在宿主执行。"""
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
+import hashlib
 import os
 import shlex
 import shutil
@@ -17,6 +19,7 @@ import stat
 import sys
 import tempfile
 import time
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +36,10 @@ _MIN_TIMEOUT = 5.0
 _MAX_TIMEOUT = 300.0
 _READ_CHUNK = 65536
 _LOG_ROTATE_BYTES = 10 * 1024 * 1024    # 单日志超限轮转（保留上一代 .old）
+# 仅后台作业管理器设置；不能通过模型工具参数关闭普通命令的超时。
+background_output: ContextVar[Any] = ContextVar("sandbox_background_output", default=None)
+# 离线回归由可信调用方设置；不暴露为模型工具参数，也不改变普通赛题网络策略。
+offline_execution: ContextVar[bool] = ContextVar("sandbox_offline_execution", default=False)
 
 class _RotatingLog:
     """写入中按字节轮转，两代有界；stdout/stderr 在同一事件循环共用。"""
@@ -42,6 +49,9 @@ class _RotatingLog:
         self.previous = path.with_name(path.stem + ".old.log")
         self.limit = max(1, _LOG_ROTATE_BYTES)
         self.rotated = False
+        self.digest = hashlib.sha256()
+        self.previous_sha256 = ''
+        self.written_bytes = 0
         self._fh = path.open("ab", buffering=0)
         self._size = path.stat().st_size
         if self._size > self.limit:
@@ -52,6 +62,11 @@ class _RotatingLog:
             self._fh.truncate(0)
             self._size = 0
             self.rotated = True
+            self.previous_sha256 = hashlib.sha256(self.previous.read_bytes()).hexdigest()
+        elif self._size:
+            with path.open('rb') as existing:
+                while chunk := existing.read(_READ_CHUNK):
+                    self.digest.update(chunk)
 
     def write(self, chunk: bytes) -> None:
         data = memoryview(chunk)
@@ -59,7 +74,9 @@ class _RotatingLog:
             if self._size >= self.limit:
                 self._fh.close()
                 self.path.replace(self.previous)
+                self.previous_sha256 = self.digest.hexdigest()
                 self._fh = self.path.open("wb", buffering=0)
+                self.digest = hashlib.sha256()
                 self._size = 0
                 self.rotated = True
             take = min(len(data), self.limit - self._size)
@@ -67,6 +84,8 @@ class _RotatingLog:
             if not written:
                 raise OSError("日志写入未完成")
             self._size += written
+            self.written_bytes += written
+            self.digest.update(data[:written])
             data = data[written:]
 
     def close(self) -> None:
@@ -94,10 +113,27 @@ def _venv_site_dirs(venv: Path) -> list[str]:
     return [str(p) for p in sorted(venv.glob("lib/python*/site-packages"))]
 
 
+def _cuda_devices(root: Path = Path('/dev')) -> list[Path]:
+    """只开放当前用户可访问的 CUDA 字符设备，不开放整个宿主 /dev 或显示控制设备。"""
+    candidates = [root / name for name in ('nvidiactl', 'nvidia-uvm', 'nvidia-uvm-tools')]
+    candidates += [path for path in root.glob('nvidia[0-9]*') if path.name[6:].isdecimal()]
+    candidates += [path for path in (root / 'nvidia-caps').glob('nvidia-cap[0-9]*')
+                   if path.name[len('nvidia-cap'):].isdecimal()]
+    result = []
+    for path in candidates:
+        try:
+            if stat.S_ISCHR(path.lstat().st_mode) and os.access(path, os.R_OK):
+                result.append(path)
+        except OSError:
+            continue
+    return sorted(result)
+
+
 def _build_argv(workspace: Path, rundir: Path, inner: list[str], *,
                 guard_root: Path | None = None,
                 persistent_tmp: Path | None = None,
-                directory_fds: dict[Path, int] | None = None) -> list[str]:
+                directory_fds: dict[Path, int] | None = None,
+                proxy_env: dict[str, str] | None = None) -> list[str]:
     """bwrap 参数：整机只读 + 控制面遮蔽 + 产物可写/附件只读 + 干净环境。
 
     工具来源：项目内 .venv（只读回挂并入 PATH/PYTHONPATH）——用户主目录、
@@ -114,7 +150,10 @@ def _build_argv(workspace: Path, rundir: Path, inner: list[str], *,
         _BWRAP,
         "--ro-bind", "/", "/",
         "--dev", "/dev",
+        # 云端/本地 LLM 与赛题计算设备独立：普通、轻量工具都可以使用已有 CUDA。
+        *(argument for device in _cuda_devices() for argument in ('--dev-bind', str(device), str(device))),
         "--unshare-pid",               # 不通过宿主 /proc/<pid>/root 绕过文件遮蔽
+        *(("--unshare-net",) if offline_execution.get() else ()),
         "--proc", "/proc",
         # 轻量 × CTF：/tmp 换成题级持久目录（tmpfs 每调用即焚会让小模型
         # 陷入"解压→下次消失→再解压"的原地循环，实测反复打转）。
@@ -144,7 +183,9 @@ def _build_argv(workspace: Path, rundir: Path, inner: list[str], *,
     # 整个控制目录不可见，只开放约定的产物目录；同样覆盖位于 /tmp
     # 或主目录之外的工作区，不能仅靠遮蔽 execution.key 保护数据库。
     argv += ["--tmpfs", str(workspace), "--bind", source(rundir), str(rundir)]
-    for name in ("attachments", "artifacts", "http-responses"):
+    for name in ("attachments", "artifacts", "http-responses", "traffic-ca"):
+        if name == "traffic-ca" and not proxy_env:
+            continue
         directory = workspace / name
         if directory in (directory_fds or {}) or directory.is_dir():
             argv += ["--bind" if name == "artifacts" else "--ro-bind",
@@ -163,11 +204,15 @@ def _build_argv(workspace: Path, rundir: Path, inner: list[str], *,
     ]
     if site_dirs:
         argv += ["--setenv", "PYTHONPATH", ":".join(site_dirs)]
+    for key, value in (proxy_env or {}).items():
+        argv += ["--setenv", key, value]
+    if background_output.get() is not None:
+        argv += ["--setenv", "PYTHONUNBUFFERED", "1"]
     return [*argv, *inner]
 
 
 async def _read_capped(stream: asyncio.StreamReader | None,
-                       cap: int, sink=None) -> tuple[bytes, int]:
+                       cap: int, sink=None, observe=None) -> tuple[bytes, int]:
     """流式读取并限幅：完整内容逐块写入 sink（落盘，过程不丢），
     内存只保留头尾，返回（保留字节, 实际总量）。"""
     if stream is None:
@@ -182,6 +227,8 @@ async def _read_capped(stream: asyncio.StreamReader | None,
         if not chunk:
             break
         total += len(chunk)
+        if observe is not None:
+            observe(chunk)
         if sink is not None:
             try:
                 sink.write(chunk)
@@ -252,16 +299,22 @@ async def sandbox_exec(
     if not workspace_root:
         return ToolResult(tool="sandbox_exec", ok=False, returncode=-1,
                           error="缺少工作区配置（workspace_root）")
-    try:
-        timeout = max(_MIN_TIMEOUT, min(float(timeout), _MAX_TIMEOUT))
-    except (TypeError, ValueError):
-        timeout = 60.0
+    if background_output.get() is not None:
+        timeout = None
+    else:
+        try:
+            timeout = max(_MIN_TIMEOUT, min(float(timeout), _MAX_TIMEOUT))
+        except (TypeError, ValueError):
+            timeout = 60.0
     lang = "python" if str(language).lower() == "python" else "shell"
     lightweight = _lightweight_local and _run_mode in (RunMode.CTF, RunMode.AWDP)
     if lightweight:
         with contextlib.suppress(TypeError, ValueError):
             max_output_chars = min(int(max_output_chars), 4000)
     workspace = Path(workspace_root).resolve()
+    from spiritscout.traffic.proxy import tool_environment
+
+    proxy_env = await tool_environment(workspace)
     with contextlib.ExitStack() as directories:
         try:
             workspace.mkdir(parents=True, exist_ok=True)
@@ -282,18 +335,22 @@ async def sandbox_exec(
                 persistent_tmp = workspace / temporary
                 directory_fds[persistent_tmp] = directories.enter_context(
                     open_directory(workspace, temporary, create=True))
+            if proxy_env:
+                directory_fds[workspace / "traffic-ca"] = directories.enter_context(
+                    open_directory(workspace, Path("traffic-ca")))
         except (OSError, ValueError) as exc:
             return ToolResult(tool="sandbox_exec", ok=False, returncode=-1,
                               error=f"沙箱工作区不可用（目录不能是符号链接）: {exc}")
         return await _execute_sandbox(
             code, lang, timeout, workspace, rundir, persistent_tmp, directory_fds,
-            guard_root, log_name, max_output_chars, started)
+            guard_root, log_name, max_output_chars, started, proxy_env=proxy_env)
 
 
-async def _execute_sandbox(code: str, lang: str, timeout: float, workspace: Path,
+async def _execute_sandbox(code: str, lang: str, timeout: float | None, workspace: Path,
                            rundir: Path, persistent_tmp: Path | None,
                            directory_fds: dict[Path, int], guard_root: str | None,
-                           log_name: str, max_output_chars: int, started: float) -> ToolResult:
+                           log_name: str, max_output_chars: int, started: float,
+                           proxy_env: dict[str, str] | None = None) -> ToolResult:
     directory = Path(f"/proc/self/fd/{directory_fds[rundir]}")
     pipeline_name = None
     if lang == "python":
@@ -320,7 +377,7 @@ async def _execute_sandbox(code: str, lang: str, timeout: float, workspace: Path
     inner = ["bash", "-c", f'exec {close_fds}; exec "$@"', "sandbox", *inner]
     guard = Path(guard_root).resolve() if guard_root else None
     argv = _build_argv(workspace, rundir, inner, guard_root=guard,
-                       persistent_tmp=persistent_tmp, directory_fds=directory_fds)
+                       persistent_tmp=persistent_tmp, directory_fds=directory_fds, proxy_env=proxy_env)
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -333,6 +390,9 @@ async def _execute_sandbox(code: str, lang: str, timeout: float, workspace: Path
     # 完整输出逐块落盘（工作目录内，跨调用可查）——上下文只进头尾摘要，
     # 过程不因截断而丢失；需要细节时模型用沙箱按需读取该文件
     log_name = Path(str(log_name)).name[:160] or "last_output"
+    observer = background_output.get()
+    if observer is not None:
+        observer("started", proc.pid)
     log_path = None
     try:
         # 同题分支和同回合多工具可能同名并发，返回的证据路径必须永久对应本次调用。
@@ -345,8 +405,29 @@ async def _execute_sandbox(code: str, lang: str, timeout: float, workspace: Path
     except OSError:
         log_fh = None
         log_path = None
-    out_task = asyncio.create_task(_read_capped(proc.stdout, cap, sink=log_fh))
-    err_task = asyncio.create_task(_read_capped(proc.stderr, cap, sink=log_fh))
+    observe = background_output.get()
+    streams = {name: {"digest": hashlib.sha256(), "decoder": codecs.getincrementaldecoder('utf-8')('strict'),
+                      "lossy": False, "nul": False, "head": bytearray(), "bytes": 0}
+               for name in ('stdout', 'stderr')}
+
+    def capture(name: str, chunk: bytes) -> None:
+        state = streams[name]
+        state['digest'].update(chunk)
+        state['bytes'] += len(chunk)
+        state['nul'] |= b'\x00' in chunk
+        state['head'].extend(chunk[:max(0, 128 - len(state['head']))])
+        if not state['lossy']:
+            try:
+                state['decoder'].decode(chunk)
+            except UnicodeDecodeError:
+                state['lossy'] = True
+        if observe is not None:
+            observe(name, chunk)
+
+    out_task = asyncio.create_task(_read_capped(proc.stdout, cap, sink=log_fh,
+        observe=lambda data: capture("stdout", data)))
+    err_task = asyncio.create_task(_read_capped(proc.stderr, cap, sink=log_fh,
+        observe=lambda data: capture("stderr", data)))
     timed_out = False
     try:
         await asyncio.wait_for(proc.wait(), timeout=timeout)
@@ -370,10 +451,12 @@ async def _execute_sandbox(code: str, lang: str, timeout: float, workspace: Path
         if log_fh is not None:
             log_fh.close()
         raise
+    capture_complete = True
     try:
         (out_b, out_total), (err_b, err_total) = await asyncio.wait_for(
             asyncio.gather(out_task, err_task), timeout=5)
     except TimeoutError:
+        capture_complete = False
         out_task.cancel()
         err_task.cancel()
         await asyncio.gather(out_task, err_task, return_exceptions=True)
@@ -407,12 +490,27 @@ async def _execute_sandbox(code: str, lang: str, timeout: float, workspace: Path
     duration = (time.perf_counter() - started) * 1000
     stdout = _decode(out_b, out_total, max_output_chars)
     stderr = _decode(err_b, err_total, max_output_chars)
+    captures = {}
+    for name, state in streams.items():
+        if capture_complete and not state['lossy']:
+            try:
+                state['decoder'].decode(b'', final=True)
+            except UnicodeDecodeError:
+                state['lossy'] = True
+        captures[name + '_capture'] = {"sha256": state['digest'].hexdigest(), "bytes": state['bytes'],
+            "complete": capture_complete, "text_decode_lossy": state['lossy'], "contains_nul": state['nul'],
+            "preview_truncated": state['bytes'] > cap, "head_hex": bytes(state['head']).hex()}
     return ToolResult(
         tool="sandbox_exec", ok=not timed_out, returncode=rc,
         stdout=stdout, stderr=stderr, timed_out=timed_out,
         parsed={"language": lang, "exit_code": rc,
                 "duration_ms": round(duration, 1), "workdir": str(rundir),
                 "output_file": str(rundir / log_path.name) if log_path else "",
+                "output_sha256": log_fh.digest.hexdigest() if log_fh else '',
+                "previous_output_sha256": log_fh.previous_sha256 if log_fh else '',
+                "output_complete": bool(log_fh and capture_complete
+                    and log_fh.written_bytes == sum(state['bytes'] for state in streams.values())),
+                **captures,
                 "tmp_persistent": persistent_tmp is not None,
                 **({"pipeline_statuses": pipeline_statuses, "pipeline_partial": pipeline_partial}
                    if pipeline_name else {}),

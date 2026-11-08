@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=SpiritScout
+Name[zh_CN]=灵枢 SpiritScout
+Comment=Local multi-agent security testing console
+Exec=spiritscout
+Icon=spiritscout
+Terminal=true
+Categories=Network;

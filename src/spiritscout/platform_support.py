@@ -12,6 +12,23 @@ from pathlib import Path
 from typing import Any
 
 
+def is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def app_root() -> Path:
+    """发行包可指定可写的数据目录；裸单文件默认使用程序旁边。"""
+    if is_frozen():
+        if value := os.environ.get("SPIRITSCOUT_DATA_HOME"):
+            return Path(value).expanduser().resolve()
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
+
+
+def bundle_root() -> Path:
+    return Path(getattr(sys, "_MEIPASS", app_root())) if is_frozen() else app_root()
+
+
 def process_options() -> dict[str, Any]:
     if sys.platform == "win32":
         return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}

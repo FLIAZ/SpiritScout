@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const source = fs.readFileSync("src/spiritscout/web/static/js/notify.js", "utf8");
-const {create} = vm.runInNewContext(source + "\nConsoleNotify", {});
+const {create} = vm.runInNewContext(source + "\nConsoleNotify", require('./helpers/i18n').context({}));
 
 async function main() {
   const values = new Map(), sent = [], toasts = [], opened = [];

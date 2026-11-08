@@ -6,7 +6,12 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 
 from spiritscout.config.model_identity import model_key, resolve_model
-from spiritscout.config.settings import GatewayConfig, ModelEntry, SystemConfig
+from spiritscout.config.settings import (
+    GatewayConfig,
+    ModelEntry,
+    ProviderEntry,
+    SystemConfig,
+)
 from spiritscout.core.audit import AuditLogger
 from spiritscout.core.exceptions import SpiritScoutError
 from spiritscout.web import agentcfg, modelcfg, vault
@@ -15,7 +20,8 @@ from spiritscout.web import agentcfg, modelcfg, vault
 # 密钥字段永不出现）。模型条目的公开字段 = 注册表声明的全部字段去掉 api_key。
 _MODEL_PUBLIC_FIELDS = tuple(
     k for k in ModelEntry.model_fields if k != "api_key")
-_PROVIDER_PUBLIC_FIELDS = ("name", "provider", "base_url", "api_format")
+_PROVIDER_PUBLIC_FIELDS = ('name', 'provider', 'base_url', 'api_format', 'billing_scheme',
+                           'billing_plan', 'auth_method', 'quota_query')
 
 
 def _visible_model_ref(entries: list[ModelEntry], ref: str) -> str:
@@ -67,13 +73,61 @@ def mount_agent_routes(app: FastAPI, cfg: SystemConfig) -> None:
 
 def mount_model_routes(app: FastAPI, cfg: SystemConfig) -> None:
     """保持静态路由优先于模型 path 参数路由的注册顺序。"""
+    from spiritscout.gateway.official_prices import price_catalog
+    from spiritscout.web import provider_auth
+    from spiritscout.web.provider_quota import QuotaService
+
+    quotas = QuotaService()
+    app.state.provider_quotas = quotas
+
+    def _provider(name: str) -> ProviderEntry:
+        raw = next((p for p in modelcfg.read_providers(cfg.models_config_path) if p.get('name') == name), None)
+        if raw is None:
+            raise HTTPException(404, '供应商不存在')
+        return ProviderEntry.model_validate(raw)
+
+    @app.get('/api/provider-pricing/{scheme}')
+    async def provider_pricing(scheme: str, refresh: bool = False) -> dict[str, Any]:
+        try:
+            return await price_catalog().get(scheme, force=refresh)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get('/api/providers/{name}/quota')
+    async def provider_quota(name: str, refresh: bool = False) -> dict[str, Any]:
+        return await quotas.get(_provider(name), force=refresh)
+
+    @app.post('/api/providers/{name}/oauth/start')
+    async def oauth_start(name: str) -> dict[str, Any]:
+        try:
+            return await provider_auth.start(_provider(name))
+        except (SpiritScoutError, TimeoutError) as exc:
+            raise HTTPException(422, str(exc) or '授权服务繁忙，请稍后重试') from exc
+
+    @app.post('/api/providers/{name}/oauth/poll')
+    async def oauth_poll(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            result = await provider_auth.poll(_provider(name), str(payload.get('flow_id') or ''))
+            if result.get('status') == 'authenticated':
+                quotas.invalidate(name)
+            return result
+        except (SpiritScoutError, TimeoutError) as exc:
+            raise HTTPException(422, str(exc) or '授权服务繁忙，请稍后重试') from exc
+
+    @app.delete('/api/providers/{name}/oauth')
+    async def oauth_logout(name: str, cancel_only: bool = False) -> dict[str, Any]:
+        _provider(name)
+        await provider_auth.logout(name, cancel_only=cancel_only)
+        quotas.invalidate(name)
+        return {'ok': True}
 
     def _providers_view() -> dict[str, Any]:
         providers = modelcfg.read_providers(cfg.models_config_path)
         # 读 API 只回规范公开字段（+密钥状态）：不回吐 YAML 原始键
         return {"path": cfg.models_config_path,
                 "providers": [{**{k: p.get(k) for k in _PROVIDER_PUBLIC_FIELDS},
-                               **vault.key_status(p, str(p.get("name") or ""))}
+                               **vault.key_status(p, str(p.get("name") or "")),
+                               'quota_credentials_configured': bool(vault.get_quota_credentials(str(p.get('name') or '')))}
                               for p in providers]}
 
     def _models_view(entries: list[dict[str, Any]]) -> dict[str, Any]:
@@ -117,6 +171,7 @@ def mount_model_routes(app: FastAPI, cfg: SystemConfig) -> None:
     @app.post("/api/providers", status_code=201)
     async def add_provider(payload: dict[str, Any]) -> dict[str, Any]:
         payload = dict(payload)
+        quota_credentials = _pop_quota_credentials(payload)
         key_value = _pop_key_value(payload)
         try:
             payload = modelcfg.canonical_provider(payload)
@@ -125,7 +180,22 @@ def mount_model_routes(app: FastAPI, cfg: SystemConfig) -> None:
             raise _model_error(exc) from exc
         if key_value is not None:                  # 校验通过才动密钥库
             _store_key(str(payload.get("name") or ""), key_value)
+        if quota_credentials is not None:
+            vault.set_quota_credentials(payload['name'], quota_credentials)
         return _providers_view()
+
+    def _pop_quota_credentials(payload: dict[str, Any]) -> dict[str, str] | None:
+        if 'quota_credentials' not in payload:
+            return None
+        raw = payload.pop('quota_credentials')
+        if not isinstance(raw, dict) or set(raw) - {'access_key_id', 'secret_access_key'}:
+            raise HTTPException(422, '查询凭据格式无效')
+        if not raw:
+            return {}
+        if not all(isinstance(raw.get(k), str) and 0 < len(raw[k].strip()) <= 1024
+                   and not any(c.isspace() for c in raw[k].strip()) for k in ('access_key_id', 'secret_access_key')):
+            raise HTTPException(422, '请同时填写 Access Key ID 和 Secret')
+        return {k: v.strip() for k, v in raw.items()}
 
     @app.put("/api/providers/{name}")
     async def update_provider(name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -133,27 +203,44 @@ def mount_model_routes(app: FastAPI, cfg: SystemConfig) -> None:
         失败请求改变），再做密钥操作。语义：仅改名=密钥随名迁移；
         改名+新密钥=迁移后按显式输入覆写；api_key_value 空串=清除。"""
         payload = dict(payload)
+        quota_credentials = _pop_quota_credentials(payload)
         key_value = _pop_key_value(payload)
         try:
             payload = modelcfg.canonical_provider({**payload, "name": payload.get("name", name)})
             new_name = payload["name"]
-            modelcfg.upsert_provider(cfg.models_config_path, payload,
-                                     original_name=name, assignments_path=cfg.agent_models_path)
+            async with provider_auth.credential_lock():
+                modelcfg.upsert_provider(cfg.models_config_path, payload,
+                                         original_name=name, assignments_path=cfg.agent_models_path)
+                credentials = vault.get_oauth(name)
+                credentials.pop('pending', None)
+                if new_name != name:
+                    vault.set_oauth(name, {})
+                vault.set_oauth(new_name, credentials)
+                query_credentials = vault.get_quota_credentials(name)
+                if new_name != name:
+                    vault.set_quota_credentials(name, {})
+                vault.set_quota_credentials(new_name, query_credentials if quota_credentials is None else quota_credentials)
         except SpiritScoutError as exc:
             raise _model_error(exc) from exc
         if new_name != name:
             vault.rename_key(name, new_name)       # 先迁移
         if key_value is not None:
             _store_key(new_name, key_value)        # 再按显式输入覆写/清除
+        quotas.invalidate(name)
+        quotas.invalidate(new_name)
         return _providers_view()
 
     @app.delete("/api/providers/{name}")
     async def delete_provider(name: str) -> dict[str, Any]:
         try:
-            modelcfg.delete_provider(cfg.models_config_path, name)
+            async with provider_auth.credential_lock():
+                modelcfg.delete_provider(cfg.models_config_path, name)
+                vault.set_oauth(name, {})
+                vault.set_quota_credentials(name, {})
         except SpiritScoutError as exc:
             raise _model_error(exc) from exc
         vault.drop_key(name)
+        quotas.invalidate(name)
         return _providers_view()
 
     @app.post("/api/providers/{name}/models")
@@ -178,6 +265,15 @@ def mount_model_routes(app: FastAPI, cfg: SystemConfig) -> None:
             # 密钥只认本次直填或密钥库——YAML 不落密钥，stored 里没有可用值
             "api_key": key_value or vault.get_key(name),
         }
+        if stored.get('auth_method') == 'kimi_oauth':
+            # OAuth 凭据绑定官方端点，不能随未保存的地址编辑发送到别处。
+            provider = _provider(name)
+            if spec['base_url'] != provider.base_url or spec['provider'] != provider.provider:
+                raise HTTPException(422, 'OAuth 模型列表只能从已保存的官方端点读取')
+            try:
+                spec['api_key'] = await provider_auth.access_token(provider)
+            except SpiritScoutError as exc:
+                raise HTTPException(422, str(exc)) from exc
         result = await fetch_model_list(spec)
         AuditLogger(cfg.audit_log_path).log("system.lifecycle", "modelcfg", {
             "action": "provider_model_list", "provider": name,
@@ -200,6 +296,13 @@ def mount_model_routes(app: FastAPI, cfg: SystemConfig) -> None:
     @app.get("/api/models")
     async def list_models() -> dict[str, Any]:
         return _models_view(modelcfg.read_entries(cfg.models_config_path))
+
+    @app.get("/api/models/diagnostics")
+    async def diagnose_models() -> dict[str, Any]:
+        from spiritscout.config import load_model_config
+        from spiritscout.gateway.model_diagnostics import model_diagnostics
+
+        return model_diagnostics(load_model_config(cfg.models_config_path))
 
     # 命名链路由须先于 /api/models/{model:path} 注册（静态段优先匹配），
     # 否则 "naming" 会被当作模型 ID 吞进动态路由。
@@ -274,7 +377,10 @@ def mount_model_routes(app: FastAPI, cfg: SystemConfig) -> None:
             entry = resolve_model(entries, model)
         except SpiritScoutError as exc:
             raise HTTPException(422, str(exc)) from exc
-        if not entry.api_key:
+        key_optional = entry.provider == 'ollama' or (
+            entry.local_runtime == 'llama_cpp' and entry.provider == 'openai_compatible'
+            and entry.api_format in {'auto', 'chat_completions'} and bool(entry.base_url))
+        if not entry.api_key and entry.auth_method != 'kimi_oauth' and not key_optional:
             return {"ok": False,
                     "error": "密钥未配置——在该模型所属供应商里填入密钥"
                              "（加密存入本机密钥库）"}

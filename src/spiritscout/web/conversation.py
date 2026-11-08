@@ -12,6 +12,7 @@ from typing import Any
 
 from spiritscout.blackboard import Blackboard
 from spiritscout.blackboard.exchange import execute
+from spiritscout.core.audit import read_record
 from spiritscout.core.models import AgentType, BlackboardLayer
 from spiritscout.web.deliverables import open_artifact, read_deliverables
 
@@ -161,7 +162,7 @@ class ConversationResources:
                 with self.session.audit_path.open(encoding="utf-8") as stream:
                     for line in stream:
                         try:
-                            event = json.loads(line)
+                            event = read_record(line)
                         except ValueError:
                             continue
                         if types and event.get("type") not in types:

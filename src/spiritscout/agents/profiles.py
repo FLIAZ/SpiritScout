@@ -27,11 +27,15 @@ class AgentProfile:
     runtime_tools: tuple[str, ...] = ()
 
     def allows_tool(self, name: str) -> bool:
+        if name in {"shell_start", "shell_status", "shell_wait", "shell_watch", "shell_events", "shell_stop", "task_wait"}:
+            return self.allows_tool("sandbox_exec")
+        if name == "view_image":
+            return self.key not in {AgentType.MASTER, AgentType.SECRETARY, AgentType.REPORT, AgentType.SCANNER}
         if name in {"cyberchef_operations", "cyberchef_bake"}:
             return self.key not in {AgentType.MASTER, AgentType.SECRETARY, AgentType.REPORT}
-        if name == "http_response_read":
+        if name in {"http_response_read", "traffic_search", "traffic_get", "traffic_body_read"}:
             return self.allows_tool("http_probe")
-        if name in {"asset_memory_lookup", "web_search"}:
+        if name in {"asset_memory_lookup", "web_search", "cve_lookup"}:
             return self.key not in {AgentType.MASTER, AgentType.SECRETARY, AgentType.REPORT}
         return any(fnmatch.fnmatchcase(name, pattern)
                    for pattern in self.runtime_tools)
@@ -57,7 +61,7 @@ PROFILES: tuple[AgentProfile, ...] = (
         "不沿用发现者的结论。基于用户原文和独立请求区分实际危害、静态回显、权限控制与证据不足。",
         ("读取候选与用户规则", "独立复测并保留对照", "核对实际危害与规则", "确认、拒收或待补证"),
         ("HTTP 对照复测", "按需接入的 MCP", "询问用户", "独立证据链"),
-        ("http_probe",),
+        ("http_probe", "metasploit_scan"),
     ),
     AgentProfile(
         AgentType.SECRETARY, "秘书", "只读参谋：审视证据、提示遗漏与重复工作，由灵枢决定采纳",
@@ -89,6 +93,14 @@ PROFILES: tuple[AgentProfile, ...] = (
         ("建立基线", "提取真实链接与表单", "根据指纹补充最小化探测", "记录资产和可交接线索"),
         ("HTTP 只读探测", "DNS 解析", "robots.txt", "指纹分析"),
         ("http_probe", "dns_resolve"),
+    ),
+    AgentProfile(
+        AgentType.SCANNER, "探微", "与主流程并行收集扫描线索，结果写入黑板供专项角色核实",
+        ("src", "ctf"), "available", True,
+        "依据用户授权、规则和现场选择目标与模板；命中是待验证线索，不自动扩围。",
+        ("理解目标与规则", "按需选择扫描", "保存原始证据", "共享线索"),
+        ("Nuclei", "HTTP 探测", "扫描原始输出"),
+        ("nuclei_scan", "metasploit_scan", "http_probe", "sandbox_exec"),
     ),
     AgentProfile(
         AgentType.WEB_VULN, "破壁", "Web 安全测试：从已观测业务端点和参数中构造最小对照实验",
@@ -208,6 +220,7 @@ def agent_prompt_parts(agent: AgentType | str, *, allow_search: bool = True) -> 
     dbg_note = (
         "动态调试直接用 pwndbg 命令（内置插件的 gdb，参数用法同 gdb）。\n"
     ) if profile.key == AgentType.CTF_PWN else ""
+    from spiritscout.tools.cve import GUIDANCE as CVE_GUIDANCE
     from spiritscout.tools.web_search import SEARCH_GUIDANCE
 
     search_note = ("智能体模式禁止公开网页搜索，不使用 Exa 或其他外部搜索服务；只使用赛题现场和已有资料。"
@@ -222,6 +235,9 @@ def agent_prompt_parts(agent: AgentType | str, *, allow_search: bool = True) -> 
         f"可用工具面：{tools}。只使用当前实际提供的工具，不声称已执行"
         f"未调用的工具。\n"
         f"{probe}{ida_note}{dbg_note}{search_note}\n"
+        + (CVE_GUIDANCE if profile.allows_tool("cve_lookup") else
+           "已观测产品、版本或 CVE 出现情报缺口时，派专项角色使用 cve_lookup；先读本地库，比赛模式只读本地。"
+           if profile.key == AgentType.MASTER else "")
     )
     common = (
         "工具选择以完成当前问题的最小成本为准：网页正文、源码、接口响应优先使用 HTTP 工具；"

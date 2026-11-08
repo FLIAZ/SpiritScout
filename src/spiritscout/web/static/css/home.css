@@ -11,8 +11,8 @@ main:has(> #view-home:not([hidden])) {
 #view-home .hero { text-align: left; margin-bottom: 32px; }
 .home-eyebrow { display: flex; align-items: center; gap: 9px; color: var(--ink-2); margin: 0 0 18px; font-size: 12px; letter-spacing: .1em; }
 .home-eyebrow > span { width: 20px; height: 2px; background: var(--accent); }
-.home-intro { margin: 14px 0 0; color: var(--ink-2); font-size: 14px; }
-#view-home .lead { font-size: clamp(32px, 3.5vw, 48px); line-height: 1.42; font-weight: 650; letter-spacing: -.04em; }
+.home-intro { margin: 14px 0 0; color: var(--ink-2); font-size: 14px; line-height: 1.75; }
+#view-home .lead { font-size: clamp(32px, 3.5vw, 48px); line-height: 1.42; font-weight: 650; letter-spacing: 0; }
 #view-home .lead-em { padding: 0 3px; font-family: "STKaiti", "KaiTi", "Kaiti SC", "FangSong", serif; font-weight: 700; font-size: 1.13em; background-image: linear-gradient(115deg, var(--accent-strong), var(--accent) 52%, var(--gold)); }
 .home-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0 0 18px; padding: 0; border: 0; min-width: 0; }
 .home-modes legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }

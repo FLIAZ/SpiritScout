@@ -6,7 +6,7 @@ const ComposerFolders = (() => {
     let size = 0;
     async function walk(entry, prefix = "") {
       if (!entry.name || /[\/\\\x00]/.test(entry.name) || [".", ".."].includes(entry.name))
-        throw new Error("文件夹包含不合法的路径名称");
+        throw new Error(I18n.t("文件夹包含不合法的路径名称"));
       const path = prefix + entry.name;
       if (entry.isDirectory) {
         entries.push({path, directory:true});
@@ -20,9 +20,9 @@ const ComposerFolders = (() => {
       } else if (entry.isFile) {
         const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
         size += file.size;
-        if (size > 50 * 1024 * 1024) throw new Error("单个文件夹总大小不能超过 50MB");
+        if (size > 50 * 1024 * 1024) throw new Error(I18n.t("单个文件夹总大小不能超过 50MB"));
         entries.push({path, file});
-      } else throw new Error("无法读取拖入的文件夹条目");
+      } else throw new Error(I18n.t("无法读取拖入的文件夹条目"));
     }
     // 根目录名作为附件名，子条目使用相对根目录的路径。
     const reader = root.createReader();
@@ -42,7 +42,7 @@ const ComposerFolders = (() => {
       if (entry?.isDirectory) files.push(await folder(entry));
       else if (file) files.push(file);
       else if (entry?.isFile) files.push(await new Promise((resolve, reject) => entry.file(resolve, reject)));
-      else throw new Error("浏览器无法读取该拖入项，请改用附件按钮选择文件");
+      else throw new Error(I18n.t("浏览器无法读取该拖入项，请改用附件按钮选择文件"));
     }
     return files;
   }

@@ -68,6 +68,7 @@ class ToolSpec:
     internet_search: bool = False  # 宿主声明的公开网页搜索能力
     approval_purpose_param: str = ""  # 宿主新增的审批说明字段，调用前移除，不传给远端
     reuse_ttl_seconds: float = 0.0  # 仅宿主明确声明无状态只读工具可短时复用
+    strict_params: bool = False  # 空参数集合也可显式拒绝未声明字段。
 
 
 @dataclass

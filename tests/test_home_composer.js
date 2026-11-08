@@ -28,12 +28,12 @@ const examples = ['src', 'ctf', 'competition'].map(mode => {
 const source = fs.readFileSync('src/spiritscout/web/static/js/console.js', 'utf8');
 const home = source.slice(source.indexOf('const autogrow ='), source.indexOf('/* 附件暂存：'));
 let launches = 0;
-vm.runInNewContext(home, {
+vm.runInNewContext(home, require('./helpers/i18n').context({
   $: selector => elements[selector],
   document: { querySelectorAll: selector => selector === '.chip-s' ? examples : radios },
   selxSync() {}, toast() {}, S: { homeFiles: [] },
   launchMission() { launches++; },
-});
+}));
 assert.equal(elements['#c-go'].classes.has('ready'), false);
 for (const radio of radios) {
   radio.listeners.change();

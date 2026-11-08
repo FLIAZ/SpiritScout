@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
@@ -74,6 +75,10 @@ def _connect() -> sqlite3.Connection:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS secrets ("
         "name TEXT PRIMARY KEY, ciphertext BLOB NOT NULL, updated_at REAL NOT NULL)")
+    conn.execute('CREATE TABLE IF NOT EXISTS oauth_credentials ('
+                 'name TEXT PRIMARY KEY, ciphertext BLOB NOT NULL, updated_at REAL NOT NULL)')
+    conn.execute('CREATE TABLE IF NOT EXISTS quota_credentials ('
+                 'name TEXT PRIMARY KEY, ciphertext BLOB NOT NULL, updated_at REAL NOT NULL)')
     # 早期版本以 alias / model 为主键列，就地改名（现按供应商名保管密钥）
     cols = {row[1] for row in conn.execute("PRAGMA table_info(secrets)").fetchall()}
     if "name" not in cols:
@@ -175,7 +180,57 @@ def apply_keys(models: list[ModelEntry]) -> list[ModelEntry]:
     """
     keys = _load_all()
     return [m.model_copy(update={"api_key": keys[m.provider_ref]})
-            if m.provider_ref and m.provider_ref in keys else m for m in models]
+            if m.auth_method == 'api_key' and m.provider_ref and m.provider_ref in keys else m for m in models]
+
+
+def get_oauth(name: str) -> dict[str, Any]:
+    """OAuth 凭据与普通 API Key 分表保存，绝不经公开配置接口返回。"""
+    return _get_credentials('oauth_credentials', name)
+
+
+def get_quota_credentials(name: str) -> dict[str, Any]:
+    return _get_credentials('quota_credentials', name)
+
+
+def _get_credentials(table: str, name: str) -> dict[str, Any]:
+    if not _db_path().exists():
+        return {}
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(f'SELECT ciphertext FROM {table} WHERE name=?', (name,)).fetchone()
+            return json.loads(_cipher().decrypt(bytes(row[0]))) if row else {}
+        except (InvalidToken, ValueError):
+            return {}
+        finally:
+            conn.close()
+
+
+def set_oauth(name: str, data: dict[str, Any]) -> None:
+    _set_credentials('oauth_credentials', name, data)
+
+
+def set_quota_credentials(name: str, data: dict[str, Any]) -> None:
+    _set_credentials('quota_credentials', name, data)
+
+
+def _set_credentials(table: str, name: str, data: dict[str, Any]) -> None:
+    with _lock:
+        conn = _connect()
+        try:
+            with conn:
+                if data:
+                    blob = _cipher().encrypt(json.dumps(data, allow_nan=False).encode())
+                    conn.execute(f'INSERT INTO {table} VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET '
+                                 'ciphertext=excluded.ciphertext, updated_at=excluded.updated_at', (name, blob, time.time()))
+                else:
+                    conn.execute(f'DELETE FROM {table} WHERE name=?', (name,))
+        finally:
+            conn.close()
+
+
+def oauth_lock_path() -> Path:
+    return (_root or Path('.spiritscout')) / '.oauth.lock'
 
 
 def key_status(entry: dict[str, Any], name: str) -> dict[str, Any]:
@@ -183,6 +238,12 @@ def key_status(entry: dict[str, Any], name: str) -> dict[str, Any]:
 
     key_source：vault（密钥库已配置）/ none（未配置）。
     """
+    if entry.get('auth_method') == 'kimi_oauth':
+        token = get_oauth(name).get('token', {})
+        configured = bool(token.get('access_token'))
+        return {'key_source': 'oauth' if configured else 'none', 'key_configured': configured,
+                'auth_status': ('reauth_required' if token.get('rejected') else 'ready' if configured else 'not_connected'),
+                'auth_expires_at': token.get('expires_at')}
     configured = has_key(name)
     return {
         "key_source": "vault" if configured else "none",

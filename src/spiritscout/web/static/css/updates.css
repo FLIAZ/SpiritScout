@@ -1,0 +1,45 @@
+#ver[role="button"] { cursor: pointer; border-radius: 3px; }
+#ver[role="button"]:focus-visible, #btn-update:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+#btn-update { width: 23px; height: 23px; padding: 4px; color: var(--ink-3); border: 0; background: none; border-radius: 5px; cursor: pointer; }
+#btn-update:hover { color: var(--accent); background: var(--surface-2); }
+#btn-update svg { display: block; width: 15px; height: 15px; }
+#btn-update[hidden] { display: none; }
+#update-dlg { width: min(740px, calc(100vw - 32px)); max-height: 86vh; padding: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink); }
+#update-dlg::backdrop { background: rgb(0 0 0 / .28); }
+.update-head, .update-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 22px; }
+.update-head { border-bottom: 1px solid var(--line); }
+.update-head h2 { font-size: 17px; margin: 0 0 5px; }
+#update-summary, #update-log-source { color: var(--ink-3); font-size: 12px; }
+.update-body { padding: 18px 22px; }
+#update-target { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
+#update-status, #update-manual, #update-recovery { font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; color: var(--ink-2); }
+#update-status.update-error, #update-recovery { color: var(--danger, #b4533b); }
+#update-steps { display: flex; flex-wrap: wrap; gap: 18px; padding: 12px 0; list-style: none; font-size: 12px; color: var(--ink-3); }
+#update-steps[hidden] { display: none; }
+#update-steps .current { color: var(--accent); font-weight: 600; }
+#update-steps .done { color: var(--ink-2); }
+#update-changelog { font-size: 13px; line-height: 1.75; overflow-wrap: anywhere; }
+#update-changelog h1 { font-size: 19px; }
+#update-changelog h2 { font-size: 16px; margin-top: 22px; }
+#update-changelog h3, #update-changelog h4 { font-size: 14px; }
+#update-changelog pre { overflow-x: auto; padding: 12px; background: var(--bg); }
+#update-changelog table { width: 100%; border-collapse: collapse; }
+#update-changelog td { border: 1px solid var(--line); padding: 5px; }
+.update-actions { position: sticky; bottom: 0; background: var(--surface); border-top: 1px solid var(--line); }
+@media (max-width: 540px) { .update-head, .update-body, .update-actions { padding: 14px; } }
+/* 教程条目默认收起，只突出当前安装方式；长内容仍保留关闭和更新操作。 */
+.update-head { position: sticky; top: 0; z-index: 2; background: var(--surface); }
+.update-actions { z-index: 2; }
+.update-help { margin: 22px 0; border-top: 1px solid var(--line); padding-top: 16px; }
+.update-help h3 { font-size: 14px; margin: 0 0 9px; }
+.update-help-intro { font-size: 12px; color: var(--ink-2); line-height: 1.7; }
+#update-guides details { border-bottom: 1px solid var(--line); }
+#update-guides summary { padding: 12px 0; cursor: pointer; font-size: 13px; line-height: 1.6; }
+#update-guides summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+.update-guide-match { color: var(--accent); font-size: 11px; margin-left: 9px; white-space: nowrap; }
+.update-guide-content { padding: 0 0 10px 14px; color: var(--ink-2); font-size: 12px; line-height: 1.8; min-width: 0; }
+.update-guide-content p { margin: 0 0 10px; }
+.update-guide-command { margin: 12px 0; }
+.update-guide-command > div { font-size: 11px; color: var(--ink-3); margin-bottom: 5px; }
+.update-guide-command pre { max-width: 100%; overflow-x: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 11px; margin: 0; white-space: pre; }
+.update-guide-command code { font: 11px/1.8 var(--mono); color: var(--ink); }

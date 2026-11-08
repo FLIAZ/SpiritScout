@@ -23,7 +23,7 @@ function fakeEl() {
 
 const page = fakeEl();
 const state = {fixture: null, opened: []};
-const context = vm.createContext({
+const context = vm.createContext(require('./helpers/i18n').context({
   $: sel => (sel === "#view-exp" ? page : fakeEl()),
   api: async () => state.fixture,
   esc: s => String(s ?? "").replace(/[&<>"]/g,
@@ -34,7 +34,7 @@ const context = vm.createContext({
   URLSearchParams,
   setTimeout: () => 0, clearTimeout: () => {},
   console,
-});
+}));
 
 vm.runInContext(source, context);
 const Page = vm.runInContext("ExperiencePage", context);

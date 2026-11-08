@@ -96,9 +96,21 @@ def command(endpoint: str, env: dict[str, str]) -> list[str]:
             connection.append("--no-sandbox")
     elif mode == "cdp":
         connection = ["--cdp-endpoint", endpoint]
+        if env.get('SPIRITSCOUT_CHROME_ISOLATED') == '1':
+            connection.append('--isolated')
     else:
         raise ValueError("SPIRITSCOUT_CHROME_MODE 必须是 cdp 或 headless")
-    return [*prefix, *connection, "--caps", "storage",
+    state = env.get('SPIRITSCOUT_CHROME_STORAGE_STATE', '')
+    if state:
+        if '--isolated' not in connection:
+            raise ValueError('登录态只能加载到隔离浏览器上下文')
+        connection += ['--storage-state', state]
+    privacy = []
+    if env.get('SPIRITSCOUT_BROWSER_ACCOUNT'):
+        # 禁用账号上下文的代码回显；不加载可能开启 trace/session 录制的外部配置。
+        env.pop('PLAYWRIGHT_MCP_CONFIG', None)
+        privacy = ['--codegen', 'none']
+    return [*prefix, *connection, *privacy, "--caps", "storage",
             "--snapshot-boxes", "--output-dir", str(output)]
 
 

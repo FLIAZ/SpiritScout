@@ -1,543 +1,3 @@
-const modelKey = entry => entry.key || entry.model;
-const modelLabel = id => {
-  const entry = (S.models?.models || []).find(m => modelKey(m) === id);
-  return entry ? `${entry.provider_ref || "默认"} / ${entry.model}` : modelDisplayName(id);
-};
-/* ================= 编队/模型/启动 ================= */
-/* ================= 编队 ================= */
-let agentSavePending = Promise.resolve();
-let agentLoadVersion = 0;
-async function loadAgents() {
-  const version = ++agentLoadVersion;
-  try {
-    await agentSavePending;
-    const agents = await api("/api/agents");
-    if (version !== agentLoadVersion) return;
-    S.agents = agents;
-    const g = $("#agents-grid");
-    g.innerHTML = S.agents.roster.map(a => {
-      const bound = S.agents.assignments[a.key] || "";
-      const available = a.status === "available";
-      const bind = a.configurable ? `<div class="bind">
-          <select data-agent="${esc(a.key)}" data-orig="${esc(bound)}" aria-label="${esc(a.name)}的模型">
-            <option value="">不指派（按模型列表顺序路由）</option>
-            ${S.agents.models.map(m => `<option value="${esc(modelKey(m))}" data-prov="${esc(m.provider || "")}" ${modelKey(m) === bound ? "selected" : ""}>${esc(m.model)} · ${esc(m.provider || "默认")}</option>`).join("")}
-            ${S.agents.models.length ? "" : `<option value="" disabled>（「模型」页还没有启用模型）</option>`}
-          </select>
-        </div><div class="bind-status muted" role="status" aria-live="polite"></div>` : `<div class="bind-note">${available ? "此角色不调用模型" : "尚未装配，不参与任务调度"}</div>`;
-      return `<div class="card acard ${available ? "" : "planned"}">
-        <div class="h"><b>${esc(a.name)}</b><span class="en">${esc(a.key)}</span>
-          <span class="tag ${available ? "green" : "orange"}" style="margin-left:auto">${available ? "可运行" : "规划中"}</span></div>
-        <div class="duty">${esc(a.duty)}</div>
-        <div class="meta-row">${(a.modes || []).map(m => `<span class="tag blue">${esc(MODE_CN[m] || m)}</span>`).join("")}</div>
-        <details class="agent-profile-details"><summary>角色说明与工具</summary>
-          <p class="mindset">${esc(a.mindset || "")}</p>
-          <ol>${(a.workflow || []).map(step => `<li>${esc(step)}</li>`).join("")}</ol>
-          <div class="tools">${(a.tools || []).map(tool => `<span class="tag">${esc(tool)}</span>`).join("")}</div>
-        </details>
-        ${bind}
-      </div>`;
-    }).join("");
-    const all = $("#bind-all-model");
-    all.innerHTML = `<option value="">选择统一使用的模型</option>` + S.agents.models.map(m =>
-      `<option value="${esc(modelKey(m))}">${esc(m.model)} · ${esc(m.provider || "默认")}</option>`).join("");
-    all.disabled = !S.agents.models.length;
-    selxSync(all);
-    const sels = [...g.querySelectorAll("select[data-agent]")];
-    const apply = $("#bind-all-apply");
-    apply.disabled = true;
-    all.onchange = () => { apply.disabled = !all.value || !sels.length; };
-    $("#bind-status").textContent = "";
-    // 串行落盘，避免单角色与批量操作交错；保存时同步禁用自定义下拉。
-    const save = (targets, model) => {
-      const changes = targets.map(sel => ({ sel, model: model ?? sel.value }))
-        .filter(item => item.model !== item.sel.dataset.orig);
-      if (!changes.length) {
-        if (model != null) $("#bind-status").textContent = "已应用";
-        return Promise.resolve();
-      }
-      ++agentLoadVersion;
-      const controls = [...sels, all];
-      controls.forEach(sel => { sel.disabled = true; selxSync(sel); });
-      apply.disabled = true;
-      $("#bind-status").textContent = "保存中…";
-      const statusOf = sel => sel.closest(".acard").querySelector(".bind-status");
-      changes.forEach(({ sel, model }) => {
-        sel.value = model;
-        selxSync(sel);
-        statusOf(sel).textContent = "保存中…";
-      });
-      agentSavePending = agentSavePending.then(async () => {
-        let saved = 0;
-        const failed = [];
-        for (const { sel, model } of changes) {
-          const status = statusOf(sel);
-          try {
-            S.agents = await api(`/api/agents/${encodeURIComponent(sel.dataset.agent)}`,
-              { method: "PUT", body: JSON.stringify({ model }) });
-            sel.dataset.orig = S.agents.assignments[sel.dataset.agent] || "";
-            sel.value = sel.dataset.orig;
-            status.textContent = "已保存";
-            saved++;
-          } catch (e) {
-            sel.value = sel.dataset.orig;
-            status.textContent = "保存失败，已恢复原指派，请重试";
-            failed.push(`${sel.dataset.agent}：${e.message}`);
-          }
-          selxSync(sel);
-        }
-        $("#bind-status").textContent = failed.length
-          ? `已保存 ${saved} 个角色，${failed.length} 个失败，请重试`
-          : `已保存 · ${saved} 个角色`;
-        if (failed.length) toast(failed.join("；"), true);
-      }).finally(() => {
-        controls.forEach(sel => {
-          sel.disabled = sel === all && !S.agents.models.length;
-          selxSync(sel);
-        });
-        apply.disabled = !all.value || !sels.length;
-      });
-      return agentSavePending;
-    };
-    sels.forEach(sel => { sel.onchange = () => save([sel]); });
-    apply.onclick = () => {
-      if (!all.value || apply.disabled) return;
-      return save(sels, all.value);
-    };
-  } catch (e) { toast(e.message, true); }
-}
-
-/* ================= 模型 ================= */
-/* 供应商（一个 API 地址 + 一把密钥）下挂模型，模型 ID 即身份。密钥由服务端
-   密钥库加密保管（工作区 vault.db），页面不缓存、不回传。 */
-const PROVIDER_CN = { openai_compatible: "OpenAI 兼容", anthropic_compatible: "Anthropic 兼容", ollama: "Ollama 原生", mock: "离线演练" };
-const fmtCtx = n => n > 0 ? (n >= 1000 ? Math.round(n / 1000) + "k" : String(n)) : "—";
-/* 模型/供应商的操作按钮统一 data-* 化：动态值只进 HTML 属性（esc 转义），
-   不再拼内联 onclick 字符串——值里的引号、尖括号从此进不了 JS 语境 */
-const M_ICONS = {
-  file: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>`,
-  sync: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.7-6.4"/><path d="M21 3v6h-6"/></svg>`,
-  pencil: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/></svg>`,
-  trash: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>`,
-  plus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>`,
-  hub: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><circle cx="4.5" cy="5" r="1.8"/><circle cx="19.5" cy="5" r="1.8"/><circle cx="12" cy="20" r="1.8"/><path d="M9.8 10.2 6 6.3M14.2 10.2 18 6.3M12 15v3.2"/></svg>`,
-};
-
-function keyLed(p) {
-  if (p.key_source === "vault")
-    return `<span class="led ok" title="密钥已加密保存在本机，重启后仍然有效"></span><span class="pb-key ok">密钥已就绪</span>`;
-  return `<span class="led bad" title="编辑该供应商填入密钥"></span><span class="pb-key bad">密钥未配置</span>`;
-}
-
-function modelTile(m) {
-  const caps = (m.capabilities || []).map(c => `<span class="tag">${esc(c)}</span>`).join("");
-  const eff = m.reasoning_effort_levels || [];
-  const q = m.quality_score;
-  return `<div class="mtile">
-    <div class="mt-id"><b>${esc(m.model)}</b></div>
-    <div class="mt-caps">${caps}</div>
-    <div class="mt-stats">
-      <div class="mstat"><div class="k">上下文窗口</div><div class="v">${fmtCtx(m.context_window)}</div></div>
-      <div class="mstat"><div class="k">质量分</div><div class="v">${q == null ? "—" : `<span class="qbar"><i style="width:${Math.max(0, Math.min(100, Math.round(q * 100)))}%"></i></span>${q}`}</div></div>
-    </div>
-    <div class="mt-eff"><span class="k">思考强度</span>${eff.length
-      ? eff.map(e => `<span class="eff-pill">${esc(e)}</span>`).join("")
-      : `<span class="muted" style="font-size:11.5px">默认档</span>`}</div>
-    ${(m.is_fallback_for || []).length ? `<div class="mt-fb">备：${esc(m.is_fallback_for.map(modelLabel).join("、"))}</div>` : ""}
-    <div class="mt-ops">
-      <button data-mact="test" data-model="${esc(modelKey(m))}">测试</button>
-      <button data-mact="edit" data-model="${esc(modelKey(m))}">编辑</button>
-      <button class="danger" data-mact="del" data-model="${esc(modelKey(m))}">删除</button>
-    </div>
-  </div>`;
-}
-
-async function loadModels() {
-  try {
-    const [pv, md, nm] = await Promise.all([api("/api/providers"), api("/api/models"),
-                                            api("/api/models/naming").catch(() => null),
-                                            loadPresets()]);
-    S.providers = pv.providers; S.models = md;
-    namingSaved = (nm && nm.chain) || [];
-    S.namingChain = [...namingSaved];
-    namingRender();
-    $("#models-path").innerHTML = `${M_ICONS.file}<span>${esc(md.path)}</span>`;
-    const box = $("#providers-list");
-    if (!pv.providers.length) {
-      box.innerHTML = `<div class="mempty">${M_ICONS.hub}
-        <div class="t">还没有供应商</div>
-        <div class="s">添加供应商后可获取模型列表，也可手动添加模型 ID。</div>
-        <button class="btn primary" data-pact="add">+ 添加供应商</button></div>`;
-      return;
-    }
-    box.innerHTML = pv.providers.map(p => {
-      const mine = md.models.filter(m => (m.provider_ref || "") === p.name);
-      return `<div class="pblock">
-        <div class="pb-head">
-          <div class="pb-id">
-            <div class="pb-r1">${brandIcon(p.name)}${keyLed(p)}<span class="pb-name">${esc(p.name)}</span>
-              <span class="tag blue">${PROVIDER_CN[p.provider] || esc(p.provider)}</span>
-              <span class="pb-count">${mine.length} 个模型</span></div>
-            <div class="pb-url" title="${esc(p.base_url || "")}">${esc(p.base_url || "（未填 API 地址）")}</div>
-          </div>
-          <div class="pb-ops">
-            <button class="btn sm tinted" data-pact="fetch" data-name="${esc(p.name)}" style="display:inline-flex;align-items:center;gap:6px">${M_ICONS.sync}获取模型列表</button>
-            <button class="icon-btn" title="编辑供应商" data-pact="edit" data-name="${esc(p.name)}">${M_ICONS.pencil}</button>
-            <button class="icon-btn danger" title="删除供应商" data-pact="del" data-name="${esc(p.name)}">${M_ICONS.trash}</button>
-          </div>
-        </div>
-        <div class="mgrid">${mine.map(modelTile).join("")}
-          <button class="ghost-tile" data-pact="addto" data-name="${esc(p.name)}">${M_ICONS.plus}手动添加模型</button>
-        </div>
-      </div>`;
-    }).join("");
-  } catch (e) { toast(e.message, true); }
-}
-
-/* ================= 会话自动命名候选链 =================
-   顺序即降级顺序，完全由用户排定：点击候选池里的模型，按点击先后入链；
-   前面的调不动，命名调用自动换下一个；留空 = 跟随编队页灵枢指派。
-   保存后即刻生效（每次命名调用热读，无需重启）。 */
-let namingSaved = [];
-function namingRender() {
-  const chain = S.namingChain || [];
-  const registry = (S.models && S.models.models) || [];
-  const provOf = id => (registry.find(m => modelKey(m) === id) || {}).provider_ref || "未知供应商";
-  $("#naming-chain").innerHTML = chain.map((m, i) => `<li>
-      <span class="nb-idx">${i + 1}</span><span class="nb-prov" title="供应商">${esc(provOf(m))}</span><b>${esc((registry.find(entry => modelKey(entry) === m) || {}).model || m)}</b>
-      <span class="nb-ops-row">
-        <button type="button" data-nm="up" data-i="${i}" ${i === 0 ? "disabled" : ""} title="前移">↑</button>
-        <button type="button" data-nm="down" data-i="${i}" ${i === chain.length - 1 ? "disabled" : ""} title="后移">↓</button>
-        <button type="button" class="danger" data-nm="del" data-i="${i}" title="移出候选链">✕</button>
-      </span></li>`).join("")
-    || `<li class="nb-empty">未配置，使用灵枢的模型。</li>`;
-  // 候选池：注册表全量模型（带供应商标识），点击即按先后顺序入链
-  $("#naming-pool").innerHTML = registry.map(m => {
-    const on = chain.includes(modelKey(m));
-    return `<button type="button" class="nb-chip${on ? " on" : ""}" data-nm="add"
-              data-model="${esc(modelKey(m))}"${on ? " disabled" : ""}
-              title="${on ? "已在候选链上（可在上方列表移除）" : "点击加入候选链，按点击顺序排列"}">
-              <span class="nb-prov">${esc(m.provider_ref || "未知供应商")}</span><b>${esc(m.model)}</b></button>`;
-  }).join("") || `<span class="nb-pool-empty">注册表中还没有模型——先在下方添加。</span>`;
-  const dirty = JSON.stringify(chain) !== JSON.stringify(namingSaved);
-  $("#naming-bar").hidden = !dirty;
-  $("#naming-save").disabled = !dirty;
-}
-$("#naming-chain").addEventListener("click", ev => {
-  const b = ev.target.closest("[data-nm]"); if (!b) return;
-  const i = +b.dataset.i, chain = S.namingChain, act = b.dataset.nm;
-  if (act === "up" && i > 0) [chain[i - 1], chain[i]] = [chain[i], chain[i - 1]];
-  else if (act === "down" && i < chain.length - 1) [chain[i], chain[i + 1]] = [chain[i + 1], chain[i]];
-  else if (act === "del") chain.splice(i, 1);
-  else return;
-  namingRender();
-});
-$("#naming-pool").addEventListener("click", ev => {
-  const b = ev.target.closest("[data-nm=add]"); if (!b || b.disabled) return;
-  S.namingChain.push(b.dataset.model);
-  namingRender();
-});
-$("#naming-revert").onclick = () => { S.namingChain = [...namingSaved]; namingRender(); };
-$("#naming-save").onclick = async () => {
-  const btn = $("#naming-save");
-  btn.disabled = true;
-  try {
-    const d = await api("/api/models/naming", { method: "PUT", body: JSON.stringify({ models: S.namingChain }) });
-    namingSaved = d.chain || [];
-    S.namingChain = [...namingSaved];
-    namingRender();
-    toast("命名候选链已保存，即刻生效");
-  } catch (e) { toast(e.message, true); btn.disabled = false; }
-};
-
-window.modelTest = async model => {
-  toast(`正在测试 ${modelLabel(model)} …`);
-  try {
-    const d = await api("/api/models/test", { method: "POST", body: JSON.stringify({ model }) });
-    if (d.ok) toast(d.note || `连通正常 · ${d.latency_ms}ms${d.sample ? " · " + d.sample : ""}`);
-    else toast(d.error || "测试失败", true);
-  } catch (e) { toast(e.message, true); }
-};
-
-/* 模型页操作走事件委托（容器级单监听，随 innerHTML 重渲不受影响）：
-   按钮只带 data-*，点击时从 dataset 取回原值再调对应动作 */
-$("#providers-list").addEventListener("click", ev => {
-  const mb = ev.target.closest("[data-mact]");
-  if (mb) {
-    const fn = { test: modelTest, edit: modelEdit, del: modelDel }[mb.dataset.mact];
-    if (fn) fn(mb.dataset.model);
-    return;
-  }
-  const pb = ev.target.closest("[data-pact]");
-  if (pb) {
-    const fn = { add: providerAdd, fetch: providerFetch, edit: providerEdit,
-                 del: providerDel, addto: modelAddTo }[pb.dataset.pact];
-    if (fn) fn(pb.dataset.name);
-  }
-});
-
-function fillPrefs(sel) {
-  $("#m-pref").innerHTML = (S.providers || []).map(p =>
-    `<option value="${esc(p.name)}" ${p.name === sel ? "selected" : ""}>${esc(p.name)}</option>`).join("");
-}
-
-/* 思考强度多选：常用档仅作快捷便利（可再自定义任意取值），
-   保存的就是模型自己声明的取值列表，灵枢仍只从其中挑选 */
-const EFFORT_COMMON = ["minimal", "low", "medium", "high", "xhigh", "ultra", "max"];
-
-function renderEffChips() {
-  const common = EFFORT_COMMON.map(v =>
-    `<button type="button" class="eff-chip ${S.effSel.includes(v) ? "on" : ""}"
-      data-eff="${esc(v)}">${esc(v)}</button>`);
-  const custom = S.effSel.filter(v => !EFFORT_COMMON.includes(v)).map(v =>
-    `<button type="button" class="eff-chip custom on" data-eff="${esc(v)}"
-      title="点击移除">${esc(v)}</button>`);
-  $("#m-eff-chips").innerHTML = common.join("") + custom.join("");
-  $("#m-eff-chips").querySelectorAll(".eff-chip").forEach(chip => chip.onclick = () => {
-    const v = chip.dataset.eff;
-    S.effSel = S.effSel.includes(v) ? S.effSel.filter(x => x !== v) : [...S.effSel, v];
-    renderEffChips();
-  });
-}
-
-function addEffCustom() {
-  const v = $("#m-eff-custom").value.trim();
-  if (!v) return;
-  if (!S.effSel.includes(v)) S.effSel = [...S.effSel, v];
-  $("#m-eff-custom").value = "";
-  renderEffChips();
-}
-$("#m-eff-add").onclick = addEffCustom;
-$("#m-eff-custom").addEventListener("keydown", e => {
-  if (e.key === "Enter") { e.preventDefault(); addEffCustom(); }
-});
-
-window.modelEdit = model => {
-  const m = (S.models.models || []).find(x => modelKey(x) === model);
-  if (!m) return;
-  S.medit = model;
-  $("#m-dlg-title").textContent = `编辑模型 ${m.model} · ${m.provider_ref || "默认"}`;
-  $("#m-model").value = m.model || "";
-  fillPrefs(m.provider_ref || "");
-  $("#m-ctx").value = m.context_window || 0;
-  $("#m-cache").value = m.prompt_caching || "provider_default";
-  selxSync($("#m-cache"));
-  S.effSel = [...(m.reasoning_effort_levels || [])];
-  renderEffChips();
-  $("#m-caps-box").querySelectorAll("input").forEach(c =>
-    c.checked = (m.capabilities || []).includes(c.value));
-  $("#m-dlg").showModal();
-};
-
-window.modelAddTo = ref => {
-  S.medit = null;
-  $("#m-dlg-title").textContent = "手动添加模型";
-  $("#m-model").value = "";
-  $("#m-caps-box").querySelectorAll("input").forEach(c => c.checked = false);
-  S.effSel = []; $("#m-eff-custom").value = "";
-  renderEffChips();
-  fillPrefs(ref);
-  $("#m-ctx").value = 0;
-  $("#m-cache").value = "provider_default"; selxSync($("#m-cache"));
-  $("#m-dlg").showModal();
-};
-
-window.modelDel = async model => {
-  try { await api(`/api/models/${encodeURIComponent(model)}`, { method: "DELETE" });
-    toast(`已删除 ${modelLabel(model)}`); loadModels(); }
-  catch (e) { toast(e.message, true); }
-};
-
-$("#m-cancel").onclick = () => $("#m-dlg").close();
-$("#m-save").onclick = async () => {
-  const existing = (S.models?.models || []).find(x => modelKey(x) === S.medit) || {};
-  const body = {
-    ...Object.fromEntries(Object.entries(existing).filter(([,value]) => value != null)),
-    model: $("#m-model").value.trim(), provider_ref: $("#m-pref").value,
-    context_window: +$("#m-ctx").value || 0,
-    reasoning_effort_levels: [...S.effSel],
-    capabilities: [...$("#m-caps-box").querySelectorAll("input:checked")]
-      .map(c => c.value),
-    prompt_caching: $("#m-cache").value,
-  };
-  if (!body.model) { toast("模型 ID 必填", true); return; }
-  try {
-    if (S.medit) await api(`/api/models/${encodeURIComponent(S.medit)}`,
-      { method: "PUT", body: JSON.stringify(body) });
-    else await api("/api/models", { method: "POST", body: JSON.stringify(body) });
-    $("#m-dlg").close(); toast("已保存，新会话即刻生效"); loadModels();
-  } catch (e) { toast(e.message, true); }
-};
-
-/* ---------- 供应商 ---------- */
-window.providerEdit = name => {
-  const p = (S.providers || []).find(x => x.name === name);
-  if (!p) return;
-  S.pedit = name;
-  $("#p-dlg-title").textContent = `编辑供应商 ${name}`;
-  $("#p-name").value = p.name;
-  $("#p-type").value = ["anthropic_compatible", "ollama"].includes(p.provider) ? p.provider : "openai_compatible";
-  $("#p-baseurl").value = p.base_url || "";
-  $("#p-keyval").value = "";
-  $("#p-keystat").textContent =
-    p.key_source === "vault" ? "当前密钥：已保存（留空表示保持不变；重填即覆盖）"
-    : "当前密钥：未配置";
-  $("#p-search").value = "";
-  $("#p-dlg").showModal();
-  loadPresets().then(() => renderPanel(brandOf(p.name).key || "custom"));
-};
-
-window.providerDel = async name => {
-  try { await api(`/api/providers/${encodeURIComponent(name)}`, { method: "DELETE" });
-    toast(`已删除供应商 ${name}`); loadModels(); }
-  catch (e) { toast(e.message, true); }
-};
-
-async function loadPresets() {
-  if (S.presets) return S.presets;
-  try { S.presets = (await api("/api/provider-presets")).presets || []; }
-  catch { S.presets = []; }
-  return S.presets;
-}
-
-/* 厂商徽章：品牌色 + 短标识字符（预设目录自带 brand/mark）；
-   自选名按名称包含匹配预设，匹配不到取首字符 + 中性灰 */
-function brandOf(name) {
-  const n = String(name || "").toLowerCase();
-  const hit = (S.presets || []).find(x => n === x.key)
-           || (S.presets || []).find(x => n.includes(x.key));
-  if (hit) return hit;
-  return { mark: [...String(name || "?").trim()][0]?.toUpperCase() || "?",
-           brand: "var(--ink-3)" };
-}
-
-function brandIcon(name, cls = "") {
-  const b = brandOf(name);
-  const mono = (b.mark || "").length > 1 ? ' style="font-family:var(--mono);font-size:.86em"' : "";
-  return `<span class="brand-ic ${cls}" style="background:${esc(b.brand)}"${mono}>${esc(b.mark)}</span>`;
-}
-
-function providerAdded(p) {
-  return (S.providers || []).some(x => {
-    const n = String(x.name || "").toLowerCase();
-    return n === p.key || n.includes(p.key);
-  });
-}
-
-/* 供应商面板左栏：厂商列表（预设 + 自定义）；点击带入右侧表单 */
-function renderPanel(selKey) {
-  const list = $("#p-presets");
-  const items = [{ key: "custom", name: "自定义" }, ...(S.presets || [])];
-  list.innerHTML = items.map(p => {
-    const ic = p.key === "custom"
-      ? `<span class="brand-ic sm" style="background:transparent;border:1px dashed var(--ink-3);color:var(--ink-3);box-shadow:none">+</span>`
-      : brandIcon(p.key, "sm");
-    const added = p.key !== "custom" && providerAdded(p) ? `<span class="pp-added">已添加</span>` : "";
-    return `<button type="button" class="pp-item ${p.key === selKey ? "on" : ""}"
-      data-pkey="${esc(p.key)}" data-text="${esc((p.name + " " + p.key).toLowerCase())}">
-      ${ic}<b>${esc(p.name)}</b>${added}</button>`;
-  }).join("");
-  list.querySelectorAll(".pp-item").forEach(btn => btn.onclick = () => {
-    const p = items.find(x => x.key === btn.dataset.pkey);
-    if (!p) return;
-    renderPanel(p.key);
-    if (p.key === "custom") {
-      $("#p-name").value = ""; $("#p-baseurl").value = "";
-      $("#p-type").value = "openai_compatible";
-    } else {
-      $("#p-name").value = p.key;
-      $("#p-type").value = ["anthropic_compatible", "ollama"].includes(p.provider) ? p.provider : "openai_compatible";
-      $("#p-baseurl").value = p.base_url || "";
-    }
-  });
-}
-
-$("#p-search").addEventListener("input", () => {
-  const q = $("#p-search").value.trim().toLowerCase();
-  $("#p-presets").querySelectorAll(".pp-item").forEach(el => {
-    el.hidden = !!q && !el.dataset.text.includes(q);
-  });
-});
-
-window.providerAdd = async () => {
-  S.pedit = null;
-  $("#p-dlg-title").textContent = "添加供应商";
-  for (const id of ["p-name", "p-baseurl", "p-keyval"]) $("#" + id).value = "";
-  $("#p-keystat").textContent = "";
-  $("#p-type").value = "openai_compatible";
-  $("#p-search").value = "";
-  $("#p-dlg").showModal();
-  await loadPresets();
-  renderPanel("custom");
-};
-$("#p-add").onclick = window.providerAdd;
-$("#p-cancel").onclick = () => $("#p-dlg").close();
-$("#p-save").onclick = async () => {
-  const name = $("#p-name").value.trim();
-  const keyval = $("#p-keyval").value.trim();
-  if (!name) { toast("供应商名必填", true); return; }
-  const original = (S.providers || []).find(p => p.name === S.pedit) || {};
-  const body = { api_format: original.api_format || "auto", name, provider: $("#p-type").value, base_url: $("#p-baseurl").value.trim(),
-                 api_key: "" };
-  // 密钥只走直填：服务端加密存入密钥库；编辑时留空 = 库内密钥保持不变
-  if (keyval) body.api_key_value = keyval;
-  try {
-    if (S.pedit) await api(`/api/providers/${encodeURIComponent(S.pedit)}`,
-      { method: "PUT", body: JSON.stringify(body) });
-    else await api("/api/providers", { method: "POST", body: JSON.stringify(body) });
-    $("#p-dlg").close(); toast("供应商已保存"); loadModels();
-  } catch (e) { toast(e.message, true); }
-};
-
-/* ---------- 拉取云端模型列表 ---------- */
-window.providerFetch = async name => {
-  S.fprov = name;
-  $("#fm-body").innerHTML = `<span class="muted">正在从「${esc(name)}」拉取可用模型…</span>`;
-  $("#fm-add").disabled = true;
-  $("#fm-dlg").showModal();
-  try {
-    const d = await api(`/api/providers/${encodeURIComponent(name)}/models`,
-      { method: "POST", body: "{}" });
-    if (!d.ok) {
-      $("#fm-body").innerHTML = `<div class="empty-note" style="padding:14px 0;text-align:left">
-        未能自动获取模型列表：${esc(d.error || "未知错误")}
-        ${(d.tried || []).length ? `<br><span class="muted" style="font-size:11.5px">已尝试：${esc((d.tried || []).join("　"))}</span>` : ""}
-        <br>关掉本窗口，用「手动添加模型」直接填模型 ID 即可。</div>`;
-      return;
-    }
-    const known = new Set((S.models.models || []).filter(x => x.provider_ref === name).map(x => x.model));
-    $("#fm-body").innerHTML = `
-      <div class="muted" style="font-size:12px;margin-bottom:9px">来自 ${esc(d.url)}，共 ${d.models.length} 个可用模型。
-        勾选后批量启用，之后可在模型行里逐个调整画像。</div>
-      <div class="fm-list">${d.models.map(x => {
-        const on = known.has(x.id);
-        return `<label class="fm-row"><input type="checkbox" value="${esc(x.id)}" ${on ? "disabled" : "checked"}>
-          <span class="mono" style="font-size:12.5px">${esc(x.id)}</span>
-          ${x.display_name && x.display_name !== x.id ? `<span class="muted" style="font-size:11.5px">${esc(x.display_name)}</span>` : ""}
-          ${on ? `<span class="tag green" style="margin-left:auto">已启用</span>` : ""}</label>`;
-      }).join("")}</div>
-      <label style="display:flex;gap:9px;align-items:center;margin-top:11px;font-size:12px;font-weight:600;color:var(--ink-2)"></label>`;
-    const boxes = [...$("#fm-body").querySelectorAll("input[type=checkbox]:not(:disabled)")];
-    const sync = () => { $("#fm-add").disabled = !boxes.some(b => b.checked); };
-    boxes.forEach(b => b.onchange = sync); sync();
-  } catch (e) {
-    $("#fm-body").innerHTML = `<div class="empty-note" style="padding:14px 0">${esc(e.message)}</div>`;
-  }
-};
-$("#fm-cancel").onclick = () => $("#fm-dlg").close();
-$("#fm-add").onclick = async () => {
-  const ids = [...$("#fm-body").querySelectorAll("input[type=checkbox]")]
-    .filter(b => b.checked && !b.disabled).map(b => b.value);
-  if (!ids.length) return;
-  try {
-    const d = await api("/api/models/batch", { method: "POST",
-      body: JSON.stringify({ provider_ref: S.fprov, models: ids }) });
-    $("#fm-dlg").close();
-    toast(`已启用 ${d.added.length} 个模型${d.added.length < ids.length ? `（${ids.length - d.added.length} 个已存在，跳过）` : ""}`);
-    loadModels();
-  } catch (e) { toast(e.message, true); }
-};
-
 /* ================= 会话输入坞：意见 + 附件（页底常驻） ================= */
 const compInput = $("#comp-input");
 compInput.addEventListener("input", () => {
@@ -549,13 +9,40 @@ function compGrow() {
   compInput.style.height = Math.min(compInput.scrollHeight, 180) + "px";
 }
 /* 附件 chip（初始任务与会话输入坞共用）；files 数组由调用方持有 */
+const composerImagePreviews = new Map();
+const isComposerImage = file => !file.directory && (
+  /^image\/(png|jpeg|gif|webp|avif|bmp)$/i.test(file.type || "") ||
+  (!file.type && /\.(png|jpe?g|gif|webp|avif|bmp)$/i.test(file.name || "")));
 function renderFileChips(sel, files) {
   const box = $(sel);
-  box.innerHTML = files.map((f, i) => `
+  const previews=composerImagePreviews.get(sel) || new Map();
+  composerImagePreviews.set(sel,previews);
+  for(const [file,url] of previews) if(!files.includes(file)) {
+    URL.revokeObjectURL(url);previews.delete(file);
+  }
+  box.innerHTML = files.map((f, i) => {
+    if(isComposerImage(f)) {
+      if(!previews.has(f))previews.set(f,URL.createObjectURL(f));
+      return I18n.html`<span class="comp-image" title="${esc(f.name)}">
+        <button type="button" class="comp-image-open" data-preview-i="${i}" aria-label="放大查看 ${esc(f.name)}">
+          <img src="${esc(previews.get(f))}" alt="${esc(f.name)}" decoding="async">
+          <span class="comp-image-fallback" hidden>无法预览</span>
+        </button>
+        <button type="button" class="comp-image-remove" data-i="${i}" title="移除 ${esc(f.name)}" aria-label="移除 ${esc(f.name)}"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg></button>
+      </span>`;
+    }
+    return I18n.html`
     <span class="comp-file"><b>${esc(f.name)}</b><i>${fmtSize(f.size)}</i>
-      <button type="button" data-i="${i}" title="移除">✕</button></span>`).join("");
-  box.querySelectorAll("button").forEach(b =>
+      <button type="button" data-i="${i}" title="移除">✕</button></span>`;
+  }).join("");
+  box.querySelectorAll("button[data-i]").forEach(b =>
     b.onclick = () => { files.splice(+b.dataset.i, 1); renderFileChips(sel, files); });
+  box.querySelectorAll("button[data-preview-i]").forEach(button=>{
+    button.onclick=()=>FileCards.openLocalImage(files[+button.dataset.previewI]);
+  });
+  box.querySelectorAll(".comp-image img").forEach(image=>{
+    image.onerror=()=>{image.hidden=true;image.nextElementSibling.hidden=false;};
+  });
   if(sel === "#comp-files") syncComposerControl();
 }
 /* 注意传 getter：S.compFiles / S.homeFiles 在切会话、切视图、发送后都会被整体
@@ -574,7 +61,8 @@ bindAttach("#comp-attach", "#comp-file", () => S.compFiles, "#comp-files");
 bindAttach("#home-attach", "#home-file", () => S.homeFiles, "#home-files");
 compInput.addEventListener("input", compGrow);
 compInput.addEventListener("keydown", ev => {
-  if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) {
+  if (typeof ComposerCommands !== "undefined" && ComposerCommands.keydown(ev, "session")) return;
+  if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing && ev.keyCode !== 229) {
     ev.preventDefault();
     compSend();
   }
@@ -597,13 +85,15 @@ async function uploadAttachment(file, sessionId = S.cur) {
 const composerDeliveries = new Map();
 async function compSend() {
   if (typeof ComposerDrop !== "undefined" && ComposerDrop.pending("session")) {
-    toast("正在读取附件，请稍后发送", true); return;
+    toast(I18n.t("正在读取附件，请稍后发送"), true); return;
   }
   const sessionId = S.cur, text = compInput.value.trim(), files = [...S.compFiles];
   if ((!text && !files.length) || sessionMessagePending.has(sessionId) ||
       (typeof ComposerModels !== "undefined" && ComposerModels.pending())) return;
   const sess = sessionId ? S.sessions.find(x => x.session_id === sessionId) : null;
-  if (!sess) { toast("先选择会话或下达任务", true); return; }
+  if (!sess) { toast(I18n.t("先选择会话或下达任务"), true); return; }
+  if (typeof ComposerCommands !== "undefined" && ComposerCommands.parse(text) &&
+      await ComposerCommands.execute(text, files)) return;
   let delivery = composerDeliveries.get(sessionId);
   if (!delivery || delivery.text !== text || delivery.files.length !== files.length ||
       delivery.files.some((file, index) => file !== files[index])) {
@@ -616,10 +106,10 @@ async function compSend() {
   try {
     if (!delivery.uploadIds) delivery.uploadIds = await stageFiles(files);
     const resp = await api(`/api/sessions/${encodeURIComponent(sessionId)}/messages`,
-      {method:"POST", body:JSON.stringify({content:text, upload_ids:delivery.uploadIds,
+      {method:"POST", body:JSON.stringify({content:typeof ComposerCommands !== "undefined" ? ComposerCommands.messageText(text) : text, upload_ids:delivery.uploadIds,
         message_id:delivery.messageId})});
     composerDeliveries.delete(sessionId);
-    toast("消息及附件已送达灵枢");
+    toast(I18n.t("消息及附件已送达灵枢"));
     if (S.cur === sessionId && resp.resumed) {
       startStreams(false); refreshState(); refreshSessions();
     }
@@ -642,10 +132,10 @@ const homeSync = () => {
   autogrow($("#c-mission"), 160, 360);
 };
 const missionModeHints = {
-  src: "评估已授权的网站或资产，验证漏洞并生成报告。",
-  ctf: "解答题目入口或附件，获取答案并生成解题报告。",
-  awdp: "上传有漏洞的服务源码或二进制，灵枢定位漏洞、最小修复并按原始目录结构打包补丁。",
-  competition: "粘贴赛方规则、目标与平台说明，灵枢按实际规则规划，支持自定义赛制。",
+  src: I18n.t("评估已授权的网站或资产，验证漏洞并生成报告。"),
+  ctf: I18n.t("解答题目入口或附件，获取答案并生成解题报告。"),
+  awdp: I18n.t("上传有漏洞的服务源码或二进制，灵枢定位漏洞、最小修复并按原始目录结构打包补丁。"),
+  competition: I18n.t("粘贴赛方规则、目标与平台说明，灵枢按实际规则规划，支持自定义赛制。"),
 };
 function ctfTypeHintPayload(mode = $("#c-mode").value) {
   if (mode !== "ctf") return {};
@@ -656,7 +146,7 @@ function ctfTypeHintPayload(mode = $("#c-mode").value) {
 $("#c-mode").onchange = () => {
   $("#c-ctf-types").hidden = $("#c-mode").value !== "ctf";
   $("#c-multiple-answers-option").hidden = $("#c-mode").value !== "ctf";
-  $("#c-mode-hint").textContent = missionModeHints[$("#c-mode").value] || "先选择任务类型，再填写目标与要求。";
+  $("#c-mode-hint").textContent = missionModeHints[$("#c-mode").value] || I18n.t("先选择任务类型，再填写目标与要求。");
   document.querySelectorAll('input[name="home-mode"]').forEach(input => {
     input.checked = input.value === $("#c-mode").value;
   });
@@ -681,11 +171,15 @@ document.querySelectorAll(".chip-s").forEach(b => b.onclick = () => {
 });
 $("#c-go").onclick = async () => {
   const mission = $("#c-mission").value.trim();
-  if (!mission) { toast("先用自然语言描述任务——目标与要求写清楚即可", true); return; }
-  await launchMission({ mission, multiple_answers: $("#c-mode").value === "ctf" && $("#c-multiple-answers").checked }, [...S.homeFiles]);
+  if (typeof ComposerCommands !== "undefined" && ComposerCommands.parse(mission) &&
+      await ComposerCommands.execute(mission, [...S.homeFiles], "home")) return;
+  if (!mission) { toast(I18n.t("先用自然语言描述任务——目标与要求写清楚即可"), true); return; }
+  await launchMission({ mission:typeof ComposerCommands !== "undefined" ? ComposerCommands.messageText(mission) : mission,
+    multiple_answers: $("#c-mode").value === "ctf" && $("#c-multiple-answers").checked }, [...S.homeFiles]);
 };
 $("#c-mission").addEventListener("keydown", ev => {
-  if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) {
+  if (typeof ComposerCommands !== "undefined" && ComposerCommands.keydown(ev, "home")) return;
+  if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing && ev.keyCode !== 229) {
     ev.preventDefault();
     $("#c-go").click();
   }
@@ -724,12 +218,12 @@ async function stageFiles(files) {
 
 async function launchMission(payload, files = []) {
   if (typeof ComposerDrop !== "undefined" && ComposerDrop.pending("home")) {
-    toast("正在读取附件，请稍后下达任务", true); return;
+    toast(I18n.t("正在读取附件，请稍后下达任务"), true); return;
   }
   if (!payload.mode) {
     const mode = $("#c-mode").value;
     if (!mode) {
-      toast("请先选择任务类型", true);
+      toast(I18n.t("请先选择任务类型"), true);
       (document.querySelector('input[name="home-mode"]') || $("#c-mode")).focus();
       return;
     }
@@ -746,7 +240,7 @@ async function launchMission(payload, files = []) {
     if (selection && payload.model === undefined) payload = {...payload, model: selection};
     if (files.length) payload = { ...payload, upload_ids: await stageFiles(files) };
     const s = await api("/api/sessions", { method: "POST", body: JSON.stringify(payload) });
-    toast(files.length ? "任务已下达，附件已交给灵枢" : "任务已下达，灵枢开始规划");
+    toast(files.length ? I18n.t("任务已下达，附件已交给灵枢") : I18n.t("任务已下达，灵枢开始规划"));
     $("#c-mission").value = "";
     if (payload.mode === "ctf") {
       const current = ctfTypeHintPayload("ctf");
@@ -764,7 +258,7 @@ async function launchMission(payload, files = []) {
   } catch (e) {
     if (Array.isArray(e.detail) && e.detail.some(item => item.type === "extra_forbidden" &&
         ["ctf_type_hints", "ctf_type_note"].includes(item.loc?.at(-1)))) {
-      toast("后端尚未加载题型提示功能。请在当前任务结束后重启服务；本次选项已保留。", true);
+      toast(I18n.t("后端尚未加载题型提示功能。请在当前任务结束后重启服务；本次选项已保留。"), true);
     } else if (e.detail && e.detail.code === "rule_conflict") openRuleConflict(payload, e.detail);
     else toast(e.message, true);
   } finally { $("#c-go").disabled = false; }
@@ -775,7 +269,7 @@ let rcPayload = null;
 function openRuleConflict(payload, detail) {
   rcPayload = payload;
   const items = Array.isArray(detail.conflicts) && detail.conflicts.length
-    ? detail.conflicts : [detail.message || "规则冲突"];
+    ? detail.conflicts : [detail.message || I18n.t("规则冲突")];
   $("#rc-list").innerHTML = items.map(c => `<li>${esc(c)}</li>`).join("");
   $("#rc-dlg").showModal();
 }
@@ -787,6 +281,13 @@ $("#rc-confirm").onclick = async () => {
 
 /* ================= 启动 ================= */
 (async function boot() {
+  I18n.onSwitch(target => {
+    target.searchParams.set("view", S.view);
+    if (S.view === "session" && S.cur) {
+      target.searchParams.set("session", S.cur);
+      target.searchParams.set("tab", S.tab);
+    }
+  });
   // 轻量部署（Ollama 离线赛台）：只留 CTF/AWDP，隐藏 SRC/智能体入口
   if (window.__SPIRITSCOUT_LIGHT__) {
     document.querySelectorAll("[data-full-only]").forEach(el => { el.hidden = true; });
@@ -794,20 +295,38 @@ $("#rc-confirm").onclick = async () => {
   }
   AgentSideChat.init();
   AgentWorkbench.init();
-  try { S.agents = await api("/api/agents"); } catch {}
-  fetch("/openapi.json").then(r => r.json()).then(j => { $("#ver").textContent = "v" + (j.info?.version || ""); }).catch(() => {});
-  // 项目目录先于会话列表：列表里的项目标签与会话创建下拉都依赖它
-  try { await ProjectsPage.loadCatalog(); } catch {}
-  await refreshSessions();
+  // 先绑定交互；编队或项目目录的慢请求不应阻塞模型选择、通知与会话列表。
   ComposerModels.init();
   ConsoleNotify.init();
-  ConsoleNotify.check();
+  const version = document.querySelector('meta[name="spiritscout-version"]')?.content;
+  if (version) $("#ver").textContent = "v" + version;
   S.polling = ConsolePolling.create({refreshList: refreshSessions, refreshState,
     refreshNotify: () => ConsoleNotify.check(),
     isSession: () => S.view === "session" && !!S.cur,
     isRunning: () => S.view === "session" && !!S.cur && !TERMINAL.has(S.state?.session?.status),
     isVisible: () => document.visibilityState === "visible"});
   S.polling.start();
+  api("/api/agents").then(data => { S.agents = data; }).catch(() => {});
+  // 目录返回后 loadCatalog 会重新分组；无需让独立请求串行等待。
+  ProjectsPage.loadCatalog().catch(() => {});
+  await refreshSessions();
+  // 切换语言后回到原页面；URL 也适用于禁用本地存储的浏览器。
+  const navigation = new URLSearchParams(typeof location === "undefined" ? "" : location.search);
+  const returnView = navigation.get("view");
+  if (navigation.has("lang") && returnView && Object.hasOwn(VIEWS, returnView)) {
+    const target = new URL(location.href);
+    for (const key of ["view", "session", "tab"]) target.searchParams.delete(key);
+    history.replaceState(null, "", target);
+    if (returnView === "session") {
+      const session = navigation.get("session");
+      if (S.sessions.some(item => item.session_id === session)) {
+        openSession(session);
+        const tab = navigation.get("tab");
+        if (TABS.includes(tab)) document.querySelector(`[data-tab="${tab}"]`)?.click();
+        return;
+      }
+    } else { show(returnView); return; }
+  }
   const running = S.sessions.find(x => !TERMINAL.has(x.status));
-  if (running) openSession(running.session_id);
+  if (running && S.view === "home" && !S.cur) openSession(running.session_id);
 })();

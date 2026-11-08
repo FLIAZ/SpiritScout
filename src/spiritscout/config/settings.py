@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from spiritscout.core.exceptions import ConfigurationError
 from spiritscout.core.models import AgentType, RunMode
@@ -90,6 +90,14 @@ class BusConfig(ValidatedConfig):
 
 class BlackboardConfig(ValidatedConfig):
     sqlite_path: str = ".spiritscout/blackboard.db"
+
+
+class StorageConfig(ValidatedConfig):
+    """磁盘维护独立于上下文和任务预算；只处理已结束、空闲的会话。"""
+
+    auto_maintenance: bool = True
+    maintenance_interval_seconds: int = Field(default=900, ge=1)
+    idle_seconds: int = Field(default=300, ge=0)
 
 
 class GatewayConfig(ValidatedConfig):
@@ -248,6 +256,30 @@ class SearchConfig(ValidatedConfig):
     cache_max_entries: int = Field(default=2000, ge=1)
 
 
+class CVEConfig(ValidatedConfig):
+    """CVE 参考情报；比赛模式只读本地记录，不访问外部情报源。"""
+
+    enabled: bool = True
+    sqlite_path: str = ".spiritscout/cve.db"
+    online: bool = True
+    nvd_api_key_env: str = "NVD_API_KEY"
+    timeout_seconds: float = Field(default=25, gt=0, le=120)
+    cache_ttl_seconds: int = Field(default=21600, ge=1)
+
+
+class ScannerConfig(ValidatedConfig):
+    """并行扫描者：仅使用预先安装的本地工具和模板。"""
+
+    enabled: bool = True
+    binary: str = Field(default="nuclei", min_length=1)
+    templates_dir: str = Field(default=".venv/share/nuclei-templates", min_length=1)
+    rate_limit: int = Field(default=5, ge=1, le=1000)
+    concurrency: int = Field(default=2, ge=1, le=64)
+    timeout_seconds: int = Field(default=180, ge=5, le=300)
+    metasploit_enabled: bool = True
+    metasploit_command: list[str] = Field(default_factory=lambda: ["msfconsole"])
+
+
 class SystemConfig(ValidatedConfig):
     """系统总配置。"""
 
@@ -255,10 +287,13 @@ class SystemConfig(ValidatedConfig):
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     bus: BusConfig = Field(default_factory=BusConfig)
     blackboard: BlackboardConfig = Field(default_factory=BlackboardConfig)
+    storage: StorageConfig = Field(default_factory=StorageConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     executor: ExecutorConfig = Field(default_factory=ExecutorConfig)
     knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
+    scanner: ScannerConfig = Field(default_factory=ScannerConfig)
+    cve: CVEConfig = Field(default_factory=CVEConfig)
     report: ReportConfig = Field(default_factory=ReportConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     secretary: SecretaryConfig = Field(default_factory=SecretaryConfig)
@@ -282,6 +317,9 @@ class SystemConfig(ValidatedConfig):
         return v
 
 
+BillingScheme = Literal['manual', 'glm_api', 'glm_token_plan', 'kimi_api', 'kimi_token_plan', 'deepseek_api', 'other_token_plan']
+
+
 class ProviderEntry(ValidatedConfig):
     """模型供应商（接入端点）：一个 base_url + 一把密钥，下挂若干模型。
 
@@ -300,6 +338,21 @@ class ProviderEntry(ValidatedConfig):
     # （anthropic_compatible→anthropic_messages，其余→chat_completions）；
     # 仅 o 系/gpt-5 等原生 Responses 端点需显式指定 responses
     api_format: Literal["auto", "chat_completions", "responses", "anthropic_messages"] = "auto"
+    billing_scheme: BillingScheme = 'manual'
+    billing_plan: str = ''                # 套餐档位；价格查询不代表购买或确认账户权益
+    auth_method: Literal['api_key', 'kimi_oauth'] = 'api_key'
+    quota_query: Literal['auto', 'disabled', 'deepseek_balance', 'glm_plan', 'kimi_plan',
+                         'minimax_plan', 'siliconflow_balance', 'stepfun_balance',
+                         'openrouter_balance', 'moonshot_balance', 'opencode_plan', 'ark_plan', 'glm_balance'] = 'auto'
+
+    @model_validator(mode='after')
+    def _oauth_endpoint(self):
+        if self.auth_method == 'kimi_oauth':
+            if (self.base_url.rstrip('/') != 'https://api.kimi.com/coding/v1'
+                    or self.provider != 'openai_compatible' or self.api_format not in {'auto', 'chat_completions'}
+                    or self.billing_scheme != 'kimi_token_plan'):
+                raise ValueError('Kimi OAuth 需使用 Kimi Token Plan、OpenAI 兼容协议及 https://api.kimi.com/coding/v1')
+        return self
 
     @field_validator("name")
     @classmethod
@@ -330,6 +383,9 @@ class ModelEntry(ValidatedConfig):
     base_url: str = ""
     api_key: str = ""                     # 由供应商合并而来（密钥库注入）
     api_format: Literal["auto", "chat_completions", "responses", "anthropic_messages"] = "auto"
+    billing_scheme: BillingScheme = 'manual'
+    billing_plan: str = ''
+    auth_method: Literal['api_key', 'kimi_oauth'] = 'api_key'
     capabilities: list[str] = Field(default_factory=list)  # reasoning/code/chinese/security
     context_window: int = 0               # 上下文窗口（token）；0 = 未声明
     # 单次输出上限（token）：0 = 请求不带 max_tokens，由端点按模型自身设定——
@@ -342,6 +398,9 @@ class ModelEntry(ValidatedConfig):
     ollama_resource: str = ""
     # 显式允许本条目参与轻量 CTF/AWDP 补偿；仅在独立轻量部署中启用。
     ollama_lightweight: bool = False
+    # 本地推理引擎与 HTTP 协议分开声明；llama.cpp 使用 OpenAI Chat Completions。
+    local_runtime: Literal["", "llama_cpp"] = ""
+    local_lightweight: bool = False
     # 思考强度取值：由每个模型自行声明（如 low/medium/high，或某模型特有的
     # ultra）——不设固定枚举，也不假设各模型档位一致；空 = 该模型不吃思考强度。
     reasoning_effort_levels: list[str] = Field(default_factory=list)
@@ -438,6 +497,9 @@ def _merge_providers(cfg: ModelConfigFile) -> list[ModelEntry]:
             "base_url": p.base_url if p else m.base_url,
             "api_key": p.api_key if p else m.api_key,
             "api_format": (p.api_format if p and p.api_format != "auto" else m.api_format),
+            "billing_scheme": p.billing_scheme if p else m.billing_scheme,
+            "billing_plan": p.billing_plan if p else m.billing_plan,
+            "auth_method": p.auth_method if p else m.auth_method,
         }))
     for entry in out:
         entry.validate_cache_transport()

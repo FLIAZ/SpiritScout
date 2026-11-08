@@ -5,6 +5,7 @@ import json
 import shutil
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -42,6 +43,20 @@ class BinaryToolTests(unittest.IsolatedAsyncioTestCase):
             result = await self.agent._run_tool_call_inner(self.task, None, {"messages": []},
                 {"name": "binary_inspect", "arguments": arguments})
             self.assertFalse(result.ok)
+
+    @unittest.skipUnless(sandbox_available() and R2_AVAILABLE, "需要现有 Linux/bwrap/r2")
+    async def test_unrecognized_zip_and_source_are_not_successful_binary_information(self):
+        archive = self.root / 'attachments/source.zip'
+        with zipfile.ZipFile(archive, 'w') as bundle:
+            bundle.writestr('app.rb', 'puts "fixture"\n')
+        source = self.root / 'attachments/app.rb'
+        source.write_text('puts "fixture"\n')
+        for path in (archive, source):
+            with self.subTest(path=path.name):
+                result = await inspect(self.agent, self.task, None, {'path': str(path), 'operation': 'info'})
+                self.assertFalse(result.ok, result.text)
+                self.assertIn('未识别', json.loads(result.text)['error'])
+                self.assertTrue(result.metadata['observation']['empty'])
 
     async def test_invalid_operation_address_and_external_paths_are_rejected(self):
         path = str(self.root / "attachments/sample.bin")
@@ -83,6 +98,41 @@ class BinaryToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decoded["requested_limit"], 200)
         self.assertIn("name", decoded["function"])
         self.assertTrue(all("disasm" in item for item in decoded["items"]))
+
+    @unittest.skipUnless(sandbox_available() and R2_AVAILABLE, "需要现有 Linux/bwrap/r2")
+    async def test_inside_function_addresses_and_page_cursors_advance(self):
+        path = str(self.root / "attachments/sample.bin")
+        functions = await inspect(self.agent, self.task, None, {"path": path, "operation": "functions", "limit": 64})
+        page = json.loads(functions.text)
+        rows = list(page['items'])
+        while page['has_more']:
+            page = json.loads((await inspect(self.agent, self.task, None, {
+                "path": path, "operation": "functions", "limit": 64, "offset": page['next_offset']})).text)
+            rows.extend(page['items'])
+        largest = max(rows, key=lambda row: row.get("size", 0))
+        first = json.loads((await inspect(self.agent, self.task, None, {
+            "path": path, "operation": "disasm", "address": str(largest["offset"]), "limit": 3})).text)
+        self.assertTrue(first["has_more"])
+        inside = first["items"][1]["offset"]
+        shifted = json.loads((await inspect(self.agent, self.task, None, {
+            "path": path, "operation": "disasm", "address": hex(inside), "limit": 3})).text)
+        self.assertEqual(shifted["items"][0]["offset"], inside)
+        self.assertEqual(shifted["items"][0]["address"], hex(inside))
+        self.assertEqual(first['next_call']['name'], 'binary_inspect')
+        self.assertEqual(first['next_call']['arguments']['offset'], first['next_offset'])
+        self.assertEqual(first['next_call']['arguments']['address'], hex(largest['offset']))
+        following = json.loads((await inspect(self.agent, self.task, None, first['next_call']['arguments'])).text)
+        self.assertEqual(following["items"][0]["address"], first["next_address"])
+        self.assertGreater(following["items"][0]["offset"], first["items"][-1]["offset"])
+
+    @unittest.skipUnless(sandbox_available() and R2_AVAILABLE, "需要现有 Linux/bwrap/r2")
+    async def test_binary_inspect_can_read_current_persistent_tmp_without_copying(self):
+        result = await sandbox_exec(f'cp "{self.root}/attachments/sample.bin" /tmp/sample.bin',
+            workspace_root=str(self.root), workspace_scope="one", _run_mode=RunMode.CTF, _lightweight_local=True)
+        self.assertTrue(result.ok, result.error)
+        result = await inspect(self.agent, self.task, None, {"path": "/tmp/sample.bin", "operation": "info"})
+        self.assertTrue(result.ok, result.text)
+        self.assertIn("ELF", json.loads(result.text)["info"]["class"])
 
     @unittest.skipUnless(sandbox_available() and R2_AVAILABLE, "需要现有 Linux/bwrap/r2")
     async def test_live_pagination_does_not_split_json(self):

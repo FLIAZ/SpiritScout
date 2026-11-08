@@ -9,7 +9,7 @@ const vm = require("node:vm");
 
 const source = fs.readFileSync(path.join(__dirname, "../src/spiritscout/web/static/js/views.js"), "utf8");
 const cut = (from, to) => source.slice(source.indexOf(from), source.indexOf(to));
-const context = vm.createContext({});
+const context = vm.createContext(require('./helpers/i18n').context({}));
 vm.runInContext(
   fs.readFileSync(path.join(__dirname, "../src/spiritscout/web/static/js/markdown.js"), "utf8"),
   context);

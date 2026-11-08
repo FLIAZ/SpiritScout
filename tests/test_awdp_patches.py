@@ -60,6 +60,50 @@ class PatchTests(unittest.TestCase):
         items = read_deliverables(self.root, kind="file")["items"]
         self.assertIn(relative, {i["path"] for i in items})
 
+    def test_shell_script_is_published_unchanged_without_executing_it(self) -> None:
+        marker = self.root / 'must-not-exist'
+        script = self.rundir / 'patch.sh'
+        content = f'#!/bin/bash -eu\nprintf "%s" "$(touch {marker})"\n'.encode()
+        script.write_bytes(content)
+        result = self.validate('patch.sh')
+        self.assertEqual(result.format, 'shell_script')
+        self.assertEqual(result.path.suffix, '.sh')
+        self.assertEqual(result.path.read_bytes(), content)
+        self.assertFalse(marker.exists())
+        with open_artifact(self.root, result.path.relative_to(self.root).as_posix()) as output:
+            self.assertEqual(output.read(), content)
+
+    def test_shell_script_in_persistent_tmp_uses_declared_original_targets(self) -> None:
+        target = self.root / sandbox_tmp_directory('one') / 'patch.sh'
+        target.parent.mkdir(parents=True)
+        target.write_text('#!/usr/bin/env sh\nprintf "patch fixture\\n"\n')
+        self.assertEqual(self.validate('/tmp/patch.sh').format, 'shell_script')
+        with self.assertRaisesRegex(ValueError, '原始附件不一致'):
+            self.validate('/tmp/patch.sh', files=['invented.rb'])
+
+    def test_invalid_shell_scripts_are_rejected(self) -> None:
+        script = self.rundir / 'patch.sh'
+        for content in (b'echo missing-shebang', b'#!/bin/bash\nif then\n',
+                        b'#!/usr/bin/python3\nprint(1)\n', b'#!/bin/sh\n\x00',
+                        b'#!/bin/sh\n\xff', b'#!/bin/sh\n' + b'x' * (4 * 1024 * 1024)):
+            with self.subTest(prefix=content[:40]), self.assertRaises(ValueError):
+                script.write_bytes(content)
+                self.validate('patch.sh')
+
+    def test_script_snapshot_cannot_be_replaced_during_validation(self) -> None:
+        from spiritscout.awdp.patches import _original_digests
+
+        script = self.rundir / 'patch.sh'
+        content = b'#!/bin/sh\necho original\n'
+        script.write_bytes(content)
+        def changed_source(*args):
+            digests = _original_digests(*args)
+            script.write_text('invalid replacement')
+            return digests
+        with patch('spiritscout.awdp.patches._original_digests', side_effect=changed_source):
+            result = self.validate('patch.sh')
+        self.assertEqual(result.path.read_bytes(), content)
+
     def test_absolute_archive_and_sandbox_tmp_path_are_supported(self) -> None:
         self.validate(str(self.archive))
         target = self.root / sandbox_tmp_directory("one") / "fix.tar.gz"
@@ -156,6 +200,39 @@ class PatchTests(unittest.TestCase):
 
 
 class SubmitFixTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lightweight_awdp_prompt_and_script_delivery_agree(self) -> None:
+        from test_single_executor import context
+
+        from spiritscout.ctf.single import SingleCTFAgent
+
+        fixture = PatchTests('test_relative_archive_is_published_without_rewriting_tree')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        ctx = context(RunMode.AWDP)
+        ctx.builtin_ctx = {'workspace_root': str(fixture.root)}
+        manager = FlagManager(fix_mode=True, local_only=True)
+        agent = SingleCTFAgent(ctx, flag_manager=manager)
+        self.assertIn('patch.tar.gz', agent._solver_system_prompt())
+        self.assertIn('format=shell_script', agent._solver_system_prompt())
+        self.assertIn('平台规则', agent._solver_system_prompt())
+        schema = next(s['function'] for s in agent._model_tool_schemas() if s['function']['name'] == 'submit_fix')
+        self.assertIn('.sh', schema['description'])
+        script = fixture.rundir / 'patch.sh'
+        script.write_text('#!/bin/sh\necho fixture\n')
+        task = Task(task_id='fix', agent_type=agent.agent_type, task_type='ctf_single', target='',
+            payload={'challenge': {'id': 'one', 'attachments': [str(fixture.original)]}})
+        result = await agent._tool_submit_fix(task, SimpleNamespace(name='solve', route_id='r'),
+            {'archive': 'patch.sh', 'files': ['attachment/app.rb'], 'description': 'fixture repair evidence'})
+        self.assertTrue(result.ok, result.text)
+        self.assertTrue(result.stop)
+        self.assertIn('未执行补丁', result.text)
+        self.assertNotIn('内容变化已校验', result.text)
+        self.assertIn('one', manager.completed_ids())
+        event = next(r for r in ctx.audit.records if r['type'] == 'file.shared')
+        self.assertTrue(event['detail']['path'].endswith('.sh'))
+        with open_artifact(fixture.root, event['detail']['path']) as output:
+            self.assertEqual(output.read(), script.read_bytes())
+
     @unittest.skipUnless(sandbox_available(), "需要 Linux/bubblewrap")
     async def test_real_sandbox_tmp_archive_is_validated_and_downloadable(self) -> None:
         fixture = PatchTests("test_relative_archive_is_published_without_rewriting_tree")
@@ -172,6 +249,16 @@ class SubmitFixTests(unittest.IsolatedAsyncioTestCase):
         with open_artifact(fixture.root, validated.path.relative_to(fixture.root).as_posix()) as f:
             with tarfile.open(fileobj=f, mode="r:gz") as archive:
                 self.assertEqual(archive.getnames(), ["attachment/app.rb"])
+        script = await sandbox_exec(
+            "printf '#!/bin/sh\\necho fixture\\n' > /tmp/patch.sh",
+            workspace_root=str(fixture.root), workspace_scope='one',
+            _run_mode=RunMode.AWDP, _lightweight_local=True)
+        self.assertTrue(script.ok, script.error)
+        self.assertEqual(script.returncode, 0, script.stderr)
+        published = fixture.validate('/tmp/patch.sh')
+        self.assertEqual(published.format, 'shell_script')
+        with open_artifact(fixture.root, published.path.relative_to(fixture.root).as_posix()) as output:
+            self.assertEqual(output.read(), b'#!/bin/sh\necho fixture\n')
 
     async def test_submit_reads_builtin_workspace_and_persists_completion(self) -> None:
         fixture = PatchTests("test_relative_archive_is_published_without_rewriting_tree")

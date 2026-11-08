@@ -1,6 +1,6 @@
 "use strict";
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
-const context=vm.createContext({SessionObserver:{resultSummary:d=>d.result||d.error||'',cleanText:v=>String(v||'')}});
+const context=vm.createContext(require('./helpers/i18n').context({SessionObserver:{resultSummary:d=>d.result||d.error||'',cleanText:v=>String(v||'')}}));
 vm.runInContext(fs.readFileSync(path.join(__dirname,'../src/spiritscout/web/static/js/agent-workbench.js'),'utf8'),context);
 const api=vm.runInContext('AgentWorkbench',context),store=api.create();
 const push=(actor,type,detail)=>api.reduce(store,{actor,type,detail,ts:'2026-10-17T00:00:00Z'});

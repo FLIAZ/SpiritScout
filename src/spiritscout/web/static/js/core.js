@@ -27,15 +27,15 @@ function modelDisplayName(reference, provider = "") {
 async function api(path, opt = {}) {
   const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opt });
   if (r.status === 401 && !String(path).startsWith("/api/auth/")) {
-    location.assign("/login");           // 会话过期：回登录页而不是持续报错
-    throw new Error("需要重新登录");
+    location.assign(I18n.url("/login"));           // 会话过期：回登录页而不是持续报错
+    throw new Error(I18n.t("需要重新登录"));
   }
   if (!r.ok) {
     let detail = null, msg = r.statusText;
     try { detail = (await r.json()).detail; } catch {}
     if (detail && typeof detail === "object") msg = detail.message || msg;
     else if (detail) msg = detail;
-    const err = new Error(msg);
+    const err = new Error(I18n.t(msg));
     err.detail = detail;               // 结构化错误（如规则冲突清单）随异常上抛
     err.status = r.status;
     throw err;
@@ -51,20 +51,20 @@ function toast(msg, err = false) {
   setTimeout(() => el.remove(), 4200);
 }
 const TERMINAL = new Set(["completed", "failed", "stopped", "interrupted"]);
-const STATUS_CN = { created: "排队中", running: "运行中", completed: "已完成",
-                    failed: "失败", stopped: "已停止", interrupted: "已中断" };
-const MODE_CN = { src: "SRC 渗透", ctf: "CTF 解题", competition: "智能渗透赛",
-                  dialogue: "对话", rules: "规则" };
-const TASK_CN = { business_context: "业务体验与上下文", recon: "侦察测绘", port_scan: "端口扫描", web_probe: "Web 探测",
-                  host_probe: "主机探测", post_exploit: "后渗透", report: "报告生成",
-                  ctf_web: "Web 题", ctf_pwn: "Pwn 题", ctf_reverse: "逆向题",
-                  ctf_crypto: "密码题", ctf_misc: "杂项题", ctf_single: "单执行者" };
-const SEV_CN = { critical: ["严重", "red"], high: ["高危", "red"], medium: ["中危", "orange"],
-                 low: ["低危", "blue"], info: ["信息", "blue"] };
+const STATUS_CN = { created: I18n.t("排队中"), running: I18n.t("运行中"), completed: I18n.t("已完成"),
+                    failed: I18n.t("失败"), stopped: I18n.t("已停止"), interrupted: I18n.t("已中断") };
+const MODE_CN = { src: I18n.t("SRC 渗透"), ctf: I18n.t("CTF 解题"), competition: I18n.t("智能渗透赛"),
+                  dialogue: I18n.t("对话"), rules: I18n.t("规则") };
+const TASK_CN = { business_context: I18n.t("业务体验与上下文"), recon: I18n.t("侦察测绘"), port_scan: I18n.t("端口扫描"), web_probe: I18n.t("Web 探测"),
+                  host_probe: I18n.t("主机探测"), post_exploit: I18n.t("后渗透"), report: I18n.t("报告生成"),
+                  ctf_web: I18n.t("Web 题"), ctf_pwn: I18n.t("Pwn 题"), ctf_reverse: I18n.t("逆向题"),
+                  ctf_crypto: I18n.t("密码题"), ctf_misc: I18n.t("杂项题"), ctf_single: I18n.t("灵枢") };
+const SEV_CN = { critical: [I18n.t("严重"), "red"], high: [I18n.t("高危"), "red"], medium: [I18n.t("中危"), "orange"],
+                 low: [I18n.t("低危"), "blue"], info: [I18n.t("信息"), "blue"] };
 function agentName(key) {
   if (!S.agents) return key || "—";
   const a = S.agents.roster.find(x => x.key === key);
-  return a ? a.name : (key || "—");
+  return a ? I18n.t(a.name) : (key || "—");
 }
 /* 审计 actor 形如 ctf-web-094cd1652967（键+实例短码）：还原为编队显示名 */
 function actorName(actor) {
@@ -74,13 +74,13 @@ function actorName(actor) {
   const base = String(actor || "").replace(/-[0-9a-f]{8,}$/i, "").replace(/-/g, "_");
   if (!S.agents) return actor || "—";
   const a = S.agents.roster.find(x => x.key === base || x.key === actor);
-  return a ? a.name : (actor || "—");
+  return a ? I18n.t(a.name) : (actor || "—");
 }
 /* 项目名缓存由项目页加载；取不到（未分类/项目已删）按未分类显示 */
 function projectName(id) {
-  if (!id) return "未分类";
+  if (!id) return I18n.t("未分类");
   const hit = (S.projects || []).find(x => x.project_id === id);
-  return hit ? hit.name : "未分类";
+  return hit ? hit.name : I18n.t("未分类");
 }
 function fmtElapsed(sec) {
   sec = Math.max(0, Math.round(sec));
@@ -109,7 +109,7 @@ function syncThemeButton() {
   const button = $("#btn-theme");
   button.querySelector(".theme-sun").toggleAttribute("hidden", dark);
   button.querySelector(".theme-moon").toggleAttribute("hidden", !dark);
-  button.title = dark ? "切换为亮色模式" : "切换为暗色模式";
+  button.title = dark ? I18n.t("切换为亮色模式") : I18n.t("切换为暗色模式");
   button.setAttribute("aria-label", button.title);
 }
 function applyTheme(t) {
@@ -129,19 +129,29 @@ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", syn
 /* 退出登录：清 Cookie 后回登录页；未启用登录时 /login 会自动跳回控制台 */
 $("#btn-logout").onclick = async () => {
   try { await fetch("/api/auth/logout", { method: "POST" }); } catch {}
-  location.assign("/login");
+  location.assign(I18n.url("/login"));
 };
 
 /* ================= 视图切换 ================= */
 const VIEWS = { home: "#view-home", session: "#view-session", dash: "#view-dash",
-                agents: "#view-agents", models: "#view-models", mcp:"#view-mcp", skill:"#view-skill", projects:"#view-projects", exp:"#view-exp" };
+                agents: "#view-agents", models: "#view-models", mcp:"#view-mcp", skill:"#view-skill", 'browser-accounts': '#view-browser-accounts', projects:"#view-projects", exp:"#view-exp", traffic:"#view-traffic", schedules:"#view-schedules" };
 function show(view) {
+  if (typeof ConsoleSidebar !== "undefined") ConsoleSidebar.closeOnMobile();
+  if (typeof ComposerCommands !== "undefined") ComposerCommands.reset();
   if(view!=="mcp" && typeof ExaSettings!=="undefined") ExaSettings.clear();
   S.view = view;
+  if(typeof BrowserAccountsPage!=='undefined')BrowserAccountsPage.navigate(view);
+  if (view !== "session" && typeof BackgroundTasks !== "undefined") BackgroundTasks.close();
+  if (typeof SchedulePage !== "undefined") { if (view === "schedules") SchedulePage.open(); else SchedulePage.close(); }
+  if (typeof TrafficPage !== "undefined") TrafficPage.navigate(view);
+  if (typeof CoveragePage !== "undefined") CoveragePage.navigate();
   if (typeof ComposerModels !== "undefined") ComposerModels.close();
   for (const [k, sel] of Object.entries(VIEWS)) $(sel).hidden = k !== view;
-  document.querySelectorAll(".side > nav button").forEach(b =>
-    b.classList.toggle("on", b.dataset.nav === (view === "session" ? "home" : view)));
+  document.querySelectorAll(".primary-nav [data-nav]").forEach(b => {
+    const active = b.dataset.nav === (view === "session" ? "home" : view);
+    b.classList.toggle("on", active);
+    if (active) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
+  });
   if (view === "agents") loadAgents();
   if (view === "models") loadModels();
   if (view === "dash") renderDash();
@@ -158,7 +168,7 @@ function show(view) {
     }
   }
 }
-document.querySelectorAll(".side > nav button").forEach(b =>
+document.querySelectorAll(".primary-nav [data-nav]").forEach(b =>
   b.onclick = () => { S.cur = null; show(b.dataset.nav); renderSessions(); });
 $("#btn-new").onclick = () => { S.cur = null; show("home"); renderSessions(); };
 
@@ -185,7 +195,7 @@ async function fetchSessions() {
   } catch (e) {
     if (!$("#connection-status")) {
       const notice = document.createElement("div"); notice.id = "connection-status"; notice.setAttribute("role", "status");
-      notice.textContent = "控制台连接中断，正在重试；当前内容可能不是最新。"; document.body.append(notice);
+      notice.textContent = I18n.t("控制台连接中断，正在重试；当前内容可能不是最新。"); document.body.append(notice);
     }
   }
 }
@@ -198,7 +208,7 @@ function sessionGroups(sessions, projects) {
     const id = s.project_id && known.has(s.project_id) ? s.project_id : "";
     if (!groups.has(id)) {
       groups.set(id, {id,
-        name: id ? (known.get(id).name || "未命名项目") : "未分类", items: []});
+        name: id ? (known.get(id).name || I18n.t("未命名项目")) : I18n.t("未分类"), items: []});
     }
     groups.get(id).items.push(s);
   }
@@ -223,7 +233,7 @@ function foldFolder(id, folded) {
 }
 
 function sessionItemHtml(s) {
-  return `
+  return I18n.html`
     <div class="sess-item ${s.session_id === S.cur ? "on" : ""}" data-id="${s.session_id}">
       <div class="t"><span class="pill ${s.status}" style="padding:1px 7px;font-size:10.5px">${STATUS_CN[s.status] || s.status}</span>
         <span class="name" title="${esc(s.title)}">${esc(s.title)}</span></div>
@@ -239,21 +249,27 @@ function renderSessions() {
   const box = $("#sess-list");
   if (!box) return;
   if (box.querySelector("input.rename, [data-armed]")) return;   // 正在重命名：不打断输入
+  const folded = foldedFolders();
+  // 轮询中用量等字段会持续变化，只比较侧栏实际显示的数据，保留 DOM、焦点和滚动位置。
+  const signature = JSON.stringify([S.cur,
+    S.sessions.map(s => [s.session_id, s.project_id, s.status, s.title, s.target]),
+    (S.projects || []).map(p => [p.project_id, p.name]), [...folded].sort()]);
+  if (box.dataset.signature === signature) return;
+  box.dataset.signature = signature;
   if (!S.sessions.length) {
-    box.innerHTML = `<div class="empty-note" style="padding:22px 8px">还没有会话</div>`;
+    box.innerHTML = I18n.html`<div class="empty-note" style="padding:22px 8px">还没有会话</div>`;
     return;
   }
-  const folded = foldedFolders();
   const chev = `<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>`;
   const folder = `<svg class="fico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.4l2 2h7.6A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/></svg>`;
   box.innerHTML = sessionGroups(S.sessions, S.projects).map(g => {
     const isFolded = folded.has(g.id);
     const hasCurrent = g.items.some(s => s.session_id === S.cur);
     const running = g.items.some(s => !TERMINAL.has(s.status));
-    const action = isFolded ? "展开" : "折叠";
-    return `<section class="sess-folder${isFolded ? " folded" : ""}${hasCurrent ? " has-on" : ""}" data-folder="${esc(g.id)}">
+    const action = isFolded ? I18n.t("展开") : I18n.t("折叠");
+    return I18n.html`<section class="sess-folder${isFolded ? " folded" : ""}${hasCurrent ? " has-on" : ""}" data-folder="${esc(g.id)}">
       <button class="sess-folder-head" type="button" aria-expanded="${isFolded ? "false" : "true"}" title="${action}项目：${esc(g.name)}">
-        ${chev}${folder}<span class="fname">${esc(g.name)}</span>${running ? `<span class="frun" title="有会话在运行"></span>` : ""}<span class="fcount">${g.items.length}</span>
+        ${chev}${folder}<span class="fname">${esc(g.name)}</span>${running ? I18n.html`<span class="frun" title="有会话在运行"></span>` : ""}<span class="fcount">${g.items.length}</span>
       </button>
       <div class="sess-folder-body">${g.items.map(sessionItemHtml).join("")}</div>
     </section>`;
@@ -264,7 +280,7 @@ function renderSessions() {
       const next = !section.classList.contains("folded");
       section.classList.toggle("folded", next);
       head.setAttribute("aria-expanded", String(!next));
-      head.title = `${next ? "展开" : "折叠"}项目：${section.querySelector(".fname").textContent}`;
+      head.title = I18n.t`${next ? I18n.t("展开") : I18n.t("折叠")}项目：${section.querySelector(".fname").textContent}`;
       foldFolder(section.dataset.folder, next);
     };
   });
@@ -290,8 +306,8 @@ function startRename(id, host) {
   const input = document.createElement("input");
   input.className = "rename";
   input.value = cur.title || "";
-  input.placeholder = cur.title || "会话名";
-  input.title = "回车保存；清空并回车恢复自动命名";
+  input.placeholder = cur.title || I18n.t("会话名");
+  input.title = I18n.t("回车保存；清空并回车恢复自动命名");
   host.style.display = "none";
   host.after(input);
   input.focus(); input.select();
@@ -304,7 +320,7 @@ function startRename(id, host) {
     try {
       await api(`/api/sessions/${id}`, {
         method: "PATCH", body: JSON.stringify({ title: next }) });
-      toast(next ? "已重命名" : "已恢复自动命名");
+      toast(next ? I18n.t("已重命名") : I18n.t("已恢复自动命名"));
     } catch (e) { toast(e.message, true); }
     await refreshSessions();
     if (S.cur === id) refreshState();
@@ -328,12 +344,12 @@ function armConfirm(btn, run) {
     Promise.resolve().then(run).catch(() => {}).finally(() => {
       btn.disabled = false;
       btn.classList.remove("armed");
-      btn.textContent = btn.dataset.label || "删除";
+      btn.textContent = btn.dataset.label || I18n.t("删除");
     });
     return;
   }
   btn.dataset.armed = "1"; btn.classList.add("armed");
-  btn.dataset.label = btn.textContent; btn.textContent = "删除?";
+  btn.dataset.label = btn.textContent; btn.textContent = I18n.t("删除?");
   setTimeout(() => {
     if (btn.dataset.armed) {
       delete btn.dataset.armed; btn.classList.remove("armed"); btn.textContent = btn.dataset.label;
@@ -344,7 +360,7 @@ function armDelete(btn, id) { armConfirm(btn, () => doDelete(id)); }
 async function doDelete(id) {
   try {
     await api(`/api/sessions/${id}?confirm=true`, { method: "DELETE" });
-    toast("会话已删除");
+    toast(I18n.t("会话已删除"));
     if (S.cur === id) { S.cur = null; show("home"); }
     refreshSessions();
   } catch (e) { toast(e.message, true); }

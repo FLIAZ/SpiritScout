@@ -27,7 +27,7 @@ const ComposerDrop = (() => {
     event.preventDefault(); reset();
     const ctx = target(event);
     if (!ctx) return;
-    if (!ctx.available() || busy.has(ctx)) { toast("正在处理附件或发送任务，请稍后再添加", true); return; }
+    if (!ctx.available() || busy.has(ctx)) { toast(I18n.t("正在处理附件或发送任务，请稍后再添加"), true); return; }
     const draft = ctx.files(), id = S.cur;
     busy.add(ctx);
     try {
@@ -35,15 +35,15 @@ const ComposerDrop = (() => {
       if (!files.length) return;
       // 目录读取为异步：切页、切会话、发送后，不能把文件混入其他草稿。
       if (S.view !== ctx.view || (ctx.view === "session" && S.cur !== id) || ctx.files() !== draft || !ctx.available()) {
-        toast("页面或草稿已变化，请在目标会话重新拖入附件", true); return;
+        toast(I18n.t("页面或草稿已变化，请在目标会话重新拖入附件"), true); return;
       }
-      if (draft.length + files.length > 20) { toast("一次最多携带 20 个附件（文件夹计为一个附件）", true); return; }
+      if (draft.length + files.length > 20) { toast(I18n.t("一次最多携带 20 个附件（文件夹计为一个附件）"), true); return; }
       if (files.some(file => (!file.directory && !file.size) || file.size > 50 * 1024 * 1024)) {
-        toast("附件不能为空，且单个文件不能超过 50MB", true); return;
+        toast(I18n.t("附件不能为空，且单个文件不能超过 50MB"), true); return;
       }
       draft.push(...files);
       renderFileChips(ctx.chips, draft);
-    } catch (error) { toast(`添加附件失败：${error.message || "无法读取文件"}`, true); }
+    } catch (error) { toast(I18n.t`添加附件失败：${error.message || I18n.t("无法读取文件")}`, true); }
     finally { busy.delete(ctx); }
   });
   document.addEventListener("dragend", reset);

@@ -42,6 +42,21 @@ def native_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result = copy.deepcopy(messages)
     names: dict[str, str] = {}
     for message in result:
+        if isinstance(message.get('content'), list):
+            texts, images = [], []
+            for part in message['content']:
+                if part.get('type') == 'text':
+                    texts.append(str(part.get('text') or ''))
+                elif part.get('type') == 'image_url':
+                    url = (part.get('image_url') or {}).get('url', '')
+                    if not url.startswith('data:image/') or ';base64,' not in url:
+                        raise ValueError('Ollama 图像输入只接受已读取的本地 Base64 图片')
+                    images.append(url.split(';base64,', 1)[1])
+                else:
+                    raise ValueError('Ollama 不支持此多模态内容类型')
+            message['content'] = '\n'.join(texts)
+            if images:
+                message['images'] = images
         if 'reasoning_content' in message:
             message['thinking'] = message.pop('reasoning_content')
         for call in message.get('tool_calls') or []:

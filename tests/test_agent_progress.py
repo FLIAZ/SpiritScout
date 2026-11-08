@@ -79,6 +79,33 @@ class AgentProgressTests(unittest.TestCase):
                          '"exploration":{"intent":"核对边界","attempt":"对照响应","state":[]}}', task_id='t')
         self.assertNotIn('state', audit.log.call_args.args[2]['exploration'])
 
+    def test_milestones_keep_public_basis_and_ignore_private_or_incomplete_fields(self):
+        from spiritscout.gateway.progress import public_exploration
+
+        value = {'intent': '核对边界', 'attempt': '账号对照', 'milestone': {
+            'kind': 'discovery', 'title': '两个账号拿到了相同记录', 'basis': '响应中的记录标识一致，尚需核对归属',
+            'next': '验证该记录是否属于其他账号', 'evidence_refs': ['topology:observed', 'topology:observed', 3],
+            'analysis': '内部分析', 'actions': ['执行参数']}}
+        semantic = public_exploration(value)
+        self.assertEqual(semantic['milestone']['evidence_refs'], ['topology:observed'])
+        self.assertEqual(semantic['milestone']['next'], '验证该记录是否属于其他账号')
+        self.assertNotIn('内部分析', str(semantic))
+        self.assertNotIn('执行参数', str(semantic))
+        for invalid in ({'kind': 'breakthrough', 'title': '无依据'},
+                        {'kind': 'tool_success', 'title': '请求成功', 'basis': '200'},
+                        {'kind': [], 'title': '错误类型', 'basis': '无效'}):
+            self.assertNotIn('milestone', public_exploration({**value, 'milestone': invalid}))
+
+    def test_existing_v1_session_receives_new_contract_once_without_rewriting_history(self):
+        from spiritscout.gateway.progress import ensure_exploration_progress
+
+        state = {'exploration_display_v1': True, 'messages': [{'role': 'user', 'content': '旧展示约定'}]}
+        ensure_exploration_progress(state)
+        self.assertEqual(state['messages'][0]['content'], '旧展示约定')
+        self.assertIn('milestone', state['messages'][-1]['content'])
+        ensure_exploration_progress(state)
+        self.assertEqual(len(state['messages']), 2)
+
 
 class ProgressDecisionIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_existing_json_decision_produces_progress_without_another_model_call(self) -> None:

@@ -7,10 +7,11 @@
 /* global mdRender, toast, esc, S */
 
 const FileCards = (() => {
-  const TEXT_EXT = new Set(["txt", "log", "json", "csv", "xml", "yml", "yaml",
+  const TEXT_EXT = new Set(["txt", "log", "json", "csv", "xml", "yml", "yaml", "http", "rc",
     "ini", "conf", "cfg", "py", "js", "ts", "html", "css", "c", "h", "cpp",
     "java", "go", "rs", "sh", "bash", "sql", "toml", "env", "list", "dict"]);
   const IMG_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
+  const CAPTURE_EXT = new Set(["pcap", "pcapng", "cap"]);
   // 预览超过该体积直接提示下载，避免把大文件整段读进会话页
   const PREVIEW_LIMIT = 4 * 1024 * 1024;
 
@@ -47,33 +48,44 @@ const FileCards = (() => {
 
   const extLabel = (name) => {
     const e = ext(name);
-    if (!e) return "文件";
+    if (!e) return I18n.t("文件");
     if (e === "md") return "Markdown";
-    if (IMG_EXT.has(e)) return "图片";
+    if (IMG_EXT.has(e)) return I18n.t("图片");
     return e.toUpperCase();
   };
 
   const isPreviewable = (name) => {
     const e = ext(name);
-    return e === "md" || TEXT_EXT.has(e) || IMG_EXT.has(e);
+    return e === "md" || TEXT_EXT.has(e) || IMG_EXT.has(e) || CAPTURE_EXT.has(e);
   };
 
   const fileUrl = (session, rel) =>
     `/api/sessions/${encodeURIComponent(session)}/artifacts/download?path=${encodeURIComponent(rel)}`;
+  const imageUrl = (session, image) => `/api/sessions/${encodeURIComponent(session)}/artifacts/image?path=${encodeURIComponent(image.path)}&sha256=${encodeURIComponent(image.sha256)}`;
+  function imageCard(image, session=S.cur) {
+    if(!image || !/^artifacts\/view-images\/[a-f0-9]+\.(png|jpg|gif|webp)$/.test(image.path || "")
+      || !/^[a-f0-9]{64}$/.test(image.sha256 || "") || !session) return "";
+    const name=image.name || image.path.split("/").pop();
+    const previewName=IMG_EXT.has(ext(name)) ? name : `${name}.${ext(image.path)}`;
+    return I18n.html`<figure class="tl-image" data-file-rel="${esc(image.path)}" data-file-name="${esc(previewName)}" data-file-size="${Number(image.size)||0}" data-image-sha="${esc(image.sha256)}">
+      <button type="button" data-file-view aria-label="放大查看 ${esc(name)}"><img src="${esc(imageUrl(session,image))}" alt="${esc(name)}" loading="lazy" decoding="async"></button>
+      <figcaption>${esc(name)}</figcaption><span class="tl-image-error" hidden>图像快照无法载入，可展开调用记录查看原因。</span></figure>`;
+  }
 
   /* ---- 卡片（气泡内的文件消息） ---- */
   function card({ rel, name, size, side }) {
-    const fname = name || String(rel || "").split("/").pop() || "文件";
+    const fname = name || String(rel || "").split("/").pop() || I18n.t("文件");
     const ops = rel ? [
       isPreviewable(fname)
-        ? `<button type="button" class="fc-btn" data-file-view>预览</button>` : "",
-      `<button type="button" class="fc-btn" data-file-dl>下载</button>`,
+        ? `<button type="button" class="fc-btn" data-file-view>${CAPTURE_EXT.has(ext(fname)) ? I18n.t("查看数据包") : I18n.t("预览")}</button>` : "",
+      I18n.html`<button type="button" class="fc-btn" data-file-dl>下载</button>`,
     ].join("") : "";
     return `<div class="filecard${side === "user" ? " fc-user" : ""}" data-file-rel="${esc(rel || "")}"
       data-file-name="${esc(fname)}" data-file-size="${size ?? ""}">
       ${iconSvg(fname)}
       <span class="fc-main"><b class="fc-name" title="${esc(fname)}">${esc(fname)}</b>
-        <small class="fc-meta">${[sizeText(size), extLabel(fname)].filter(Boolean).join(" · ")}</small></span>
+        <small class="fc-meta">${[sizeText(size), extLabel(fname)].filter(Boolean).join(" · ")}</small>
+        ${rel && CAPTURE_EXT.has(ext(fname)) ? I18n.html('<small class="fc-note">点击「查看数据包」可放大查看流量包详情</small>') : ""}</span>
       <span class="fc-ops">${ops}</span>
     </div>`;
   }
@@ -84,7 +96,7 @@ const FileCards = (() => {
     let reportDownload = false;
     try { reportDownload = new URL(url, window.location?.href || "http://localhost").pathname.endsWith("/report/download"); } catch {}
     if (reportDownload) {
-      name = name || "报告.md";
+      name = name || I18n.t("报告.md");
       if (!/\.md$/i.test(name)) name += ".md";
     }
     try {
@@ -94,8 +106,8 @@ const FileCards = (() => {
           try { suggestedName = new URL(url, window.location?.href || "http://localhost").searchParams.get("path")?.split("/").pop() || ""; } catch {}
         }
         try {
-          handle = await window.showSaveFilePicker({ suggestedName: suggestedName || "下载文件",
-            ...(/\.md$/i.test(suggestedName) ? {types: [{description: "Markdown 文档", accept: {"text/markdown": [".md"]}}]} : {}) });
+          handle = await window.showSaveFilePicker({ suggestedName: suggestedName || I18n.t("下载文件"),
+            ...(/\.md$/i.test(suggestedName) ? {types: [{description: I18n.t("Markdown 文档"), accept: {"text/markdown": [".md"]}}]} : {}) });
         } catch (e) {
           if (e && e.name === "AbortError") return;
         }
@@ -107,7 +119,7 @@ const FileCards = (() => {
         if (resp.body) await resp.body.pipeTo(writer);
         else { await writer.write(await resp.blob()); await writer.close(); }
         writer = null;
-        toast(`已保存 ${handle.name || name || "下载文件"}`);
+        toast(I18n.t`已保存 ${handle.name || name || I18n.t("下载文件")}`);
         return;
       }
       const blob = await resp.blob();
@@ -120,7 +132,7 @@ const FileCards = (() => {
           try { fname = decodeURIComponent(m[1]); } catch { fname = m[1]; }
         }
       }
-      fname = fname || "下载文件";
+      fname = fname || I18n.t("下载文件");
       const a = document.createElement("a");
       const objUrl = URL.createObjectURL(blob);
       a.href = objUrl;
@@ -129,33 +141,41 @@ const FileCards = (() => {
       setTimeout(() => URL.revokeObjectURL(objUrl), 8000);
     } catch (e) {
       if (writer) { try { await writer.abort(); } catch {} }
-      toast(`下载失败：${e && e.message ? e.message : e}`, true);
+      toast(I18n.t`下载失败：${e && e.message ? e.message : e}`, true);
     }
   }
 
   /* ---- 在线预览 ---- */
   let viewerObjUrl = null, viewerController = null, viewerVersion = 0;
+  let packetViewer = null, packetTimer = null;
+  function closePackets() {
+    clearTimeout(packetTimer); packetTimer = null;
+    packetViewer?.close(); packetViewer = null;
+    document.getElementById("file-dlg")?.classList?.remove("file-dlg-packets");
+  }
 
-  async function openViewer(session, rel, name, size) {
+  async function openViewer(session, rel, name, size, imageSha="") {
     const dlg = document.getElementById("file-dlg");
     if (!dlg) return;
     const version = ++viewerVersion;
+    closePackets();
     viewerController?.abort(); viewerController = null;
     if (viewerObjUrl) { URL.revokeObjectURL(viewerObjUrl); viewerObjUrl = null; }
     const current = () => version === viewerVersion && dlg.open;
-    const fname = name || String(rel).split("/").pop() || "文件";
+    const fname = name || String(rel).split("/").pop() || I18n.t("文件");
     const e = ext(fname);
     document.getElementById("fd-name").textContent = fname;
     document.getElementById("fd-meta").textContent =
       [sizeText(size), extLabel(fname)].filter(Boolean).join(" · ");
-    document.getElementById("fd-dl").onclick = () => saveFile(fileUrl(session, rel), fname);
+    const url=imageSha ? imageUrl(session,{path:rel,sha256:imageSha}) : fileUrl(session,rel);
+    document.getElementById("fd-dl").onclick = () => saveFile(url, fname);
     const body = document.getElementById("fd-body");
     const render = async () => {
-      body.innerHTML = `<div class="fd-loading">正在读取…</div>`;
+      body.innerHTML = I18n.html`<div class="fd-loading">正在读取…</div>`;
       viewerController = new AbortController();
       const signal = viewerController.signal;
       try {
-        const resp = await fetch(fileUrl(session, rel), {signal});
+        const resp = await fetch(url, {signal});
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         if (IMG_EXT.has(e)) {
           const blob = await resp.blob();
@@ -171,19 +191,60 @@ const FileCards = (() => {
         }
       } catch (err) {
         if (!current() || err.name === "AbortError") return;
-        body.innerHTML = `<div class="fd-tip">读取失败：${esc(err && err.message ? err.message : String(err))}</div>`;
+        body.innerHTML = I18n.html`<div class="fd-tip">读取失败：${esc(err && err.message ? err.message : String(err))}</div>`;
       } finally {
         if (version === viewerVersion) viewerController = null;
       }
     };
     if (!dlg.open) dlg.showModal();
-    if (!isPreviewable(fname)) {
-      body.innerHTML = `<div class="fd-tip">该类型不支持在线预览，请下载后查看。</div>`;
+    if (CAPTURE_EXT.has(e)) {
+      dlg.classList?.add("file-dlg-packets");
+      body.innerHTML = I18n.html('<div class="fd-loading">正在解析离线流量附件…</div>');
+      try {
+        const data = await api(`/api/sessions/${encodeURIComponent(session)}/artifacts/packets?path=${encodeURIComponent(rel)}`, {method:"POST"});
+        if (!current()) return;
+        packetViewer = PacketBrowser.mount(body, session, data.capture_id);
+        const instance = packetViewer;
+        const refresh = async () => {
+          if (!current() || packetViewer !== instance) return;
+          const state = await instance.refresh();
+          if (state?.pending && current() && packetViewer === instance) packetTimer = setTimeout(refresh, 1500);
+        };
+        await refresh();
+      } catch (error) {
+        const reason = [404,405].includes(error.status)
+          ? I18n.t("当前服务尚未加载离线附件预览接口，请在运行任务结束后重启后端并刷新页面")
+          : error.message;
+        if (current()) body.innerHTML = I18n.html`<div class="fd-tip">离线数据包无法预览：${esc(reason)}。原附件仍可下载。</div>`;
+      }
+    } else if (!isPreviewable(fname)) {
+      body.innerHTML = I18n.html`<div class="fd-tip">该类型不支持在线预览，请下载后查看。</div>`;
     } else if (Number(size) > PREVIEW_LIMIT) {
-      body.innerHTML = `<div class="fd-tip">文件较大（${sizeText(size)}），请下载后查看。</div>`;
+      body.innerHTML = I18n.html`<div class="fd-tip">文件较大（${sizeText(size)}），请下载后查看。</div>`;
     } else {
       await render();
     }
+  }
+
+  function openLocalImage(file) {
+    if(!file)return;
+    closePackets();
+    const dlg=document.getElementById("file-dlg");if(!dlg)return;
+    const version=++viewerVersion;viewerController?.abort();viewerController=null;
+    if(viewerObjUrl)URL.revokeObjectURL(viewerObjUrl);
+    viewerObjUrl=URL.createObjectURL(file);
+    const url=viewerObjUrl;
+    document.getElementById("fd-name").textContent=file.name;
+    document.getElementById("fd-meta").textContent=sizeText(file.size);
+    document.getElementById("fd-dl").onclick=()=>saveFile(url,file.name);
+    const body=document.getElementById("fd-body");
+    body.innerHTML=`<img class="fd-img" src="${esc(url)}" alt="${esc(file.name)}">`;
+    const image=body.querySelector("img");
+    image.onerror=()=>{
+      if(version===viewerVersion && dlg.open)
+        body.innerHTML=I18n.html('<div class="fd-tip">无法预览此图片，仍可下载查看或从附件中移除。</div>');
+    };
+    if(!dlg.open)dlg.showModal();
   }
 
   /* ---- 发送到会话（产出/报告/附件目录内的文件） ---- */
@@ -206,7 +267,7 @@ const FileCards = (() => {
       const session = S.cur;
       const { fileRel: rel, fileName: name, fileSize: size } = host.dataset;
       if (btn.hasAttribute("data-file-view")) {
-        await openViewer(session, rel, name, size === "" ? undefined : Number(size));
+        await openViewer(session, rel, name, size === "" ? undefined : Number(size), host.dataset.imageSha || "");
       } else {
         await saveFile(fileUrl(session, rel), name);
       }
@@ -231,11 +292,18 @@ const FileCards = (() => {
     dlgEl.addEventListener("close", () => {
       if (dlgEl.open) return;
       viewerVersion++; viewerController?.abort(); viewerController = null;
+      closePackets();
       if (viewerObjUrl) { URL.revokeObjectURL(viewerObjUrl); viewerObjUrl = null; }
       const body = document.getElementById("fd-body");
       if (body) body.innerHTML = "";
     });
   }
 
-  return { card, saveFile, openViewer, share, isPreviewable, fileUrl, sizeText };
+  document.addEventListener("error", event=>{
+    const image=event.target;
+    if(image?.tagName!=="IMG")return;
+    const host=image.closest(".tl-image");if(!host)return;
+    image.hidden=true;host.querySelector(".tl-image-error").hidden=false;
+  },true);
+  return { card, imageCard, saveFile, openViewer, openLocalImage, share, isPreviewable, fileUrl, sizeText };
 })();

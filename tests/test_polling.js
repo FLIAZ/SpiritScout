@@ -1,7 +1,7 @@
 "use strict";
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), vm = require('node:vm'), path = require('node:path');
-const context = vm.createContext({});
+const context = vm.createContext(require('./helpers/i18n').context({}));
 vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/spiritscout/web/static/js/polling.js'), 'utf8'), context);
 (async () => {
   let time=0, timer, list=0, state=0, visible=true, session=true;
@@ -21,8 +21,8 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/spiritscout/web/sta
   // 两个来源同时刷新列表，只能有一个实际在途请求。
   const source=fs.readFileSync(path.join(__dirname,'../src/spiritscout/web/static/js/core.js'),'utf8');
   let requests=0,resolve;
-  const sandbox=vm.createContext({S:{sessions:[],cur:null,view:'home'}, $:()=>({remove(){}}),
-    renderSessions(){}, api:()=>{requests++;return new Promise(r=>{resolve=r;});}});
+  const sandbox=vm.createContext(require('./helpers/i18n').context({S:{sessions:[],cur:null,view:'home'}, $:()=>({remove(){}}),
+    renderSessions(){}, api:()=>{requests++;return new Promise(r=>{resolve=r;});}}));
   vm.runInContext(source.slice(source.indexOf('let sessionsInFlight'),source.indexOf('function renderSessions()')),sandbox);
   const first=vm.runInContext('refreshSessions()',sandbox),second=vm.runInContext('refreshSessions()',sandbox);
   assert.equal(first,second);assert.equal(requests,1);resolve({sessions:[]});await first;

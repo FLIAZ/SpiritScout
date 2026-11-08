@@ -1,0 +1,20 @@
+.browser-account-list {display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr));gap:18px;}
+.browser-account-card {border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:22px;min-width:0;}
+.browser-account-card header,.account-editor header {display:flex;justify-content:space-between;align-items:flex-start;gap:12px;}
+.browser-account-card h3,.account-editor h3 {margin:0;font-size:17px;}
+.browser-account-card header p,.account-sites {font-size:12px;color:var(--ink-2);overflow-wrap:anywhere;line-height:1.7;}
+.browser-account-card dl {border-top:1px solid var(--line);margin:18px 0;padding-top:12px;font-size:12px;}
+.browser-account-card dl div {display:grid;grid-template-columns:92px minmax(0,1fr);gap:12px;padding:6px 0;}
+.browser-account-card dt {color:var(--ink-2);}.browser-account-card dd {margin:0;overflow-wrap:anywhere;}
+.account-actions {display:flex;gap:8px;align-items:center;flex-wrap:wrap;}.account-actions summary {font-size:12px;cursor:pointer;padding:6px;}
+.account-actions details[open] {flex-basis:100%;}.account-actions details .btn {margin:8px 6px 0 0;}
+.account-editor {width:min(620px,calc(100vw - 32px));max-height:90dvh;padding:24px;border:1px solid var(--line);border-radius:14px;background:var(--surface);color:var(--ink);overflow:auto;}
+.account-editor::backdrop {background:rgba(0,0,0,.35);}.account-editor header {margin-bottom:20px;}
+.account-editor label {display:flex;flex-direction:column;gap:7px;font-size:12px;margin:12px 0;}
+.account-fields {display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+.account-editor :is(input:not([type=checkbox]),textarea,select) {box-sizing:border-box;width:100%;min-width:0;padding:9px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink);font:inherit;}
+.account-editor fieldset {border:1px solid var(--line);border-radius:8px;padding:10px 16px;margin:18px 0;}.account-editor legend {font-size:13px;font-weight:600;}
+.account-editor .account-check {flex-direction:row;align-items:center;}.account-editor .muted {font-size:12px;line-height:1.7;}
+.account-editor [data-error] {color:var(--bad);font-size:12px;}.account-editor footer {display:flex;justify-content:flex-end;}
+:is(.account-editor,#view-browser-accounts) :is(button,input,textarea,select,summary):focus-visible {outline:2px solid var(--accent);outline-offset:3px;}
+@media(max-width:600px){.account-fields{grid-template-columns:1fr;gap:0;}.account-editor{padding:16px;}.browser-account-card{padding:16px;}}

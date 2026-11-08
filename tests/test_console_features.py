@@ -60,7 +60,7 @@ def session(root, sid="sess-fixture"):
 
 
 class ModelSelectionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_selected_model_preserves_provider_and_role_precedence(self):
+    async def test_selected_model_overrides_all_role_bindings_and_preserves_provider(self):
         entries = models()
         gateway = ModelGateway(ModelRegistry(entries))
         selected = entries[1].key
@@ -68,12 +68,13 @@ class ModelSelectionTests(unittest.IsolatedAsyncioTestCase):
         master = AgentBoundGateway(gateway, entries[0].key, prefer_session=True)
         child = AgentBoundGateway(gateway, entries[0].key)
         self.assertEqual(master.resolve_model().key, entries[1].key)
-        self.assertEqual(child.resolve_model().key, entries[0].key)
+        self.assertEqual(child.resolve_model().key, entries[1].key)
         self.assertEqual(master.resolve_model(model=entries[0].key).key, entries[0].key)
         self.assertEqual(master.context_identity()["provider_ref"], "beta")
         self.assertIsNotNone(master.context_budget())
         selected = ""
         self.assertEqual(master.resolve_model().key, entries[0].key)
+        self.assertEqual(child.resolve_model().key, entries[0].key)
         selected = "missing"
         self.assertEqual(master.resolve_model().key, entries[0].key)
 
@@ -333,3 +334,29 @@ class DistillFeedbackTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(Exception) as raised:
                 await request_distill(cfg, manager, item)
             self.assertEqual(raised.exception.status_code, 409)
+
+class AutomationIdentityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_same_scheduled_occurrence_registers_and_queues_only_once(self):
+        from spiritscout.core.models import RunMode
+        from spiritscout.launch import LaunchRequest, prepare_launch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, entries = fixture(Path(tmp))
+            manager = SessionManager(cfg, entries)
+            plan = prepare_launch(
+                LaunchRequest(mode=RunMode.CTF, mission="fixture independent task")
+            )
+            payload = {
+                "mode": "ctf",
+                "mission": "fixture independent task",
+                "no_llm": True,
+                "model": entries[1].key,
+            }
+            with patch.object(manager, "start"):
+                first = await manager.create(payload, plan, automation_id="a" * 32)
+                second = await manager.create(payload, plan, automation_id="a" * 32)
+            self.assertIs(first, second)
+            self.assertEqual(first.session_id, "sess-auto-" + "a" * 32)
+            self.assertEqual(manager._queue.qsize(), 1)
+            self.assertEqual(first.model, entries[1].key)
+            await manager.aclose()

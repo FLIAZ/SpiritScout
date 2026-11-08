@@ -12,8 +12,8 @@ function node(id) {
   return nodes.get(id);
 }
 const S = {cur: "sess-a", compFiles: [], homeFiles: []};
-const ctx = vm.createContext({S, $: node, esc: s => String(s), fmtSize: () => "1 KB",
-  syncComposerControl() {}});
+const ctx = vm.createContext(require('./helpers/i18n').context({S, $: node, esc: s => String(s), fmtSize: () => "1 KB",
+  syncComposerControl() {}}));
 const start = source.indexOf("/* 附件 chip");
 // 同名监听器绑定在附件段之前，必须从 start 起找段落结尾
 const end = source.indexOf("compInput.addEventListener(\"input\"", start);
@@ -39,3 +39,25 @@ node("#home-file").files = [{name: "题面.zip", size: 9}];
 node("#home-file").onchange();
 assert.equal(S.homeFiles.length, 1);
 console.log("test_composer_attachments: 全部通过");
+
+const created=[],revoked=[],opened=[];
+ctx.URL={createObjectURL(file){created.push(file);return `blob:preview-${created.length}`;},
+  revokeObjectURL(url){revoked.push(url);}};
+ctx.FileCards={openLocalImage(file){opened.push(file);}};
+const image={name:"截图.png",type:"image/png",size:100};
+S.compFiles=[image];
+const imageBox=node("#comp-files"),remove={dataset:{i:"0"}},preview={dataset:{previewI:"0"}};
+imageBox.querySelectorAll=selector=>selector==='button[data-i]'?[remove]:selector==='button[data-preview-i]'?[preview]:[];
+ctx.renderFileChips("#comp-files",S.compFiles);
+assert.match(imageBox.innerHTML,/class="comp-image"/);
+assert.match(imageBox.innerHTML,/src="blob:preview-1"/);
+ctx.renderFileChips("#comp-files",S.compFiles);
+assert.equal(created.length,1,"重复渲染复用图片 URL，避免预览闪烁和资源泄漏");
+preview.onclick();assert.equal(opened[0],image,"放大读取本地草稿，不上传图片");
+remove.onclick();
+assert.equal(S.compFiles.length,0,"右上角移除按钮只删除当前草稿附件");
+assert.deepEqual(revoked,["blob:preview-1"]);
+S.compFiles=[image];ctx.renderFileChips("#comp-files",S.compFiles);
+S.compFiles=[];ctx.renderFileChips("#comp-files",S.compFiles);
+assert.deepEqual(revoked,["blob:preview-1","blob:preview-2"],"切换草稿或发送后释放缩略图资源");
+console.log("composer images: immediate previews, enlargement, removal and URL lifecycle passed");

@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<script defer src="/static/js/i18n.en.js?v=20261107-en"></script>
+<script defer src="/static/js/i18n.js?v=20261108-language-icon"></script>
 <title>登录 · 灵枢 SpiritScout</title>
 <script>
 try {
@@ -10,16 +12,17 @@ try {
   if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
 } catch {}
 </script>
-<link rel="stylesheet" href="/static/css/base.css?v=20261022-login-clean">
-<link rel="stylesheet" href="/static/css/views.css?v=20261022-login-clean">
-<link rel="stylesheet" href="/static/css/login.css?v=20261022-login-clean">
+<link rel="stylesheet" href="/static/css/base.css?v=20261107-layout-spacing">
+<link rel="stylesheet" href="/static/css/views.css?v=20261107-layout-spacing">
+<link rel="stylesheet" href="/static/css/login.css?v=20261107-layout-spacing">
+<link rel="stylesheet" href="/static/css/i18n.css?v=20261108-language-icon">
 </head>
 <body class="login-body">
-<div class="aurora" aria-hidden="true"></div>
 <main class="login-wrap">
   <section class="card login-card" aria-labelledby="login-title">
+    <div class="login-language"><button class="language-switch" type="button" data-language-toggle lang="en">English</button></div>
     <p class="login-eyebrow">SpiritScout · Access Control</p>
-    <h1 id="login-title" class="login-title">灵枢<em>·</em>SpiritScout</h1>
+    <h1 id="login-title" class="login-title"><span data-brand-zh>灵枢<em>·</em></span>SpiritScout</h1>
     <p class="login-sub">渗透测试智能体集群 · 管理控制台</p>
 
     <form id="login-form" novalidate>
@@ -42,6 +45,6 @@ try {
     </form>
   </section>
 </main>
-<script src="/static/js/login.js?v=20261022-login-clean"></script>
+<script defer src="/static/js/login.js?v=20261107-en"></script>
 </body>
 </html>

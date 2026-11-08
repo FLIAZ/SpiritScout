@@ -7,7 +7,7 @@ const submitEl = document.getElementById("login-submit");
 const toggleEl = document.getElementById("login-pw-toggle");
 
 function showError(message) {
-  errEl.textContent = message;
+  errEl.textContent = I18n.t(message);
   errEl.hidden = false;
 }
 function clearError() {
@@ -18,9 +18,9 @@ function clearError() {
 toggleEl.addEventListener("click", () => {
   const shown = passEl.type === "text";
   passEl.type = shown ? "password" : "text";
-  toggleEl.textContent = shown ? "显示" : "隐藏";
+  toggleEl.textContent = shown ? I18n.t("显示") : I18n.t("隐藏");
   toggleEl.setAttribute("aria-pressed", String(!shown));
-  toggleEl.setAttribute("aria-label", shown ? "显示密码" : "隐藏密码");
+  toggleEl.setAttribute("aria-label", shown ? I18n.t("显示密码") : I18n.t("隐藏密码"));
   passEl.focus();
 });
 
@@ -30,11 +30,11 @@ form.addEventListener("submit", async (event) => {
   const username = userEl.value.trim();
   const password = passEl.value;
   if (!username || !password) {
-    showError("请输入管理员用户名和密码");
+    showError(I18n.t("请输入管理员用户名和密码"));
     return;
   }
   submitEl.disabled = true;
-  submitEl.textContent = "正在验证…";
+  submitEl.textContent = I18n.t("正在验证…");
   try {
     const response = await fetch("/api/auth/login", {
       method: "POST",
@@ -43,15 +43,15 @@ form.addEventListener("submit", async (event) => {
       body: JSON.stringify({ username, password }),
     });
     if (response.ok) {
-      location.replace("/");
+      location.replace(I18n.url("/"));
       return;
     }
     if (response.status === 401) {
-      showError("用户名或密码错误");
+      showError(I18n.t("用户名或密码错误"));
     } else if (response.status === 429) {
-      showError("尝试过于频繁，请稍后再试");
+      showError(I18n.t("尝试过于频繁，请稍后再试"));
     } else {
-      let message = "登录失败，请稍后再试";
+      let message = I18n.t("登录失败，请稍后再试");
       try {
         const data = await response.json();
         if (data && typeof data.detail === "string") message = data.detail;
@@ -60,9 +60,9 @@ form.addEventListener("submit", async (event) => {
     }
     passEl.select();
   } catch {
-    showError("无法连接控制台，请检查服务是否在运行");
+    showError(I18n.t("无法连接控制台，请检查服务是否在运行"));
   } finally {
     submitEl.disabled = false;
-    submitEl.textContent = "进入控制台";
+    submitEl.textContent = I18n.t("进入控制台");
   }
 });

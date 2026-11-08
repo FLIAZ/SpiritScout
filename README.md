@@ -10,13 +10,83 @@
 
 [![Version](https://img.shields.io/badge/version-v0.20.0-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
 
-[快速开始](#快速开始) · [能力与模式](#能力与模式) · [架构](#架构) · [部署指南](docs/部署与配置.md) · [参与贡献](CONTRIBUTING.md)
+[界面预览](#界面预览) · [快速开始](#快速开始) · [能力与模式](#能力与模式) · [架构](#架构) · [部署指南](docs/部署与配置.md) · [参与贡献](CONTRIBUTING.md)
 
 </div>
 
 > 用于已获授权的测试目标与赛事。任务范围、审批方式和使用约定见下文及 [安全策略](SECURITY.md)。
 
+## 界面预览
+
+实际界面截图，使用本地演示数据。点击图片查看大图。
+
+**任务入口**
+
+[![任务入口](docs/images/screenshots/task-entry.png)](docs/images/screenshots/task-entry.png)
+
+<table>
+<tr>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/dashboard.png"><img src="docs/images/screenshots/dashboard.png" alt="仪表盘" width="100%"></a><br>
+<b>仪表盘</b>
+</td>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/session-workbench.png"><img src="docs/images/screenshots/session-workbench.png" alt="会话协作" width="100%"></a><br>
+<b>会话协作</b>
+</td>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/exploration-graph.png"><img src="docs/images/screenshots/exploration-graph.png" alt="探索链路" width="100%"></a><br>
+<b>探索链路</b>
+</td>
+</tr>
+<tr>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/agent-team.png"><img src="docs/images/screenshots/agent-team.png" alt="编队管理" width="100%"></a><br>
+<b>编队管理</b>
+</td>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/model-settings.png"><img src="docs/images/screenshots/model-settings.png" alt="模型配置" width="100%"></a><br>
+<b>模型配置</b>
+</td>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/mcp-tools.png"><img src="docs/images/screenshots/mcp-tools.png" alt="MCP 工具" width="100%"></a><br>
+<b>MCP 工具</b>
+</td>
+</tr>
+<tr>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/skills.png"><img src="docs/images/screenshots/skills.png" alt="技能管理" width="100%"></a><br>
+<b>技能管理</b>
+</td>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/projects.png"><img src="docs/images/screenshots/projects.png" alt="项目归属" width="100%"></a><br>
+<b>项目归属</b>
+</td>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/experience.png"><img src="docs/images/screenshots/experience.png" alt="经验沉淀" width="100%"></a><br>
+<b>经验沉淀</b>
+</td>
+</tr>
+<tr>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/assets.png"><img src="docs/images/screenshots/assets.png" alt="资产视图" width="100%"></a><br>
+<b>资产视图</b>
+</td>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/vulnerabilities.png"><img src="docs/images/screenshots/vulnerabilities.png" alt="漏洞复核" width="100%"></a><br>
+<b>漏洞复核</b>
+</td>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/ctf-writeup.png"><img src="docs/images/screenshots/ctf-writeup.png" alt="CTF 报告" width="100%"></a><br>
+<b>CTF 报告</b>
+</td>
+</tr>
+</table>
+
 ## 能力与模式
+
+控制台支持简体中文和 English，可在侧栏底部或登录页切换，浏览器会记住选择。
+界面使用本地语言包，不调用在线翻译服务；会话内容、用户配置、技能说明与证据原文保持原样。
 
 | 模式 | 适用场景 | 协作与审批 |
 | --- | --- | --- |
@@ -31,12 +101,13 @@
 | 执行工作台 | 展开任务、路线与推进步骤，查看工具结果及事实／依据黑板图 |
 | 项目与产物 | 保存资产和会话；SRC 候选漏洞由「鉴真」独立复测，生成报告或 WriteUp |
 | 浏览器与工具 | 接入 MCP、Skill 和 shell/Python 沙箱；SRC 与 CTF 执行角色支持本地离线 CyberChef 配方与完整字节结果复用；MCP 与 Skill 以卡片分组管理、组合筛选和启停；SRC 可复用登录态并人工处理验证码 |
+| CVE 情报库 | 官方 CVE List 全量本地收录、增量更新与离线检索，按需补充 NVD、KEV、EPSS、OSV，并关联本地 Nuclei 模板；情报与现场复测证据分开。[建库与维护](docs/部署与配置.md#cve-情报库) |
 | 模型与用量 | 配置供应商、编队与模型，查看费用估算、Token、端点返回的输入缓存用量 |
 
 Skill 管理采用卡片目录，支持启用分组、类型／来源／日期组合筛选、绿色开关和删除；点击卡片浏览技能目录、渲染并直接编辑 Markdown，支持草稿保护和版本校验保存。支持直接多选导入 ZIP、tar.gz 等压缩包，RAR / 7z 通过系统 libarchive 读取；参见[管理与导入说明](docs/部署与配置.md#skill-目录与文件浏览)。
 主 Agent 与子 Agent 可自主发现技能、完整读取 SKILL.md，再按需查阅子目录资料；会话展示实际技能读取，避免重复注入已读正文。
 
-### 特色能力：Ollama 本地小模型 AWDP
+### Ollama 本地小模型优化
 
 **面向低显存、断外网赛事的修补工作流**。灵枢为 Ollama 本地小模型提供独立的 CTF / AWDP 轻量模式：模型在本机分析题目、执行工具并修改源码，通过 `submit_fix` 交付可下载的修补提交件，无需云端模型 API。
 
@@ -51,24 +122,108 @@ Skill 管理采用卡片目录，支持启用分组、类型／来源／日期�
 ./launch.sh start --offline
 ```
 
+Ollama 与 llama.cpp 都使用这一个入口，共用轻量工作区与会话记录；后端在模型配置中选择。
+
 默认控制台为 `http://127.0.0.1:8001`，选择 **AWDP 修补** 后上传题目源码并说明修补要求。赛前准备、参数和提交格式见 [Ollama 轻量配置](docs/Ollama轻量配置.md)；工程取舍与同类工作核对见 [创新点与技术思想](docs/06-创新点与技术思想.md)。
 
-----
-
-历史跑分记录 · tsecbench（2026-10-23）
+<details>
+<summary>历史跑分记录 · tsecbench（2026-10-23）</summary>
 
 原记录使用 DeepSeek v4.1 Flash，供参考
 
 <img width="1606" height="838" alt="tsecbench 历史跑分记录" src="https://github.com/user-attachments/assets/f5cea640-aa57-40d2-9d21-919960aadd64" />
 
-
+</details>
 
 ## 快速开始
 
-### Docker · 推荐
+**Windows 用户推荐在 WSL2 内源码部署，Linux 用户推荐直接源码部署。** 项目日常开发采用源码运行，便于检查配置、补装工具和排查问题。已有 Docker 环境或希望统一容器依赖时，也可以选择 Docker。
 
-需要 **Linux 容器模式**和 **Docker Compose 2.20+**。Windows 使用 Docker Desktop，
-Linux 使用 Docker Engine；macOS/ARM64 的兼容待开发
+### 使用 Agent 部署项目
+
+在准备安装的电脑上打开能读写文件、执行终端命令的编程 Agent，将下面内容发给它。
+已有仓库时，让 Agent 在该目录工作；选择 WSL2 后，让 Agent 在 WSL 的 Linux 环境中执行安装。
+
+```text
+请帮我部署灵枢（SpiritScout），项目仓库：https://github.com/FLIAZ/SpiritScout.git
+先阅读仓库根目录的 AGENTS.md 和 AGENTINSTALL.md；没有本地仓库时先获取这两份指南。
+检查操作系统、CPU 架构、依赖、端口和已有配置，再确认安装方式；我已经选定的方式直接采用。
+Windows 优先推荐 WSL2 内源码部署，Linux 优先推荐源码部署，Docker 和 Linux 安装包作为可选方式。
+选择 WSL2 后，在 /home 下存放项目、虚拟环境和数据；已有仓库先检查位置，不覆盖配置或混用 Windows 的 .venv。
+没有仓库时，克隆到选定运行环境中的安装目录。
+确认我要常规多 Agent 部署还是本地模型轻量部署，以及是否需要远程访问和 SRC 可操作浏览器。
+按我选择的方式安装，保留已有配置和数据，遇到报错按指南排查。
+完成后给出访问地址、启动和停止命令、配置与数据位置，并说明哪些检查已通过、哪些还没验证。
+```
+
+环境检查、安装步骤和常见报错处理见 [Agent 安装指南](AGENTINSTALL.md)。
+模型 API Key 在部署后的本机控制台填写。
+
+### Linux / WSL2 源码部署 · 推荐
+
+需要 Python 3.11+、Git 和 bubblewrap。以下命令用于首次安装；已有仓库和虚拟环境时先检查并复用，升级前保留配置与数据。
+
+**Windows 先准备 WSL2**
+
+在 PowerShell 查看已安装的发行版，确认使用的发行版 `VERSION` 为 `2`：
+
+```powershell
+wsl --list --verbose
+```
+
+没有发行版时，先用 `wsl --list --online` 查看可安装名称，再在管理员 PowerShell 安装，例如 `wsl --install -d Ubuntu-24.04`。按提示重启、创建 Linux 用户，进入该发行版的终端。已有 WSL1 的转换和常见问题见 [Agent 安装指南](AGENTINSTALL.md#4-源码安装推荐)；WSL 安装要求见 [微软说明](https://learn.microsoft.com/en-us/windows/wsl/install)。Linux 用户直接继续下面步骤。
+
+**以下命令在 Linux / WSL2 终端执行**
+
+Debian / Ubuntu 安装基础依赖，并确认系统 Python 为 3.11+：
+
+```bash
+sudo apt update
+sudo apt install git python3 python3-venv bubblewrap
+/usr/bin/python3 --version
+```
+
+Fedora 使用 `sudo dnf install git python3 python3-pip bubblewrap`。系统 Python 版本不足时先安装合适版本，再创建虚拟环境。
+
+项目、`.venv` 和 `.spiritscout/` 放在 Linux 文件系统中，例如 `~/projects/SpiritScout`。WSL2 下避免放在 `/mnt/c`、`/mnt/d`，不要复用 Windows 创建的虚拟环境。[微软文件存储建议](https://learn.microsoft.com/en-us/windows/wsl/filesystems)
+
+```bash
+mkdir -p ~/projects
+cd ~/projects
+git clone https://github.com/FLIAZ/SpiritScout.git
+cd SpiritScout
+./install.sh
+./launch.sh
+```
+
+`install.sh` 自动创建或复用 `.venv`，安装并检查核心依赖，补齐缺失配置；已有配置和数据保留。
+
+访问 <http://127.0.0.1:8000>，WSL2 用户可从 Windows 浏览器打开。按 `Ctrl+C` 停止，换端口用 `./launch.sh --port 8100`。需要登录时，先运行 `python3 deploy.py init` 创建管理员凭据；该命令不启动 Docker。远程访问另行配置管理员凭据和 HTTPS。
+
+浏览器工具另需 Node.js 22+ 和 Chromium/Chrome；CyberChef 需要 Node.js 24–26。CTF 工具箱、MCP、沙箱验证及 WSL 访问 Windows 模型服务的方法见 [Agent 安装指南](AGENTINSTALL.md)。控制台能打开后，还需验证实际使用的 shell/Python、模型和浏览器工具。
+
+<details>
+<summary>Windows 原生运行：仅需控制台和 MCP 时使用</summary>
+
+Windows 原生需要 Python 3.11+，不提供本项目的 Linux shell/Python 沙箱。需要完整工具执行时优先使用上面的 WSL2 部署。
+
+在仓库根目录的 PowerShell 中执行：
+
+```powershell
+py -3 -m venv .venv
+.venv\Scripts\python.exe -m pip install -e .
+if (-not (Test-Path configs/system.yaml)) { Copy-Item configs/system.example.yaml configs/system.yaml }
+if (-not (Test-Path configs/models.yaml)) { Set-Content -Path configs/models.yaml -Value "providers: []`nmodels: []" -Encoding utf8 }
+.\launch.ps1
+```
+
+访问 <http://127.0.0.1:8000>，按 `Ctrl+C` 停止，参数传给 `launch.ps1`。Windows 与 WSL 必须使用各自的 `.venv`。
+
+</details>
+
+### Docker 部署 · 可选
+
+适合已有 Docker 环境、希望统一依赖或运行多个独立实例的用户。需要 **Linux 容器模式**和 **Docker Compose 2.20+**。Windows 使用 Docker Desktop，Linux 使用 Docker Engine；macOS/ARM64 尚未完成完整实测。
 
 ```bash
 git clone https://github.com/FLIAZ/SpiritScout.git
@@ -98,7 +253,7 @@ python deploy.py down     # 停服，保留数据卷
 <details>
  <summary> 点击展开 </summary>
 
- 
+
 复制 `.env.example` 为 `.env`，设置管理员用户名和强密码，再启动：
 
 ```bash
@@ -110,39 +265,6 @@ docker compose up -d --build --wait
 
 
 
-###  Linux / Windows 本地运行
-<details>
- <summary> 点击展开 </summary>
-
-需要 Python 3.11+。原生浏览器工具另需 Node.js 22+ 和 Chromium/Chrome，
-也可通过 `SPIRITSCOUT_CHROME_EXECUTABLE` 指定路径。
-
-**Linux**
-
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -e .
-sudo apt install bubblewrap   # Debian / Ubuntu；Fedora 使用 sudo dnf install bubblewrap
-./launch.sh
-```
-
-**Windows PowerShell**
-
-```powershell
-py -3 -m venv .venv
-.venv\Scripts\python.exe -m pip install -e .
-.\launch.ps1
-```
-
-访问 <http://127.0.0.1:8000>，按 `Ctrl+C` 停止。Linux 可用 `./launch.sh --port 10010`
-修改端口；Windows 将参数传给 `launch.ps1`。监听外部地址前需配置管理员凭据与 HTTPS。
-
-shell/Python 沙箱需要 Linux 与 bubblewrap。Windows/macOS 原生控制台无法提供这一
-完整工具链，建议使用 Docker。Windows、WSL、Linux 的虚拟环境不要混用。
-
-</details>
-
-
 ### 配置模型并开始任务
 
 1. 在「模型」页添加供应商地址、API Key 和模型 ID。
@@ -152,6 +274,8 @@ shell/Python 沙箱需要 Linux 与 bubblewrap。Windows/macOS 原生控制台�
 侧栏底部或会话详情的「清理存储」可查看占用、精简数据库及清理下载缓存，保留会话与成果；查看范围并确认后执行。
 
 输入框右侧的圆形按钮可暂停或继续当前任务；输入消息时切换为发送。暂停保留原任务进度，“结束任务”位于更多操作菜单。
+
+在输入框输入 `/` 可筛选 Agent 命令，↑↓ 选择、Tab 或 Enter 补全，再按 Enter 执行。主任务会话支持 `/compact` 手动整理上下文、`/status` 查看任务与压缩结果、`/pause` 暂停、`/resume` 继续、`/model` 选模、`/files` 查看产物、`/report` 查看已有报告、`/help` 帮助。`/compact` 在各上下文下一次模型调用前处理一次，不额外调用模型；保留用户原话、当前授权、最近四轮执行回复及完整历史，短历史可能无需缩小。暂停或结束的任务不会因此自动启动。命令不接受附件或额外参数；以 `//` 开头可发送以 `/` 开头的原文。首页可用 `/help` 和 `/model`，其他命令需先打开任务会话。
 
 发送按钮左侧的模型按钮用于本会话选模，默认“自动”跟随编队。选择按供应商与模型区分并随会话保存；后续调用生效，不中断正在返回的请求，也不覆盖子 Agent 的显式指派。选择“自动”可撤销会话覆盖。
 

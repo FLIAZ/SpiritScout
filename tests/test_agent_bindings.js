@@ -3,7 +3,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
-const source = fs.readFileSync("src/spiritscout/web/static/js/console.js", "utf8");
+const source = fs.readFileSync("src/spiritscout/web/static/js/agent-roster.js", "utf8");
 function setup(models = [{ key: "@A", model: "same", provider: "A" }, { key: "@B", model: "same", provider: "B" }]) {
   const selectors = ["master", "recon"].map(key => {
     const status = { textContent: "" };
@@ -25,7 +25,8 @@ function setup(models = [{ key: "@A", model: "same", provider: "A" }, { key: "@B
   ];
   const calls = [], errors = [];
   const state = () => ({ roster, models, assignments: { ...assignments } });
-  const ctx = vm.createContext({ $, S: {}, esc: String, MODE_CN: {}, selxSync: () => {},
+  const ctx = vm.createContext(require('./helpers/i18n').context({ $, S: {}, esc: String, MODE_CN: {}, selxSync: () => {},
+    modelKey: entry => entry.key || entry.model,
     toast: (...args) => errors.push(args),
     api: async (url, opts) => {
       if (!opts) return state();
@@ -37,8 +38,8 @@ function setup(models = [{ key: "@A", model: "same", provider: "A" }, { key: "@B
       else delete assignments[role];
       return state();
     },
-  });
-  vm.runInContext(source.slice(0, source.indexOf("/* ================= 模型 ================= */")), ctx);
+  }));
+  vm.runInContext(source, ctx);
   return { ctx, $, selectors, calls, errors };
 }
 (async () => {

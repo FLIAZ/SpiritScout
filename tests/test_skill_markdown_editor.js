@@ -1,6 +1,6 @@
 "use strict";
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
-const context=vm.createContext({esc:value=>String(value).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))});
+const context=vm.createContext(require('./helpers/i18n').context({esc:value=>String(value).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}));
 vm.runInContext(fs.readFileSync(path.join(__dirname,'../src/spiritscout/web/static/js/skill-markdown-editor.js'),'utf8'),context);
 const api=vm.runInContext('SkillMarkdownEditor',context);
 const source='---\r\nname: fixture\r\ndescription: 保留元数据\r\n---\r\n\r\n# 标题\r\n\r\n正文 **粗体** 和 [参考](references/a.md)。\r\n\r\n- 原列表\r\n  - 嵌套项\r\n\r\n| A | B |\r\n| :--- | ---: |\r\n| 原文 | `a\\|b` |\r\n\r\n```python\r\nprint("保留代码")\r\n```\r\n\r\n> 引用\r\n\r\n![不加载外部图片](https://example.test/a.png)\r\n<script>bad()</script>\r\n';

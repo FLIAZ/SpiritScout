@@ -1,0 +1,189 @@
+/* 动效只负责视觉反馈，不延迟操作；节奏集中配置，避免各处各自闪动。 */
+:root {
+  --motion-fast: 140ms;
+  --motion-base: 200ms;
+  --motion-enter: 240ms;
+  --motion-hero: 360ms;
+  --motion-stagger: 30ms;
+  --motion-distance: 6px;
+  --motion-scale: .985;
+  --motion-ease: cubic-bezier(.22, 1, .36, 1);
+  --motion-pulse: ss-breathe 3.2s ease-in-out infinite;
+  --motion-line: ss-line-breathe 4.8s ease-in-out infinite;
+}
+:root[data-motion="soft"] {
+  --motion-fast: 180ms;
+  --motion-base: 280ms;
+  --motion-enter: 360ms;
+  --motion-hero: 480ms;
+  --motion-stagger: 45ms;
+  --motion-distance: 8px;
+  --motion-scale: .98;
+  --motion-pulse: ss-breathe 4s ease-in-out infinite;
+  --motion-line: ss-line-breathe 5.6s ease-in-out infinite;
+}
+:root[data-motion="quick"] {
+  --motion-fast: 70ms;
+  --motion-base: 100ms;
+  --motion-enter: 140ms;
+  --motion-hero: 160ms;
+  --motion-stagger: 0ms;
+  --motion-distance: 2px;
+  --motion-scale: .995;
+  --motion-pulse: none;
+  --motion-line: none;
+}
+
+/* 视图容器只淡入：不改变其内 fixed 菜单、拓扑和历史滚动的坐标系。
+   不给轮询生成的列表/轨迹逐项加动画，避免反复回放或创建大量合成层。 */
+main > section:not([hidden]), #tab-area > [id^="tab-"]:not([hidden]) {
+  animation: ss-fade-in var(--motion-enter) var(--motion-ease);
+}
+#view-home:not([hidden]) .hero {
+  animation: ss-enter var(--motion-hero) var(--motion-ease) both;
+}
+#view-home:not([hidden]) .home-modes {
+  animation: ss-enter var(--motion-hero) var(--motion-ease) var(--motion-stagger) backwards;
+}
+#view-home:not([hidden]) .composer {
+  animation: ss-fade-in var(--motion-hero) var(--motion-ease) calc(var(--motion-stagger) * 2) backwards;
+  transition: border-color var(--motion-base), box-shadow var(--motion-base);
+}
+.home-eyebrow > span { transform-origin: left center; animation: var(--motion-line); }
+
+:is(.btn, .action-icon, .send-btn, .selx-btn, .home-mode-card, .pfolder,
+    .primary-nav button, .tabs button, .sess-folder-head, .sess-item,
+    .model-picker > button, .model-menu [role="option"], .notify-item,
+    .pd-tabs button, .dash-periods button, .dash-toggle button) {
+  transition: color var(--motion-fast), background-color var(--motion-fast),
+    border-color var(--motion-fast), opacity var(--motion-fast),
+    transform var(--motion-base) var(--motion-ease);
+}
+.mode-symbol, .mode-check {
+  transition: transform var(--motion-base) var(--motion-ease),
+    border-color var(--motion-fast), background-color var(--motion-fast);
+}
+.selx-panel { transition-duration: var(--motion-base); transition-timing-function: var(--motion-ease); }
+.selx-chev, .sess-folder-head .chev, .notify-switch-track > span,
+.answer-option-switch::after, .skill-switch-track > span {
+  transition-duration: var(--motion-base);
+  transition-timing-function: var(--motion-ease);
+}
+
+/* 选择标记舒展，按钮按下即反馈；触屏不使用悬停位移。 */
+.primary-nav button, .tabs button { position: relative; }
+.primary-nav button::before {
+  content: ""; position: absolute; left: 0; top: 50%; width: 2px; height: 14px;
+  border-radius: 2px; background: var(--accent); opacity: 0;
+  transform: translateY(-50%) scaleY(.4); pointer-events: none;
+  transition: opacity var(--motion-fast), transform var(--motion-base) var(--motion-ease);
+}
+.primary-nav button.on::before { opacity: .8; transform: translateY(-50%) scaleY(1); }
+.tabs button::after {
+  content: ""; position: absolute; bottom: -2px; left: 0; right: 0; height: 2px;
+  background: var(--accent); opacity: 0; transform: scaleX(.5); pointer-events: none;
+  transition: opacity var(--motion-fast), transform var(--motion-base) var(--motion-ease);
+}
+.tabs button.on { border-bottom-color: transparent; }
+.tabs button.on::after { opacity: 1; transform: scaleX(1); }
+@media (prefers-reduced-motion: no-preference) {
+  :root:not([data-motion="off"]) :is(.btn, .action-icon, .send-btn):not(:disabled):active {
+    transform: translateY(1px) scale(.97);
+  }
+  :root:not([data-motion="off"]) .home-mode-card:has(input:checked) .mode-symbol {
+    transform: scale(1.06);
+  }
+}
+@media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+  :root:not([data-motion="off"]) :is(.home-mode-card, .pfolder):hover { transform: translateY(-2px); }
+  :root:not([data-motion="off"]) :is(.home-mode-card, .pfolder):active { transform: translateY(0); }
+  :root:not([data-motion="off"]) :is(.btn, .action-icon):not(:disabled):hover { transform: translateY(-1px); }
+  :root:not([data-motion="off"]) :is(.btn, .action-icon):not(:disabled):active { transform: translateY(1px) scale(.97); }
+}
+
+dialog[open] { animation: ss-pop-in var(--motion-enter) var(--motion-ease); }
+dialog[open]::backdrop { animation: ss-backdrop-in var(--motion-enter) ease-out; }
+.model-menu:not([hidden]), .notify-panel:not([hidden]), .inline-help[open] > :not(summary) {
+  animation: ss-enter var(--motion-enter) var(--motion-ease);
+}
+.toast { animation: ss-enter var(--motion-enter) var(--motion-ease); }
+
+/* 少量低频呼吸作为运行信号；侧栏每条记录的圆点和暂停状态保持静止。 */
+.pill.running::before, .sess-folder-head .frun, .tnode .tact .dot.active,
+.tcard .rt-dot.running, .tl-think.live > summary::after { animation: var(--motion-pulse); }
+.sess-item .pill.running::before, .pill.paused::before { animation: none; }
+:root[data-motion="quick"] .hub.live::before,
+:root[data-motion="quick"] .hub.live::after,
+:root[data-motion="quick"] .led.ok::after,
+:root[data-motion="quick"] .topo svg.edges path.active { animation: none; }
+:root[data-motion="quick"] *, :root[data-motion="quick"] *::before,
+:root[data-motion="quick"] *::after { transition-duration: var(--motion-fast) !important; transition-delay: 0s !important; }
+
+@keyframes ss-fade-in { from { opacity: .55; } to { opacity: 1; } }
+@keyframes ss-enter {
+  from { opacity: .35; transform: translateY(var(--motion-distance)); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes ss-pop-in {
+  from { opacity: .3; transform: translateY(var(--motion-distance)) scale(var(--motion-scale)); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes ss-backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes ss-breathe { 0%, 100% { opacity: .5; } 50% { opacity: 1; } }
+@keyframes ss-line-breathe {
+  0%, 100% { opacity: .55; transform: scaleX(.8); }
+  50% { opacity: 1; transform: scaleX(1.15); }
+}
+
+/* 偏好入口与原生对话框：键盘选择、Esc、焦点返回沿用浏览器行为。 */
+#btn-motion {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  width: 100%; min-height: 30px; padding: 3px 6px; border: 0; border-radius: 6px;
+  background: transparent; color: var(--ink-2); font-size: 12px;
+  transition: background-color var(--motion-fast), color var(--motion-fast);
+}
+#btn-motion:hover { background: var(--surface-2); color: var(--ink); }
+#btn-motion > span { display: inline-flex; align-items: center; gap: 7px; }
+#btn-motion svg { width: 15px; height: 15px; }
+#motion-current { color: var(--ink-3); font-size: 11px; }
+#btn-motion:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#motion-dlg { width: min(440px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 24px; }
+.motion-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.motion-heading h2 { margin: 0; font-size: 18px; line-height: var(--heading-leading); }
+.motion-intro { color: var(--ink-2); font-size: 12px; margin: 10px 0 20px; line-height: 1.8; }
+.motion-options { display: grid; gap: 8px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.motion-option {
+  display: flex; align-items: center; gap: 13px; padding: 12px 14px;
+  border: 1px solid var(--line); border-radius: 9px; cursor: pointer;
+  transition: background-color var(--motion-fast), border-color var(--motion-fast);
+}
+.motion-option:hover { border-color: var(--line-strong); }
+.motion-option:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.motion-option:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 3px; }
+.motion-option input { margin: 0; width: 15px; height: 15px; accent-color: var(--accent); flex: none; }
+.motion-option > span { display: grid; gap: 3px; }
+.motion-option b { font-weight: 600; font-size: 13px; }
+.motion-option small { font-size: 11px; color: var(--ink-2); }
+.motion-preview { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+#motion-sample { display: inline-flex; align-items: center; gap: 9px; color: var(--ink-2); font-size: 12px; }
+#motion-sample::before { content: ""; width: 20px; height: 2px; background: var(--accent); }
+.motion-note { color: var(--ink-3); font-size: 11px; line-height: 1.7; margin: 14px 0 0; }
+#motion-system-note { color: var(--accent-ink); }
+@media (max-width: 860px) {
+  #btn-motion { min-height: 40px; }
+  .primary-nav button::before { top: auto; bottom: 0; left: 50%; width: 14px; height: 2px; transform: translateX(-50%) scaleX(.4); }
+  .primary-nav button.on::before { transform: translateX(-50%) scaleX(1); }
+}
+
+/* 离开标签页时不继续跑装饰动画；偏好关闭和系统减弱设置始终优先。 */
+:root[data-page-hidden] *, :root[data-page-hidden] *::before,
+:root[data-page-hidden] *::after { animation-play-state: paused !important; }
+:root[data-motion="off"] *, :root[data-motion="off"] *::before,
+:root[data-motion="off"] *::after {
+  animation: none !important; transition: none !important; scroll-behavior: auto !important;
+}
+:root[data-motion="off"] :is(.send-btn, .pfolder) { transform: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+  :is(.send-btn, .pfolder) { transform: none !important; }
+}

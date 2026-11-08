@@ -128,22 +128,22 @@ const SkillMarkdownEditor = (() => {
       const wrap=doc.createElement('div');wrap.className='skill-md-block';block.element=wrap;wrap._skillMdBlock=block;
       if(block.kind==='rule')wrap.append(doc.createElement('hr'));
       else if(block.kind==='code'){
-        const pre=editable(doc.createElement('pre'),'编辑代码块');pre.textContent=block.code;wrap.append(pre);
+        const pre=editable(doc.createElement('pre'),I18n.t('编辑代码块'));pre.textContent=block.code;wrap.append(pre);
       }else if(block.kind==='table'){
         const table=doc.createElement('table'),body=doc.createElement('tbody');let header=true;
         for(const row of block.rows){
           if(row.cells.every(cell=>/^:?-{2,}:?$/.test(cell)))continue;
           const tr=doc.createElement('tr');
-          for(const value of row.cells){const cell=editable(doc.createElement(header?'th':'td'),'编辑表格单元格');cell.innerHTML=inlineHtml(value.replace(/\\\|/g,'|'));tr.append(cell);}
+          for(const value of row.cells){const cell=editable(doc.createElement(header?'th':'td'),I18n.t('编辑表格单元格'));cell.innerHTML=inlineHtml(value.replace(/\\\|/g,'|'));tr.append(cell);}
           row.initial=tr.innerHTML;row.element=tr;body.append(tr);header=false;
         }
         table.append(body);wrap.append(table);
       }else if(block.kind==='list'){
         const ordered=/^\d/.test(block.marker),list=doc.createElement(ordered?'ol':'ul');if(ordered)list.start=parseInt(block.marker,10);
-        list.style.marginLeft=(block.indent.length*.5)+'em';const li=editable(doc.createElement('li'),'编辑列表项');li.innerHTML=inlineHtml(block.text);list.append(li);wrap.append(list);
+        list.style.marginLeft=(block.indent.length*.5)+'em';const li=editable(doc.createElement('li'),I18n.t('编辑列表项'));li.innerHTML=inlineHtml(block.text);list.append(li);wrap.append(list);
       }else {
         const tag=block.kind==='heading'?'h'+block.level:block.kind==='quote'?'blockquote':'p';
-        block.editable=editable(doc.createElement(tag),block.kind==='heading'?'编辑标题':'编辑段落');
+        block.editable=editable(doc.createElement(tag),block.kind==='heading'?I18n.t('编辑标题'):I18n.t('编辑段落'));
         block.editable.innerHTML=inlineHtml(block.text);wrap.append(block.editable);
       }
       block.initial=wrap.innerHTML;container.append(wrap);
@@ -169,7 +169,7 @@ const SkillMarkdownEditor = (() => {
       const selection=doc.getSelection(),range=selection?.rangeCount?selection.getRangeAt(0):null;
       if(target.tagName==='LI'&&!event.shiftKey&&range&&target.contains(range.endContainer)){
         range.deleteContents();const suffix=range.cloneRange();suffix.setEnd(target,target.childNodes.length);
-        const next=editable(doc.createElement('li'),'编辑列表项');next.append(suffix.extractContents());if(!next.childNodes.length)next.append(doc.createElement('br'));
+        const next=editable(doc.createElement('li'),I18n.t('编辑列表项'));next.append(suffix.extractContents());if(!next.childNodes.length)next.append(doc.createElement('br'));
         target.after(next);const caret=doc.createRange();caret.selectNodeContents(next);caret.collapse(true);selection.removeAllRanges();selection.addRange(caret);
       }else doc.execCommand('insertLineBreak');
       mark(target);onChange();

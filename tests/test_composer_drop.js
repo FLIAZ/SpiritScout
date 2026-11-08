@@ -8,11 +8,11 @@ zone.classList.add=key=>classes.add(key);
 const send={disabled:false};
 const S={cur:"one",view:"session",compFiles:[],homeFiles:[]},pending=new Set(),messages=[];
 let renders=0,modal=false;
-const context=vm.createContext({S,sessionMessagePending:pending,
+const context=vm.createContext(require('./helpers/i18n').context({S,sessionMessagePending:pending,
   toast:message=>messages.push(message),renderFileChips:(selector,files)=>{assert.equal(selector,S.view==="home"?"#home-files":"#comp-files");assert.equal(files,S.view==="home"?S.homeFiles:S.compFiles);renders++;},
   document:{getElementById:id=>({"view-session":zone,"view-home":homeZone,"comp-drop-status":hint,"home-drop-status":homeHint,"c-go":send})[id],querySelector:()=>modal?{}:null,addEventListener:(type,handler)=>handlers[type]=handler},
   ComposerFolders:{collect:async transfer=>Array.from(transfer.files)},
-  window:{addEventListener:(type,handler)=>handlers[type]=handler}});
+  window:{addEventListener:(type,handler)=>handlers[type]=handler}}));
 vm.runInContext(fs.readFileSync("src/spiritscout/web/static/js/composer-drop.js","utf8"),context);
 function event(files=[{name:"evidence.txt",size:3}],inside=true){return{target:{inside},dataTransfer:{types:["Files"],files,items:[]},preventDefault(){this.prevented=true;}};}
 (async()=>{

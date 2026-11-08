@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../src/spiritscout/web/static/js/skill-browser.js'), 'utf8');
-const context = vm.createContext({URL, Map, esc:value=>String(value).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))});
+const context = vm.createContext(require('./helpers/i18n').context({URL, Map, esc:value=>String(value).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}));
 vm.runInContext(source.slice(source.indexOf('  function fileTree'), source.indexOf('  function mount')), context);
 context.files = {'SKILL.md':'root','references/nested/detail.md':'# Detail','scripts/test.py':'print(1)','<unsafe>.md':'data'};
 const tree = vm.runInContext('fileTree(files)', context);

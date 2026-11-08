@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 灵枢 SpiritScout 启动器
 #   ./launch.sh                      前台启动（Ctrl+C 停止）；额外参数透传给程序（如 --port 8000）
-#   ./launch.sh start --offline      启动独立 Ollama 轻量控制台（默认端口 8001）
+#   ./launch.sh start --offline      启动本地轻量控制台（Ollama / llama.cpp，默认端口 8001）
 #   ./launch.sh stop    [端口] [--force]        停止控制台（默认端口 8000；--force = 放弃运行中会话现场）
 #   ./launch.sh restart [端口] [--force] [参数]  先停再起；显式给了端口会一并转给新进程，其余参数透传
 #   ./launch.sh -h                   启动器用法说明（程序自身参数：./launch.sh start -h）
@@ -12,7 +12,11 @@ shopt -s nullglob
 OFFLINE=""
 args=()
 for a in "$@"; do
-  if [ "$a" = "--offline" ]; then OFFLINE="1"; else args+=("$a"); fi
+  if [ "$a" = "--offline" ]; then OFFLINE="1"
+  elif [ "$a" = "--llama" ]; then
+    echo "轻量模式已统一使用 --offline；请在同一份轻量模型配置中选择 llama.cpp。" >&2
+    exit 1
+  else args+=("$a"); fi
 done
 if [ "${#args[@]}" -gt 0 ]; then set -- "${args[@]}"; else set --; fi
 
@@ -35,7 +39,7 @@ case "${1:-start}" in
   help|-h|--help|stop) ;;
   *)
     if [ ! -x .venv/bin/python ]; then
-      echo "缺少虚拟环境：先执行 python3 -m venv .venv，再执行 .venv/bin/python -m pip install -e ." >&2
+      echo "缺少虚拟环境：先执行 ./install.sh，再重新启动。" >&2
       exit 1
     fi
     ;;
@@ -104,7 +108,7 @@ case "${1:-start}" in
 用法：
   ./launch.sh                        前台启动（Ctrl+C 停止）；额外参数透传给程序（如 --port 8000）
   ./launch.sh start [参数...]        同上（显式 start）
-  ./launch.sh start --offline        启动独立 Ollama 轻量控制台（默认端口 8001）
+  ./launch.sh start --offline        启动本地轻量控制台（Ollama / llama.cpp，默认端口 8001）
   ./launch.sh stop     [端口] [--force]         停止控制台（默认端口 8000，或环境变量 WEBCONSOLE_PORT）
                                                 --force = 有运行中会话时确认放弃现场
   ./launch.sh restart  [端口] [--force] [参数]  先停再起；显式端口会转成 --port 传给新进程，其余参数透传
@@ -119,8 +123,11 @@ case "${1:-start}" in
   ./launch.sh restart 8100 --force   # 放弃会话现场，重启在 8100
   ./launch.sh --host 0.0.0.0         # 透传给程序前台启动
 
---offline：选择 .spiritscout-ollama/ 独立配置；首次启动复用本机已下载模型初始化，
-不安装依赖、不下载模型、不修改正常配置，也不隔离系统网络或重启 Ollama。
+--offline：统一使用 .spiritscout-ollama/ 的轻量配置与会话，后端由 models.yaml 选择。
+Ollama 与 llama.cpp 共用工作区；目录沿用旧名以保留已有会话。
+缺少配置时复用本机已下载的 Ollama 模型初始化；llama.cpp 可先用
+scripts/setup_local_light.py --backend llama_cpp --model <模型名> --context <实际上下文> 初始化。
+不安装依赖、不下载模型、不修改正常配置，也不隔离系统网络或启停模型服务。
 停止行为：按端口找 PID，SIGTERM 优雅退出（最多等 10 秒），超时 SIGKILL。
 程序自身参数说明：./launch.sh start -h
 USAGE

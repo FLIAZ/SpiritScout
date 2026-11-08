@@ -1,0 +1,48 @@
+name: Linux packages
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    name: Linux ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: native/traffic-proxy/go.mod
+      - name: Install package tools
+        run: sudo apt-get update && sudo apt-get install -y rpm zstd desktop-file-utils squashfs-tools
+      - name: Build native architecture packages
+        run: python scripts/build-linux-packages.py --arch '${{ matrix.arch }}'
+      - name: Verify checksums
+        working-directory: dist/linux
+        run: sha256sum -c 'SHA256SUMS-${{ matrix.arch }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spiritscout-linux-${{ matrix.arch }}
+          path: |
+            dist/linux/spiritscout-linux-*
+            dist/linux/spiritscout-traffic-proxy-linux-*
+            dist/linux/*.AppImage
+            dist/linux/*.deb
+            dist/linux/*.rpm
+            dist/linux/*.pkg.tar.zst
+            dist/linux/manifest-*.json
+            dist/linux/SHA256SUMS-*
+            dist/linux/build-requirements-*.txt
+            dist/linux/appimage-tools-*.json
+          if-no-files-found: error

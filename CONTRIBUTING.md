@@ -8,22 +8,24 @@
 安装和数据迁移统一参考 [部署与配置](docs/部署与配置.md)，不要用开发工作区覆盖运行中的配置。
 只修改文档或前端不需要配置真实模型，也不需要下载额外操作系统或启动付费测试。
 
-**Linux / macOS 的 Python 环境**
+**Linux / WSL2 / macOS 的 Python 环境**
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
 ```
 
-**Windows PowerShell**
+**Windows 原生 PowerShell（不含 Linux 工具沙箱）**
 
 ```powershell
 py -3 -m venv .venv
 .venv\Scripts\python.exe -m pip install -e '.[dev]'
 ```
 
-各系统使用自己的虚拟环境。完整工具执行优先使用 Docker；Linux 原生沙箱需要
-bubblewrap 和命名空间权限。测试密钥使用明确标记的夹具值，真实密钥通过控制台配置。
+各系统使用自己的虚拟环境。Windows 完整工具执行优先在 WSL2 内源码部署，Linux
+优先源码部署；沙箱需要 bubblewrap 和命名空间权限。Docker 保留为可选方式。
+WSL2 用户在 Linux 文件系统中创建仓库和虚拟环境，具体检查见 [Agent 安装指南](AGENTINSTALL.md)。
+测试密钥使用明确标记的夹具值，真实密钥通过控制台配置。
 
 ## 分支与 PR
 
@@ -81,6 +83,13 @@ Get-ChildItem tests/test_*.js | ForEach-Object {
 - 环境依赖导致的跳过要列出对应测试和原因，不能把跳过记为成功或关闭失败用例。
 - Mock 可验证局部逻辑，不能证明真实协议或浏览器行为。涉及相关请求链路时，针对受影响的本机 HTTP/SSE、SDK、浏览器或沙箱路径实测；环境不可用时如实说明未覆盖范围，不要求无关修改也运行这些检查。
 - 真实模型和付费端点测试需有用户授权，记录测试目的与用量；默认使用本机夹具。
+
+### 前端本地化
+
+前端界面文案使用 `I18n.t("中文源文案")` 或带插值的 `I18n.t` 模板；HTML 模板使用
+`I18n.html` 标签，并在 `src/spiritscout/web/static/js/i18n.en.js` 中维护英文译文。
+译文的 `{0}`、`{1}` 对应模板插值，必须保留。动态内容仍须按原位置转义；不要把会话、
+项目名称、工具输出或证据传入翻译函数。新增静态页面文案也应同步补充词表。
 
 ### 依赖兼容
 

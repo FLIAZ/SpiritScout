@@ -19,10 +19,10 @@ const metrics = {
   total_tokens: 123, total_cost: 0.25, running: 0,
   daily: { "2026-10-15": 123 }, per_model: { "audit-model": 123 },
 };
-const context = vm.createContext({
+const context = vm.createContext(require('./helpers/i18n').context({
   S: state, $: () => box, api: async () => metrics,
   esc: value => String(value), toast: () => {}, MODE_CN:{}, STATUS_CN:{},
-});
+}));
 const coreSource=fs.readFileSync(require("node:path").join(__dirname,"../src/spiritscout/web/static/js/core.js"),"utf8");
 context.atob=atob;context.TextDecoder=TextDecoder;context.Uint8Array=Uint8Array;
 vm.runInContext(coreSource.slice(coreSource.indexOf("function modelDisplayName("),coreSource.indexOf("async function api(")),context);
@@ -61,6 +61,22 @@ vm.runInContext(renderer, context);
   context.api=async()=>metrics;
   await vm.runInContext("renderDash()",context);
   assert.equal(node("details").open,true,"统计刷新保留趋势明细展开状态");
+  // 模拟浏览器替换趋势 HTML 时销毁嵌套滚动容器，不能用同一个假节点掩盖归零。
+  const trend=node('.dash-trend');let trendHTML=trend.innerHTML;
+  Object.defineProperty(trend,'innerHTML',{get:()=>trendHTML,set:value=>{
+    trendHTML=value;nodes.delete('.dash-table-scroll');nodes.delete('.dash-chart-viewport');node('details').open=false;
+  }});
+  const table=node('.dash-table-scroll');table.scrollTop=137;table.scrollLeft=43;
+  node('.dash-chart-viewport').scrollLeft=56;
+  await vm.runInContext('renderDash()',context);
+  assert.equal(node('.dash-table-scroll'),table,'相同数据保留趋势 DOM');
+  context.api=async()=>({...metrics,daily:{'2026-10-15':124}});
+  await vm.runInContext('renderDash()',context);
+  assert.notEqual(node('.dash-table-scroll'),table,'趋势变化确实触发更新');
+  assert.equal(node('.dash-table-scroll').scrollTop,137);
+  assert.equal(node('.dash-table-scroll').scrollLeft,43);
+  assert.equal(node('.dash-chart-viewport').scrollLeft,56);
+  assert.equal(node('details').open,true,'数据变化保留展开状态');
   box.onchange({target:{dataset:{dashField:"sort"},value:"cost"}});
   context.sortRows=[
     {session_id:"low",selected:{cost:{cny_max:1}},recent_hour:{cost:{cny_max:99}}},

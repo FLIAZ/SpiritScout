@@ -321,6 +321,8 @@ class DecisionMemory:
         self.skills: dict[str, Any] = {}
         self.blackboard: Any = None
         self.agent_type: Any = None
+        self.manual_compaction_id = ""
+        self.pending_compaction: dict[str, Any] | None = None
 
     @staticmethod
     def _same_value(old: Any, new: Any) -> bool:
@@ -415,6 +417,9 @@ class DecisionMemory:
                 max_input_tokens: int | None = None,
                 compact_patches: bool = False,
                 stable_snapshot_prefix: bool = False) -> list[dict[str, Any]]:
+        from spiritscout.gateway.manual_context import pending_request
+
+        self.pending_compaction = pending_request(self.blackboard, self.manual_compaction_id)
         system = "\n".join(m["content"] for m in messages if m.get("role") == "system")
         snapshot: dict[str, Any] = {}
         for message in messages:
@@ -435,9 +440,10 @@ class DecisionMemory:
         pressure = (estimate_input_tokens(prepared) > max_input_tokens
                     if max_input_tokens is not None else len(serialize(prepared)) > max(
                         self.soft_chars, len(serialize(snapshot)) * 3))
-        self.segment_changed = not prepared or pressure
+        previous_tokens = estimate_input_tokens(prepared) if self.pending_compaction and prepared else None
+        self.segment_changed = not prepared or pressure or self.pending_compaction is not None
         if self.segment_changed:
-            self.segment_info = {"reason": "initial" if not self.messages else
+            self.segment_info = {"reason": "manual" if self.pending_compaction else "initial" if not self.messages else
                                  "contract_changed" if system != self.system else "context_window",
                                  "snapshot_chars": len(serialize(snapshot)),
                                  "previous_chars": len(serialize(self.messages)),
@@ -457,6 +463,10 @@ class DecisionMemory:
                 initial = serialize({"snapshot": snapshot})
             prepared = [{"role": "system", "content": system + self.note},
                         {"role": "user", "content": initial}]
+        if self.pending_compaction:
+            self.segment_info.update(request_id=self.pending_compaction["request_id"],
+                estimated_tokens_before=previous_tokens if previous_tokens is not None else estimate_input_tokens(prepared),
+                estimated_tokens_after=estimate_input_tokens(prepared))
         self.pending = (prepared, copy.deepcopy(snapshot), system)
         return copy.deepcopy(prepared)
 
@@ -467,6 +477,9 @@ class DecisionMemory:
         self.messages = copy.deepcopy([*messages, {"role": "assistant", "content": content,
                                      **({"reasoning_content": reasoning} if reasoning else {})}])
         self.pending = None
+        if self.pending_compaction:
+            self.manual_compaction_id = self.pending_compaction["request_id"]
+            self.pending_compaction = None
         self.persist()
 
     def persist(self) -> None:
@@ -474,7 +487,7 @@ class DecisionMemory:
         if self.journal is not None:
             self.journal.checkpoint("decision_memory", self.checkpoint_key, "committed", {
                 "messages": self.messages, "snapshot": self.snapshot, "system": self.system,
-                "skills": self.skills})
+                "skills": self.skills, "manual_compaction_id": self.manual_compaction_id})
 
 
 def decision_memory(owner: Any, key: str) -> DecisionMemory:
@@ -499,6 +512,7 @@ def decision_memory(owner: Any, key: str) -> DecisionMemory:
                 memory.snapshot = copy.deepcopy(state["snapshot"])
                 memory.system = state["system"]
                 memory.skills = copy.deepcopy(state.get("skills") or {})
+                memory.manual_compaction_id = state.get("manual_compaction_id", "")
             memory.journal, memory.checkpoint_key = journal, checkpoint_key
             # 只淘汰已提交且可从磁盘恢复的记忆；无持久化时不能悄悄丢上下文。
             if len(memories) >= 128:

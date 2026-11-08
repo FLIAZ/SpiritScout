@@ -52,6 +52,32 @@ class SessionRecoveryRegressions(unittest.IsolatedAsyncioTestCase):
         kwargs['execution_request'].update(mission='继续核对本次目标')
         return '执行目标已接收，等待执行'
 
+    async def test_light_followup_uses_model_intent_then_execution_only_handoff(self) -> None:
+        self.cfg.gateway.lightweight_local = True
+        self.session.remember_user_message('继续剩余工具工作', message_id='light-resume', enqueue=True)
+        reply = AsyncMock(side_effect=self.request_execution)
+        result = SimpleNamespace(run_summary={'answers_complete': True}, verify_stats={}, flag_stats={}, report_path='')
+        with patch('spiritscout.web.sessions._llm_route_intent', new=AsyncMock(return_value='task')) as classify, \
+             patch('spiritscout.web.sessions._master_reply', new=reply), \
+             patch('spiritscout.runtime.run_ctf_engagement', new=AsyncMock(return_value=result)) as runtime:
+            await self.manager._run(self.session, self.cfg, self.plan, False, self.models, True)
+        classify.assert_awaited_once()
+        self.assertTrue(reply.call_args.kwargs['execution_only'])
+        self.assertTrue(runtime.call_args.kwargs['followup_goal'])
+        self.assertEqual(runtime.call_args.kwargs['mission'], '继续核对本次目标')
+        self.assertIn('light-resume', self.session.handled_user_messages)
+
+    async def test_light_dialogue_keeps_record_tools_and_does_not_dispatch(self) -> None:
+        self.cfg.gateway.lightweight_local = True
+        self.session.remember_user_message('解释已有结果', message_id='light-question', enqueue=True)
+        with patch('spiritscout.web.sessions._llm_route_intent', new=AsyncMock(return_value='dialogue')), \
+             patch('spiritscout.web.sessions._master_reply', new=AsyncMock(return_value='已有结果的解释')) as reply, \
+             patch('spiritscout.runtime.run_ctf_engagement', new=AsyncMock()) as runtime:
+            await self.manager._run(self.session, self.cfg, self.plan, False, self.models, True)
+        self.assertFalse(reply.call_args.kwargs['execution_only'])
+        runtime.assert_not_awaited()
+        self.assertEqual(self.session.summary['intent'], 'dialogue')
+
     async def test_resume_refreshes_endpoint_credentials_and_removed_models(self) -> None:
         old = [ModelEntry(model='fixture', provider='mock',
                           base_url='http://old.invalid', api_key='fixture-old-key'),

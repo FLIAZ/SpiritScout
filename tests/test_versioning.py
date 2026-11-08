@@ -52,10 +52,6 @@ class VersioningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             app = create_app(SystemConfig(workspace=WorkspaceConfig(root=temporary)), [])
             self.assertEqual(app.openapi()["info"]["version"], __version__)
-            html = (ROOT / "src/spiritscout/web/static/index.html").read_text()
-            self.assertIn('id="ver"', html)
-            console = (ROOT / "src/spiritscout/web/static/js/console.js").read_text()
-            self.assertIn('fetch("/openapi.json")', console)
 
     def test_changelog_has_ordered_versions_and_explains_backfill(self) -> None:
         log = (ROOT / "CHANGELOG.md").read_text()

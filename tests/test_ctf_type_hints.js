@@ -7,11 +7,11 @@ const nodes=new Map(),types=[{value:'IoT',checked:true},{value:'AI 安全',check
 function $(id){if(!nodes.has(id))nodes.set(id,{value:'',disabled:false,focus(){}});return nodes.get(id);}
 $('#c-mode').value='ctf';$('#c-ctf-type-note').value=' 固件协议与提示词注入 ';
 let fail=true,oldBackend=false;const notices=[];
-const ctx=vm.createContext({$,S:{homeFiles:[]},document:{querySelectorAll:sel=>sel.includes(':checked')?types.filter(t=>t.checked):types,querySelector:()=>null},
+const ctx=vm.createContext(require('./helpers/i18n').context({$,S:{homeFiles:[]},document:{querySelectorAll:sel=>sel.includes(':checked')?types.filter(t=>t.checked):types,querySelector:()=>null},
   toast:message=>notices.push(message),openSession(){},refreshSessions(){},renderFileChips(){},openRuleConflict(){},stageFiles:async()=>[],
   api:async(url,opts)=>{calls.push(JSON.parse(opts.body));if(fail){fail=false;throw new Error('fixture failure');}
     if(oldBackend)throw Object.assign(new Error('unsupported'),{detail:[{type:'extra_forbidden',loc:['body','ctf_type_hints']}]});
-    return {session_id:'fixture'};}});
+    return {session_id:'fixture'};}}));
 vm.runInContext(hints+launch,ctx);
 (async()=>{
  assert.equal(JSON.stringify(ctx.ctfTypeHintPayload()),JSON.stringify({ctf_type_hints:['IoT','AI 安全'],ctf_type_note:'固件协议与提示词注入'}));

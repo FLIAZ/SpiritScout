@@ -9,9 +9,9 @@ function setup(picker, fetch) {
     static createObjectURL(){return "blob:fixture";}
     static revokeObjectURL(){}
   }
-  const ctx=vm.createContext({document,window:picker?{showSaveFilePicker:picker}:{},fetch,
+  const ctx=vm.createContext(require('./helpers/i18n').context({document,window:picker?{showSaveFilePicker:picker}:{},fetch,
     URL:TestURL,setTimeout(){},
-    toast:(message,error)=>toasts.push({message,error}),esc:String,mdRender:String,S:{}});
+    toast:(message,error)=>toasts.push({message,error}),esc:String,mdRender:String,S:{}}));
   vm.runInContext(source,ctx);
   return {cards:vm.runInContext("FileCards",ctx),downloads,toasts};
 }

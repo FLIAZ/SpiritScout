@@ -121,6 +121,7 @@ class SubAgentContext:
             self,
             gateway=gateway,
             tools=tool_view,
+            builtin_ctx={**self.builtin_ctx, "_image_gateway": gateway},
             mcp_tools=_AgentMcpView(self.mcp_tools, tool_view.allows),
         )
 
@@ -680,17 +681,32 @@ class SubAgent(abc.ABC):
 
         user_obj = {**user_obj, 'exploration_display': EXPLORATION_PROGRESS_GUIDANCE}
         from spiritscout.agents.profiles import get_profile
+        from spiritscout.tools.background import NAMES as BACKGROUND_NAMES
+        from spiritscout.tools.background import SCHEMAS as BACKGROUND_SCHEMAS
+        from spiritscout.tools.cve import SCHEMA as CVE_SCHEMA
         from spiritscout.tools.cyberchef import NAMES as CYBERCHEF_NAMES
         from spiritscout.tools.cyberchef import SCHEMAS as CYBERCHEF_SCHEMAS
+        from spiritscout.tools.images import SCHEMA as IMAGE_SCHEMA
         from spiritscout.tools.web_search import SEARCH_SCHEMA
+        from spiritscout.traffic.tools import NAMES as TRAFFIC_NAMES
+        from spiritscout.traffic.tools import SCHEMAS as TRAFFIC_SCHEMAS
 
+        cve_allowed = get_profile(self.agent_type).allows_tool('cve_lookup')
         local_allowed = get_profile(self.agent_type).allows_tool('cyberchef_bake')
+        traffic_allowed = get_profile(self.agent_type).allows_tool('traffic_search')
+        background_allowed = get_profile(self.agent_type).allows_tool('sandbox_exec')
         local_contract = (
-            '\n需要编码解码或字节转换时，本轮仅输出 '
-            '{"local_tool":{"name":"cyberchef_operations 或 cyberchef_bake","arguments":{工具参数}}}。'
+            '\n需要编码解码、字节转换或查看本地图片时，本轮仅输出 '
+            '{"local_tool":{"name":"cyberchef_operations、cyberchef_bake 或 view_image","arguments":{工具参数}}}。'
             '收到 local_observations 后继续原约定 JSON 决策；本地转换不是新的目标请求或独立复测。参数契约：'
-            + json.dumps(CYBERCHEF_SCHEMAS, ensure_ascii=False)
+            + json.dumps([*CYBERCHEF_SCHEMAS, IMAGE_SCHEMA], ensure_ascii=False)
         ) if local_allowed else ''
+        if traffic_allowed:
+            local_contract += ('\n可通过 local_tool 调用当前会话只读流量工具，检索和读取已采集证据，不发出新的目标请求。参数契约：'
+                               + json.dumps(TRAFFIC_SCHEMAS, ensure_ascii=False))
+        if background_allowed:
+            local_contract += ('\n持续 Shell 使用 shell_start；有其他独立工作时使用 shell_watch 注册输出条件后继续推进，通知自动回灌；仅在当前分支确实依赖结果时 shell_wait，其他 Agent 不受影响。task_wait 用于定时挂起，不要轮询。收尾前确认后台工作结果或明确停止，不得把运行中当作成功。参数契约：'
+                               + json.dumps(BACKGROUND_SCHEMAS, ensure_ascii=False))
 
         search_contract = (
             "\n如果需要先查证公开资料，本轮仅输出 {\"web_search\": {检索参数}}，"
@@ -699,6 +715,9 @@ class SubAgent(abc.ABC):
         )
         if not search_allowed(self.ctx):
             search_contract = ""
+        if cve_allowed:
+            search_contract += ('\n需要漏洞情报时仅输出 {"local_tool":{"name":"cve_lookup","arguments":{参数}}}；'
+                                '比赛模式也可查本地记录，不联网。参数契约：' + json.dumps(CVE_SCHEMA, ensure_ascii=False))
         observations: list[dict[str, Any]] = []
         local_observations: list[dict[str, Any]] = []
         try:
@@ -706,6 +725,12 @@ class SubAgent(abc.ABC):
                 pause_gate = getattr(self.ctx, "pause_gate", None)
                 if pause_gate is not None:
                     await pause_gate.wait()
+                from spiritscout.tools.background import take_notifications
+
+                ready = take_notifications(self.ctx.builtin_ctx.get("workspace_root", ""), self.agent_id,
+                    self.ctx.builtin_ctx.get("workspace_scope", ""))
+                if ready:
+                    local_observations.append({"name":"background_notifications", "result":ready})
                 resp = await chat_decision(
                     self.ctx.gateway,
                     decision_messages(self._system_prompt() + f"\nROLE: {role}" + search_contract + local_contract
@@ -734,12 +759,15 @@ class SubAgent(abc.ABC):
                     detail = {'task_id': task.task_id if task else '', 'route_id': execution.route_id}
                     self.ctx.audit.log('agent.tool_call', self.agent_id, {**detail,
                         'calls': [{'id': call_id, 'name': name, 'arguments': arguments}]})
-                    if (not local_allowed or not isinstance(name, str)
-                            or name not in CYBERCHEF_NAMES or not isinstance(arguments, dict)):
+                    if (not isinstance(name, str) or not isinstance(arguments, dict)
+                            or not ((local_allowed and name in CYBERCHEF_NAMES | {"view_image"})
+                                    or (traffic_allowed and name in TRAFFIC_NAMES)
+                                    or (background_allowed and name in BACKGROUND_NAMES)
+                                    or (cve_allowed and name == "cve_lookup"))):
                         from spiritscout.tools.spec import ToolResult
 
                         result = ToolResult(tool=str(name), ok=False,
-                                            error='local_tool 只接受当前角色可用的 CyberChef 工具和参数对象')
+                                            error='local_tool 只接受当前角色可用的本地工具和参数对象')
                     else:
                         token = current_execution_scope.set(dataclasses.replace(
                             execution, task_id=task.task_id if task else '', agent_id=self.agent_id,

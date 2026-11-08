@@ -11,7 +11,7 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from spiritscout.config.settings import SystemConfig
 from spiritscout.core.audit import AuditLogger
@@ -64,6 +64,41 @@ def resolve_staged_uploads(cfg: SystemConfig, payload: dict[str, Any]) -> list[P
 
 def mount_artifact_routes(app: FastAPI, _require: Callable[[str], Session]) -> None:
     """挂载产物下载；会话查找沿用主应用的统一入口。"""
+    @app.get('/api/sessions/{session_id}/vulnerabilities/{vuln_id}')
+    def vulnerability_detail(session_id: str, vuln_id: str):
+        from spiritscout.web.deliverables import read_vulnerability_detail
+
+        detail = read_vulnerability_detail(_require(session_id).workspace, vuln_id)
+        if detail is None:
+            raise HTTPException(404, '漏洞记录不存在')
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(detail, headers={'Cache-Control': 'no-store'})
+
+    @app.get("/api/sessions/{session_id}/artifacts/image")
+    def session_image(session_id: str, path: str = Query(..., max_length=1000),
+                      sha256: str = Query(..., pattern=r"^[a-f0-9]{64}$")) -> Response:
+        import hashlib
+
+        from spiritscout.tools.images import MAX_IMAGE_BYTES, image_type
+        from spiritscout.web.deliverables import open_artifact
+
+        if not path.startswith("artifacts/view-images/"):
+            raise HTTPException(404, "图像快照不存在")
+        try:
+            with open_artifact(_require(session_id).workspace, path) as source:
+                data = source.read(MAX_IMAGE_BYTES + 1)
+            if len(data) > MAX_IMAGE_BYTES:
+                raise ValueError("图像快照过大")
+            mime, _ = image_type(data)
+            if hashlib.sha256(data).hexdigest() != sha256:
+                raise ValueError("图像快照已变化")
+        except (OSError, ValueError) as exc:
+            raise HTTPException(404, "图像快照不可用或已变化") from exc
+        return Response(data, media_type=mime, headers={"X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": "private, max-age=31536000, immutable"})
+
     @app.get("/api/sessions/{session_id}/artifacts/download")
     def session_artifact(session_id: str, path: str = Query(..., max_length=1000)) -> StreamingResponse:
         from spiritscout.web.deliverables import open_artifact
@@ -217,7 +252,9 @@ def mount_collaboration_routes(app: FastAPI, cfg: SystemConfig, manager: Session
             except Exception as exc:
                 raise HTTPException(
                     503, f"续传未完成：{type(exc).__name__}: {exc}") from exc
-        return {"queued": pending, "resumed": resumed, "message_id": message_id}
+        statement = session.user_statement(message_id) or {}
+        return {"queued": pending, "resumed": resumed, "message_id": message_id,
+                "attachments": statement.get("attachments", [])}
 
     @app.post("/api/sessions/{session_id}/attachments")
     async def upload_attachment(session_id: str, request: Request,

@@ -32,6 +32,7 @@ from spiritscout.resources.runtime import (
     native_skill_result,
     runtime_for,
 )
+from spiritscout.tools.cve import SCHEMA as CVE_SCHEMA
 from spiritscout.tools.cyberchef import NAMES as CYBERCHEF_NAMES
 from spiritscout.tools.cyberchef import SCHEMAS as CYBERCHEF_SCHEMAS
 from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
@@ -83,7 +84,14 @@ class VerifierAgent:
                         "description": "仅当选项彼此不互斥、用户可能同时选多项时设 true；允许/拒绝等互斥决策省略"},
                     "targets": {"type": "array", "items": {"type": "string"}}}, "required": ["question"]}}}]
         schemas.append(RESPONSE_SCHEMA)
+        schemas.append(CVE_SCHEMA)
         schemas.extend(CYBERCHEF_SCHEMAS)
+        from spiritscout.tools.metasploit import SCHEMA as METASPLOIT_SCHEMA
+
+        schemas.append(METASPLOIT_SCHEMA)
+        from spiritscout.tools.images import SCHEMA as IMAGE_SCHEMA
+
+        schemas.append(IMAGE_SCHEMA)
         if search_allowed(self.ctx):
             schemas.append(SEARCH_SCHEMA)
         proof = {"type": "array", "items": {"type": "object", "properties": {
@@ -194,6 +202,8 @@ class VerifierAgent:
                             text = model_preview(result)
                         tool_ok = result.ok
                         result_meta = {"invocation_id": result.invocation_id, "returncode": result.returncode}
+                        if name == "view_image":
+                            result_meta.update(result.parsed)
                         execution_id = result.invocation_id or call["id"]
                         if name == "http_probe" and result.reuse and result.source_invocation_id:
                             execution_id = result.source_invocation_id
@@ -207,7 +217,9 @@ class VerifierAgent:
                             original["text"] += "\n" + text
                         else:
                             executions[execution_id] = {"ok": result.ok, "text": text, "tool": name,
-                                                        "params": args}
+                                                        "params": args, "files": result.parsed.get('evidence_files', {}),
+                                                        "capture_note": result.parsed.get('evidence_note', ''),
+                                                        "download_complete": result.parsed.get('download_complete')}
                         text = encode({"execution_id": execution_id, "ok": result.ok,
                                        "result": text[:12000], "parsed": result.parsed})
                     except asyncio.CancelledError:
@@ -233,7 +245,7 @@ class VerifierAgent:
                     continue
                 ref, quote = str(item.get("execution_id", "")), str(item.get("quote", ""))
                 actual = executions.get(ref, {})
-                if (actual.get("ok") and actual.get("tool") not in CYBERCHEF_NAMES | {"web_search"}
+                if (actual.get("ok") and actual.get("tool") not in CYBERCHEF_NAMES | {"web_search", "view_image", "cve_lookup"}
                         and quote.strip() and quote in actual.get("text", "")):
                     out.append({"execution_id": ref, "quote": quote[:1000]})
             return out
@@ -274,7 +286,9 @@ class VerifierAgent:
         return {"verdict": verdict, "reason": reason, "rule_quote": quote if valid_rule else "",
                 "harm": harm, "severity": str(result.get("severity")) if str(result.get("severity")) in {v.value for v in Severity} else "info",
                 "evidence": evidence, "controls": controls,
-                "executions": [{"execution_id": key, "tool": value["tool"], "ok": value["ok"]}
+                "executions": [{"execution_id": key, "tool": value["tool"], "ok": value["ok"],
+                                "files": value.get('files', {}), "capture_note": value.get('capture_note', ''),
+                                "download_complete": value.get('download_complete')}
                                for key, value in executions.items()]}
 
 

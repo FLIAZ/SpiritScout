@@ -40,6 +40,21 @@ class EligibilityTests(unittest.TestCase):
         for entries in ([], [unmarked], [cloud], [local, cloud], [local, unmarked]):
             self.assertFalse(lightweight_enabled(True, RunMode.CTF, entries))
 
+    def test_llama_cpp_requires_explicit_runtime_and_chat_transport(self):
+        local = ModelEntry(model="qwen", base_url="http://host.docker.internal:8081/v1",
+                           local_runtime="llama_cpp", local_lightweight=True)
+        ollama = ModelEntry(model="qwen", provider="ollama", ollama_lightweight=True)
+        self.assertTrue(lightweight_enabled(True, RunMode.CTF, [local, ollama]))
+        for patch in ({"local_runtime": ""}, {"local_lightweight": False},
+                      {"base_url": ""}, {"api_format": "responses"},
+                      {"provider": "anthropic_compatible"}):
+            self.assertFalse(lightweight_enabled(True, RunMode.CTF,
+                             [local.model_copy(update=patch)]))
+        self.assertFalse(lightweight_enabled(True, RunMode.SRC, [local]))
+        self.assertFalse(lightweight_enabled(False, RunMode.CTF, [local]))
+        self.assertFalse(lightweight_enabled(True, RunMode.CTF,
+                         [local, ModelEntry(model="cloud")]))
+
     def test_tmp_scopes_do_not_alias_session_and_topic(self):
         self.assertNotEqual(sandbox_tmp_directory(None), sandbox_tmp_directory("session"))
         self.assertNotEqual(sandbox_directory("../../one"), sandbox_directory("one"))
@@ -226,8 +241,9 @@ class SolverIsolationTests(unittest.IsolatedAsyncioTestCase):
         agent.challenge_id = lambda task: "one"
         state = {"messages": []}
         await agent._forced_tool_recovery(None, SimpleNamespace(name="r"), state, 1)
-        self.assertIn("submit_fix", state["messages"][-1]["content"])
-        self.assertNotIn("record_answer", state["messages"][-1]["content"])
+        sent = agent.ctx.gateway.chat.call_args.args[0]
+        self.assertIn("submit_fix", str(sent))
+        self.assertNotIn("record_answer", str(sent))
         options = agent.ctx.gateway.chat.call_args.kwargs
         self.assertEqual(options["tools"], agent.tool_schemas)
         self.assertEqual(options["tool_choice"], "auto")
