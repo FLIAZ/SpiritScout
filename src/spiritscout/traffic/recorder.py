@@ -7,8 +7,10 @@ import json
 import logging
 import re
 import sqlite3
+import threading
 import time
-from contextlib import contextmanager
+import weakref
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -18,6 +20,8 @@ import httpx
 from spiritscout.tools.invocation import current_execution_scope, current_invocation
 
 _LOG = logging.getLogger(__name__)
+_WRITE_LOCKS: weakref.WeakValueDictionary[Path, Any] = weakref.WeakValueDictionary()
+_WRITE_LOCKS_GUARD = threading.Lock()
 BODY_LIMIT = 32768
 _SECRET = re.compile(r"password|passwd|secret|token|authorization|cookie|api[-_]?key|session[-_]?id", re.I)
 _SCHEMA = """
@@ -96,6 +100,17 @@ def _body(data: bytes, content_type: str) -> dict[str, Any]:
     return {"text": text, "encoding": encoding, "truncated": len(data) > BODY_LIMIT}
 
 
+def _write_lock(path: Path) -> Any:
+    # SQLite 首次切换 WAL 会直接报 BUSY；同库写事务串行，不阻塞其它会话。
+    # 空闲锁随引用释放，避免历史会话不断增加常驻缓存。
+    with _WRITE_LOCKS_GUARD:
+        lock = _WRITE_LOCKS.get(path)
+        if lock is None:
+            lock = threading.RLock()
+            _WRITE_LOCKS[path] = lock
+        return lock
+
+
 @contextmanager
 def _connect(workspace: Path, *, write: bool = False) -> Iterator[sqlite3.Connection | None]:
     root = workspace / "traffic"
@@ -110,23 +125,24 @@ def _connect(workspace: Path, *, write: bool = False) -> Iterator[sqlite3.Connec
     if not write and not path.exists():
         yield None
         return
-    conn = sqlite3.connect(path.resolve().as_uri() + ("?mode=rwc" if write else "?mode=ro"),
-                           uri=True, timeout=1)
-    try:
-        conn.row_factory = sqlite3.Row
-        if write:
-            path.chmod(0o600)
-            conn.execute("PRAGMA journal_mode=WAL")
-            for statement in _SCHEMA.split(";"):
-                if statement.strip():
-                    conn.execute(statement)
-        else:
-            conn.execute("PRAGMA query_only=ON")
-        yield conn
-        if write:
-            conn.commit()
-    finally:
-        conn.close()
+    with _write_lock(path.resolve()) if write else nullcontext():
+        conn = sqlite3.connect(path.resolve().as_uri() + ("?mode=rwc" if write else "?mode=ro"),
+                               uri=True, timeout=1)
+        try:
+            conn.row_factory = sqlite3.Row
+            if write:
+                path.chmod(0o600)
+                conn.execute("PRAGMA journal_mode=WAL")
+                for statement in _SCHEMA.split(";"):
+                    if statement.strip():
+                        conn.execute(statement)
+            else:
+                conn.execute("PRAGMA query_only=ON")
+            yield conn
+            if write:
+                conn.commit()
+        finally:
+            conn.close()
 
 
 def _append(workspace: Path, record: dict[str, Any]) -> int:
