@@ -8,7 +8,7 @@
 
 **简体中文 · [English](README_EN.md)**
 
-[![Version](https://img.shields.io/badge/version-v0.20.0-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.21.0-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11--3.14-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
 
 [界面预览](#界面预览) · [快速开始](#快速开始) · [能力与模式](#能力与模式) · [架构](#架构) · [部署指南](docs/部署与配置.md) · [参与贡献](CONTRIBUTING.md)
 
@@ -161,7 +161,7 @@ Windows 优先推荐 WSL2 内源码部署，Linux 优先推荐源码部署，Doc
 
 ### Linux / WSL2 源码部署 · 推荐
 
-需要 Python 3.11+、Git 和 bubblewrap。以下命令用于首次安装；已有仓库和虚拟环境时先检查并复用，升级前保留配置与数据。
+需要 Python 3.11–3.14、Git 和 bubblewrap。以下命令用于首次安装；已有仓库和虚拟环境时先检查并复用，升级前保留配置与数据。
 
 **Windows 先准备 WSL2**
 
@@ -205,7 +205,7 @@ cd SpiritScout
 <details>
 <summary>Windows 原生运行：仅需控制台和 MCP 时使用</summary>
 
-Windows 原生需要 Python 3.11+，不提供本项目的 Linux shell/Python 沙箱。需要完整工具执行时优先使用上面的 WSL2 部署。
+Windows 原生需要 Python 3.11–3.14，不提供本项目的 Linux shell/Python 沙箱。需要完整工具执行时优先使用上面的 WSL2 部署。
 
 在仓库根目录的 PowerShell 中执行：
 
@@ -220,6 +220,8 @@ if (-not (Test-Path configs/models.yaml)) { Set-Content -Path configs/models.yam
 访问 <http://127.0.0.1:8000>，按 `Ctrl+C` 停止，参数传给 `launch.ps1`。Windows 与 WSL 必须使用各自的 `.venv`。
 
 </details>
+
+也可使用 `uv sync` 按 `uv.lock` 建立环境，然后运行 `./launch.sh`；Windows 原生使用 `uv sync` 和 `launch.ps1`。构建独立可执行文件见 [免安装可执行文件](docs/部署与配置.md#免安装可执行文件)。
 
 ### Docker 部署 · 可选
 
@@ -316,7 +318,7 @@ CTF/智能体模式使用会话独立的无头浏览器，SRC 可连接已有浏
 
 智能体模式默认保留未完成题的运行现场；暂缓派工、取消在途工作与释放实例分别由模型明确决策，不按固定耗时强制切题。
 
-当前代码版本 **v0.20.0**。版本唯一来源、递增规则和历史版本说明见 [版本管理](CONTRIBUTING.md#版本管理)。
+当前代码版本 **v0.21.0**。版本唯一来源、递增规则和历史版本说明见 [版本管理](CONTRIBUTING.md#版本管理)。
 
 贡献时按 [Agent 工作约定](AGENTS.md) 执行：同期功能共用一个版本，调整版本号和推送远端须先取得用户明确同意。
 

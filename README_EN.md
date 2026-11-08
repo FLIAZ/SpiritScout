@@ -8,7 +8,7 @@ Assign tasks in your browser, let agents collaborate, and inspect their progress
 
 **[简体中文](README.md) · English**
 
-[![Version](https://img.shields.io/badge/version-v0.20.0-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.21.0-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11--3.14-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
 
 [Interface preview](#interface-preview) · [Quick start](#quick-start) · [Capabilities and modes](#capabilities-and-modes) · [Architecture](#architecture) · [Deployment guide (中文)](docs/部署与配置.md) · [Contributing (中文)](CONTRIBUTING.md)
 
@@ -161,7 +161,7 @@ See the [Agent installation guide (中文)](AGENTINSTALL.md) for environment che
 
 ### Run from source on Linux / WSL2 · Recommended
 
-Requires Python 3.11+, Git, and bubblewrap. The commands below are for a new installation. Inspect and reuse existing checkouts and compatible virtual environments; preserve configuration and data before upgrading.
+Requires Python 3.11–3.14, Git, and bubblewrap. The commands below are for a new installation. Inspect and reuse existing checkouts and compatible virtual environments; preserve configuration and data before upgrading.
 
 **Prepare WSL2 on Windows**
 
@@ -205,7 +205,7 @@ Browser tools additionally require Node.js 22+ and Chromium/Chrome; CyberChef re
 <details>
 <summary>Native Windows: for the console and MCP only</summary>
 
-Native Windows requires Python 3.11+ and does not provide the project's Linux shell/Python sandbox. Use the WSL2 deployment above when you need the complete tool execution environment.
+Native Windows requires Python 3.11–3.14 and does not provide the project's Linux shell/Python sandbox. Use the WSL2 deployment above when you need the complete tool execution environment.
 
 Run in PowerShell from the repository root:
 
@@ -220,6 +220,8 @@ if (-not (Test-Path configs/models.yaml)) { Set-Content -Path configs/models.yam
 Visit <http://127.0.0.1:8000> and press `Ctrl+C` to stop. Pass arguments to `launch.ps1`. Windows and WSL must use separate virtual environments.
 
 </details>
+
+You can also create the environment from `uv.lock` with `uv sync`, then run `./launch.sh` (or `launch.ps1` on native Windows). See [standalone executables (中文)](docs/部署与配置.md#免安装可执行文件) for packaging.
 
 ### Docker deployment · Optional
 
@@ -307,7 +309,7 @@ The topology shows persistent blackboard facts, evidence, and user-rule referenc
 
 Agent competition mode preserves unfinished instances across investigation stages. Deferring dispatch, cancelling running work, and releasing an instance are explicit model decisions; elapsed time alone does not force a switch.
 
-Current code version: **v0.20.0**. See [Version management (中文)](CONTRIBUTING.md#版本管理) for the single source of truth, increment rules, and historical version notes.
+Current code version: **v0.21.0**. See [Version management (中文)](CONTRIBUTING.md#版本管理) for the single source of truth, increment rules, and historical version notes.
 
 Follow the [Agent working rules](AGENTS.md): keep changes in the same batch under one version, and obtain explicit user approval before changing the version or pushing to a remote.
 `ctfy-docker/` and `tsecbench-docker/` are local validation projects for the maintainer, are excluded from the repository, and are not required for contributors.

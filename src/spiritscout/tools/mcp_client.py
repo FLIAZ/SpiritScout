@@ -21,6 +21,7 @@ from mcp.types import Implementation
 
 from spiritscout import __version__
 from spiritscout.config.settings import McpServerConfig
+from spiritscout.platform_support import app_root, is_frozen
 from spiritscout.tools.spec import RiskLevel
 
 _HANDSHAKE_TIMEOUT = 60.0        # 握手：子进程冷启动 + initialize + tools/list
@@ -60,7 +61,7 @@ class McpError(RuntimeError):
 
 
 def _project_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+    return app_root()
 
 
 def _resolve_command(command: str) -> str:
@@ -345,11 +346,16 @@ def build_client(spec: Any) -> McpClient:
     if not spec.command:
         raise McpError(f"MCP[{spec.name}] stdio 传输缺少 command")
     command = spec.command
+    args = list(spec.args or [])
     env = dict(spec.env or {})
-    if command in {"python", "python3"} and list(spec.args[:2]) == ["-m", "spiritscout.tools.chrome_mcp"]:
+    chrome_mcp = args[:2] == ["-m", "spiritscout.tools.chrome_mcp"]
+    if command in {"python", "python3"} and chrome_mcp:
         # launch.sh 直接调用 venv 解释器、不激活 PATH；本项目模块沿用当前解释器。
         command = sys.executable
-    if list(spec.args[:2]) == ["-m", "spiritscout.tools.chrome_mcp"]:
+    if chrome_mcp:
+        if is_frozen() and command == sys.executable:
+            # 单文件程序没有模块入口，由主入口转交 Chrome MCP 子命令。
+            args = ["--run-chrome-mcp", *args[2:]]
         # SDK 只继承基础环境；显式转交连接配置与当前桌面的显示连接。
         env = {**{key: os.environ[key] for key in (
             "SPIRITSCOUT_CHROME_CDP_URL", "SPIRITSCOUT_CHROME_MCP_CLI",
@@ -357,7 +363,6 @@ def build_client(spec: Any) -> McpClient:
             "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "XAUTHORITY",
             "DBUS_SESSION_BUS_ADDRESS") if key in os.environ}, **env}
         env["SPIRITSCOUT_CHROME_DEFER_START"] = "1"
-        args = ["--run-chrome-mcp", *list(spec.args[2:])] if getattr(sys, "frozen", False) and command == sys.executable else list(spec.args)
         client_type = ChromeMcpClient
         if env.get('SPIRITSCOUT_BROWSER_ACCOUNT'):
             from spiritscout.tools.browser_accounts import AccountChromeMcpClient
@@ -366,5 +371,5 @@ def build_client(spec: Any) -> McpClient:
         return client_type(spec.name, command=command, args=args,
                                env=env, timeout=timeout)
     return McpStdioClient(spec.name, command=command,
-                          args=list(spec.args or []),
+                          args=args,
                           env=env, timeout=timeout)

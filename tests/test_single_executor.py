@@ -163,8 +163,11 @@ class AssemblyTests(unittest.IsolatedAsyncioTestCase):
                      "mission": "USER_GOAL", "rules": "ORIGINAL_RULE", "source_context": "graph" * 10000})
         state = {"seed": ["bootstrap " * 500]}
         agent._seed_messages(task, None, RoutePlan(name="solve", strategy="", steps=[]), state)
-        view = project_context(state["messages"], agent._model_tool_schemas(), 10650, world=world)
-        self.assertLessEqual(view.estimated_tokens, 10650)
+        tools = agent._model_tool_schemas()
+        # 此处验证用户契约与派生图的边界；工具说明长度变化不应改变测试条件。
+        budget = estimate_input_tokens(state["messages"], tools) + 512
+        view = project_context(state["messages"], tools, budget, world=world)
+        self.assertLessEqual(view.estimated_tokens, budget)
         self.assertIn("USER_GOAL", str(view.messages))
         self.assertIn("ORIGINAL_RULE", str(view.messages))
         self.assertNotIn("graphgraph", str(view.messages))

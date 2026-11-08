@@ -8,7 +8,7 @@ Agent 执行安装时先读 [安装指南](AGENTINSTALL.md)。环境搭建和提
 灵枢（SpiritScout）是多智能体安全测试系统：主 Agent 通过 DAG 动态规划，专项
 Agent 并行执行，覆盖 SRC、CTF 与渗透赛。
 
-- 后端：Python 3.11+ / FastAPI / SQLite / LiteLLM / LangGraph
+- 后端：Python 3.11–3.14 / FastAPI / SQLite / LiteLLM / LangGraph
 - 前端：原生 HTML/CSS/ES2020+，直接修改 `static/`，无构建步骤
 - 沙箱：bubblewrap；MCP：官方 SDK，stdio/http/sse 三种传输
 
@@ -112,6 +112,9 @@ Agent 并行执行，覆盖 SRC、CTF 与渗透赛。
 .venv/bin/python -m ruff check <修改的 Python 文件>
 node --check src/spiritscout/web/static/js/<修改的文件>.js
 node tests/test_<相关模块>.js
+# 修改打包入口、资源清单或冻结构建路径时：
+.\scripts\build-exe.ps1        # Windows，产物 dist\SpiritScout.exe
+./scripts/build-elf.sh         # Linux，产物 dist/spiritscout
 # 确需全量后端回归时：
 .venv/bin/python -m unittest discover tests/
 ```
@@ -131,6 +134,6 @@ node tests/test_<相关模块>.js
 
 - 版本唯一来源为 `src/spiritscout/__init__.py` 的 `__version__`，不另写版本字面量。
 - 不自行调整版本号或创建标签；用户已授权时按其指定版本或贡献指南执行。
-- 同批功能、修复与文档共用一个版本，当前批次沿用 `0.20.0`；不因新消息、
+- 同批功能、修复与文档共用一个版本，当前批次沿用 `0.21.0`；不因新消息、
   小修或 commit 单独升版。发布说明合并到当前批次，实际改版时再同步版本展示。
 - 详细递增和历史版本规则见 `CONTRIBUTING.md` 的「版本管理」。

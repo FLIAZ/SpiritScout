@@ -7,6 +7,7 @@ docker-compose.yml
 
 # 本地环境与缓存
 .venv/
+.venv-build/
 venv/
 __pycache__/
 *.py[cod]
@@ -17,6 +18,10 @@ __pycache__/
 .playwright-mcp/
 dist/
 build/
+
+# PyInstaller 构建产物
+build/
+dist/
 
 # 运行数据与本地凭据（绝不进镜像层）
 .spiritscout/

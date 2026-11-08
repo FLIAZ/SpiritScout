@@ -603,8 +603,8 @@ class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
     """小模型自动命名：解析、失败静默、按用户候选链降级。"""
 
     def _cfg(self, root: Path) -> SystemConfig:
-        # 配置路径显式指向临时目录：模型注册表只能写进 tmp，
-        # 默认值 "configs/models.yaml" 是仓库真实文件（相对 CWD）。
+        # 配置路径显式指向临时目录：模型注册表只能写进 tmp；
+        # 默认值 "configs/models.yaml" 可能由启动流程在 CWD 下创建。
         cfg = SystemConfig(
             workspace=WorkspaceConfig(root=str(root)),
             models_config_path=str(root / "models.yaml"),

@@ -62,7 +62,7 @@ Get-PSDrive -PSProvider FileSystem
 | 安装方式或功能 | 检查内容 | 通过条件 |
 | --- | --- | --- |
 | WSL2 源码 | PowerShell 中的 `wsl --list --verbose`，所选发行版内的系统、路径和依赖 | 发行版 `VERSION` 为 `2`；项目、虚拟环境和数据在 Linux 文件系统中 |
-| 源码 | Python 版本、解释器位置、`python3 -m venv --help`；仅 Windows 原生换成 `py -3` | Python 3.11+，可以创建当前平台的虚拟环境 |
+| 源码 | Python 版本、解释器位置、`python3 -m venv --help`；仅 Windows 原生换成 `py -3` | Python 3.11–3.14，可以创建当前平台的虚拟环境 |
 | Linux 沙箱 | `command -v bwrap`、`bwrap --version` | 已安装 bubblewrap；安装完成后还要实际验证命名空间和工具执行 |
 | Docker | `docker version`、`docker info --format '{{.OSType}}'`、`docker compose version --short` | 守护进程可访问，容器类型为 `linux`，Compose 2.20+ |
 | 原生浏览器 | `node --version`、`npm --version`、Chrome/Chromium 可执行文件 | Node.js 22+，浏览器存在；Docker 已包含这些依赖 |
@@ -147,7 +147,7 @@ df -T .
 
 ### Linux / WSL2 安装与启动
 
-准备 Python 3.11+ 和 bubblewrap。安装脚本默认用 `/usr/bin/python3` 创建虚拟环境；沙箱会遮蔽用户主目录和 `/usr/local`，优先使用发行版的系统 Python。
+准备 Python 3.11–3.14 和 bubblewrap。安装脚本默认用 `/usr/bin/python3` 创建虚拟环境；沙箱会遮蔽用户主目录和 `/usr/local`，优先使用发行版的系统 Python。
 
 如果 Linux/WSL2 缺少系统依赖，先按发行版安装，二选一：
 
@@ -189,11 +189,11 @@ sudo dnf install git python3 python3-pip bubblewrap
 
 ### macOS 原生控制台
 
-macOS 准备好 Python 3.11+ 后，同样运行 `./install.sh`、`./launch.sh`，跳过 Linux 的 apt/dnf 命令；安装脚本默认使用 PATH 中的 `python3`。原生控制台不能提供本项目的 Linux shell/Python 沙箱，需要完整工具执行时可选 Docker，并记录尚未验证的兼容项。
+macOS 准备好 Python 3.11–3.14 后，同样运行 `./install.sh`、`./launch.sh`，跳过 Linux 的 apt/dnf 命令；安装脚本默认使用 PATH 中的 `python3`。原生控制台不能提供本项目的 Linux shell/Python 沙箱，需要完整工具执行时可选 Docker，并记录尚未验证的兼容项。
 
 ### Windows PowerShell
 
-确认 `py -3` 是 Python 3.11+，且现有 `.venv` 不是从 Linux/WSL 复制来的。复用已检查的 Windows 虚拟环境时跳过第一行：
+确认 `py -3` 是 Python 3.11–3.14，且现有 `.venv` 不是从 Linux/WSL 复制来的。复用已检查的 Windows 虚拟环境时跳过第一行：
 
 ```powershell
 py -3 -m venv .venv
@@ -299,7 +299,7 @@ python3 deploy.py up --browser
 
 默认控制台为 `http://127.0.0.1:8000`。系统包和 AppImage 的数据目录是 `${XDG_DATA_HOME:-~/.local/share}/spiritscout/`；裸 ELF 默认使用程序所在目录。`SPIRITSCOUT_DATA_HOME` 可指定另一数据目录。程序不会自动安装后台服务。
 
-包内含控制台的 Python 运行时和核心依赖，但完整沙箱还需要系统 Python 3.11+、bubblewrap；浏览器还需 Node.js、Chrome/MCP。不要将“可打开控制台”报告为“所有工具可用”。包由原包管理器升级，卸载不删除用户数据。
+包内含控制台的 Python 运行时和核心依赖，但完整沙箱还需要系统 Python 3.11–3.14、bubblewrap；浏览器还需 Node.js、Chrome/MCP。不要将“可打开控制台”报告为“所有工具可用”。包由原包管理器升级，卸载不删除用户数据。
 
 ## 7. 本地模型轻量安装
 
@@ -398,7 +398,7 @@ docker compose exec spiritscout bwrap --ro-bind / / --dev /dev --unshare-pid --p
 | `unhealthy` / `--wait` 失败 | 查看主服务日志和容器健康检查输出，先修其中的启动错误；不要直接延长超时或删除健康检查 |
 | 拉镜像、apt、pip 超时或证书错误 | 确认失败的是哪个下载服务，再修该环境的代理、DNS、可信 CA 或来源。宿主浏览器能联网不等于 Docker 构建能联网；不要用 `--trusted-host` 或关闭证书校验掩盖问题 |
 | `No space left on device` | 查宿主和 Docker 数据目录空间。先识别可清理的构建缓存或无用文件；不要运行包含数据卷的全局清理命令 |
-| Python 版本不足 / `ensurepip is not available` | 安装 Python 3.11+ 和对应 venv 组件，再运行 `./install.sh`。新环境可用 `SPIRITSCOUT_PYTHON` 指定解释器；已有旧版或跨平台 `.venv` 先备份再重建 |
+| Python 版本不足 / `ensurepip is not available` | 安装 Python 3.11–3.14 和对应 venv 组件，再运行 `./install.sh`。新环境可用 `SPIRITSCOUT_PYTHON` 指定解释器；已有旧版或跨平台 `.venv` 先备份再重建 |
 | `externally-managed-environment` / `No module named spiritscout` | 确认使用项目 `.venv` 的 Python，执行该解释器的 `-m pip install -e .`；不要绕过系统包保护 |
 | `install.sh` / `launch.sh` 提示 `Permission denied` | 可分别用 `bash install.sh`、`bash launch.sh`；若目录所在磁盘禁止执行程序，将项目移到可执行的 Linux 目录 |
 | PowerShell 禁止运行脚本 | Windows 原生用第 4 节的直接 Python 命令，不全局放宽脚本策略 |

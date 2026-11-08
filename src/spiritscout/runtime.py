@@ -555,7 +555,7 @@ async def _build_infra(
                                          and not hasattr(client, 'account_id'))
                     t = {**t, "description": (t.get("description") or t["name"])
                          + browser_tool_guidance(t["name"])
-                         + (chrome_tool_guidance(t["name"]) if shared_browser and not anonymous_browser else "")
+                         + (chrome_tool_guidance(t["name"], isolated=anonymous_browser) if shared_browser else "")
                          + (" 当前是会话隔离浏览器，默认未登录。通常无需账号，先判断当前步骤是否确实依赖登录身份；"
                             "仅在匿名方式不足且有现场依据时，搜索 account_request 申请对应平台的已存账号，"
                             "等待用户明确同意；没有申请工具或未获同意时继续匿名方式或报告所缺条件。"

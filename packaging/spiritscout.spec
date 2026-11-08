@@ -11,7 +11,7 @@ os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 ROOT = Path(SPECPATH).resolve().parent
 PKG = ROOT / "src/spiritscout"
 datas = [(str(PKG / path), "spiritscout/" + path) for path in (
-    "web/static", "knowledge/data", "agents/report/templates")]
+    "web/static", "knowledge/data", "awdp/data", "agents/report/templates")]
 for worker in (PKG / "tools").glob("*.mjs"):
     datas.append((str(worker), "spiritscout/tools"))
 for template in (ROOT / "configs").glob("*.example.yaml"):

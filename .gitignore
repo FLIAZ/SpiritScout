@@ -5,6 +5,7 @@ __pycache__/
 build/
 dist/
 .venv/
+.venv-build/
 venv/
 
 # 项目自带工具（本机封装的大体积二进制，不入库）

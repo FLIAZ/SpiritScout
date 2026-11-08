@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 $appArguments = $args
 $projectPython = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $projectPython)) {
-    throw "缺少虚拟环境：先运行 py -3 -m venv .venv，再运行 .venv\Scripts\python.exe -m pip install -e .；完整部署可运行 py -3 deploy.py up"
+    throw "缺少虚拟环境：先运行 uv sync（或 py -3 -m venv .venv && .venv\Scripts\python.exe -m pip install -e .）；完整部署可运行 py -3 deploy.py up"
 }
 Push-Location -LiteralPath $PSScriptRoot
 try {

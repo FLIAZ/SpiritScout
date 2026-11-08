@@ -8,7 +8,23 @@
 安装和数据迁移统一参考 [部署与配置](docs/部署与配置.md)，不要用开发工作区覆盖运行中的配置。
 只修改文档或前端不需要配置真实模型，也不需要下载额外操作系统或启动付费测试。
 
-**Linux / WSL2 / macOS 的 Python 环境**
+**uv（推荐，三平台一致）**
+
+项目依赖 LiteLLM 1.102.0，Python 范围为 3.11–3.14；uv 会自动选择兼容解释器。
+安装 [uv](https://docs.astral.sh/uv/) 后，在项目根执行：
+
+```bash
+uv sync --extra dev                      # 运行依赖 + ruff/pytest
+uv sync --extra dev --extra toolkit      # 同时需要 pwntools、z3、scapy 等工具库
+uv run python -m spiritscout --help
+```
+
+多个 extras 需在同一条 `uv sync` 命令中组合；单独执行后一次会按当前参数同步环境。
+
+`uv sync` 按 `uv.lock` 创建项目根 `.venv`，`launch.sh`、`launch.ps1` 和下列检查命令
+可直接使用该环境。修改依赖后执行 `uv lock` 并一并提交锁文件。
+
+**不使用 uv 时仍可使用 pip**
 
 ```bash
 python3 -m venv .venv
@@ -99,6 +115,27 @@ LiteLLM 固定为 `1.102.0`，MCP SDK 使用 `>=1.28.1,<2`。较新的 LiteLLM M
 
 修改依赖后重新安装或构建镜像，确认实际运行版本；不要用运行中容器里的临时补丁代替仓库约束。
 
+### 打包可执行文件
+
+`scripts/build-exe.ps1` 与 `scripts/build-elf.sh` 使用 PyInstaller 生成单文件控制台，
+配置在 `scripts/spiritscout.spec`。构建使用 Python 3.11–3.14；有 uv 时脚本自动获取
+指定版本并创建隔离的 `.venv-build`，没有 uv 时退回系统兼容 Python 与 pip。
+
+```powershell
+.\scripts\build-exe.ps1                 # dist\SpiritScout.exe
+.\scripts\build-exe.ps1 -PythonVersion 3.12
+```
+
+```bash
+./scripts/build-elf.sh                  # dist/spiritscout
+BUILD_PYTHON=3.12 ./scripts/build-elf.sh
+```
+
+构建脚本最后会执行 `dist/... --version`。修改打包资源、依赖或启动路径后，至少运行一次
+对应平台的构建，并在空目录中启动产物确认首次配置生成和 `/login` 可访问。
+`.venv-build/`、`build/`、`dist/` 属本地构建产物，不提交。打包版的能力边界见
+[部署与配置](docs/部署与配置.md#免安装可执行文件)。
+
 ## 设计与安全约定
 
 | 事项 | 约定 |
@@ -137,8 +174,8 @@ LiteLLM 固定为 `1.102.0`，MCP SDK 使用 `>=1.28.1,<2`。较新的 LiteLLM M
 或授权调整时直接按要求执行，无需重复询问。收到新消息、完成功能或准备 commit 不构成升版授权。
 同期功能、后续优化、修复、文档和测试共用同一版本，统一补充当前 CHANGELOG 条目，
 不按消息、文件、功能点或 commit 单独升版；是否开始下一版本由用户决定。
-当前批次为 `0.20.0`。小修依次使用 `0.20.1`、`0.20.2`；下一批较大的功能更新使用
-`0.21.0`。次版本号可以大于 9，例如 `0.16.0` 本身就是合法版本号，不回退编号。
+当前批次为 `0.21.0`。小修依次使用 `0.21.1`、`0.21.2`；下一批较大的功能更新使用
+`0.22.0`。次版本号可以大于 9，例如 `0.16.0` 本身就是合法版本号，不回退编号。
 上表只用于用户同意升版后的编号选择。
 纯分析、问答或只运行测试不升版本，用户指定版本优先。
 

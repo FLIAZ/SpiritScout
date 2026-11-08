@@ -7,8 +7,9 @@ name = "spiritscout"
 dynamic = ["version"]
 description = "灵枢（SpiritScout）多智能体安全测试工作台，支持 SRC、CTF 与智能体竞赛"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.15"   # LiteLLM 1.102.0 目前只发布到 3.14
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 dependencies = [
     "pydantic>=2.10",
     "pyyaml>=6.0",
@@ -43,6 +44,7 @@ nats = ["nats-py>=2.6"]
 chroma = ["chromadb>=1.0"]
 report = ["weasyprint>=62", "python-docx>=1.1"]
 test = ["ruff==0.16.10"]
+build = ["pyinstaller>=6.11"]   # scripts/build-exe.ps1 / build-elf.sh
 dev = ["pytest>=8.0", "ruff==0.16.10"]
 
 [project.scripts]

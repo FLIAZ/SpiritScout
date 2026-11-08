@@ -54,32 +54,61 @@ def _load_dotenv(path: Path) -> None:
 
 
 def _find_dotenv() -> Path | None:
-    candidates = (Path.cwd() / ".env",
-                  app_root() / ".env")
+    candidates = (Path.cwd() / ".env", app_root() / ".env")
     return next((path for path in candidates if path.is_file()), None)
 
 
+def _copy_if_missing(source: Path, target: Path) -> bool:
+    """只在目标缺失时复制模板，不覆盖用户已有配置。"""
+    if target.exists() or not source.is_file():
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, target)
+    return True
+
+
 def _prepare_portable_runtime() -> None:
-    """打包资源只读，配置与工作区落在用户数据目录；绝不覆盖已有文件。"""
+    """冻结构建使用可写运行目录；默认程序旁，也支持 SPIRITSCOUT_DATA_HOME。
+
+    解包资源保持只读，配置仅在缺失时生成，不覆盖已有用户文件。
+    """
     if not is_frozen():
         return
-    root, bundled = app_root(), bundle_root()
+    root = app_root()
+    bundled = bundle_root()
     root.mkdir(parents=True, exist_ok=True)
     os.chdir(root)
-    (root / "configs").mkdir(exist_ok=True)
-    for template in (bundled / "configs").glob("*.example.yaml"):
-        target = root / "configs" / template.name
-        if not target.exists():
-            shutil.copyfile(template, target)
-    target = root / "configs/system.yaml"
-    if not target.exists():
-        shutil.copyfile(bundled / "configs/system.example.yaml", target)
-    models = root / "configs/models.yaml"
+    configs = root / "configs"
+    configs.mkdir(parents=True, exist_ok=True)
+    created: list[str] = []
+    if _copy_if_missing(bundled / "configs/system.example.yaml",
+                        configs / "system.yaml"):
+        created.append("configs/system.yaml")
+    models = configs / "models.yaml"
     if not models.exists():
         models.write_text("providers: []\nmodels: []\n", encoding="utf-8")
+        created.append("configs/models.yaml")
+    for source in sorted((bundled / "configs").glob("*.example.yaml")):
+        _copy_if_missing(source, configs / source.name)
+    _copy_if_missing(bundled / ".env.example", root / ".env.example")
     cache = bundled / "tiktoken-cache"
     if cache.is_dir():
         os.environ.setdefault("TIKTOKEN_CACHE_DIR", str(cache))
+    if created:
+        print(f"[提示] 首次运行已生成 {', '.join(created)}；"
+              "可在控制台配置模型，端口与工作区在同目录配置文件中调整。")
+
+
+def _ensure_default_model_config(path: str) -> None:
+    """默认模型注册表缺失时创建空表；自定义路径仍按原样报错。"""
+    target = Path(path)
+    if (target.exists()
+            or target.as_posix().removeprefix("./") != "configs/models.yaml"):
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("providers: []\nmodels: []\n", encoding="utf-8")
+    print("[提示] 未找到 configs/models.yaml，已创建空模型注册表；"
+          "请在控制台「模型」页添加供应商。")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -122,6 +151,7 @@ def main(argv: list[str] | None = None) -> int:
         _load_dotenv(dotenv)      # 忘记管理员凭据时改 .env 重启即可恢复
     try:
         cfg = load_system_config(args.config)
+        _ensure_default_model_config(cfg.models_config_path)
         models = load_model_config(cfg.models_config_path)
     except SpiritScoutError as exc:
         print(f"[错误] {exc}", file=sys.stderr)
