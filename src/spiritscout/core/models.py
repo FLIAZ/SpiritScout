@@ -73,6 +73,7 @@ class AgentType(str, enum.Enum):
     SECRETARY = "secretary"
     BUSINESS_CONTEXT = "business_context"  # 业务流程理解与上下文建模
     RECON = "recon"                # 侦察
+    SCANNER = "scanner"            # 与主流程并行的信息收集
     PORT_SCAN = "port_scan"        # 端口扫描
     WEB_VULN = "web_vuln"          # Web 漏洞
     HOST_VULN = "host_vuln"        # 主机漏洞
@@ -189,6 +190,8 @@ class Vulnerability(BaseModel):
     false_positive_reason: str | None = None
     compliance: dict[str, Any] = Field(default_factory=dict, description="合规判定：platform/decision/reason")
     found_by: str = ""
+    scanner_evidence: list[dict[str, Any]] = Field(default_factory=list, description="扫描原始证据与交付件引用；不代表独立复核通过")
+    vulnerability_ids: list[str] = Field(default_factory=list, description="原工具实际提供的 CVE/CWE 等编号")
     found_at: datetime = Field(default_factory=utcnow)
     exploitable: bool = False          # 实际可利用性（收录硬条件之一）
 
@@ -281,6 +284,8 @@ class FlagCandidate(BaseModel):
     accepted: bool | None = None
     submit_response: str = ""
     found_by: str = ""
+    evidence_refs: list[str] = Field(default_factory=list)
+    answer_review: dict[str, Any] = Field(default_factory=dict)
 
 
 class ExperienceEntry(BaseModel):

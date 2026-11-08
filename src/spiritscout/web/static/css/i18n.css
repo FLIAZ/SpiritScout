@@ -1,0 +1,10 @@
+.language-switch { display: inline-flex; align-items: center; justify-content: center; min-height: 32px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink-2); font: inherit; font-size: 12px; cursor: pointer; }
+.language-switch:hover { color: var(--accent-ink); border-color: var(--accent); }
+.language-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.login-language { display: flex; justify-content: flex-end; margin-bottom: 12px; }
+html[lang="en"] [data-brand-zh] { display: none; }
+html[lang="en"] .btn { max-width: 100%; white-space: normal; }
+html[lang="en"] .home-mode-card strong { line-height: 1.4; }
+html[lang="en"] .tl-concl::before { content: "Conclusion"; }
+html[lang="en"] .tl-share::before { content: "Shared notes"; }
+html[lang="en"] .task-tools:empty::after { content: "No tool calls in this excerpt"; }

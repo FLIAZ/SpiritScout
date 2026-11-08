@@ -1,6 +1,6 @@
 "use strict";
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
-const context=vm.createContext({esc:value=>String(value??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))});
+const context=vm.createContext(require('./helpers/i18n').context({esc:value=>String(value??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}));
 vm.runInContext(fs.readFileSync(path.join(__dirname,'../src/spiritscout/web/static/js/markdown.js'),'utf8'),context);
 context.markdown='# 标题\n<script>alert(1)</script>\n[危险](javascript:alert(1))\n[文档](https://example.test)\n```\n<unsafe>\n```\n| A | B\n| -- | -- |\n| C | D |';
 const html=vm.runInContext('mdRender(markdown)',context);

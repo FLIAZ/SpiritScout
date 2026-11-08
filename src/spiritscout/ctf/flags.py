@@ -66,7 +66,7 @@ class FlagManager:
     ):
         self.local_only = local_only
         self.multiple_answers = multiple_answers
-        # AWDP 修补模式：产出不是 flag 而是补丁（tar.gz + 说明）；
+        # AWDP 修补模式：产出为平台要求的脚本/归档及说明；
         # 复用完成度记账，answer_ids 语义映射为 fix_ids
         self.fix_mode = fix_mode
         self.fixes: dict[str, dict] = {}
@@ -108,11 +108,23 @@ class FlagManager:
             return False
         self.completions[challenge_id] = {**self.completions.get(challenge_id, {}),
                                          'answer_ids': sorted(answers), 'reason': reason, 'completed': True}
+        self.completions[challenge_id].pop('no_fix_needed', None)
         if self.store_path:
             path = self.store_path.with_suffix('.completion.json')
             tmp = path.with_suffix('.tmp')
             tmp.write_text(json.dumps(self.completions, ensure_ascii=False), encoding='utf-8')
             tmp.replace(path)
+        return True
+
+    def confirm_no_fix_needed(self, challenge_id: str, reason: str) -> bool:
+        """登记模型明确给出的无需修改审查结论，不伪造补丁或安全验证回执。"""
+        if not self.local_only or not self.fix_mode or not reason.strip() or self.answer_ids(challenge_id):
+            return False
+        self.completions[challenge_id] = {'answer_ids': [], 'reason': reason, 'completed': True,
+                                         'no_fix_needed': True}
+        self._persist_completions()
+        self.audit.log('awdp.review_completed', 'flag_manager',
+                       {'challenge_id': challenge_id, 'no_fix_needed': True, 'reason': reason})
         return True
 
     def answer_ids(self, challenge_id: str) -> set[str]:
@@ -155,8 +167,9 @@ class FlagManager:
 
     def completed_ids(self) -> set[str]:
         return {cid for cid, row in self.completions.items() if isinstance(row, dict)
-                and row.get('completed') and row.get('answer_ids')
-                and set(row['answer_ids']) == self.answer_ids(cid)}
+                and row.get('completed') and (
+                    row.get('answer_ids') and set(row['answer_ids']) == self.answer_ids(cid)
+                    or self.fix_mode and row.get('no_fix_needed') is True and not self.answer_ids(cid))}
 
     # ------------------------------------------------------------ 提取
 
@@ -258,6 +271,13 @@ class FlagManager:
 
     def all(self) -> list[FlagCandidate]:
         return list(self._flags.values())
+
+    def record_answer_evidence(self, value: str, refs: list[str], review: dict) -> None:
+        """保存本地答案的复核依据，后续多答案完成确认可重新检查来源状态。"""
+        candidate = self._flags[value]
+        candidate.evidence_refs = list(refs)
+        candidate.answer_review = dict(review)
+        self._persist()
 
     def accepted_flags(self) -> list[FlagCandidate]:
         return [c for c in self._flags.values() if c.accepted]

@@ -95,6 +95,21 @@ class PublicStagesTests(unittest.TestCase):
         self.assertEqual(rows[1]['tools'][0]['status'], 'done')
         self.assertNotIn('不能进入投影', str(rows))
 
+    def test_milestone_survives_replay_and_later_plain_progress_in_same_turn(self):
+        self.add('agent.progress', turn=3, text='发现账号记录重叠', exploration={
+            'intent': '核对隔离', 'attempt': '账号对照', 'milestone': {
+                'kind': 'discovery', 'title': '账号记录重叠', 'basis': '实际响应标识相同',
+                'next': '核对归属', 'evidence_refs': ['topology:response'], 'analysis': '隐藏字段'}})
+        self.add('agent.tool_call', turn=3, calls=[{'id': 'check', 'name': 'http_probe'}])
+        self.add('agent.progress', turn=3, text='继续核对归属')
+        self.add('agent.tool_result', turn=3, id='check', ok=True, note='响应已保存')
+        first = read_public_stages(self.path)
+        row = first['items'][0]
+        self.assertEqual(row['exploration']['milestone']['title'], '账号记录重叠')
+        self.assertEqual(row['tools'][0]['status'], 'done')
+        self.assertNotIn('隐藏字段', str(first))
+        self.assertEqual(read_public_stages(self.path), first)
+
     def test_historical_annotations_are_read_only_and_bound_to_public_source(self):
         self.add('agent.progress', turn=1, text='正在核对入口')
         page = read_public_stages(self.path)

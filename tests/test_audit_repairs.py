@@ -395,7 +395,7 @@ class AuditOwnershipTests(unittest.TestCase):
                 first.begin("private", "echo", "digest", "safe", params={"private": "saved"})
                 with bb.transaction() as conn:
                     conn.execute("DROP TABLE execution_owner")
-                    conn.execute("DELETE FROM execution_schema_migrations WHERE version=3")
+                    conn.execute("DELETE FROM execution_schema_migrations WHERE version>=3")
                 (root / "two").mkdir()
                 (root / "two" / "execution.key").write_bytes(Fernet.generate_key())
                 with self.assertRaises(ConfigurationError):

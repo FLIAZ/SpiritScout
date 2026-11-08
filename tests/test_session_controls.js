@@ -8,12 +8,12 @@ function node(id) {
   return nodes.get(id);
 }
 const state = {cur:"sess-a", compFiles:[], state:{session:{session_id:"sess-a", title:"暂停测试", status:"running", mode:"ctf", paused:false}, recovery:{unresolved_count:3}}};
-const ctx = vm.createContext({S:state, $:node, TERMINAL:new Set(["completed","stopped","interrupted","failed"]),
+const ctx = vm.createContext(require('./helpers/i18n').context({S:state, $:node, TERMINAL:new Set(["completed","stopped","interrupted","failed"]),
   STATUS_CN:{},MODE_CN:{},esc:String,projectName:()=>"未分类",fmtDur:()=>"1 分钟",agentName:String,
   toast() {}, refreshState() {}, startRename() {}, openSession() {},
   ProjectsPage:{moveSession() {}},SessionStorage:{open() {}}, armDelete() {},
   api:async (url,opts)=>{calls.push({url,opts});return {...state.state.session,paused:url.endsWith("/pause")};},
-});
+}));
 vm.runInContext(source.slice(source.indexOf("const sessionControlPending"),source.indexOf("/* Flag 概览")),ctx);
 (async()=>{
   ctx.renderSessionHead();

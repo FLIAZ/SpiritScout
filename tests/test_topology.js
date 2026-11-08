@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const path = require("node:path");
-const context = vm.createContext({});
+const context = vm.createContext(require('./helpers/i18n').context({}));
 vm.runInContext(fs.readFileSync(path.join(__dirname,
   "../src/spiritscout/web/static/js/topology.js"), "utf8"), context);
 const layout = vm.runInContext("TopologyLayout", context);

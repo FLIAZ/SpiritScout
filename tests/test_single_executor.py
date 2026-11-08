@@ -9,12 +9,16 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from spiritscout.agents.sub.base import RoutePlan
+from spiritscout.config.settings import GatewayConfig, ModelEntry
 from spiritscout.core.audit import NullAuditLogger
 from spiritscout.core.models import AgentType, RunMode, Task, TaskStatus
+from spiritscout.ctf.agents import CTFBaseAgent
 from spiritscout.ctf.flags import FlagManager
 from spiritscout.ctf.single import SingleCTFAgent, run_single
 from spiritscout.gateway.context import estimate_input_tokens
+from spiritscout.gateway.gateway import AgentBoundGateway, ModelGateway
 from spiritscout.gateway.light_context import project_context
+from spiritscout.gateway.registry import ModelRegistry
 from spiritscout.modes.assembler import ModeAssembler
 from spiritscout.runtime import _run_master
 from spiritscout.tools.registry import ToolRegistry
@@ -31,6 +35,101 @@ def context(mode=RunMode.AWDP, light=True):
 
 
 class AssemblyTests(unittest.IsolatedAsyncioTestCase):
+    def test_recovery_uses_selected_or_bound_model_and_its_actual_fallbacks(self):
+        ollama = ModelEntry(model='ollama', provider='ollama', ollama_lightweight=True)
+        llama = ModelEntry(model='llama', local_runtime='llama_cpp', local_lightweight=True,
+                           base_url='http://127.0.0.1:8081/v1')
+        gateway = ModelGateway(ModelRegistry([ollama, llama]), GatewayConfig(lightweight_local=True),
+                               audit=NullAuditLogger())
+        ctx = context()
+        ctx.gateway = AgentBoundGateway(gateway, llama.key)
+        agent = SingleCTFAgent(ctx, flag_manager=FlagManager(local_only=True, fix_mode=True))
+        self.assertEqual(agent._recovery_tool_choice(), 'required')
+        gateway.set_session_model(ollama.key)
+        self.assertEqual(agent._recovery_tool_choice(), 'auto')
+        gateway.set_session_model(llama.key)
+        self.assertEqual(agent._recovery_tool_choice(), 'required')
+        gateway.registry = ModelRegistry([ollama.model_copy(update={'is_fallback_for': [llama.key]}), llama])
+        self.assertEqual(agent._recovery_tool_choice(), 'auto')
+
+    @unittest.skipUnless(sandbox_available(), '需要现有 Linux/bwrap')
+    async def test_initial_workdir_fact_matches_actual_sandbox_for_non_ascii_challenge_id(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ctx = context(RunMode.AWDP)
+            ctx.builtin_ctx = {'workspace_root': folder, '_run_mode': RunMode.AWDP, '_lightweight_local': True}
+            agent = SingleCTFAgent(ctx, flag_manager=FlagManager(local_only=True, fix_mode=True))
+            task = Task(task_id='workdir-fixture', agent_type=agent.agent_type, task_type='ctf_single', target='',
+                        payload={'challenge': {'id': '题目 / 路径'}})
+            state = {'seed': []}
+            agent._seed_messages(task, None, None, state)
+            advertised = state['messages'][1]['_light_task_frame']['execution_environment']['default_workdir']
+            observed = await sandbox_exec('pwd', **agent._tool_ctx(task))
+            self.assertTrue(observed.ok, observed.error)
+            self.assertEqual(observed.returncode, 0, observed.stderr)
+            self.assertEqual(observed.parsed['workdir'], advertised)
+            self.assertEqual(observed.stdout.strip(), advertised)
+
+    def test_first_request_fits_small_window_with_runtime_state_and_original_contract(self):
+        for mode in (RunMode.CTF, RunMode.AWDP):
+            with self.subTest(mode=mode):
+                ctx = context(mode)
+                ctx.builtin_ctx = {"workspace_root": "/workspace/sessions/session-one"}
+                ctx.ring = None
+                agent = SingleCTFAgent(ctx, flag_manager=FlagManager(local_only=True,
+                    fix_mode=mode == RunMode.AWDP))
+                mission = "请分析附件中的程序，寻找输入校验逻辑并根据实际运行结果说明结论。" * 3
+                rules = "仅分析本题附件和隔离环境，保留原始文件与完整验证证据。"
+                world = {"environment": agent._world_environment(),
+                    "authorization": {"testing_rules": rules, "local_analysis": True},
+                    "user_context": {"mission": mission, "standing_rules": rules,
+                        "statements": [{"statement_id": "first", "text": mission}]}}
+                agent._world_snapshot = lambda: world
+                task = Task(task_id="one", agent_type=agent.agent_type, task_type="ctf_solve", target="",
+                    payload={"challenge": {"id": "one", "description": mission,
+                        "attachments": ["/workspace/sessions/session-one/attachments/challenge.zip"]},
+                        "mission": mission, "rules": rules})
+                state = {"seed": ["本次沙箱命令可用性：\n" + "/usr/bin/python3\n" * 12]}
+                agent._seed_messages(task, None, None, state)
+                original = copy.deepcopy(state["messages"])
+                ctx.gateway.context_budget = lambda **kwargs: 10650
+                sent = agent._light_model_messages(task, SimpleNamespace(route_id="r"), state)
+                self.assertLessEqual(estimate_input_tokens(sent, agent._model_tool_schemas()), 10650)
+                self.assertIn(mission, str(sent))
+                self.assertIn(rules, str(sent))
+                self.assertEqual(state["messages"], original)
+
+    def test_compact_descriptions_preserve_parameters_and_other_executors(self):
+        ctx = context()
+        baseline = CTFBaseAgent(ctx, flag_manager=FlagManager(local_only=True))
+        original = copy.deepcopy(baseline.tool_schemas)
+        agent = SingleCTFAgent(ctx, flag_manager=FlagManager(local_only=True))
+        compact = {s["function"]["name"]: s["function"] for s in agent.tool_schemas}
+
+        def without_descriptions(value):
+            if isinstance(value, dict):
+                return {key: without_descriptions(item) for key, item in value.items() if key != "description"}
+            if isinstance(value, list):
+                return [without_descriptions(item) for item in value]
+            return value
+
+        # HTTP 和问询入口只在单执行者保留，也要核对其嵌套参数约束。
+        for schema in [*CTFBaseAgent.tool_schemas, *original]:
+            function = schema["function"]
+            if function["name"] in compact:
+                actual = without_descriptions(compact[function["name"]])
+                if function["name"] == "record_answer":
+                    actual["parameters"]["properties"].pop("review")
+                elif function['name'] == 'history_read':
+                    properties = actual['parameters']['properties']
+                    self.assertEqual(properties['view']['enum'], ['index', 'message', 'content', 'output'])
+                    self.assertEqual(properties['length']['maximum'], 4000)
+                    for key in ('view', 'find', 'limit', 'expected_sha256', 'output_part'):
+                        properties.pop(key)
+                    properties['length'] = {'type': 'integer'}
+                self.assertEqual(without_descriptions(function), actual)
+        self.assertEqual(baseline.tool_schemas, original)
+        self.assertEqual(CTFBaseAgent(ctx, flag_manager=FlagManager(local_only=True)).tool_schemas, original)
+
     def test_only_qualified_ctf_and_awdp_assemble_one_executor(self):
         for mode in (RunMode.CTF, RunMode.AWDP):
             assembly = ModeAssembler(context(mode)).assemble(mode,
@@ -64,8 +163,11 @@ class AssemblyTests(unittest.IsolatedAsyncioTestCase):
                      "mission": "USER_GOAL", "rules": "ORIGINAL_RULE", "source_context": "graph" * 10000})
         state = {"seed": ["bootstrap " * 500]}
         agent._seed_messages(task, None, RoutePlan(name="solve", strategy="", steps=[]), state)
-        view = project_context(state["messages"], agent.tool_schemas, 10650, world=world)
-        self.assertLessEqual(view.estimated_tokens, 10650)
+        tools = agent._model_tool_schemas()
+        # 此处验证用户契约与派生图的边界；工具说明长度变化不应改变测试条件。
+        budget = estimate_input_tokens(state["messages"], tools) + 512
+        view = project_context(state["messages"], tools, budget, world=world)
+        self.assertLessEqual(view.estimated_tokens, budget)
         self.assertIn("USER_GOAL", str(view.messages))
         self.assertIn("ORIGINAL_RULE", str(view.messages))
         self.assertNotIn("graphgraph", str(view.messages))
@@ -121,7 +223,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         agent.run.assert_awaited_once()
         self.assertEqual(result["dag_nodes"][0]["status"], "failed")
 
-    async def test_user_feed_is_delivered_into_current_task_without_an_extra_model(self):
+    async def test_user_feed_is_staged_without_claiming_delivery_before_model_response(self):
         for text in ("继续看这个文件", ""):
             with self.subTest(text=text):
                 ctx = context()
@@ -130,13 +232,17 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 feed = {"statement_id": "message-one", "text": text, "attachments": [{"path": "/attachments/new.jar"}]}
                 agent.user_inbox = [feed]
                 agent.on_user_feed = Mock()
+                state = {}
+                agent._inv_state = lambda *args: state
                 task = Task(task_id="one", agent_type=agent.agent_type, task_type="ctf_solve", target="",
                             payload={"challenge": {"id": "one", "attachments": []}})
                 with patch("spiritscout.ctf.single.record_user_statement") as record, \
                      patch("spiritscout.ctf.agents.CTFBaseAgent.execute_step", new=AsyncMock()) as execute:
                     await agent.execute_step(task, None, None, {})
                 record.assert_called_once_with(ctx.blackboard, feed)
-                agent.on_user_feed.assert_called_once_with([feed])
+                agent.on_user_feed.assert_not_called()
+                self.assertEqual(state['user_feed'], [feed])
+                self.assertEqual(agent.user_inbox, [feed])
                 execute.assert_awaited_once()
                 self.assertEqual(task.payload["challenge"]["attachments"], ["/attachments/new.jar"])
 

@@ -16,6 +16,9 @@ from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from spiritscout.core.audit import read_record
+from spiritscout.core.storage_codec import unpack_json
+
 
 def read_tool_parameters(workspace: Path, tool: str, digest: str) -> dict[str, Any]:
     """按工具名与参数摘要精确关联；相同摘要的历史调用拥有相同参数。"""
@@ -45,7 +48,7 @@ def read_tool_parameters(workspace: Path, tool: str, digest: str) -> dict[str, A
             with (workspace / "audit.jsonl").open(encoding="utf-8") as stream:
                 for line in stream:
                     try:
-                        record = json.loads(line)
+                        record = read_record(line)
                     except ValueError:
                         continue
                     if not isinstance(record, dict) or record.get("type") != "agent.tool_call":
@@ -62,7 +65,7 @@ def read_tool_parameters(workspace: Path, tool: str, digest: str) -> dict[str, A
                             cipher_text = call["arguments_cipher"].encode()
         if cipher_text is None:
             return unavailable
-        parameters = json.loads(Fernet(key_bytes).decrypt(cipher_text))
+        parameters = unpack_json(Fernet(key_bytes).decrypt(cipher_text))
         actual = hashlib.sha256(json.dumps(parameters, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         if actual != digest:
             return {"available": False, "reason": "参数副本校验失败"}

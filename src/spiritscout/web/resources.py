@@ -211,16 +211,17 @@ def mount_resources(
         q: str = Query("", max_length=200),
         enabled: bool | None = None,
         domain: str = Query("", max_length=100),
+        tier: Literal["", "core", "domain", "reference"] = "",
         source: Literal["", "builtin", "archive", "manual"] = "",
         added_from: date | None = None,
         added_to: date | None = None,
         date_state: Literal["all", "known", "unknown"] = "all",
-        sort: Literal["added_desc", "added_asc", "name_asc", "updated_desc"] = "added_desc",
+        sort: Literal["relevance", "added_desc", "added_asc", "name_asc", "updated_desc"] = "relevance",
         offset: int = Query(0, ge=0),
         limit: int = Query(40, ge=1, le=100),
     ) -> dict[str, Any]:
         try:
-            return skill_catalog(store.skills(), q=q, enabled=enabled, domain=domain,
+            return skill_catalog(store.skills(), q=q, enabled=enabled, domain=domain, tier=tier,
                                  source=source, added_from=added_from, added_to=added_to,
                                  date_state=date_state, sort=sort, offset=offset, limit=limit)
         except ValueError as exc:
@@ -256,7 +257,9 @@ def mount_resources(
         )
         if not item:
             raise HTTPException(404, "Skill 不存在")
-        return item
+        from spiritscout.resources.skill_search import metadata
+
+        return {**item, **metadata(item)}
 
     @app.put("/api/resources/skills/{key}")
     def skill_save(key: str, payload: ResourceChange) -> dict[str, Any]:

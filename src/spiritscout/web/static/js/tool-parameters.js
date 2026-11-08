@@ -7,7 +7,7 @@ const ToolParameters = (() => {
     if (!entry.element.isConnected || entry.session !== S.cur) return;
     entry.pre.textContent = data.available ? JSON.stringify(data.parameters, null, 2) : data.reason;
     entry.element.querySelector('.ar').textContent = data.available
-      ? argBrief(entry.call.name, data.parameters) : '参数副本暂不可用';
+      ? argBrief(entry.call.name, data.parameters) : I18n.t('参数副本暂不可用');
   }
   function enqueue(entry) {
     if (entry.queued || entry.loaded || !entry.box.open || entry.session !== session) return;
@@ -40,7 +40,7 @@ const ToolParameters = (() => {
           show(entry, data);
         } catch (error) {
           if (version === generation && entry.session === session && entry.element.isConnected) {
-            entry.pre.textContent = `参数读取失败：${error.message}。收起后重新展开可重试。`;
+            entry.pre.textContent = I18n.t`参数读取失败：${error.message}。收起后重新展开可重试。`;
           }
         } finally { inflight.delete(requestKey); active--; drain(); }
       })();
@@ -48,19 +48,19 @@ const ToolParameters = (() => {
   }
   function attach(element, call) {
     const box = document.createElement('details'); box.className = 'tl-parameters';
-    const title = document.createElement('summary'); title.textContent = '调用参数';
+    const title = document.createElement('summary'); title.textContent = I18n.t('调用参数');
     const pre = document.createElement('pre'); box.append(title, pre);
     element.insertBefore(box, element.querySelector('.nt'));
     const args = call.arguments;
     if (args && !args._redacted) { pre.textContent = JSON.stringify(args,null,2); return; }
     const digest = args?.digest;
-    if (!/^[0-9a-f]{64}$/.test(digest || '')) { pre.textContent = '此历史调用未保存可读取的参数副本'; return; }
+    if (!/^[0-9a-f]{64}$/.test(digest || '')) { pre.textContent = I18n.t('此历史调用未保存可读取的参数副本'); return; }
     const entry = {element,box,pre,call,digest,session:S.cur,key:call.name+':'+digest,attempts:0};
-    pre.textContent = '展开后读取调用参数';
+    pre.textContent = I18n.t('展开后读取调用参数');
     box.addEventListener('toggle', () => {
       if (!box.open) return;
       if (cache.has(entry.key)) { entry.loaded = true; show(entry,cache.get(entry.key)); return; }
-      pre.textContent = '正在读取调用参数…'; enqueue(entry);
+      pre.textContent = I18n.t('正在读取调用参数…'); enqueue(entry);
     });
   }
   function refresh() {

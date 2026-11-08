@@ -32,6 +32,18 @@ from spiritscout.tools.search_policy import search_allowed
 
 
 class MasterPlanning:
+    def _scanner_context(self) -> dict[str, Any]:
+        control = (getattr(self.ctx, 'extra', None) or {}).get('scan_controller')
+        return control.snapshot() if control is not None else {'status': 'unavailable'}
+
+    async def _apply_scanner_control(self, decision: dict[str, Any]) -> dict[str, Any] | None:
+        control = (getattr(self.ctx, 'extra', None) or {}).get('scan_controller')
+        if control is None or 'scan_control' not in decision:
+            return None
+        result = await control.apply(decision['scan_control'], actor=self.agent_id)
+        self.ctx.extra['last_scan_control'] = result
+        return result
+
     async def _meta_plan(self, state: MasterState, *,
                          dispatch_only: bool = False,
                          live_dag: TaskDAG | None = None,
@@ -67,6 +79,7 @@ class MasterPlanning:
                 plan["dag_nodes"] = self._ensure_business_gate(
                     plan.get("dag_nodes", []))
                 result = dag.upsert_from_plan(plan.get("dag_nodes", []), round_no)
+            await self._apply_scanner_control(plan)
             await self._apply_competition_decisions(dag, plan)
             self._record_plan_result(round_no, result.created, result.skipped,
                                      rejected=rejected_reason)
@@ -244,6 +257,7 @@ class MasterPlanning:
             llm_decision = None
         deferred_replan = False
         if llm_decision and not stop_reason:
+            await self._apply_scanner_control(llm_decision)
             await self._apply_competition_decisions(dag, llm_decision)
             if llm_decision.get("continue_iteration", False):
                 await self._ask_user_from_review(llm_decision)
@@ -442,6 +456,7 @@ class MasterPlanning:
                         "flag_solved_ids": self._flag_solved_ids(),
                         "platform_facts": (self.ctx.extra.get("platform_facts") or [])[-8:],
                         "world_state": self._world_state(),
+                        "scanner": self._scanner_context(),
                         "project_rules": self._project_rules(),
                         "execution_recovery": self.ctx.extra.get("execution_recovery", {}),
                         "available_tactics": {
@@ -725,6 +740,7 @@ class MasterPlanning:
             dag_now = TaskDAG.from_dict(state["dag"])
             payload: dict[str, Any] = {
                 "action": "review", "view": view,
+                "scanner": self._scanner_context(),
                 "mission": self._mission()[:2000],
                 "competition_context": self.ctx.extra.get("competition_context", {}),
                 "competition_status": self._competition_status(dag_now),

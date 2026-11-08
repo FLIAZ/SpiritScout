@@ -2,7 +2,7 @@
 /* 公开正文按意图聚合；调用与结果收进对应消息的默认折叠明细。 */
 const TaskTrace = (() => {
   const terminal = new Set(["done", "failed", "cancelled", "pruned"]);
-  const statuses = {running:"执行中", done:"已完成", failed:"执行失败", cancelled:"已撤销", pruned:"已暂缓", waiting:"等待返回"};
+  const statuses = {running:I18n.t("执行中"), done:I18n.t("已完成"), failed:I18n.t("执行失败"), cancelled:I18n.t("已撤销"), pruned:I18n.t("已暂缓"), waiting:I18n.t("等待返回")};
   const supported = /^(task\.(start|done|failed|cancelled|pruned)|agent\.(turn|delta|tool_call|tool_result|conclude|note|progress|ask_user|ask_answered|blocked|error)|executor\.identity|model\.(started|call|failed|cancelled))$/;
   const wrapper = name => name === "investigate" || name === "explore";
   const worker = actor => !!actor && !/^(master(?:-|$)|gateway$|runtime$|system$|user$)/.test(actor);
@@ -20,7 +20,7 @@ const TaskTrace = (() => {
     return (hash % 8) + 1;
   };
   const sealOf = actor => {
-    const name = actorName(actor) || "灵";
+    const name = actorName(actor) || I18n.t("灵");
     return `<i class="task-seal" style="--seal: var(--agent-${agentSlot(actor)})" aria-label="${esc(name)}" title="${esc(name)}">${esc([...name][0])}</i>`;
   };
   function resolve(store, e) {
@@ -46,8 +46,8 @@ const TaskTrace = (() => {
     const d = e.detail || {}, key = resolve(store,e);
     let task = store.tasks.get(key);
     if (!task) {
-      task = {key, id:d.task_id || "", actor:e.actor, title:"", status:"running", progress:"正在准备", tools:new Map(),
-        texts:new Map(), steps:new Map(), segments:new Map(), activeIntents:new Map(), activeSteps:new Map(), routeAliases:new Map(),
+      task = {key, id:d.task_id || "", actor:e.actor, title:"", status:"running", progress:I18n.t("正在准备"), tools:new Map(),
+        texts:new Map(), completedTexts:new Set(), steps:new Map(), segments:new Map(), activeIntents:new Map(), activeSteps:new Map(), routeAliases:new Map(),
         conclusions:new Map(), modelSteps:new Map(), started:false, summary:"", updated:e.ts, event:e, version:0,
         currentSegmentKey:"", segmentSerial:0, startId:eventId, endId:eventId};
       store.tasks.set(key,task);
@@ -79,7 +79,7 @@ const TaskTrace = (() => {
     let step=route ? task.activeSteps.get(route) : null;
     const ensureStep = (stepKey, turn=0) => {
       if(!task.steps.has(stepKey)) {
-        task.steps.set(stepKey,{key:stepKey,route,turn,event:e,texts:new Map(),status:terminal.has(task.status) ? task.status : "running",progress:"正在分析"});
+        task.steps.set(stepKey,{key:stepKey,route,turn,event:e,texts:new Map(),status:terminal.has(task.status) ? task.status : "running",progress:I18n.t("正在分析")});
       }
       const next=task.steps.get(stepKey), previous=task.activeSteps.get(route);
       // 迟到事件只更新原阶段；不会把当前阶段回退，也不提前宣告在途工具完成。
@@ -113,6 +113,9 @@ const TaskTrace = (() => {
       if(owner) {step=owner;route=owner.route;}
     }
     const stem=JSON.stringify([route,d.call_id || d.turn || ""]);
+    if(e.type === "agent.progress" || /^model\.(call|failed|cancelled)$/.test(e.type)) task.completedTexts.add(stem);
+    if(step?.turn && (e.type === "agent.tool_call" || /^model\.(call|failed|cancelled)$/.test(e.type)))
+      task.completedTexts.add(JSON.stringify([route,step.turn]));
     const previousDeltaText=e.type === "agent.delta" ? task.texts.get(stem) || "" : "";
     const nextDeltaText=previousDeltaText+(d.text || "");
     const structuredDelta=/^\s*\{|^\s*```(?:json)?(?:\s|$)/i.test(nextDeltaText);
@@ -138,7 +141,8 @@ const TaskTrace = (() => {
         const adopt=owner && !owner.intent;
         const same=owner && owner.key===activeIntentKey && owner.epoch===timelineEpoch &&
           ((!semantic && !angle) || owner.intent===intent || !owner.texts.size);
-        if(adopt || same) {
+        const streamedOwner=e.type==='agent.progress' && d.streamed && owner && step?.intentKey===owner.key;
+        if(adopt || same || streamedOwner) {
           segment=owner;
           if(semantic || !segment.intent) segment.intent=intent;
           if(adopt) {segment.event=e;if(eventId != null) segment.startId=eventId;}
@@ -168,25 +172,28 @@ const TaskTrace = (() => {
       }
       segment.version++;
       if(eventId != null) segment.endId=eventId;
-      if(["agent.turn","model.started","model.failed","model.cancelled","agent.error"].includes(e.type)) {
+      // 明细只补充实际错误；模型轮次与开始/取消事件仍参与状态更新，不堆成调用流水。
+      if(["model.failed","agent.error"].includes(e.type)) {
         const recordKey=JSON.stringify([e.type,step?.key || route,d.call_id || ""]);
-        const label=e.type==="agent.turn" ? `第 ${d.turn || "?"} 次调用` : e.type==="model.started" ? "模型调用开始"
-          : e.type==="model.cancelled" ? "模型调用已取消" : textOf(d.error || "调用失败");
-        segment.records.set(recordKey,label);
+        segment.records.set(recordKey,textOf(d.error || I18n.t("调用失败")));
       }
     }
-    if (e.type === "task.start") { task.started=true;task.status="running";task.progress="开始执行";task.target=d.target || ""; }
+    if (e.type === "task.start") { task.started=true;task.status="running";task.progress=I18n.t("开始执行");task.target=d.target || ""; }
     if (e.type === "agent.turn") {
-      task.progress="正在推进";
-      if(step) {step.title=d.angle || step.title;step.progress="正在分析";}
+      task.progress=I18n.t("正在推进");
+      if(step) {step.title=d.angle || step.title;step.progress=I18n.t("正在分析");}
     }
-    if (e.type === "model.started") {task.progress="正在分析下一步";if(step) {step.progress="正在分析";if(!terminal.has(task.status)) step.status="running";}}
+    if (e.type === "model.started") {task.progress=I18n.t("正在分析下一步");if(step) {step.progress=I18n.t("正在分析");if(!terminal.has(task.status)) step.status="running";}}
     if (e.type === "agent.delta") {
-      if (d.kind === "reset") {task.texts.delete(stem);step?.texts.delete(stem);segment?.texts.delete(stem);}
+      if (d.kind === "reset") {
+        task.texts.delete(stem);task.completedTexts.delete(stem);step?.texts.delete(stem);
+        // 同一输出可能跨过用户消息；重试只撤回该输出，不留下另一张卡里的旧碎片。
+        for(const item of task.segments.values()) item.texts.delete(stem);
+      }
       else if (d.kind !== "reasoning" && d.kind !== "tool_call" && d.text) {
         const text=nextDeltaText;
-        task.texts.set(stem,text.slice(-24000)); task.progress="正在更新进展";
-        if(step) {step.texts.set(stem,text.slice(-24000));step.progress="正在更新进展";}
+        task.texts.set(stem,text.slice(-24000)); task.progress=I18n.t("正在更新进展");
+        if(step) {step.texts.set(stem,text.slice(-24000));step.progress=I18n.t("正在更新进展");}
         if(segment) {
           let segmentText=(segment.texts.get(stem) || "")+d.text;
           // JSON 的公开说明只能在完整解析后提取，不能从跨段的半截协议中提取。
@@ -198,7 +205,8 @@ const TaskTrace = (() => {
     if (e.type === "agent.progress") {
       if(step && d.exploration)step.exploration=d.exploration;
       const text=commentaryText(d.text);
-      if(text) {
+      const alreadyStreamed=d.streamed && step && [...step.texts.values()].some(raw=>commentaryText(raw)===text);
+      if(text && !alreadyStreamed) {
         const publicKey=`progress:${d.call_id || e.seq || e.ts || task.version}`;
         task.texts.set(publicKey,text);
         if(step) step.texts.set(publicKey,text);
@@ -207,7 +215,7 @@ const TaskTrace = (() => {
     }
     if (e.type === "agent.ask_user" || e.type === "agent.blocked") {
       task.waitingReasons ||= new Map();
-      task.waitingReasons.set(route,textOf(d.question || d.reason || d.message || "等待补齐必要条件"));
+      task.waitingReasons.set(route,textOf(d.question || d.reason || d.message || I18n.t("等待补齐必要条件")));
       task.waitingReason=[...task.waitingReasons.values()].join("；");
       task.progress=task.waitingReason;
       if(segment) segment.texts.set(`waiting:${e.seq || e.ts}`,task.waitingReason);
@@ -216,12 +224,12 @@ const TaskTrace = (() => {
     if (e.type === "agent.ask_answered") {
       task.waitingReasons?.delete(route);
       task.waitingReason=[...(task.waitingReasons?.values() || [])].join("；");
-      task.progress="已收到答复，正在继续验证";
+      task.progress=I18n.t("已收到答复，正在继续验证");
       if(step && !terminal.has(task.status)) {step.status="running";step.progress=task.progress;}
     }
     if (e.type === "agent.note") {
       const noteKey=`note:${e.seq || e.ts}`, note=textOf(d.text);
-      task.progress="已更新进展";task.texts.set(noteKey,note);
+      task.progress=I18n.t("已更新进展");task.texts.set(noteKey,note);
       if(step) step.texts.set(noteKey,note);
       if(segment) segment.texts.set(noteKey,note);
     }
@@ -232,8 +240,8 @@ const TaskTrace = (() => {
           stepKey:wrapper(c.name) ? "" : step?.key || "", intentKey:segment?.key || ""});
         segment?.toolKeys.add(toolKey);
       }
-      if(step) {step.status=terminal.has(task.status) ? task.status : "running";step.progress="工具执行中";}
-      task.progress=(d.calls || []).length ? `正在调用 ${d.calls.map(c => SessionObserver.toolName(c.name)).join("、")}` : task.progress;
+      if(step) {step.status=terminal.has(task.status) ? task.status : "running";step.progress=I18n.t("工具执行中");}
+      task.progress=(d.calls || []).length ? I18n.t`正在调用 ${d.calls.map(c => SessionObserver.toolName(c.name)).join("、")}` : task.progress;
     }
     if (e.type === "agent.tool_result") {
       let tool=linkedTool;
@@ -243,24 +251,25 @@ const TaskTrace = (() => {
       }
       if (!tool) {
         const toolKey=JSON.stringify([route,d.id || `result:${e.seq || e.ts}`]);
-        tool={key:toolKey,call:{name:d.name},route,id:d.id,name:d.name || "工具",version:0,missingCall:true,
+        tool={key:toolKey,call:{name:d.name},route,id:d.id,name:d.name || I18n.t("工具"),version:0,missingCall:true,
           stepKey:wrapper(d.name) ? "" : step?.key || ""};
         task.tools.set(toolKey,tool);
       }
       tool.status=d.ok === false ? "failed" : "done";tool.version++;
-      const raw=SessionObserver.cleanText(textOf(d.result ?? d.note ?? d.error ?? "未记录原始响应"));
+      const raw=SessionObserver.cleanText(textOf(d.result ?? d.note ?? d.error ?? I18n.t("未记录原始响应")));
       tool.result=raw.slice(0,24000);tool.clipped=raw.length>24000;
       tool.note=SessionObserver.resultSummary(d);
+      if(Array.isArray(d.images))tool.images=d.images;
       if(d.ok !== false && d.skill?.skill_id)tool.skill=d.skill;
       segment?.toolKeys.add(tool.key);
-      task.progress=`${SessionObserver.toolName(tool.name)} · ${d.ok === false ? "失败" : "已返回"}${tool.note ? `：${brief(tool.note)}` : ""}`;
+      task.progress=`${SessionObserver.toolName(tool.name)} · ${d.ok === false ? I18n.t("失败") : I18n.t("已返回")}${tool.note ? `：${brief(tool.note)}` : ""}`;
       const owner=task.steps.get(tool.stepKey);
       if(owner) {
         const pending=[...task.tools.values()].some(t=>t.stepKey===owner.key && t.status==="running");
         if(!terminal.has(task.status)) {
           owner.status=pending ? (task.activeSteps.get(owner.route)===owner ? "running" : "waiting") :
             [...task.tools.values()].some(t=>t.stepKey===owner.key && t.status==="failed") ? "failed" : "done";
-          owner.progress=pending ? "等待其他工具返回" : "本次执行已返回";
+          owner.progress=pending ? I18n.t("等待其他工具返回") : I18n.t("本次执行已返回");
         }
       }
     }
@@ -270,11 +279,11 @@ const TaskTrace = (() => {
         task.conclusions.set(route,conclusion);
         segment?.texts.set(`conclusion:${e.seq || e.ts}`,conclusion);
       }
-      task.progress="已整理路线结论";
-      if(step) {if(!terminal.has(task.status)) step.status="done";step.progress="已整理结论";}
+      task.progress=I18n.t("已整理路线结论");
+      if(step) {if(!terminal.has(task.status)) step.status="done";step.progress=I18n.t("已整理结论");}
     }
-    if (e.type === "agent.error" || e.type === "model.failed") task.progress=brief(d.error) || "执行遇到问题，等待下一步";
-    if (e.type === "model.cancelled") task.progress="本次模型调用已取消";
+    if (e.type === "agent.error" || e.type === "model.failed") task.progress=brief(d.error) || I18n.t("执行遇到问题，等待下一步");
+    if (e.type === "model.cancelled") task.progress=I18n.t("本次模型调用已取消");
     if(step && ["agent.error","model.failed","model.cancelled"].includes(e.type)) {
       step.status=e.type==="model.cancelled" ? "cancelled" : "failed";
       step.progress=brief(d.error) || task.progress;
@@ -291,7 +300,7 @@ const TaskTrace = (() => {
       if (typeof summary === "string") task.summary=summary;
       else if (summary && typeof summary === "object") {
         task.summary=textOf(summary.conclusion || summary.summary || "");
-        task.stats=summary.routes_total != null ? `路线完成 ${summary.routes_done || 0}/${summary.routes_total}` : "";
+        task.stats=summary.routes_total != null ? I18n.t`路线完成 ${summary.routes_done || 0}/${summary.routes_total}` : "";
       }
       if (d.error) task.summary=textOf(d.error);
       task.progress=statuses[task.status];
@@ -313,7 +322,8 @@ const TaskTrace = (() => {
     if(structured) {
       try {
         const data=JSON.parse(text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));
-        text=[data.progress, data.commentary].filter(v=>typeof v === "string" && v.trim()).join("\n\n");
+        text=[...new Set([data.progress, data.commentary].filter(v=>typeof v === "string" && v.trim())
+          .map(v=>v.trim()))].join("\n\n");
       } catch { return ""; } // JSON 尚未完整时不把半截协议刷成进度。
     }
     return text;
@@ -333,22 +343,22 @@ const TaskTrace = (() => {
     const conclusions=[...new Set(task.conclusions.values())].filter(hasBody);
     if(hasBody(task.summary) || conclusions.length) return hasBody(task.summary) ? task.summary : conclusions.join("\n\n");
     const latest=updatesOf(task).at(-1)?.text;
-    if(latest) return `${statuses[task.status]}${task.stats ? `，${task.stats}` : ""}。\n\n最后一次进展：\n${latest}`;
+    if(latest) return I18n.t`${statuses[task.status]}${task.stats ? `，${task.stats}` : ""}。\n\n最后一次进展：\n${latest}`;
     const tools=[...task.tools.values()];
     const results=tools.filter(t=>t.status === "done").length, failures=tools.filter(t=>t.status === "failed").length;
     return `${statuses[task.status]}${task.stats ? `，${task.stats}` : ""}。`+
-      (tools.length ? `本页记录了 ${tools.length} 次工具调用，${results} 次返回、${failures} 次失败。` : "")+
-      "当前记录未包含文字结论。";
+      (tools.length ? I18n.t`本页记录了 ${tools.length} 次工具调用，${results} 次返回、${failures} 次失败。` : "")+
+      I18n.t("当前记录未包含文字结论。");
   }
   function stageSummary(task, step) {
     const notes=[...new Set([...step.texts.values()].map(commentaryText).filter(Boolean))];
-    if(!notes.length && terminal.has(step.status)) return `本阶段${statuses[step.status]}，记录中未包含文字总结，可展开执行明细。`;
-    return notes.at(-1) || (step.turn ? "本阶段尚未收到文字进展，正在执行验证。" : "尚未形成阶段结论，执行明细可展开查看。");
+    if(!notes.length && terminal.has(step.status)) return I18n.t`本阶段${statuses[step.status]}，记录中未包含文字总结，可展开执行明细。`;
+    return notes.at(-1) || (step.turn ? I18n.t("本阶段尚未收到文字进展，正在执行验证。") : I18n.t("尚未形成阶段结论，执行明细可展开查看。"));
   }
   function liveSummary(task) {
     const text=updatesOf(task).at(-1)?.text;
     if(terminal.has(task.status)) return summaryOf(task);
-    return text || (task.title ? `正在处理：${task.title}。尚未收到阶段结论。` : "正在准备任务，尚未收到阶段进展。");
+    return text || (task.title ? I18n.t`正在处理：${task.title}。尚未收到阶段结论。` : I18n.t("正在准备任务，尚未收到阶段进展。"));
   }
   let store=create();
   function skillsOf(task) {
@@ -369,9 +379,37 @@ const TaskTrace = (() => {
     const text=[...segment.texts.values()].map(commentaryText).find(Boolean);
     return text ? brief(text.split(/\n|[。！？]/)[0]).slice(0,100) : task.title;
   }
-  function segmentSummary(segment) {
-    const notes=[...new Set([...segment.texts.values()].map(commentaryText).filter(Boolean))];
-    return notes.join("\n\n");
+  const segmentNotes=segment=>[...new Set([...segment.texts.values()].map(commentaryText).filter(Boolean))];
+  function segmentSummary(segment) { return segmentNotes(segment).join("\n\n"); }
+  function narrativeOf(task, segment) {
+    const notes=[], seen=new Set();
+    let repeated=0;
+    for(const [key,raw] of segment.texts) {
+      const text=commentaryText(raw);
+      if(!text) continue;
+      const complete=!key.startsWith("[") || task.completedTexts.has(key) || terminal.has(task.status);
+      if(seen.has(text)) {if(complete) repeated++;continue;}
+      // 完整旧段落已在屏幕上时，重复流的前缀暂不另起一段。
+      // 一旦内容不同或以较短的新句结束，仍按原样展示，不能吞掉有效更新。
+      if(!complete && notes.some(note=>note.complete && note.text.startsWith(text))) continue;
+      seen.add(text);notes.push({key,text,complete});
+    }
+    return {notes,repeated};
+  }
+  function renderNarrative(target, notes) {
+    const keys=new Set(notes.map(note=>note.key));
+    for(const child of [...target.children]) if(!keys.has(child.dataset.narrativeKey)) child.remove();
+    notes.forEach((note,index)=>{
+      let child=[...target.children].find(el=>el.dataset.narrativeKey===note.key);
+      if(!child) {
+        target.insertAdjacentHTML("beforeend",'<div class="task-narrative-turn"></div>');
+        child=target.lastElementChild;child.dataset.narrativeKey=note.key;
+      }
+      if(target.children[index]!==child) target.insertBefore(child,target.children[index] || null);
+      if(child.dataset.text!==note.text) {
+        child.dataset.text=note.text;child.innerHTML=mdRender(note.text);
+      }
+    });
   }
   function outcomeText(task) {
     const keyOfText=value=>String(value || "").trim();
@@ -402,20 +440,20 @@ const TaskTrace = (() => {
     if(text) return brief(text.split(/\n|[。！？]/)[0]).slice(0,100);
     if(step.title && step.title!==task.title) return brief(step.title);
     const names=[...new Set([...task.tools.values()].filter(t=>t.stepKey===step.key).map(t=>SessionObserver.toolName(t.name)))];
-    return names.join("、") || "分析当前现场";
+    return names.join("、") || I18n.t("分析当前现场");
   }
   // 意图标签：优先事件里带出的路线名，其次该路线首个阶段的切入角度
   function routeLabel(task,route) {
     for(const [name,ids] of task.routeAliases) if(ids.has(route)) return name;
     const titled=[...task.steps.values()].find(s=>s.route===route && s.title && s.title!==task.title);
     if(titled) return brief(titled.title).slice(0,40);
-    return route ? `路线 ${String(route).slice(-6)}` : "默认路线";
+    return route ? I18n.t`路线 ${String(route).slice(-6)}` : I18n.t("默认路线");
   }
   function renderTools(task,tools,list) {
     for(const tool of tools) {
       let el=[...list.children].find(child=>child.dataset.toolKey === tool.key);
       if(!el) {
-        list.insertAdjacentHTML("beforeend",`<div class="tl-act"><button class="hd" type="button" aria-expanded="false"><span class="nm"></span><span class="ar"></span><span class="st"></span><span class="cv" aria-hidden="true">⌄</span></button><div class="nt"></div><pre class="tl-output"></pre></div>`);
+        list.insertAdjacentHTML("beforeend",`<div class="tl-act"><button class="hd" type="button" aria-expanded="false"><span class="nm"></span><span class="ar"></span><span class="st"></span><span class="cv" aria-hidden="true">⌄</span></button><div class="tl-images"></div><div class="nt"></div><pre class="tl-output"></pre></div>`);
         el=list.lastElementChild;el.dataset.toolKey=tool.key;
         const button=el.querySelector("button.hd");
         button.onclick=()=>{
@@ -427,16 +465,19 @@ const TaskTrace = (() => {
       if(el.dataset.version === String(tool.version)) continue;
       el.dataset.version=String(tool.version);
       el.querySelector(".nm").textContent=SessionObserver.toolName(tool.name);
-      el.querySelector(".ar").textContent=tool.missingCall ? "调用参数见更早记录" : tool.call.preview || argBrief(tool.name || "",tool.call.arguments);
-      el.querySelector(".st").textContent=tool.status === "running" ? "进行中" : tool.status === "failed" ? "失败" : "已返回";
+      el.querySelector(".ar").textContent=tool.missingCall ? I18n.t("调用参数见更早记录") : tool.call.preview || argBrief(tool.name || "",tool.call.arguments);
+      el.querySelector(".st").textContent=tool.status === "running" ? I18n.t("进行中") : tool.status === "failed" ? I18n.t("失败") : I18n.t("已返回");
       el.querySelector(".st").className=`st ${tool.status === "failed" ? "n" : tool.status === "done" ? "y" : ""}`;
       el.querySelector(".nt").textContent=tool.note || "";
-      el.querySelector(".tl-output").textContent=(tool.result || "等待工具返回")+(tool.clipped ? "\n\n此处展示前 24,000 字，完整内容可导出审计查看。" : "");
+      const images=el.querySelector(".tl-images");
+      images.innerHTML=typeof FileCards!=="undefined" ? (tool.images || []).map(image=>FileCards.imageCard(image)).join("") : "";
+      images.hidden=!images.innerHTML;
+      el.querySelector(".tl-output").textContent=(tool.result || I18n.t("等待工具返回"))+(tool.clipped ? I18n.t("\n\n此处展示前 24,000 字，完整内容可导出审计查看。") : "");
     }
   }
-  function executorLabel(task) {return task.singleExecutor ? "单执行者" : actorName(task.actor);}
-  function directionLabel(task) {return task.directionHints?.length ? `用户方向：${task.directionHints.join("、")}（提示）` : "";}
-  function actorLabel(actor) {return store.singleActors.has(actor) ? "单执行者" : "";}
+  function executorLabel(task) {return task.singleExecutor ? I18n.t("灵枢") : actorName(task.actor);}
+  function directionLabel(task) {return task.directionHints?.length ? I18n.t`用户方向：${task.directionHints.join("、")}（提示）` : "";}
+  function actorLabel(actor) {return store.singleActors.has(actor) ? I18n.t("灵枢") : "";}
   function render(task) {
     const narratives=[...task.segments.values()].filter(hasNarrative);
     const pending=[...task.segments.values()].filter(segment=>!hasNarrative(segment));
@@ -445,7 +486,7 @@ const TaskTrace = (() => {
     let row=rows.get(task.key);
     if(row || task.started || task.title || pendingTools.length) {
       if(!row?.isConnected) {
-        row=traceAppend(task.event,`<details class="task-thread task-dispatch task-execution-only" aria-label="任务执行记录">
+        row=traceAppend(task.event,I18n.html`<details class="task-thread task-dispatch task-execution-only" aria-label="任务执行记录">
           <summary class="task-heading">${sealOf(task.actor)}<strong></strong><span class="task-status"></span></summary>
           <p class="task-context"></p><p class="task-skills" hidden></p>
           <div class="task-tools"></div><pre class="task-execution-records"></pre>
@@ -456,22 +497,23 @@ const TaskTrace = (() => {
       if(task.endId != null) row.dataset.historyEnd=String(task.endId);
       row.hidden=!!narratives.length && !pendingTools.length;
       const root=row.querySelector(".task-thread");
-      root.querySelector(".task-heading strong").textContent=task.title || "此前意图的执行明细";
+      root.querySelector(".task-heading strong").textContent=task.title || I18n.t("此前意图的执行明细");
       root.dataset.status=task.status;row.dataset.taskStatus=task.status;
-      root.querySelector(".task-status").textContent=statuses[task.status] || "执行中";
+      root.querySelector(".task-status").textContent=statuses[task.status] || I18n.t("执行中");
       root.querySelector(".task-context").textContent=[executorLabel(task),directionLabel(task),task.target || task.id].filter(Boolean).join(" · ");
       const skillLine=root.querySelector(".task-skills"),skills=skillsOf(task);
-      skillLine.hidden=!skills.length;skillLine.textContent=skills.map(skill=>`使用技能「${skill.id}」· v${skill.version} · 已读 ${skill.paths.length} 个文件`).join("；");
+      skillLine.hidden=!skills.length;skillLine.textContent=skills.map(skill=>I18n.t`使用技能「${skill.id}」· v${skill.version} · 已读 ${skill.paths.length} 个文件`).join("；");
       renderTools(task,pendingTools,root.querySelector(".task-tools"));
       renderRecords(new Map(pending.flatMap(segment=>[...segment.records])),root.querySelector(".task-execution-records"));
     }
     for(const segment of narratives) {
       let segmentRow=segmentRows.get(segment.key);
       if(!segmentRow?.isConnected) {
-        segmentRow=traceAppend(segment.event,`<section class="task-thread task-stage task-continuation" aria-label="意图消息">
+        segmentRow=traceAppend(segment.event,I18n.html`<section class="task-thread task-stage task-continuation" aria-label="意图消息">
           <p class="task-context"></p>
           <header class="task-heading">${sealOf(task.actor)}<span class="task-marker" aria-hidden="true"></span><strong></strong><span class="task-status"></span></header>
           <div class="task-stage-summary md" aria-live="polite"></div>
+          <p class="task-repetition" role="status" hidden></p>
           <details class="task-step"><summary>执行明细 <span class="task-tool-count"></span></summary>
             <p class="task-progress"></p><div class="task-tools"></div><pre class="task-execution-records"></pre>
           </details></section>`,"tl-task tl-task-step");
@@ -485,30 +527,35 @@ const TaskTrace = (() => {
       stage.dataset.status=segment.status;group.dataset.stepKey=segment.key;group.dataset.status=segment.status;
       stage.querySelector(".task-context").textContent=[executorLabel(task),directionLabel(task),routeLabel(task,segment.route)].filter(Boolean).join(" · ");
       stage.querySelector(".task-heading strong").textContent=segmentTitle(task,segment);
-      stage.querySelector(".task-status").textContent=statuses[segment.status] || "执行中";
+      stage.querySelector(".task-status").textContent=statuses[segment.status] || I18n.t("执行中");
       group.querySelector(".task-progress").textContent=segment.progress || "";
-      const text=segmentSummary(segment), target=stage.querySelector(".task-stage-summary");
-      if(target.dataset.text!==text) {target.dataset.text=text;target.innerHTML=mdRender(text);}
+      const {notes,repeated}=narrativeOf(task,segment), text=notes.map(note=>note.text).join("\n\n");
+      const target=stage.querySelector(".task-stage-summary");
+      renderNarrative(target,notes);
+      const repetition=stage.querySelector(".task-repetition");
+      repetition.hidden=!repeated;
+      const repeatText=repeated ? I18n.t`相同说明重复出现 ${repeated} 次，已合并展示。` : "";
+      if(repetition.textContent!==repeatText) repetition.textContent=repeatText;
       const normalize=value=>String(value || "").trim().replace(/[。.!！]+$/u, "");
       target.hidden=!text || normalize(text)===normalize(segmentTitle(task,segment));
       const owned=[...segment.toolKeys].map(key=>task.tools.get(key)).filter(tool=>tool && !wrapper(tool.name)), list=group.querySelector(".task-tools");
       list.hidden=!owned.length;
       group.hidden=!owned.length && !segment.records.size;
       group.querySelector(".task-tool-count").textContent=owned.length
-        ? `· ${owned.filter(tool=>tool.status!=="running").length}/${owned.length} 次返回` : `· ${segment.records.size} 条调用记录`;
+        ? I18n.t`· ${owned.filter(tool=>tool.status!=="running").length}/${owned.length} 次返回` : I18n.t`· ${segment.records.size} 条错误信息`;
       renderTools(task,owned,list);
       renderRecords(segment.records,group.querySelector(".task-execution-records"));
     }
     if(terminal.has(task.status) && outcomeText(task)) {
       let summary=summaryRows.get(task.key);
       if(!summary?.isConnected) {
-        summary=traceAppend(task.endEvent || task.event,`<section class="task-thread task-outcome" aria-label="子任务结论"><header class="task-heading">${sealOf(task.actor)}<span class="task-marker" aria-hidden="true"></span><strong></strong><span class="task-status"></span></header><div class="task-summary md"></div></section>`,"tl-task");
+        summary=traceAppend(task.endEvent || task.event,I18n.html`<section class="task-thread task-outcome" aria-label="子任务结论"><header class="task-heading">${sealOf(task.actor)}<span class="task-marker" aria-hidden="true"></span><strong></strong><span class="task-status"></span></header><div class="task-summary md"></div></section>`,"tl-task");
         summaryRows.set(task.key,summary);summary.dataset.taskId=task.id;summary.dataset.taskPart="summary";
       }
       if(task.endId != null) summary.dataset.historyId=summary.dataset.historyStart=String(task.endId);
       const outcome=summary.querySelector(".task-thread");outcome.dataset.status=task.status;
       summary.dataset.taskStatus=task.status;
-      outcome.querySelector("strong").textContent=`${task.title || task.id || actorName(task.actor)} · 子任务结论`;
+      outcome.querySelector("strong").textContent=I18n.t`${task.title || task.id || actorName(task.actor)} · 子任务结论`;
       outcome.querySelector(".task-status").textContent=statuses[task.status];
       outcome.querySelector(".task-summary").innerHTML=mdRender(outcomeText(task));
     }
@@ -571,5 +618,5 @@ const TaskTrace = (() => {
     for(const key of dirty) {const task=store.tasks.get(key);if(task) render(task);}
     dirty.clear();
   }
-  return {push,reset,flush,create,reduce,summaryOf,resolve,updatesOf,commentaryText,skillsOf,stepTitle,stageSummary,liveSummary,progressSnapshot,routeSnapshot,actorLabel};
+  return {push,reset,flush,create,reduce,summaryOf,resolve,updatesOf,commentaryText,narrativeOf,skillsOf,stepTitle,stageSummary,liveSummary,progressSnapshot,routeSnapshot,actorLabel};
 })();

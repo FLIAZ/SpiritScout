@@ -23,6 +23,21 @@ class UsageCall(BaseModel):
     tokens: int = Field(default=0, ge=0)
     cost_usd: float = Field(default=0, ge=0, allow_inf_nan=False)
     model: str = ""
+    model_key: str = ""
+    provider_ref: str = ""
+    api_format: str = ""
+    configured_context_window: int | None = Field(default=None, ge=0)
+    requested_reasoning_effort: str | None = None
+    sent_reasoning_effort: str | None = None
+    estimated_cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    usd_pricing_status: str = ""
+    usd_rate_snapshot: dict[str, float | None] = Field(default_factory=dict)
+    billing_scheme: str = 'manual'
+    billing_plan: str = ''
+    pricing_snapshot: dict[str, Any] = Field(default_factory=dict)
+    pricing_status: str = ''
+    estimated_plan_credits_min: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    estimated_plan_credits_max: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     mode: str = ""
     call_id: str = ""
     runtime_version: str = ""
@@ -44,6 +59,7 @@ class UsageCall(BaseModel):
     reused_prefix_bytes: int | None = Field(default=None, ge=0)
     new_suffix_bytes: int | None = Field(default=None, ge=0)
     context_parts: dict[str, int] = Field(default_factory=dict)
+    cache_diagnostics: dict[str, Any] = Field(default_factory=dict)
     cache_scope: str = ""
     task_id: str = ""
     route_id: str = ""

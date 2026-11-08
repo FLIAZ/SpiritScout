@@ -8,9 +8,9 @@ class FakeSource {
   addEventListener(type, handler) { this.handlers[type] = handler; }
   close() { closed++; }
 }
-const sandbox = vm.createContext({S:{cur:'one',evSeen:0},EventSource:FakeSource,
+const sandbox = vm.createContext(require('./helpers/i18n').context({S:{cur:'one',evSeen:0},EventSource:FakeSource,
   SessionHistory:{clearLiveQueue(){},async drain(){}},
-  Date, refreshState(){refreshes++;},setInterval(){return 42;},clearInterval(){cleared++;}});
+  Date, refreshState(){refreshes++;},setInterval(){return 42;},clearInterval(){cleared++;}}));
 vm.runInContext(source.slice(source.indexOf('function startStreams('), source.indexOf('// 唤醒即自救')), sandbox);
 (async () => {
 vm.runInContext('startStreams(false)', sandbox);

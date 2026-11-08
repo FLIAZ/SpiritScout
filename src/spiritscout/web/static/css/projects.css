@@ -23,7 +23,7 @@
 .pfolder:hover .pf-top svg { color: var(--accent-ink); }
 .pf-ro { font: 10px var(--mono); border: 1px solid var(--line); border-radius: 999px;
   padding: 2px 7px; color: var(--ink-3); white-space: nowrap; }
-.pf-name { font-size: 14px; letter-spacing: -.01em; overflow-wrap: anywhere; }
+.pf-name { font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
 .pf-desc { font-size: 11.5px; line-height: 1.7; color: var(--ink-2); min-height: 2.4em; overflow-wrap: anywhere; }
 .pf-count { font: 11px var(--mono); color: var(--ink-2); }
 .pf-time { font: 10px var(--mono); color: var(--ink-3); margin-top: auto; }
@@ -33,8 +33,9 @@
 .pd-head { padding: 18px 20px 0; }
 .pd-head > [data-back] { margin-bottom: 10px; }
 .pd-title { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
-.pd-title h3 { font-size: 22px; margin: 6px 0; letter-spacing: -.02em; overflow-wrap: anywhere; }
-.pd-title p { font-size: 12.5px; line-height: 1.8; color: var(--ink-2); max-width: 760px; }
+.pd-title > div { min-width: 0; max-width: 100%; }
+.pd-title h3 { font-size: 20px; line-height: var(--heading-leading); margin: 0; overflow-wrap: anywhere; }
+.pd-title p { margin: 8px 0 0; font-size: 12.5px; line-height: 1.8; color: var(--ink-2); max-width: 760px; }
 .pd-title .pd-desc { white-space: pre-wrap; overflow-wrap: anywhere;
   max-height: 220px; overflow-y: auto; }
 .pd-ops { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -44,9 +45,9 @@
 .pd-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 12px 20px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
   background: var(--surface-2); }
-.pd-tabs { display: flex; gap: 4px; }
+.pd-tabs { display: flex; gap: 4px; max-width: 100%; overflow-x: auto; }
 .pd-tabs button { border: 0; background: transparent; color: var(--ink-2); font: inherit;
-  font-size: 12px; padding: 7px 12px; border-radius: 7px; cursor: pointer; }
+  font-size: 12px; padding: 7px 12px; border-radius: 7px; cursor: pointer; white-space: nowrap; flex-shrink: 0; }
 .pd-tabs button.on { background: var(--surface); color: var(--ink); font-weight: 600;
   box-shadow: inset 0 0 0 1px var(--line); }
 .pd-search { flex: 1; min-width: 160px; }
@@ -91,3 +92,6 @@
   .bar-left { width: 100%; }
   .bar-left .selx { flex: 1; max-width: none; }
 }
+
+.proj-chip { display:inline-flex; align-items:center; gap:6px; }
+.proj-chevron { width:13px; height:13px; flex:none; opacity:.8; }

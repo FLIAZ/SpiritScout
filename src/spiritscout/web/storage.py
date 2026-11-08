@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import sqlite3
 import stat
+import tempfile
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -14,12 +16,20 @@ from typing import TYPE_CHECKING, Any
 from cryptography.fernet import Fernet
 
 from spiritscout.core.exceptions import SpiritScoutError
+from spiritscout.core.storage_codec import (
+    MIN_COMPRESS_BYTES,
+    compress_bytes,
+    decompress_bytes,
+    is_compressed,
+    unpack_json,
+)
 from spiritscout.tools.run_lock import ExecutionRunLock
 
 if TYPE_CHECKING:
     from spiritscout.web.sessions import Session, SessionManager
 
 _DAG = ("task_state", "dag-snapshot")
+_LOG = logging.getLogger(__name__)
 
 
 def _regular(path: Path, root: Path) -> bool:
@@ -136,7 +146,7 @@ def _prune_checkpoints(conn: sqlite3.Connection, workspace: Path) -> int:
             keep.add(current)
             blob = conn.execute("SELECT state_cipher FROM runtime_checkpoints WHERE checkpoint_id=?",
                                 (current,)).fetchone()[0]
-            payload = json.loads(cipher.decrypt(blob))
+            payload = unpack_json(cipher.decrypt(blob))
             if not isinstance(payload, dict):
                 raise SpiritScoutError("检查点内容无效，保留全部检查点")
             if row["schema_version"] == 1:
@@ -153,6 +163,42 @@ def _prune_checkpoints(conn: sqlite3.Connection, workspace: Path) -> int:
                         "(SELECT id FROM retained_checkpoints)").rowcount
 
 
+def _compress_records(conn: sqlite3.Connection, workspace: Path, tables: set[str]) -> dict[str, int]:
+    """在原事务内重编码存量；保留行号、历史版本和所有原文，不压缩可 SQL 查询的现值。"""
+    count = saved = 0
+    fields = [("bb_record_history", "data", False), ("bb_event_outbox", "event_json", False),
+              ("runtime_checkpoints", "state_cipher", True),
+              ("tool_invocations", "params_cipher", True), ("tool_invocations", "result_cipher", True)]
+    cipher = None
+    for table, column, encrypted in fields:
+        if table not in tables or column not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+            continue
+        rows = conn.execute(f"SELECT rowid,{column} FROM {table} WHERE length({column})>=? ORDER BY rowid",
+                            (MIN_COMPRESS_BYTES,))
+        for row_id, original in rows:
+            blob = original.encode("utf-8") if isinstance(original, str) else original
+            if encrypted:
+                if cipher is None:
+                    cipher = Fernet((workspace / "execution.key").read_bytes())
+                raw = cipher.decrypt(blob)
+            else:
+                raw = blob
+            if is_compressed(raw):
+                continue
+            packed = compress_bytes(raw)
+            if packed == raw:
+                continue
+            if decompress_bytes(packed) != raw:
+                raise ValueError("存储压缩往返校验失败")
+            result = cipher.encrypt(packed) if encrypted else packed
+            conn.execute(f"UPDATE {table} SET {column}=? WHERE rowid=?", (result, row_id))
+            count += 1
+            saved += len(blob) - len(result)
+    if cipher is not None and "execution_schema_migrations" in tables:
+        conn.execute("INSERT OR IGNORE INTO execution_schema_migrations VALUES(4, ?)", (time.time(),))
+    return {"records_compressed": count, "payload_bytes_saved": saved}
+
+
 def clean_database(workspace: Path, progress: Any) -> dict[str, Any]:
     """事务内精简；VACUUM 失败时已释放页仍可复用，如实返回收缩未完成。"""
     if not (workspace / "bb.db").exists():
@@ -161,6 +207,9 @@ def clean_database(workspace: Path, progress: Any) -> dict[str, Any]:
     result: dict[str, Any] = {"warnings": []}
     try:
         tables = _tables(conn)
+        if "execution_schema_migrations" in tables and conn.execute(
+                "SELECT COALESCE(MAX(version),0) FROM execution_schema_migrations").fetchone()[0] > 4:
+            raise SpiritScoutError("执行台账版本高于当前程序支持版本，未清理数据库")
         # 大量 DELETE 也会生成回滚日志/WAL，不能等到 VACUUM 才检查磁盘。
         pages = conn.execute("PRAGMA page_count").fetchone()[0]
         unused = conn.execute("PRAGMA freelist_count").fetchone()[0]
@@ -188,6 +237,16 @@ def clean_database(workspace: Path, progress: Any) -> dict[str, Any]:
                 if not isinstance(exc, InvalidToken):
                     raise
                 result["warnings"].append("检查点未清理：密文校验失败")
+        progress("正在无损压缩历史记录")
+        conn.execute("SAVEPOINT storage_compression")
+        try:
+            result.update(_compress_records(conn, workspace, tables))
+        except Exception as exc:
+            # 任一密文/编码异常都回滚本次重编码；不把部分迁移误报为完成。
+            conn.execute("ROLLBACK TO storage_compression")
+            result["warnings"].append(f"历史记录未压缩：{type(exc).__name__}")
+        finally:
+            conn.execute("RELEASE storage_compression")
         conn.commit()
         progress("正在收缩数据库文件")
         checkpoint = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
@@ -216,6 +275,89 @@ class StorageCleaner:
         self.manager = manager
         self.jobs: dict[str, dict[str, Any]] = {}
         self._task: asyncio.Task | None = None
+        self._maintenance_task: asyncio.Task | None = None
+        self._attempted: dict[str, float] = {}
+
+    def start_maintenance(self) -> None:
+        if self.manager._cfg.storage.auto_maintenance and (
+                self._maintenance_task is None or self._maintenance_task.done()):
+            self._maintenance_task = asyncio.create_task(self._maintain(), name="session-storage-maintenance")
+
+    async def _maintain(self) -> None:
+        interval = self.manager._cfg.storage.maintenance_interval_seconds
+        # 启动及报告恢复优先；历史库迁移在后台串行执行。
+        await asyncio.sleep(min(30, interval))
+        while True:
+            try:
+                await self.maintain_once()
+            except Exception:
+                _LOG.exception("会话存储自动维护失败，下次扫描重试")
+            await asyncio.sleep(interval)
+
+    @staticmethod
+    def _signature(workspace: Path) -> list[list[int]]:
+        result = []
+        for name in ("bb.db", "bb.db-wal"):
+            try:
+                info = (workspace / name).stat()
+                result.append([info.st_size, info.st_mtime_ns, info.st_ino])
+            except FileNotFoundError:
+                result.append([0, 0, 0])
+        return result
+
+    async def maintain_once(self) -> None:
+        """已维护且未变化的数据库不重扫；失败退避，绝不自动清理证据或沙箱文件。"""
+        cfg = self.manager._cfg.storage
+        if not cfg.auto_maintenance:
+            return
+        for session in self.manager.list():
+            if self._task and not self._task.done():
+                return
+            now = time.time()
+            if (self.blocked_reason(session)
+                    or now - (session.finished_at or session.created_at) < cfg.idle_seconds
+                    or now - self._attempted.get(session.session_id, 0) < cfg.maintenance_interval_seconds
+                    or not session.bb_path.is_file()):
+                continue
+            # 与手动清理一致的路径检查，标记也不得跟随符号链接。
+            try:
+                workspace = self._session(session.session_id).workspace
+                marker = workspace / ".storage-maintenance.json"
+                if not _regular(marker, workspace):
+                    continue
+                signature = self._signature(workspace)
+            except (SpiritScoutError, OSError) as exc:
+                _LOG.warning("会话 %s 存储路径不可维护：%s", session.session_id, exc)
+                continue
+            try:
+                if json.loads(marker.read_text()) == {"format": 1, "database": signature}:
+                    continue
+            except (OSError, ValueError):
+                pass
+            self._attempted[session.session_id] = now
+            try:
+                self.start(session.session_id, database=True, caches=False)
+            except SpiritScoutError:
+                continue
+            await asyncio.shield(self._task)
+            job = self.jobs[session.session_id]
+            if job["status"] == "completed":
+                # 原子发布完成标记；掉电重跑仍是幂等重编码，不生成数据库副本。
+                try:
+                    payload = {"format": 1, "database": self._signature(workspace)}
+                    fd, temporary = tempfile.mkstemp(prefix=".storage-maintenance-", dir=workspace)
+                    try:
+                        with os.fdopen(fd, "w", encoding="utf-8") as output:
+                            json.dump(payload, output)
+                        os.replace(temporary, marker)
+                    finally:
+                        Path(temporary).unlink(missing_ok=True)
+                except OSError as exc:
+                    _LOG.warning("会话 %s 存储维护标记未保存，下次扫描重试：%s", session.session_id, exc)
+            else:
+                _LOG.warning("会话 %s 存储自动维护未完成：%s", session.session_id,
+                             job.get("warnings") or job.get("error"))
+            await asyncio.sleep(0)
 
     def _session(self, session_id: str) -> Session:
         session = self.manager.get(session_id)
@@ -306,5 +448,9 @@ class StorageCleaner:
             self.manager.storage_busy.discard(session.session_id)
 
     async def close(self) -> None:
+        if self._maintenance_task:
+            self._maintenance_task.cancel()
+            await asyncio.gather(self._maintenance_task, return_exceptions=True)
+            self._maintenance_task = None
         if self._task:
             await asyncio.shield(self._task)

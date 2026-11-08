@@ -28,11 +28,12 @@ from spiritscout.blackboard.exchange import GUIDANCE, NAMES, SCHEMAS, execute
 from spiritscout.blackboard.exchange import project_rules as project_rules_fn
 from spiritscout.core.ids import new_id
 from spiritscout.core.models import AgentType, BlackboardLayer, RunMode, Task
+from spiritscout.ctf.ai_tools import SCHEMA as AI_SCHEMA
+from spiritscout.ctf.ai_tools import inspect as inspect_ai
 from spiritscout.ctf.flags import FlagManager
 from spiritscout.gateway import world_state
 from spiritscout.gateway.context import (
     append_instruction_events,
-    compact_history_tokens,
     estimate_input_tokens,
 )
 from spiritscout.resources.runtime import (
@@ -42,7 +43,10 @@ from spiritscout.resources.runtime import (
     SkillRuntime,
 )
 from spiritscout.resources.store import ResourceStore
+from spiritscout.tools.background import NAMES as BACKGROUND_NAMES
+from spiritscout.tools.background import SCHEMAS as BACKGROUND_SCHEMAS
 from spiritscout.tools.catalog import MCP_PROXY_SCHEMAS, search_mcp_tools
+from spiritscout.tools.cve import SCHEMA as CVE_SCHEMA
 from spiritscout.tools.cyberchef import NAMES as CYBERCHEF_NAMES
 from spiritscout.tools.cyberchef import SCHEMAS as CYBERCHEF_SCHEMAS
 from spiritscout.tools.http_responses import SCHEMA as RESPONSE_SCHEMA
@@ -50,6 +54,8 @@ from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
 from spiritscout.tools.search_policy import search_allowed
 from spiritscout.tools.spec import ActionCategory
 from spiritscout.tools.web_search import SEARCH_SCHEMA
+from spiritscout.traffic.tools import NAMES as TRAFFIC_NAMES
+from spiritscout.traffic.tools import SCHEMAS as TRAFFIC_SCHEMAS
 
 # 题面中疑似编码串的最小长度（降噪）
 _MIN_BLOB_LEN = 12
@@ -459,6 +465,7 @@ class _DeltaEmitter:
             self.has_public_text = False
             self._buf.clear()
             self._kind = ""
+            self._emit("reset", "")
             return
         if kind == "tool_call":
             return          # 参数碎片不转播；整轮结束后统一发 tool_call 事件
@@ -477,12 +484,15 @@ class _DeltaEmitter:
         self._buf.clear()
         self._last = time.monotonic()
         if text.strip():
-            self.audit.log("agent.delta", self.agent_id, {
-                "task_id": (current_execution_scope.get() or ExecutionScope()).task_id,
-                "route_id": (current_execution_scope.get() or ExecutionScope()).route_id,
-                "route": self.route, "challenge": self.challenge,
-                "turn": self.turn, "kind": self._kind or "text",
-                "text": text[:4000]})
+            for start in range(0, len(text), 4000):
+                self._emit(self._kind or "text", text[start:start + 4000])
+
+    def _emit(self, kind: str, text: str) -> None:
+        scope = current_execution_scope.get() or ExecutionScope()
+        self.audit.log("agent.delta", self.agent_id, {
+            "task_id": scope.task_id, "route_id": scope.route_id,
+            "route": self.route, "challenge": self.challenge,
+            "turn": self.turn, "kind": kind, "text": text})
 
 
 def _obs_text(obs: dict[str, Any]) -> str:
@@ -538,6 +548,8 @@ class CTFBaseAgent(SubAgent):
         *SCHEMAS,
         *MCP_PROXY_SCHEMAS,
         RESPONSE_SCHEMA,
+        *TRAFFIC_SCHEMAS,
+        *BACKGROUND_SCHEMAS,
         *CYBERCHEF_SCHEMAS,
         _fn("steering_feedback", "向灵枢回报本任务指令的处理情况；accepted=说明下一步计划，"
             "completed=给出实际动作与证据，blocked=说明无法执行的事实原因。回执不代替实际操作。",
@@ -652,6 +664,8 @@ class CTFBaseAgent(SubAgent):
         _fn("asset_memory_lookup", "读取同一主机的跨会话历史观测；历史不代表当前事实，不含凭据或授权。",
             {"host": {"type": "string"}, "query": {"type": "string"}, "offset":{"type":"integer","minimum":0}}, required=["host"]),
         SEARCH_SCHEMA,
+        CVE_SCHEMA,
+        AI_SCHEMA,
         _fn("kb_search",
             "检索本地经验知识库：敏感路径/备份文件清单、PHP 弱类型等平台特性"
             "事实、模板注入 canary、隐写与提权检查点、本机工具面与字典位置、"
@@ -732,16 +746,24 @@ class CTFBaseAgent(SubAgent):
                      "complete": {"type":"boolean","description":"全部答案已确认设 true；无法完成且需结束当前调查设 false"}},
                     required=["answer_ids","reason"])
             if getattr(flag_manager, "fix_mode", False):
+                finish_schema = _fn('finish_challenge',
+                    'AWDP 审查未确认需修改时 complete=true、no_fix_needed=true，并在 reason 写审查范围和依据；'
+                    '这只登记审查结论，不证明绝对安全。已确认缺口但无法修复用 complete=false；有补丁用 submit_fix。',
+                    {'complete': {'type': 'boolean'}, 'no_fix_needed': {'type': 'boolean'},
+                     'reason': {'type': 'string', 'description': '审查范围、原件依据、正常行为与未覆盖项，或未完成的具体缺口'}},
+                    required=['complete', 'reason'])
                 self.tool_schemas = [s for s in self.tool_schemas
                                      if s["function"]["name"] != "submit_flag"] + [
                     _fn("submit_fix",
-                        "登记本题修复补丁：只含被修改文件的 tar.gz（保持与原始附件一致的"
-                        "相对路径）已在工作目录生成后调用，登记即完成本题。",
-                        {"archive": {"type": "string", "description": "补丁包路径（如 fix.tar.gz）"},
+                        "登记本题修复提交件，默认 tar.gz 赛事包（patch.sh/update.sh 入口与修复文件）；具体格式以题面/平台规则为准，兼容裸脚本。"
+                        "包内含可执行入口及必要修复文件，按部署映射应用；不混入报告或测试数据。"
+                        "先验证正常功能和漏洞回归，登记即完成本题。",
+                        {"archive": {"type": "string", "description": "最终提交件路径，如 build_patch 返回的 patch.tar.gz/update.tar.gz；必须提交被验证的同一文件"},
                          "files": {"type": "array", "items": {"type": "string"},
-                                   "description": "被修改文件的原始相对路径清单"},
+                                   "description": "被修改文件的原始相对路径清单；脚本填写声明将修改的目标文件，不填脚本自身"},
                          "description": {"type": "string",
-                                         "description": "漏洞类别、位置与修法说明"}},
+                                         "description": "漏洞位置、可达性与危害证据、根因修法、部署路径/调用方法、实际回归结果及未验证项"},
+                         "verification_ref": {"type": "string", "description": "可选：verify_patch 返回的回执，绑定整个最终压缩包/脚本与原件；缺失时明确标记未获工具验证"}},
                         required=["archive", "files", "description"]),
                     finish_schema]
             else:
@@ -766,7 +788,30 @@ class CTFBaseAgent(SubAgent):
             self.tool_schemas.append(_fn("history_read", "按原始消息编号或当前指令编号分页读取本题历史；摘要不是完整证据。",
                 {"message_index": {"type": "integer"}, "instruction_id": {"type": "string"},
                  "offset": {"type": "integer"}, "length": {"type": "integer"}}))
+        if not self._is_lightweight():
+            from spiritscout.ctf.answer_evidence import REVIEW_SCHEMA
+            from spiritscout.ctf.evidence_memory import SCHEMA as MEMORY_SCHEMA
+
+            self.tool_schemas.append(copy.deepcopy(MEMORY_SCHEMA))
+            self.tool_schemas.append(_fn("history_read", "读取当前路线原始历史。find 返回精确命中总数、位置和附近原文，避免逐次查找确认数量；"
+                "view=content 可直接引用工具输出原文，默认 message 为完整消息 JSON。",
+                {"message_index": {"type": "integer"}, "offset": {"type": "integer"},
+                 "length": {"type": "integer"}, 'view': {'type': 'string', 'enum': ['message', 'content']},
+                 'find': {'type': 'string', 'maxLength': 200, 'description': '在指定 view 中从 offset 起精确查找，返回命中位置附近原文；不是正则'}},
+                required=["message_index"]))
+            for schema in self.tool_schemas:
+                if schema['function']['name'] == 'record_answer':
+                    schema['function']['parameters']['properties']['evidence_refs']['description'] = (
+                        '工具返回的执行证据 ID（invocation_id/execution_ref/evidence_refs）或有执行来源的黑板引用；'
+                        'message_index 只供历史定位，不能作执行证据。')
+                    schema['function']['parameters']['properties']['review'] = copy.deepcopy(REVIEW_SCHEMA)
+                    schema['function']['parameters']['required'].append('review')
+                    schema['function']['description'] = ('核对题面、推导及实际验证后登记答案；已有有效观察支持时直接引用，'
+                        '无需为登记重复取证或先更新笔记。证据不满足时返回缺口继续调查，不向平台提交。')
         self._merge_mcp_schemas()
+        from spiritscout.tools.images import SCHEMA as IMAGE_SCHEMA
+
+        self.tool_schemas = [*self.tool_schemas, copy.deepcopy(IMAGE_SCHEMA)]
 
     @staticmethod
     def _mcp_tool_schema(prefix: str, entry: dict[str, Any]) -> dict[str, Any]:
@@ -951,26 +996,61 @@ class CTFBaseAgent(SubAgent):
                         "lightweight_local", False)
                 and getattr(self.ctx, "mode", None) in (RunMode.CTF, RunMode.AWDP))
 
+    def _model_tool_schemas(self) -> list[dict[str, Any]]:
+        """本回合发送的工具入口；执行校验仍使用完整工具目录。"""
+        return self.tool_schemas
+
+    def _recovery_tool_choice(self) -> str:
+        """默认协议保留 auto；支持原生约束的独立执行器可收紧恢复请求。"""
+        return "auto"
+
+    def _context_projection_options(self, budget: int) -> dict[str, Any]:
+        return {}
+
+    def _ensure_progress_guidance(self, state: dict[str, Any]) -> None:
+        from spiritscout.gateway.progress import ensure_exploration_progress
+
+        ensure_exploration_progress(state)
+
+    def _model_response_received(self, task: Task, route, state: dict[str, Any]) -> None:
+        """当前请求成功返回后，由执行者确认本轮携带的用户消息。"""
+
+    def _record_public_progress(self, task: Task, route, state: dict[str, Any], detail: dict[str, Any] | None) -> None:
+        """执行者可保存模型明确声明的公开探索关系，不从自然语言推断。"""
+
     def _light_model_messages(self, task: Task, route, state: dict[str, Any]) -> list[dict[str, Any]]:
         from spiritscout.gateway.light_context import project_context
 
         budget_for = getattr(self.ctx.gateway, "context_budget", None)
         budget = budget_for(task_type="execution") if callable(budget_for) else None
+        archive_before = state.get("manual_archive_before", 0)
+        if archive_before and budget is None:
+            # 未声明模型窗口时，手动归档仍可执行；不把此估值伪装成模型容量。
+            budget = estimate_input_tokens(state["messages"], self._model_tool_schemas()) + 4096
         if not self._is_lightweight() or budget is None:
+            if self._is_lightweight():
+                state["model_skill_refs"] = sorted({m["_skill_ref"] for m in state["messages"] if m.get("_skill_ref")})
             return _model_messages(state["messages"], initialized=bool(state.get("system_initialized")))
-        projected = project_context(state["messages"], self.tool_schemas, budget,
-            world=state.get("world_state"), instructions=self._active_steering(task, route))
-        if projected.archived_turns:
+        projected = project_context(state["messages"], self._model_tool_schemas(), budget,
+            world=state.get("world_state"), instructions=self._active_steering(task, route),
+            archive_before=archive_before,
+            **self._context_projection_options(budget))
+        state["model_skill_refs"] = projected.skill_refs
+        before = projected.original_tokens
+        if projected.archived_turns or before != projected.estimated_tokens:
             self.ctx.audit.log("context.projected", self.agent_id, {
                 "task_id": task.task_id, "route_id": route.route_id,
                 "archived_turns": projected.archived_turns,
-                "estimated_tokens_after": projected.estimated_tokens, "max_input_tokens": budget})
+                "estimated_tokens_before": before, "estimated_tokens_after": projected.estimated_tokens,
+                "tools_tokens": estimate_input_tokens([], self._model_tool_schemas()),
+                "active_skill_refs": projected.skill_refs, "max_input_tokens": budget})
         return _model_messages(projected.messages, initialized=bool(state.get("system_initialized")))
 
     def _completion_instruction(self) -> str:
         if getattr(self.ctx, "mode", None) == RunMode.AWDP and getattr(self.flag_manager, "fix_mode", False):
             return ("修补提交件和测试依据准备好后，用 submit_fix 的 archive、files 数组与 description 登记；"
-                    "归档接收不等同于漏洞修复有效。")
+                    "提交件登记不等同于漏洞修复有效。未确认需修改之处时，用 "
+                    "finish_challenge(complete=true,no_fix_needed=true,reason=审查范围与依据) 结束审查，不制造无意义补丁。")
         return ("用户已勾选多答案，逐个 record_answer 登记证据，全部取得后 finish_challenge。"
                 if self.flag_manager.multiple_answers else
                 "用户选择单答案，取得答案后直接 record_answer 携带证据，登记即结束，不再探查其他答案。")
@@ -989,12 +1069,14 @@ class CTFBaseAgent(SubAgent):
                       "答案已有证据时调用 record_answer 登记原文与依据。")
         state["messages"].append({"role": "user", "_light_kind": "recovery", "content": (
             "上一回合没有携带工具调用。需要继续调查时，从可用工具中自主选择下一步并实际调用；"
-            + completion + "无法继续时用 finish_challenge(complete=false) 说明缺口。")})
+            + completion + "无法继续时用 finish_challenge(complete=false) 说明缺口。"
+            "本次通过原生 tool_calls 输出实际动作；正文可以为空，不再单独重复 progress/exploration JSON。")})
         try:
             rec = await self.ctx.gateway.chat(
                 self._light_model_messages(task, route, state), task_type="execution",
                 timeout_seconds=_SOLVER_TIMEOUT,
-                tools=self.tool_schemas, tool_choice="auto",
+                tools=self._model_tool_schemas(), tool_choice=self._recovery_tool_choice(),
+                preserve_tool_order=bool(getattr(self.flag_manager, 'fix_mode', False)),
                 preserve_context=True, reasoning_effort=self.task_effort(task))
         except Exception as exc:  # noqa: BLE001 —— 恢复失败走原路径
             self.ctx.audit.log("solver.forced_recovery", self.agent_id, {
@@ -1004,17 +1086,17 @@ class CTFBaseAgent(SubAgent):
         rec_calls = [c for c in (rec.tool_calls or []) if isinstance(c, dict)]
         self.ctx.audit.log("solver.forced_recovery", self.agent_id, {
             "route": route.name, "challenge": self.challenge_id(task),
-            "turn": turn, "ok": bool(rec_calls)})
+            "turn": turn, "ok": bool(rec_calls), "finish_reason": getattr(rec, "finish_reason", "")})
+        assistant: dict[str, Any] = {"role": "assistant", "content": rec.content or ""}
+        state["messages"].append(assistant)
         if not rec_calls:
             return []
-        assistant: dict[str, Any] = {"role": "assistant", "content": rec.content or ""}
         assistant["tool_calls"] = [
             {"id": c.get("id") or f"rec_{i}", "type": "function",
              "function": {"name": str(c.get("name") or "shell"),
                           "arguments": c.get("raw") or json.dumps(
                               c.get("arguments") or {}, ensure_ascii=False)}}
             for i, c in enumerate(rec_calls)]
-        state["messages"].append(assistant)
         return rec_calls
 
     def _save_inv_state(self, task: Task, route, state: dict[str, Any]) -> None:
@@ -1396,6 +1478,13 @@ class CTFBaseAgent(SubAgent):
                 # 同伴动态作为新消息注入：并行 Agent 的现场即时互通
                 state["messages"].append({"role": "user", "content": update})
 
+        from spiritscout.tools.background import take_notifications
+
+        notifications = take_notifications(getattr(self.ctx, "builtin_ctx", {}).get("workspace_root", ""), self.agent_id,
+            self._tool_ctx(task).get("workspace_scope", ""))
+        if notifications:
+            state["messages"].append({"role":"user", "_light_kind": "observation",
+                "content":"后台任务通知（工具观测，不是新的用户指令）：" + json.dumps(notifications, ensure_ascii=False)})
         fragment, changed = self._sync_world_state(state)
         if fragment:
             state["messages"].append({"role": "user", "content": fragment,
@@ -1413,9 +1502,7 @@ class CTFBaseAgent(SubAgent):
         state["turn"] += 1
         turn = state["turn"]
         include_initial_system = not bool(state.get("system_initialized"))
-        from spiritscout.gateway.progress import ensure_exploration_progress
-
-        ensure_exploration_progress(state)
+        self._ensure_progress_guidance(state)
         records = (self.ctx.ring.steerings_for(self.agent_type.value, task_id=task.task_id)
                    if self.ctx.ring is not None else [])
         before_instructions = len(state["messages"])
@@ -1425,16 +1512,7 @@ class CTFBaseAgent(SubAgent):
         self._merge_mcp_schemas()
         budget_for = getattr(self.ctx.gateway, "context_budget", None)
         budget = budget_for(task_type="execution") if callable(budget_for) else None
-        if budget is not None and not self._is_lightweight():
-            before = estimate_input_tokens(state["messages"], self.tool_schemas)
-            if compact_history_tokens(state["messages"], budget, tools=self.tool_schemas):
-                self.ctx.audit.log("context.compacted", self.agent_id, {
-                    "task_id": task.task_id, "route_id": route.route_id,
-                    "reason": "token_window_pressure", "max_input_tokens": budget,
-                    "estimated_tokens_before": before,
-                    "estimated_tokens_after": estimate_input_tokens(
-                        state["messages"], self.tool_schemas)})
-        elif budget is None:
+        if budget is None and self._is_lightweight():
             # 未声明容量的第三方端点保留旧整理方式，不猜测其真实窗口。
             size = len(json.dumps(state["messages"], ensure_ascii=False))
             if size > state.get("compact_at", _MSG_CHAR_BUDGET):
@@ -1458,14 +1536,47 @@ class CTFBaseAgent(SubAgent):
         from spiritscout.gateway.light_context import ContextWindowError
 
         try:
+            from spiritscout.gateway.manual_context import (
+                archive_boundary,
+                pending_request,
+                record_result,
+            )
+
+            compact_request = pending_request(self.ctx.blackboard, state.get("manual_compaction_id", ""))
+            before_compaction = None
+            if compact_request and self._is_lightweight():
+                try:
+                    before_compaction = estimate_input_tokens(
+                        self._light_model_messages(task, route, copy.deepcopy(state)), self._model_tool_schemas())
+                except ContextWindowError:
+                    before_compaction = estimate_input_tokens(state["messages"], self._model_tool_schemas())
+                # 留住最近四轮助手回复及其完整工具结果，旧请求不会继续归档新消息。
+                state["manual_archive_before"] = archive_boundary(state["messages"])
             if self._is_lightweight():
                 messages = self._light_model_messages(task, route, state)
+            else:
+                from spiritscout.gateway.normal_context import project
+
+                view = project(state, self._model_tool_schemas(), budget, force=compact_request is not None)
+                before_compaction = view['previous_tokens']
+                messages = view['messages']
+                if view['new_archived_turns']:
+                    self.ctx.audit.log('context.projected', self.agent_id, {
+                        'task_id': task.task_id, 'route_id': route.route_id, 'mode': 'normal',
+                        **{k: v for k, v in view.items() if k != 'messages'}})
+            if compact_request:
+                state["manual_compaction_id"] = compact_request["request_id"]
+                self._save_inv_state(task, route, state)
+                record_result(self.ctx.blackboard, compact_request, f"execution:{task.task_id}:{route.route_id}",
+                    before_compaction, estimate_input_tokens(messages, self._model_tool_schemas()),
+                    audit=self.ctx.audit, actor=self.agent_id)
             resp = await self.ctx.gateway.chat(
                 messages, task_type="execution",
                 # 输出上限由网关按模型配置处理，避免截断思考或工具参数。
                 timeout_seconds=_SOLVER_TIMEOUT,
-                tools=self.tool_schemas, tool_choice="auto",
-                preserve_tool_order=bool(state.get("shared_prefix", False)),
+                tools=self._model_tool_schemas(), tool_choice="auto",
+                preserve_tool_order=bool(state.get("shared_prefix", False)
+                    or (self._is_lightweight() and getattr(self.flag_manager, 'fix_mode', False))),
                 preserve_context=True,
                 on_delta=emitter if getattr(self, "public_body", False) and self._is_lightweight() else
                 (lambda kind, text: emitter(kind, text) if kind != "text" else None)
@@ -1494,6 +1605,7 @@ class CTFBaseAgent(SubAgent):
         emitter.flush()
         state["llm_failures"] = 0
         state["system_initialized"] = True
+        self._model_response_received(task, route, state)
         if isinstance(getattr(resp, "model", None), str) and resp.model:
             models = state.setdefault("response_models", [])
             if resp.model not in models:
@@ -1506,16 +1618,19 @@ class CTFBaseAgent(SubAgent):
         from spiritscout.gateway.progress import publish_progress
 
         public_body = getattr(self, "public_body", False) and self._is_lightweight()
+        progress = None
         if public_body:
-            if not emitter.has_public_text:
-                publish_progress(self.ctx.audit, self.agent_id, resp.content or "",
-                    task_id=task.task_id, route_id=route.route_id, turn=state.get("turn", 0))
+            # 流式正文服务实时展示；完整事件仍须持久化，供探索图和刷新后回放。
+            progress = publish_progress(self.ctx.audit, self.agent_id, resp.content or "",
+                task_id=task.task_id, route_id=route.route_id, turn=state.get("turn", 0),
+                streamed=emitter.has_public_text)
         elif resp.tool_calls:
-            publish_progress(self.ctx.audit, self.agent_id, resp.content or "",
+            progress = publish_progress(self.ctx.audit, self.agent_id, resp.content or "",
                              task_id=task.task_id, route_id=route.route_id, turn=state.get("turn", 0))
         elif not getattr(self.flag_manager, "local_only", False):
-            publish_progress(self.ctx.audit, self.agent_id, resp.content or "",
+            progress = publish_progress(self.ctx.audit, self.agent_id, resp.content or "",
                              task_id=task.task_id, route_id=route.route_id, turn=state.get("turn", 0))
+        self._record_public_progress(task, route, state, progress)
         calls = [c for c in (resp.tool_calls or []) if isinstance(c, dict)]
         lightweight = (getattr(getattr(getattr(self.ctx, "gateway", None), "config", None),
                                "lightweight_local", False)
@@ -1541,11 +1656,11 @@ class CTFBaseAgent(SubAgent):
         state["messages"].append(assistant)
 
         if (not calls and getattr(self.flag_manager, "local_only", False)
-                and not task.payload.get("followup_goal") and str(resp.content or "").strip()):
+                and (lightweight or not task.payload.get("followup_goal")) and str(resp.content or "").strip()):
             if lightweight:
-                # Ollama 小模型专属补偿：叙述回合先用强制工具恢复（Ollama
-                # 按名强制）把口述动作变成真实执行；恢复失败才计数，连续
-                # 第二次仍无动作落入下方通用结论路径。
+                # Ollama 小模型专属补偿：叙述回合用同一工具目录重试，
+                # 让模型自主选择真实动作；恢复失败只记录状态，
+                # 不能把尚未执行的口述计划当作调查结论。
                 recovered = await self._forced_tool_recovery(task, route, state, turn)
                 if recovered:
                     calls = recovered
@@ -1556,7 +1671,7 @@ class CTFBaseAgent(SubAgent):
                     state["prose_only_turns"] = prose_only
                     if prose_only == 1:
                         instruction = self._completion_instruction()
-                        state["messages"].append({"role": "user", "content": (
+                        state["messages"].append({"role": "user", "_light_kind": "recovery", "content": (
                             "上一回合只输出了文字，恢复调用也没有携带工具调用。"
                             "需要继续调查时自主选择工具并实际调用；已完成目标时按完成契约登记；"
                             "无法完成时用 finish_challenge(complete=false, reason=具体缺口)。"
@@ -1572,13 +1687,13 @@ class CTFBaseAgent(SubAgent):
                 self._save_inv_state(task, route, state)
                 return StepResult(ok=True, note="正在核对答案完整性，题解由后台报告统一生成")
         if not calls:
-            # 不再调用工具 = 调查结束，这条消息就是结论
+            # 兼容普通模式的正文结论；轻量模式须在下方检查显式完成动作。
             summary = (resp.content or "").strip()
             if not summary:
                 # 协议修复：正文为空且无工具调用，多见于思考型模型把输出
                 # 额度耗在思考段——空回合不是结论。轻量模式先强制恢复成
-                # 工具调用；恢复不了再注入提示，连续两次仍空按无结论收尾
-                if lightweight and int(state.get("empty_replies") or 0) == 0:
+                # 工具调用；恢复不了保持待执行，不能按空回复次数判定收尾
+                if lightweight:
                     recovered = await self._forced_tool_recovery(task, route, state, turn)
                     if recovered:
                         calls = recovered
@@ -1602,6 +1717,18 @@ class CTFBaseAgent(SubAgent):
                                           note=self._merge_note(boot_note, note))
             else:
                 state["empty_replies"] = 0
+        if not calls and lightweight:
+            # 结束调查须由模型显式调用完成契约；普通正文、空回复与恢复失败都不是完成信号。
+            state["messages"].append({"role": "user", "_light_kind": "recovery", "content": (
+                "本回合仍未收到工具调用，口述计划尚未执行，任务保持进行中。"
+                "需要继续调查时实际调用工具；" + self._completion_instruction()
+                + "无法继续时调用 finish_challenge(complete=false, reason=具体缺口)，不能只输出计划代替动作。")})
+            self.ctx.audit.log("solver.awaiting_tool_action", self.agent_id, {
+                "task_id": task.task_id, "route_id": route.route_id, "turn": turn,
+                "empty_reply": not bool(str(resp.content or "").strip())})
+            note = self._extend_or_finish(plan, state, f"第 {turn} 回合：未收到工具动作，等待模型明确继续或结束")
+            self._save_inv_state(task, route, state)
+            return StepResult(ok=True, value=boot_value, note=self._merge_note(boot_note, note))
         if not calls:
             summary = (resp.content or "").strip()
             state["conclusion_text"] = summary[:2000]
@@ -1636,6 +1763,7 @@ class CTFBaseAgent(SubAgent):
         empty_streak = int(state.get("empty_streak") or 0)
         for idx, (call, out) in enumerate(zip(calls, outcomes)):
             text = out.text or "（无输出）"
+            result_name = out.metadata.get("invoked_tool") or call.get("name")
             if idx == 0 and out.ok and empty_streak >= 3:
                 # 感知标注（非规则）：连续空输出是「方法可能不成立」的事实信号，
                 # 是否换路由模型自行判断——后端不截断不强制
@@ -1645,10 +1773,14 @@ class CTFBaseAgent(SubAgent):
             state["messages"].append({
                 "role": "tool", "tool_call_id": call.get("id") or "call_0",
                 # 参数契约按需查询后必须完整可读，不能把 schema JSON 截成半段。
-                "content": text if call.get("name") in SKILL_NAMES | NAMES or call.get("name") in {"mcp_search", "http_response_read"} else text[:_TOOL_RESULT_CAP],
+                "content": text if (result_name in SKILL_NAMES | NAMES
+                    or result_name in {"mcp_search", "http_response_read", "tool_lookup", "tool_help", "history_read", "ai_inspect"}
+                    or not lightweight or result_name in {"shell", "python", "source_manifest", "verify_patch",
+                                                         "edit_source", "build_patch", "source_context", "source_scan"}) else text[:_TOOL_RESULT_CAP],
                 **({"_context_contract": True, "_skill_ref": out.metadata["skill_ref"]}
                    if out.metadata.get("skill_ref") else
-                   {"_context_contract": True} if call.get("name") == "mcp_search" else {})})
+                   {"_context_contract": True} if result_name == "mcp_search" else {})})
+            self._observe_tool_result(state, call, out)
             total_value += out.value
             findings.extend(out.findings)
             if out.note:
@@ -1679,6 +1811,13 @@ class CTFBaseAgent(SubAgent):
             findings=findings, note=self._merge_note(boot_note, note[:300]))
 
     # ------------------------------------------------------------ 工具执行
+
+    def _observe_tool_result(self, state: dict[str, Any], call: dict[str, Any], outcome: _ToolOutcome) -> None:
+        """结果写入历史后再派生观察，确保引用指向实际结果而非尚未结束的调用。"""
+        if not self._is_lightweight():
+            from spiritscout.gateway.normal_context import observe
+
+            observe(state, call, outcome)
 
     async def _run_tool_call(self, task: Task, route, state: dict[str, Any],
                              call: dict[str, Any]) -> _ToolOutcome:
@@ -1718,9 +1857,13 @@ class CTFBaseAgent(SubAgent):
                 ok=False,
                 text=f"工具 {name} 不在 {self.agent_type.value} 的工具目录内。",
             )
+        if name == "evidence_memory" and not self._is_lightweight():
+            from spiritscout.ctf.evidence_memory import execute as memory_execute
+
+            result = memory_execute(state, args)
+            return _ToolOutcome(ok=result['ok'], text=json.dumps(result, ensure_ascii=False, separators=(',', ':')),
+                metadata={'memory_revision': result['revision']} if result['ok'] else {})
         if name == "history_read":
-            if not self._is_lightweight():
-                return _ToolOutcome(ok=False, text="history_read 仅用于轻量会话")
             index, identifier = args.get("message_index"), args.get("instruction_id")
             offset, length = args.get("offset", 0), args.get("length", 2000)
             if (type(offset) is not int or offset < 0
@@ -1736,9 +1879,46 @@ class CTFBaseAgent(SubAgent):
                 original = state["messages"][index]
             raw = json.dumps({k: v for k, v in original.items() if not k.startswith("_")},
                              ensure_ascii=False, separators=(",", ":"))
+            extra = {}
+            if not self._is_lightweight():
+                from spiritscout.ctf.evidence_memory import source_digest
+
+                view = args.get('view', 'message')
+                if view not in ('message', 'content'):
+                    return _ToolOutcome(ok=False, text='view 需要 message 或 content')
+                if view == 'content':
+                    if not isinstance(original.get('content'), str):
+                        return _ToolOutcome(ok=False, text='该消息不是文本 content，请用 view=message 读取')
+                    raw = original['content']
+                invocation_id = (original.get('_normal_observation') or {}).get('invocation_id')
+                extra = {'view': view, 'source_sha256': source_digest(original), 'offset_unit': 'characters',
+                         'evidence_refs': [invocation_id] if invocation_id else []}
+                query = args.get('find')
+                if query is not None:
+                    if not isinstance(query, str) or not 1 <= len(query) <= 200:
+                        return _ToolOutcome(ok=False, text='find 需要 1–200 字符的精确原文')
+                    position = raw.find(query, offset)
+                    positions, cursor = [], offset
+                    while len(positions) < 16:
+                        hit = raw.find(query, cursor)
+                        if hit < 0:
+                            break
+                        positions.append(hit)
+                        cursor = hit + len(query)
+                    count = raw.count(query, offset)
+                    extra.update(found=position >= 0, match_offset=position if position >= 0 else None,
+                        total_matches=raw.count(query), matches_from_offset=count, match_offsets=positions,
+                        offsets_truncated=count > len(positions), search_complete=True,
+                        search_semantics='精确、区分大小写、非重叠；total_matches 覆盖该 view 全文，位置从请求 offset 起列举')
+                    if position < 0:
+                        return _ToolOutcome(ok=True, text=json.dumps({'message_index': index, **extra,
+                            'offset': offset, 'text': '', 'total_chars': len(raw), 'next_offset': len(raw),
+                            'has_more': False}, ensure_ascii=False))
+                    # 保证短页也包含命中位置；分页仍以返回的 view 和 next_offset 延续。
+                    offset = max(offset, position - min(200, length // 4))
             return _ToolOutcome(ok=True, text=json.dumps({"message_index": index, "instruction_id": identifier,
                 "offset": offset, "text": raw[offset:offset + length], "total_chars": len(raw),
-                "next_offset": min(offset + length, len(raw)), "has_more": offset + length < len(raw)},
+                "next_offset": min(offset + length, len(raw)), "has_more": offset + length < len(raw), **extra},
                 ensure_ascii=False))
         if name in NAMES:
             result = execute(self.ctx.blackboard, name, args, actor=self.agent_id,
@@ -1783,6 +1963,8 @@ class CTFBaseAgent(SubAgent):
                     raise ValueError("当前会话未装配技能资源库")
                 seen = {message["_skill_ref"] for message in state.get("messages", [])
                         if message.get("_skill_ref")}
+                if self._is_lightweight() and "model_skill_refs" in state:
+                    seen = set(state["model_skill_refs"])
                 result = runtime.execute(name, args, state.setdefault("skills", {}), seen=seen)
                 brief = {key: value for key, value in result.items() if key != "content"}
                 metadata = {"skill": brief}
@@ -1806,10 +1988,16 @@ class CTFBaseAgent(SubAgent):
                 out = await self._tool_mcp(task, str(args.get("name") or ""), args["arguments"])
             elif name == "http_request":
                 out = await self._tool_http(task, route, state, args)
-            elif name == "http_response_read":
+            elif name == "view_image":
                 result = await self.ctx.tools.call(name, args, **self._tool_ctx(task))
                 out = _ToolOutcome(ok=result.ok, text=result.stdout or result.error,
-                                   note="读取本地响应源码" if result.ok else "读取响应源码失败",
+                    note="查看图像" if result.ok else result.error,
+                    metadata={"invocation_id": result.invocation_id, **result.parsed})
+            elif name == "http_response_read" or name in TRAFFIC_NAMES | BACKGROUND_NAMES:
+                result = await self.ctx.tools.call(name, args, **self._tool_ctx(task))
+                out = _ToolOutcome(ok=result.ok, text=result.stdout or result.error,
+                                   note=("后台 Shell / 等待" if name in BACKGROUND_NAMES else "读取本地流量证据")
+                                   + ("完成" if result.ok else "失败"),
                                    metadata={"invocation_id": result.invocation_id})
             elif name in CYBERCHEF_NAMES:
                 result = await self.ctx.tools.call(name, args, **self._tool_ctx(task))
@@ -1818,6 +2006,8 @@ class CTFBaseAgent(SubAgent):
                                    metadata={**result.parsed, "invocation_id": result.invocation_id})
             elif name in ("shell", "python"):
                 out = await self._tool_sandbox(task, route, state, name, args)
+            elif name == "ai_inspect":
+                out = await inspect_ai(self, task, route, args)
             elif name == "analyze_text":
                 out = await self._tool_analyze_text(task)
             elif name == "analyze_attachments":
@@ -1830,10 +2020,11 @@ class CTFBaseAgent(SubAgent):
                 page = resources.assets(query=str(args.get("query", "")),host=host,offset=max(0,int(args.get("offset",0))),limit=20)
                 out = _ToolOutcome(ok=True, value=0, note="已读取历史资产，仍需按任务复核",
                     text=json.dumps({**page,"notice":"历史参考，不代表本次已验证；旧授权和凭据不会复用"},ensure_ascii=False))
-            elif name == "web_search":
+            elif name in {"web_search", "cve_lookup"}:
                 res = await self.ctx.tools.call(name, args, **self._tool_ctx(task))
                 out = _ToolOutcome(ok=res.ok, text=res.stdout or res.failure_reason(),
-                    note=f"公开资料检索：{args.get('query', '')}", metadata=res.parsed)
+                    note=(f"CVE 情报：{args.get('cve_id') or args.get('query', '')}"
+                          if name == "cve_lookup" else f"公开资料检索：{args.get('query', '')}"), metadata=res.parsed)
             elif name == "kb_search":
                 out = await self._tool_kb_search(args)
             elif name == "ask_user":
@@ -1915,7 +2106,7 @@ class CTFBaseAgent(SubAgent):
                             text=body[:_TOOL_RESULT_CAP])
 
     async def _tool_submit_fix(self, task: Task, route, args: dict[str, Any]) -> _ToolOutcome:
-        """AWDP：校验归档和原始路径后登记；漏洞有效性仍需模型提供验证依据。"""
+        """AWDP：校验脚本/归档及原始路径后登记，修复有效性由实际测试证明。"""
         manager = self.flag_manager
         if (not getattr(manager, "fix_mode", False)
                 or getattr(self.ctx, "mode", None) != RunMode.AWDP):
@@ -1936,14 +2127,39 @@ class CTFBaseAgent(SubAgent):
             patch = await asyncio.to_thread(
                 validate_patch, workspace, self.challenge_id(task), archive.strip(), files,
                 list(self.challenge_of(task).get("attachments") or []))
+            receipt = None
+            if args.get('verification_ref'):
+                from spiritscout.awdp.verification import check_receipt, issues
+
+                receipt = await asyncio.to_thread(check_receipt, workspace, self.challenge_id(task),
+                    args['verification_ref'], patch.sha256, list(self.challenge_of(task).get('attachments') or []))
+                if receipt['status'] != 'passed':
+                    return _ToolOutcome(ok=False, text=json.dumps({
+                        'ok': False, 'executed': False, 'status': 'verification_not_passed',
+                        'verification_status': receipt['status'], 'verification_ref': args['verification_ref'],
+                        'archive': archive, 'issues': issues(receipt.get('reports', {})),
+                        'note': '该回执未通过，提交说明不能改变其状态。先按具体错误修正测试、环境或源码，'
+                                '重新 verify_patch 取得 passed 回执后再 submit_fix。'
+                                '只改测试时复用当前补丁包；仅修改源码时才重新构建，不能用重复打包解决测试分组/调用错误。',
+                    }, ensure_ascii=False))
+                if set(patch.files) != {item['source'] for item in receipt['mapping']}:
+                    raise ValueError('声明的修改文件与验证回执的原件映射不一致')
         except (ValueError, OSError) as exc:
-            return _ToolOutcome(ok=False, text=f"补丁校验未通过：{exc}。修正归档后重新 submit_fix。")
+            return _ToolOutcome(ok=False, text=f"补丁校验未通过：{exc}。修正提交件后重新 submit_fix。")
         fix_id = manager.record_fix(
             self.challenge_id(task), list(patch.files), description, str(patch.path),
             found_by=self.agent_id)
         ids = sorted(manager.answer_ids(self.challenge_id(task)))
+        validation = ("脚本语法与声明的原始目标路径已校验；未执行补丁，实际修改范围需测试核对"
+                      if patch.format == "shell_script" else "归档结构、入口语法（如有）、原始路径与内容变化已校验；未执行补丁")
+        if receipt:
+            validation = (f"最终提交件/原件/测试哈希已绑定回执 {receipt['verification_ref']}，"
+                          f"回归状态 {receipt['status']}；仅覆盖所记录测试，部署根使用干净副本，"
+                          "不含实际服务器路径、命令白名单或服务重启验证")
+        else:
+            validation += '；未提供 verify_patch 回执，修复效果未获工具验证'
         if not manager.confirm_complete(self.challenge_id(task), ids,
-                                        "补丁格式、原始目录结构与内容变化已校验并登记", 1):
+                                        validation + "并登记", 1):
             return _ToolOutcome(ok=False, text="补丁已保存，但完成状态未确认，不能标记本题完成")
         relative = patch.path.relative_to(workspace).as_posix()
         self.ctx.audit.log("file.shared", self.agent_id, {
@@ -1951,10 +2167,13 @@ class CTFBaseAgent(SubAgent):
             "route": route.name, "challenge": self.challenge_id(task),
             "name": patch.path.name, "path": relative,
             "size": patch.path.stat().st_size, "sha256": patch.sha256,
-            "note": "AWDP 修补提交件；目录结构已校验，漏洞修复效果以测试证据为准"})
+            "format": patch.format, "entrypoint": patch.entrypoint,
+            "verification_ref": receipt['verification_ref'] if receipt else None,
+            "verification_status": receipt['status'] if receipt else 'unverified',
+            "note": "AWDP 修补提交件；" + validation + "，漏洞修复效果以测试证据为准"})
         text = (f"补丁已登记（fix_id={fix_id}，{len(patch.files)} 个修改文件），"
-                f"可下载文件：{relative}。已校验归档和原始路径；"
-                "这不替代正常功能与漏洞回归测试。")
+                f"可下载文件：{relative}。{validation}；"
+                "这不替代正常功能与漏洞回归测试。\n\n修复说明与验证：\n" + description)
         return _ToolOutcome(ok=True, value=1, stop=True, final_text=text, text=text, note=text)
 
     async def _tool_record_answer(self, task: Task, route, args: dict[str, Any]) -> _ToolOutcome:
@@ -1964,18 +2183,53 @@ class CTFBaseAgent(SubAgent):
             return _ToolOutcome(ok=True, stop=True, final_text=text, text=text, note=text)
         refs = args.get("evidence_refs") or []
         value = str(args.get("answer") or "").strip()
-        if not getattr(manager, "local_only", False) or not value or not refs or not all(isinstance(r,str) and r.strip() for r in refs):
+        if (not getattr(manager, "local_only", False) or not value or not isinstance(refs, list)
+                or not refs or not all(isinstance(r, str) and r.strip() for r in refs)):
             return _ToolOutcome(ok=False, text="需要单题模式、答案原文和非空证据引用")
-        candidate = manager.register(value, challenge_id=self.challenge_id(task), found_by=self.agent_id) or manager.get(value)
-        self._record_flag(task, value, "local", route=route.name)
         from spiritscout.blackboard.exchange import execute
-        if getattr(self.ctx, "blackboard", None) is not None:
-            execute(self.ctx.blackboard, "blackboard_write", {
+
+        normal = not self._is_lightweight()
+        blackboard = getattr(self.ctx, "blackboard", None)
+        review = args.get('review') or {}
+
+        def publish_evidence() -> dict[str, Any]:
+            return execute(blackboard, "blackboard_write", {
                 "text": str(args.get("note") or "已取得并核对一个答案"), "evidence_refs": refs},
                 actor=self.agent_id, agent_type=self.agent_type)
+
+        if normal:
+            if blackboard is None:
+                return _ToolOutcome(ok=False, text="证据存储未装配，答案尚未登记，不能确认完成。")
+            from spiritscout.ctf.answer_evidence import check_evidence, review_error
+
+            error = review_error(review)
+            if error:
+                return _ToolOutcome(ok=False, text=error)
+            refs = list(dict.fromkeys(refs + review['validation_evidence_refs']))
+            scope = current_execution_scope.get() or ExecutionScope()
+            evidence = check_evidence(blackboard, getattr(getattr(self.ctx, 'tools', None), 'journal', None),
+                                      task, refs, environment_id=scope.environment_id)
+            if not evidence['ok']:
+                return _ToolOutcome(ok=False, text='答案尚未登记；证据缺口：' + json.dumps(evidence['issues'], ensure_ascii=False),
+                                    metadata={'answer_evidence': evidence})
+            # 证据先落地；失败时不污染候选集合，避免之后 finish_challenge 绕过失败。
+            published = publish_evidence()
+            if not published.get("ok"):
+                return _ToolOutcome(ok=False, text="证据发布失败，答案尚未登记，不能确认完成："
+                                    + str(published.get("error") or "未获得成功回执"))
+        candidate = manager.register(value, challenge_id=self.challenge_id(task), found_by=self.agent_id) or manager.get(value)
+        if normal and (candidate is None or candidate.challenge_id != self.challenge_id(task)):
+            return _ToolOutcome(ok=False, text="答案未登记到当前题目，不能确认完成。")
+        if normal:
+            manager.record_answer_evidence(value, refs, review)
+        self._record_flag(task, value, "local", route=route.name)
+        if not normal and blackboard is not None:
+            publish_evidence()
         if not manager.multiple_answers:
             ids = sorted(manager.answer_ids(self.challenge_id(task)))
-            manager.confirm_complete(self.challenge_id(task), ids, "用户选择单答案，已登记答案及证据", 1)
+            confirmed = manager.confirm_complete(self.challenge_id(task), ids, "用户选择单答案，已登记答案及证据", 1)
+            if normal and not confirmed:
+                return _ToolOutcome(ok=False, text="答案与证据已登记，但完成状态未确认，请核对后重试。")
             text = "已取得本题答案；完整解题报告与经验提炼转后台生成。"
             return _ToolOutcome(ok=True, value=1, stop=True, final_text=text, text=text, note=text)
         return _ToolOutcome(ok=True, value=.6, text=f"答案已登记，answer_id={candidate.flag_id}。用户已勾选多答案，全部取得后调用 finish_challenge。", note="已登记一个答案，继续完成用户指定的多答案目标")
@@ -1985,8 +2239,31 @@ class CTFBaseAgent(SubAgent):
         if args.get("complete") is False and getattr(manager,"local_only",False) and str(args.get("reason") or "").strip():
             text = "本题尚未完成：" + str(args["reason"])
             return _ToolOutcome(ok=True, stop=True, final_text=text, text=text, note=text)
+        if args.get('no_fix_needed') is True:
+            if (self.ctx.mode != RunMode.AWDP or args.get('complete') is not True
+                    or not manager.confirm_no_fix_needed(self.challenge_id(task), str(args.get('reason') or ''))):
+                return _ToolOutcome(ok=False, text='无需修改结论仅用于 AWDP 无已登记补丁的审查；需明确 complete=true 及审查依据。')
+            text = '源码审查已完成，未确认需修改之处：' + str(args['reason'])
+            return _ToolOutcome(ok=True, value=1, stop=True, final_text=text, text=text, note=text)
+        if self.ctx.mode == RunMode.AWDP and manager.fix_mode and not manager.answer_ids(self.challenge_id(task)):
+            return _ToolOutcome(ok=False, text='尚未登记补丁。已确认需修补的问题应验证后 submit_fix；'
+                '审查后未确认需修改时，用 complete=true、no_fix_needed=true 和具体审查依据完成；'
+                '仍有缺口且无法完成时用 complete=false。不能把未完成当作无需修改。')
         expected = max(2, int(self.challenge_of(task).get("flag_count") or 0)) if manager.multiple_answers else 1
         ids = args.get("answer_ids") or []
+        if not self._is_lightweight() and getattr(manager, 'local_only', False) and not manager.fix_mode:
+            from spiritscout.ctf.answer_evidence import check_evidence, review_error
+
+            for candidate in manager.all():
+                if candidate.flag_id not in manager.answer_ids(self.challenge_id(task)):
+                    continue
+                error = review_error(candidate.answer_review)
+                evidence = check_evidence(getattr(self.ctx, 'blackboard', None),
+                    getattr(getattr(self.ctx, 'tools', None), 'journal', None), task, candidate.evidence_refs,
+                    environment_id=(current_execution_scope.get() or ExecutionScope()).environment_id)
+                if error or not evidence['ok']:
+                    return _ToolOutcome(ok=False, text='完成前需重新核对已登记答案的证据：'
+                                        + (error or json.dumps(evidence['issues'], ensure_ascii=False)))
         if (not getattr(manager, "local_only", False) or not isinstance(ids,list)
                 or not manager.confirm_complete(self.challenge_id(task), ids, str(args.get("reason") or ""), expected)):
             return _ToolOutcome(ok=False, text="尚未覆盖已登记的全部答案或已知答案数量；需继续核对，不能标记完成。")
@@ -2525,10 +2802,13 @@ class CTFBaseAgent(SubAgent):
             return _ToolOutcome(ok=False, note=f"{desc} → 执行失败", text=(
                 f"{desc} 执行失败：{str(res.error)[:300]}"))
         rc = res.parsed.get("exit_code", res.returncode)
+        captures = [res.parsed.get(name + '_capture') or {} for name in ('stdout', 'stderr')]
+        raw_comparison = all(value.get('complete') and value.get('sha256') for value in captures)
         same_output_count = 0
+        output_key = hashlib.sha256(json.dumps(
+            [rc, [value['sha256'] for value in captures] if raw_comparison else [res.stdout, res.stderr],
+             res.error, res.timed_out], ensure_ascii=False).encode()).hexdigest()
         if self._is_lightweight():
-            output_key = hashlib.sha256(json.dumps(
-                [rc, res.stdout, res.stderr, res.error, res.timed_out], ensure_ascii=False).encode()).hexdigest()
             previous_outputs = state.setdefault("light_output_signatures", {})
             same_output_count = previous_outputs.get(output_key, 0)
             previous_outputs[output_key] = same_output_count + 1
@@ -2537,7 +2817,7 @@ class CTFBaseAgent(SubAgent):
                   else "上游 SIGPIPE（141），管道末端成功；已有部分输出，完整性需核对" if pipeline_partial
                   else f"退出码 {rc}")
         # 督导需要看到实际响应；进程成功不代表假设成立或取得有效线索。
-        evidence = _head_tail((res.stdout or res.stderr or "无输出").strip(), 160)
+        evidence = _head_tail((res.stderr if rc != 0 and res.stderr else res.stdout or res.stderr or "无输出").strip(), 160)
         state["observations"].append(
             {"action": desc,
              "result": f"{status}；{evidence}"})
@@ -2551,7 +2831,8 @@ class CTFBaseAgent(SubAgent):
             lines.append(f"完整{param}已调用 {repeat_count} 次，本次仍真实执行。"
                          "结合本次结果与文件/服务状态判断是否继续重试；没有新证据时考虑调整方法。")
         if same_output_count:
-            lines.append(f"本次退出码、stdout、stderr 与此前 {same_output_count} 次调用完全一致；"
+            compared = "完整 stdout/stderr 的原始字节摘要" if raw_comparison else "stdout/stderr 的展示预览（不覆盖未展示字节）"
+            lines.append(f"本次退出码、{compared}与此前 {same_output_count} 次调用完全一致；"
                          "这不证明环境没变，但不能当作新增结果。若是必要对照可继续，"
                          "否则依据已排除事实选择未覆盖的问题，不反复重读同一输出。")
         if self._is_lightweight() and rc != 0 and not pipeline_partial:
@@ -2559,9 +2840,14 @@ class CTFBaseAgent(SubAgent):
                          f"当前可写工作目录为 {workdir}，artifacts 路径见 world_state。"
                          "失败和 stderr 也是本次证据，应核对路径和实际错误后再选择动作。")
         if res.stdout:
-            lines.append("stdout:\n" + _head_tail(res.stdout, _SAND_MODEL_CAP))
+            if self._is_lightweight() and captures[0].get('contains_nul'):
+                lines.append("stdout 含 NUL，以下仅为前 128 字节十六进制预览，不能当作完整文本：\n" + captures[0].get('head_hex', ''))
+            else:
+                lines.append("stdout:\n" + _head_tail(res.stdout, _SAND_MODEL_CAP))
         if res.stderr:
             lines.append("stderr:\n" + _head_tail(res.stderr, 1200))
+        if self._is_lightweight() and any(value.get('text_decode_lossy') for value in captures):
+            lines.append("输出无法无损按 UTF-8 展示，替换字符不是原始字节；按来源编码或字节方式核对原始输出，不能手抄有损预览还原数据。")
         if out_file:
             label = "输出已轮转，仅保留最近两代" if res.parsed.get("output_rotated") else "输出已存盘"
             lines.append(f"{label}（不占上下文）: {out_file}"
@@ -2572,10 +2858,33 @@ class CTFBaseAgent(SubAgent):
             lines.append("提示：超时通常意味着脚本在等待输入或死循环——"
                          "交互式脚本请改为非交互（预置输入/设置超时）。")
         metadata = {"invocation_id": res.invocation_id, "output_file": out_file}
-        if getattr(self, "evidence_review_enabled", False) and self._is_lightweight():
+        if self._is_lightweight():
+            metadata.update(output_rotated=bool(res.parsed.get('output_rotated')),
+                            previous_output_file=res.parsed.get('previous_output_file', ''),
+                            output_complete=res.parsed.get('output_complete', False),
+                            output_sha256=res.parsed.get('output_sha256', ''),
+                            previous_output_sha256=res.parsed.get('previous_output_sha256', ''))
+            if rc != 0 and not pipeline_partial and getattr(self, 'evidence_review_enabled', False):
+                lines.append('参数/属性用法不确定时，tool_lookup(name=tool_help) 后查询本机 CLI 帮助或 Python 完整名称的签名；'
+                             '依据实际错误修正，原样重试不会修复参数错误。')
+        if not self._is_lightweight() or getattr(self, "evidence_review_enabled", False):
+            streams = {name: _head_tail(value, 400) for name, value in
+                       (("stdout", res.stdout), ("stderr", res.stderr)) if value}
+            preview = "\n".join(name + ":\n" + value for name, value in streams.items()) or res.error or "无输出"
+            if any(value.get('contains_nul') or value.get('text_decode_lossy') for value in captures):
+                streams = {}
+                source_note = "按输出日志引用回读" if out_file else "本次未保存日志，完整内容须从原始来源重新取证"
+                preview = f"原始字节的部分预览（hex，{source_note}）：" + json.dumps({
+                    name: {key: value.get(key) for key in ('head_hex', 'bytes', 'text_decode_lossy', 'contains_nul')}
+                    for name, value in zip(('stdout', 'stderr'), captures)}, ensure_ascii=False)
             metadata["observation"] = {"digest": output_key, "empty": not bool(res.stdout or res.stderr),
-                "preview": _head_tail(res.stdout or res.stderr or res.error or "无输出", 900),
-                "exit_code": rc, "partial": pipeline_partial}
+                "preview": preview,
+                "stream_previews": streams,
+                "exit_code": rc, "partial": (pipeline_partial or res.timed_out
+                    or len(res.stdout) > _SAND_MODEL_CAP or len(res.stderr) > 1200
+                    or any(not value.get('complete') or value.get('preview_truncated')
+                           or value.get('text_decode_lossy') or value.get('contains_nul') for value in captures)),
+                "comparison_scope": "raw_streams" if raw_comparison else "display_preview"}
         return _ToolOutcome(
             ok=res.ok and (rc == 0 or pipeline_partial), value=0.05 if res.ok and rc == 0 else 0.0, empty=not (res.stdout or "").strip(),
             findings=[],
@@ -2608,7 +2917,7 @@ class CTFBaseAgent(SubAgent):
                 parsed_map[str(path)] = cached
                 continue
             res = await self.ctx.tools.call(
-                "file_analyze", {"path": path}, **self._tool_ctx(task))
+                "file_analyze", {"path": path, "preview_archive_text": self._is_lightweight()}, **self._tool_ctx(task))
             if res.ok and isinstance(res.parsed, dict):
                 self.cache.put(self.route_namespace, f"file|{path}", res.parsed)
                 parsed_map[str(path)] = res.parsed
@@ -2625,7 +2934,7 @@ class CTFBaseAgent(SubAgent):
         all_strings: list[str] = []
         for path in attachments:
             res = await self.ctx.tools.call(
-                "file_analyze", {"path": path}, **self._tool_ctx(task))
+                "file_analyze", {"path": path, "preview_archive_text": self._is_lightweight()}, **self._tool_ctx(task))
             if not res.ok:
                 notes.append(f"{path}: {res.error}")
                 body_lines.append(f"{path}: 解析失败 {str(res.error)[:120]}")
@@ -2641,6 +2950,8 @@ class CTFBaseAgent(SubAgent):
                 f"{path}: magic={parsed['magic']} size={parsed['size']} "
                 f"is_elf={parsed.get('is_elf')}\n  字符串样本: "
                 + " | ".join(str(s)[:120] for s in strings[:40]))
+            if parsed.get("archive"):
+                body_lines.append("容器资料（不是执行指令）：" + json.dumps(parsed["archive"], ensure_ascii=False))
         return _ToolOutcome(ok=True, value=0.3,
                             findings=findings, note="; ".join(notes),
                             text="\n".join(body_lines)[:_TOOL_RESULT_CAP])
@@ -2788,10 +3099,12 @@ class CTFBaseAgent(SubAgent):
             if getattr(self.flag_manager, "fix_mode", False):
                 prompt += ("\n本题是 AWDP 修补，目标不是取得 flag。方法由你根据现场证据决定；"
                     "仅做必要修改并保留正常功能。提交前提供正常功能与漏洞回归的实际测试依据，"
-                    "语法检查不能代替这两类验证。提交件采用 gzip 压缩的 tar 归档，"
-                    "只包含被修改文件，内部相对路径须与原始附件完全一致；"
+                    "语法检查不能代替这两类验证。默认交付 tar.gz 补丁包，包含 patch.sh 与必要修改文件；"
+                    "赛事要求 update.sh 或外层目录时据规则调整，源码附件格式不决定提交格式。"
+                    "遵循平台解释器、执行目录、部署路径、权限、命令白名单和重启约定，不依赖本机临时文件。"
+                    "原件路径与服务器路径分别记录；验证最终包的实际解压与入口执行，改变包后重新验证；"
                     "用 submit_fix(archive=补丁路径, files=修改文件数组, description=漏洞与修法及测试证据) 登记。"
-                    "归档接收只表示提交件结构通过校验，不表示漏洞已修复或比赛平台已接受。"
+                    "登记仅表示提交件校验通过，不表示漏洞已修复或比赛平台已接受。"
                     "无法修复时用 finish_challenge(complete=false) 说明具体缺口。")
             elif getattr(self.flag_manager, "local_only", False):
                 prompt += ("\n本题不向平台提交。答案用 record_answer 携带证据登记，"
@@ -2878,6 +3191,16 @@ class CTFBaseAgent(SubAgent):
                           "用户未勾选多答案：按单答案处理，record_answer 携带证据登记后立即结束，不判断是否多答案，不额外调用完成确认。")
                        + "不要在会话输出长篇题解，"
                        "完整思路、失败分支与过程由后台报告统一写一次。")
+            if not self._is_lightweight():
+                prompt += ('\nrecord_answer 必须带 review：requirements、derivation、validation 和 validation_evidence_refs。'
+                           '说明验收条件、推导与实际验证；引用当前题成功执行的记录，不以工具成功代替语义判断。'
+                           '缺口未补齐时继续调查，不能把中间结果或未核实猜测登记为完成。')
+        if not self._is_lightweight():
+            from spiritscout.gateway.normal_context import (
+                GUIDANCE as NORMAL_CONTEXT_GUIDANCE,
+            )
+
+            prompt += '\n' + NORMAL_CONTEXT_GUIDANCE
         if compact_graph_context:
             prompt = prompt.replace('shared_facts_delta 按 blackboard_ref',
                                     'shared_facts_delta／exploration_graph_delta 按 blackboard_ref')

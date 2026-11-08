@@ -8,7 +8,7 @@ const SessionRail = (() => {
     const tab=$("#tab-chat"), button=$("#session-rail-toggle");
     tab.classList.toggle("rail-collapsed",collapsed);
     button.setAttribute("aria-expanded",String(!collapsed));
-    const label=collapsed ? "展开实况与旁路会话" : "收起实况与旁路会话";
+    const label=collapsed ? I18n.t("展开实况与旁路会话") : I18n.t("收起实况与旁路会话");
     button.setAttribute("aria-label",label);button.title=label;
     try { localStorage.setItem(key,String(collapsed)); } catch {}
   }
@@ -49,7 +49,7 @@ const AgentSideChat = (() => {
     if(nav.dataset.signature!==signature) {
       nav.dataset.signature=signature;
       const focus=document.activeElement?.dataset.sideActor;
-      nav.innerHTML=`<button type="button" data-side-actor="" aria-pressed="${!selected}">实况</button>`+items.map(a=>`<button type="button" data-side-actor="${esc(a.actor)}" aria-pressed="${a.actor===selected}" title="${esc(a.actor)} · ${esc(a.status)}">${esc(actorName(a.actor))}</button>`).join("");
+      nav.innerHTML=I18n.html`<button type="button" data-side-actor="" aria-pressed="${!selected}">实况</button>`+items.map(a=>`<button type="button" data-side-actor="${esc(a.actor)}" aria-pressed="${a.actor===selected}" title="${esc(a.actor)} · ${esc(a.status)}">${esc(actorName(a.actor))}</button>`).join("");
       if(focus!==undefined) [...nav.querySelectorAll("button")].find(b=>b.dataset.sideActor===focus)?.focus({preventScroll:true});
     }
     $("#session-observer").hidden=!!selected;
@@ -82,18 +82,23 @@ const AgentSideChat = (() => {
     const messages=box.querySelector(".side-chat-messages"), signature=JSON.stringify(e.messages);
     if(messages.dataset.signature!==signature) {
       const stick=messages.scrollHeight-messages.scrollTop-messages.clientHeight<48 || !messages.dataset.signature;
+      const positions=messages.dataset.signature?[...messages.querySelectorAll('.side-message')].map(el=>[...el.querySelectorAll('pre,table')].map(part=>[part.scrollTop,part.scrollLeft])):[];
+      const top=messages.scrollTop;
       messages.dataset.signature=signature;
-      messages.innerHTML=e.messages.length ? e.messages.map(m=>`<article class="side-message ${m.role==="user" ? "from-user" : "from-agent"}"><small>${m.role==="user" ? "你" : esc(actorName(e.actor))}</small><div class="md">${mdRender(m.content || "")}</div></article>`).join("") : '<div class="side-chat-empty"><strong>和子 Agent 直接对话</strong><p>发送第一条消息，开始独立的旁路会话。它会带入所选任务的已有记录。</p></div>';
-      if(stick) messages.scrollTop=messages.scrollHeight;
+      messages.innerHTML=e.messages.length ? e.messages.map(m=>`<article class="side-message ${m.role==="user" ? "from-user" : "from-agent"}"><small>${m.role==="user" ? I18n.t("你") : esc(actorName(e.actor))}</small><div class="md">${mdRender(m.content || "")}</div></article>`).join("") : I18n.html('<div class="side-chat-empty"><strong>和子 Agent 直接对话</strong><p>发送第一条消息，开始独立的旁路会话。它会带入所选任务的已有记录。</p></div>');
+      messages.querySelectorAll('.side-message').forEach((el,i)=>el.querySelectorAll('pre,table').forEach((part,j)=>{
+        const saved=positions[i]?.[j];if(saved){part.scrollTop=saved[0];part.scrollLeft=saved[1];}
+      }));
+      messages.scrollTop=stick?messages.scrollHeight:top;
     }
-    box.querySelector("[data-side-status]").textContent=e.busy ? "正在发送…" : e.pending.length ? "有操作等待你确认" : e.questions.length ? "子 Agent 有问题需要你回答" : ["running","queued"].includes(e.status) ? "子 Agent 正在处理，新消息会在这里显示…" : e.status==="failed" ? "本轮回复失败，可补充消息重试或展开会话查看详情。" : e.status==="cancelled" ? "本轮已停止，可继续发送消息。" : "";
+    box.querySelector("[data-side-status]").textContent=e.busy ? I18n.t("正在发送…") : e.pending.length ? I18n.t("有操作等待你确认") : e.questions.length ? I18n.t("子 Agent 有问题需要你回答") : ["running","queued"].includes(e.status) ? I18n.t("子 Agent 正在处理，新消息会在这里显示…") : e.status==="failed" ? I18n.t("本轮回复失败，可补充消息重试或展开会话查看详情。") : e.status==="cancelled" ? I18n.t("本轮已停止，可继续发送消息。") : "";
     box.querySelector("[data-side-error]").textContent=e.error;
     box.querySelector('[type="submit"]').disabled=e.busy;
     const pending=box.querySelector("[data-side-pending]");
     const pendingSignature=JSON.stringify([e.pending,e.questions]);
     if(pending.dataset.signature!==pendingSignature) {
       pending.dataset.signature=pendingSignature;
-      pending.innerHTML=e.pending.length || e.questions.length ? '<button class="btn sm" type="button" data-side-review>打开会话处理审批与提问</button>' : "";
+      pending.innerHTML=e.pending.length || e.questions.length ? I18n.html('<button class="btn sm" type="button" data-side-review>打开会话处理审批与提问</button>') : "";
     }
   }
   async function refresh() {

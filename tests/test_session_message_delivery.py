@@ -261,6 +261,49 @@ class SessionMessageDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.launch_request['mission'], '原始题面')
         self.assertEqual(self.session.user_inbox, [])
 
+    async def test_successful_execution_request_dispatches_without_an_extra_model_turn(self) -> None:
+        gateway = SimpleNamespace(chat=AsyncMock(return_value=SimpleNamespace(content='', tool_calls=[
+            {'id': 'continue', 'name': 'request_execution', 'arguments': {'mission': '继续原题验证'}}])))
+        request = {}
+        with patch('spiritscout.web.sessions._conversation_gateway', return_value=gateway):
+            reply = await _master_reply(self.cfg, [ModelEntry(model='fixture', provider='openai_compatible',
+                local_runtime='llama_cpp')], '继续', Mock(),
+                kind='dialogue', session=self.session, execution_request=request, execution_only=True)
+        gateway.chat.assert_awaited_once()
+        self.assertEqual(gateway.chat.call_args.kwargs['tool_choice'], 'required')
+        self.assertEqual([tool['function']['name'] for tool in gateway.chat.call_args.kwargs['tools']],
+                         ['request_execution'])
+        self.assertEqual(request['mission'], '继续原题验证')
+        self.assertIn('继续处理', reply)
+
+    async def test_execution_handoff_keeps_ollama_and_mixed_backends_compatible(self) -> None:
+        ollama = ModelEntry(model='fixture', provider='ollama')
+        llama = ModelEntry(model='fixture-cpp', provider='openai_compatible', local_runtime='llama_cpp')
+        for models in ([ollama], [llama, ollama]):
+            with self.subTest(providers=[entry.provider for entry in models]):
+                gateway = SimpleNamespace(chat=AsyncMock(return_value=SimpleNamespace(content='', tool_calls=[
+                    {'id': 'continue', 'name': 'request_execution', 'arguments': {'mission': '继续原题验证'}}])))
+                request = {}
+                with patch('spiritscout.web.sessions._conversation_gateway', return_value=gateway):
+                    await _master_reply(self.cfg, models, '继续', Mock(), kind='dialogue', session=self.session,
+                                        execution_request=request, execution_only=True)
+                gateway.chat.assert_awaited_once()
+                self.assertEqual(gateway.chat.call_args.kwargs['tool_choice'], 'auto')
+                self.assertEqual(request['mission'], '继续原题验证')
+
+    async def test_rejected_execution_request_keeps_dialogue_open_for_correction(self) -> None:
+        gateway = SimpleNamespace(chat=AsyncMock(side_effect=[
+            SimpleNamespace(content='', tool_calls=[{'id': 'bad', 'name': 'request_execution',
+                                                     'arguments': {'mission': ''}}]),
+            SimpleNamespace(content='缺少执行目标', tool_calls=[])]))
+        request = {}
+        with patch('spiritscout.web.sessions._conversation_gateway', return_value=gateway):
+            reply = await _master_reply(self.cfg, [ModelEntry(model='fixture', provider='mock')], '继续', Mock(),
+                kind='dialogue', session=self.session, execution_request=request)
+        self.assertEqual(gateway.chat.await_count, 2)
+        self.assertFalse(request)
+        self.assertEqual(reply, '缺少执行目标')
+
     def test_initial_attachment_metadata_enriches_one_original_message(self) -> None:
         initial = self.session.remember_user_message('原始任务', message_id='message-initial')
         attachments = [{'name': 'source.txt', 'path': str(self.root / 'source.txt')}]

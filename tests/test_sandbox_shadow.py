@@ -8,11 +8,27 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from spiritscout.tools.sandbox import _build_argv
+from spiritscout.tools.sandbox import _build_argv, _cuda_devices
 
 
 class ShadowRootArgvTests(unittest.TestCase):
+    def test_cuda_nodes_are_mapped_after_private_dev_without_opening_host_dev(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch('spiritscout.tools.sandbox._cuda_devices',
+                return_value=[Path('/dev/nvidia0'), Path('/dev/nvidiactl')]):
+            argv = self._argv(Path(tmp), guard=None)
+            self.assertLess(argv.index('--dev'), argv.index('--dev-bind'))
+            bindings = [argv[i + 1:i + 3] for i, arg in enumerate(argv) if arg == '--dev-bind']
+            self.assertEqual(bindings, [['/dev/nvidia0', '/dev/nvidia0'], ['/dev/nvidiactl', '/dev/nvidiactl']])
+
+    def test_cuda_discovery_rejects_regular_files_and_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'nvidia0').write_text('not a device')
+            (root / 'nvidiactl').symlink_to('/dev/null')
+            self.assertEqual(_cuda_devices(root), [])
+
     def test_http_response_snapshots_are_read_only_in_sandbox(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp).resolve()

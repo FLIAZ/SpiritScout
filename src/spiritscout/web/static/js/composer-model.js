@@ -2,7 +2,7 @@
 const ComposerModels = (() => {
   const label = entry => entry.provider_ref ? `${entry.provider_ref} / ${entry.model}` : entry.model;
   function options(data) {
-    return [{key: "", label: "自动 · 跟随编队"}, ...(data?.models || [])
+    return [{key: "", label: I18n.t("自动 · 跟随编队")}, ...(data?.models || [])
       .filter(entry => entry.enabled !== false)
       .map(entry => ({key: entry.key || entry.model, label: label(entry)}))];
   }
@@ -80,9 +80,9 @@ const ComposerModels = (() => {
       const button = $(`#${kind}-model`);
       if (!button) continue;
       const ref = controller.selected(kind), item = rows.find(row => row.key === ref);
-      const text = !ref ? "自动" : item?.label || modelDisplayName(ref);
+      const text = !ref ? I18n.t("自动") : item?.label || modelDisplayName(ref);
       button.querySelector("span").textContent = text;
-      button.title = ref ? `本会话使用 ${text}；子 Agent 显式指派不变` : "自动 · 跟随编队";
+      button.title = ref ? I18n.t`${kind === "home" ? I18n.t("新会话") : I18n.t("本会话")}所有角色统一使用 ${text}；不修改全局编队` : I18n.t("自动 · 各角色跟随编队");
       button.disabled = controller.pending(kind) || (kind === "comp" && !S.cur);
     }
   }
@@ -91,13 +91,13 @@ const ComposerModels = (() => {
     const token = ++generation, menu = $(`#${kind}-model-menu`);
     const id = S.cur;
     menu.hidden = false;
-    menu.innerHTML = '<p role="status">正在读取模型…</p>';
+    menu.innerHTML = I18n.html('<p role="status">正在读取模型…</p>');
     positionMenu();
     $(`#${kind}-model`).setAttribute("aria-expanded", "true");
     try {
       rows = options(await api("/api/models"));
       if (token !== generation || opened !== kind || (kind === "comp" && S.cur !== id)) return;
-      menu.innerHTML = '<label class="model-search">选择模型<input type="search" placeholder="搜索模型或供应商…" aria-label="搜索模型或供应商"></label><div role="listbox" aria-label="会话模型"></div>';
+      menu.innerHTML = I18n.html('<label class="model-search">选择模型<input type="search" placeholder="搜索模型或供应商…" aria-label="搜索模型或供应商"></label><div role="listbox" aria-label="会话模型"></div>');
       const search = menu.querySelector("input"), list = menu.querySelector('[role="listbox"]');
       function paint() {
         const query = search.value.trim().toLowerCase();
@@ -109,7 +109,7 @@ const ComposerModels = (() => {
           const operation = controller.choose(kind, button.dataset.model);
           sync();
           try { await operation; close(true); }
-          catch (error) { toast(`模型未切换：${error.message}`, true); paint(); }
+          catch (error) { toast(I18n.t`模型未切换：${error.message}`, true); paint(); }
           finally { sync(); }
         });
       }
@@ -117,7 +117,7 @@ const ComposerModels = (() => {
       paint(); positionMenu(); search.focus(); sync();
     } catch (error) {
       if (token !== generation) return;
-      menu.innerHTML = `<p role="alert">读取失败：${esc(error.message)}</p><button type="button">重试</button>`;
+      menu.innerHTML = I18n.html`<p role="alert">读取失败：${esc(error.message)}</p><button type="button">重试</button>`;
       menu.querySelector("button").onclick = () => open(kind);
     }
   }

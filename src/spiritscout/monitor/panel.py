@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from spiritscout.blackboard.store import Blackboard
+from spiritscout.core.audit import read_record
 from spiritscout.core.models import BlackboardLayer, VulnStatus
 
 _LAYER_LABELS = {
@@ -90,8 +91,8 @@ def export_audit(
         if not line.strip():
             continue
         try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
+            entry = read_record(line)
+        except ValueError:
             skipped += 1
             continue
         if event_type_prefix and not str(entry.get("type", "")).startswith(event_type_prefix):
@@ -100,7 +101,7 @@ def export_audit(
         if since_iso and str(entry.get("ts", "")) < since_iso:
             skipped += 1
             continue
-        out_lines.append(line)
+        out_lines.append(json.dumps(entry, ensure_ascii=False))
         exported += 1
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)

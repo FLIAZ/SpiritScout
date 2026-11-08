@@ -24,6 +24,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+audit = ["semgrep==1.180.0"]  # AWDP 离线源码扫描；只使用随包本地规则
 toolkit = [
     "pwntools>=4.12",       # 交互/构造/exploit 基建
     "pycryptodome>=3.20",   # 现代密码学原语
@@ -63,6 +64,7 @@ spiritscout = [
     "web/static/js/*.js",
     "web/static/css/*.css",
     "knowledge/data/*.json",
+    "awdp/data/*.json",
     "agents/report/templates/*.j2",
     "tools/*.mjs",
 ]

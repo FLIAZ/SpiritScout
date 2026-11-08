@@ -9,6 +9,7 @@ from collections import defaultdict
 from pathlib import PurePosixPath
 from typing import Any
 
+from spiritscout.resources.skill_search import TIERS, metadata, rank
 from spiritscout.resources.store import ResourceStore, builtin_skills
 
 SKILL_NAMES = frozenset({'skill_search', 'skill_open', 'skill_read'})
@@ -28,8 +29,9 @@ def _schema(name: str, description: str, properties: dict[str, Any], required: l
 
 
 SKILL_SCHEMAS = [
-    _schema('skill_search', '检索已启用技能的适用说明，不读取正文；空查询可按类型分页浏览。',
+    _schema('skill_search', '按自然语言、中英术语和别名检索启用技能，按相关性排序；空查询可分页浏览。分级不限制能力。',
             {'query': {'type': 'string'}, 'domain': {'type': 'string'},
+             'tier': {'type': 'string', 'enum': ['', *TIERS]},
              'offset': {'type': 'integer', 'minimum': 0},
              'limit': {'type': 'integer', 'minimum': 1, 'maximum': 50}}, []),
     _schema('skill_open', '使用选定技能：完整读取根目录 SKILL.md，返回其文件目录；按需继续读取引用。',
@@ -59,20 +61,33 @@ class SkillRuntime:
             # 仅生成发现摘要；实际读取的技能原文绝不在此截取。
             description = re.sub(r'\s+', ' ', match.group(1) if match else body.split('\n', 1)[0])[:400]
         return {'skill_id': row['skill_id'], 'description': description,
-                'domain': row.get('domain') or 'custom', 'version': row.get('version', 0)}
+                'domain': row.get('domain') or 'custom', 'version': row.get('version', 0),
+                **metadata(row)}
 
     def discovery(self) -> dict[str, Any]:
         groups: dict[str, list[str]] = defaultdict(list)
-        custom = []
+        custom, core, manifest = [], [], []
+        counts = dict.fromkeys(TIERS, 0)
         for row in self.store.skills():
             if not row.get('enabled', True):
                 continue
+            item = self._metadata(row)
+            manifest.append(item)
+            counts[item['tier']] += 1
+            if item['tier'] == 'core':
+                core.append(item)
             if row.get('source_kind') == 'builtin':
                 groups[row.get('domain') or 'custom'].append(row['skill_id'])
             else:
-                custom.append(self._metadata(row))
-        return {'custom': custom, 'builtin_domains': dict(sorted(groups.items())),
-                'notice': '内置技能按类型列 ID 节省上下文；用 skill_search 获取适用说明，所有启用技能均可发现。'}
+                custom.append(item)
+        digest = hashlib.sha256(json.dumps(manifest, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
+        return {'custom': custom[:8], 'core': core[:12],
+                'builtin_domains': {key: values[:6] for key, values in sorted(groups.items())},
+                'domain_counts': {key: len(values) for key, values in sorted(groups.items())},
+                'tier_counts': counts, 'total': len(manifest), 'revision': digest,
+                'notice': '目录仅展示部分示例；核心／领域／参考是资料分级，不限制能力。'
+                          '用 skill_search 按当前问题搜索全部启用技能，可用中文、英文或别名；'
+                          '没有命中时可换关键词或空查询分页浏览。'}
 
     def execute(self, name: str, arguments: dict[str, Any], state: dict[str, Any], *,
                 seen: set[str] | None = None) -> dict[str, Any]:
@@ -82,15 +97,17 @@ class SkillRuntime:
             if name == 'skill_search':
                 query = arguments.get('query', '')
                 domain = arguments.get('domain', '')
+                tier = arguments.get('tier', '')
                 offset, limit = arguments.get('offset', 0), arguments.get('limit', 12)
-                if (not isinstance(query, str) or not isinstance(domain, str)
+                if (not isinstance(query, str) or len(query) > 200 or not isinstance(domain, str)
+                        or not isinstance(tier, str) or tier not in {'', *TIERS}
                         or type(offset) is not int or offset < 0
                         or type(limit) is not int or not 1 <= limit <= 50):
                     raise ValueError('检索词／类型须为文本；offset≥0，limit 为 1–50 的整数')
-                words = query.casefold().split()
                 rows = [self._metadata(row) for row in self.store.skills() if row.get('enabled', True)]
                 rows = [row for row in rows if (not domain or row['domain'] == domain)
-                        and (not words or any(word in ' '.join(str(v) for v in row.values()).casefold() for word in words))]
+                        and (not tier or row['tier'] == tier)]
+                rows = rank(rows, query)
                 return {'ok': True, 'items': rows[offset:offset + limit], 'total': len(rows),
                         'has_more': offset + limit < len(rows), 'next_offset': offset + limit,
                         'note': '仅返回候选说明；尚未读取技能正文。'}

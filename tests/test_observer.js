@@ -2,7 +2,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
-const context = vm.createContext({});
+const context = vm.createContext(require('./helpers/i18n').context({}));
 const coreSource=fs.readFileSync(require("node:path").join(__dirname,"../src/spiritscout/web/static/js/core.js"),"utf8");
 context.atob=atob;context.TextDecoder=TextDecoder;context.Uint8Array=Uint8Array;
 vm.runInContext(coreSource.slice(coreSource.indexOf("function modelDisplayName("),coreSource.indexOf("async function api(")),context);

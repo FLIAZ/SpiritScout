@@ -25,6 +25,7 @@ from spiritscout.blackboard.layers import can_write
 from spiritscout.bus.base import EventBus
 from spiritscout.core.exceptions import PolicyViolation, VersionConflict
 from spiritscout.core.models import AgentType, BlackboardLayer, Event
+from spiritscout.core.storage_codec import compress_bytes, unpack_json
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS bb_records (
@@ -154,6 +155,10 @@ class Blackboard:
                 """
         if not can_write(agent_type, layer):
             raise PolicyViolation(f"{agent_type.value} 无黑板层 {layer.value} 写入权限")
+        if agent_type == AgentType.SCANNER and layer == BlackboardLayer.VULN and (
+                data.get('status', 'candidate') != 'candidate'
+                or data.get('poc_verified') or data.get('exploitable')):
+            raise PolicyViolation('扫描者只能提交待复核候选，不能写入已确认或已验证状态')
         now = datetime.now(UTC).isoformat()
         # Web 入口短连接与运行态并发写：先取得数据库写锁，再读当前版本。
         with self.transaction(immediate=True):
@@ -191,7 +196,7 @@ class Blackboard:
             new_version = current + 1
             self._conn.execute(
                 "INSERT INTO bb_record_history VALUES(?,?,?,?,?,?)",
-                (layer.value, record_id, new_version, payload, updated_by, now))
+                (layer.value, record_id, new_version, compress_bytes(payload.encode()), updated_by, now))
             self._conn.execute(
                 """INSERT INTO bb_records(layer, record_id, version, dedup_key, data, updated_by, updated_at)
                    VALUES(?,?,?,?,?,?,?)
@@ -212,7 +217,7 @@ class Blackboard:
                           priority=priority, source=updated_by, payload=data)
             # 通知仅携带定位信息；黑板记录与 outbox 在同一事务提交。
             self._conn.execute("INSERT INTO bb_event_outbox(event_json) VALUES(?)",
-                               (event.model_dump_json(),))
+                               (compress_bytes(event.model_dump_json().encode()),))
         self._wake_outbox()
         if layer == BlackboardLayer.ASSET and self.asset_observer is not None:
             self.asset_observer(record_id, new_version, data)
@@ -316,7 +321,7 @@ class Blackboard:
                                       (max(1, min(limit, 1000)),)).fetchall()
         delivered = 0
         for row in rows:
-            await self._bus.publish(Event.model_validate_json(row["event_json"]))
+            await self._bus.publish(Event.model_validate(unpack_json(row["event_json"])))
             with self.transaction() as conn:
                 conn.execute("DELETE FROM bb_event_outbox WHERE sequence=?",
                              (row["sequence"],))

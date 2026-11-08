@@ -79,12 +79,14 @@ def browser_tool_guidance(tool: str) -> str:
     return ""
 
 
-def chrome_tool_guidance(tool: str) -> str:
+def chrome_tool_guidance(tool: str, *, isolated: bool = False) -> str:
     """可见共享浏览器的协作说明，是否请用户接手由模型按当前页面决定。"""
     if tool == "browser_close":
         return " 此连接复用用户的可见浏览器；结束测试时保留浏览器及配置档案，只关闭本次新建的测试标签。"
     if tool in {"browser_navigate", "browser_cookie_list", "browser_cookie_get"}:
-        return (" 此连接操作用户可见的现有浏览器，与用户共享页面和登录态。"
+        context = (" 此连接使用会话隔离的浏览器上下文，不含用户原有登录态。" if isolated else
+                   " 此连接操作用户可见的现有浏览器，与用户共享页面和登录态。")
+        return (context +
                 "Docker 启用 src-browser profile 时，浏览器操作页在部署主机的 10011 端口；"
                 "若配置了外部浏览器，用户应在那个浏览器窗口操作。"
                 "若需要用户登录、输入验证码或拖动滑块，优先搜索并调用同服务器的 browser_login，"

@@ -205,7 +205,9 @@ class CyberChefLiveTests(unittest.IsolatedAsyncioTestCase):
             result = await agent._llm_chat_json('path_planner', {}, _allow_ask=False)
         self.assertEqual(result, {'paths': []})
         call.assert_not_awaited()
-        self.assertIn('只接受当前角色可用的 CyberChef', gateway.chat.await_args.args[0][-1]['content'])
+        feedback = json.loads(gateway.chat.await_args.args[0][-1]['content'])
+        observation = feedback['patch'][0]['value'][0]
+        self.assertEqual((observation['name'], observation['ok']), ('sandbox_exec', False))
 
     async def test_large_output_is_saved_in_full_and_not_presented_as_complete(self):
         original = ('a_variable_with_extra_ii_ 零\r\n' * 600).encode()

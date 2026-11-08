@@ -116,6 +116,9 @@ class ConvergenceEngine:
             winner.poc_verified = winner.exploitable = False
             winner.verification = {"verdict": "pending", "previous_verdict": prev.verification.get("verdict")}
         winner.evidence = merged_evidence
+        winner.scanner_evidence = [*prev.scanner_evidence,
+            *[item for item in vuln.scanner_evidence if item not in prev.scanner_evidence]]
+        winner.vulnerability_ids = list(dict.fromkeys([*prev.vulnerability_ids, *vuln.vulnerability_ids]))
         self._bb.write(
             BlackboardLayer.VULN,
             existing["record_id"],

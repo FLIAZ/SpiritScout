@@ -186,7 +186,7 @@ class CacheRepairTests(unittest.IsolatedAsyncioTestCase):
 
 class SecretaryRepairTests(unittest.IsolatedAsyncioTestCase):
     async def test_secretary_filters_invented_refs_and_has_no_tools(self) -> None:
-        fake = SimpleNamespace(chat=AsyncMock(return_value=SimpleNamespace(content=json.dumps({"suggestions": [
+        fake = SimpleNamespace(selected_model=lambda: "", chat=AsyncMock(return_value=SimpleNamespace(content=json.dumps({"suggestions": [
             {"summary": "real", "evidence_refs": ["topology:a@1"]},
             {"summary": "invented", "evidence_refs": ["missing"]}]}))))
         result = await Secretary(fake, NullAuditLogger()).advise({"records": [{"ref": "topology:a@1"}]}, {})
@@ -199,7 +199,7 @@ class SecretaryRepairTests(unittest.IsolatedAsyncioTestCase):
             bb = Blackboard(Path(directory) / "bb.db")
             self.addCleanup(bb.close)
             bb.write(BlackboardLayer.TOPOLOGY, "fact", {"text": "observed"})
-            secretary = SimpleNamespace(chat=AsyncMock(return_value=SimpleNamespace(content=json.dumps({"suggestions": [
+            secretary = SimpleNamespace(selected_model=lambda: "", chat=AsyncMock(return_value=SimpleNamespace(content=json.dumps({"suggestions": [
                 {"summary": "verify", "evidence_refs": ["topology:fact@1"]}]}))))
             async def decide(messages, **kwargs):
                 payload = next(json.loads(m["content"]) for m in messages
@@ -209,7 +209,7 @@ class SecretaryRepairTests(unittest.IsolatedAsyncioTestCase):
                     "advice_decisions": [{"id": advice["suggestions"][0]["id"], "verdict": "rejected", "reason": "已有覆盖"}]}))
             master = object.__new__(MasterAgent)
             master.agent_id = "master-test"
-            master.ctx = SimpleNamespace(blackboard=bb, audit=NullAuditLogger(), gateway=SimpleNamespace(chat=decide),
+            master.ctx = SimpleNamespace(blackboard=bb, audit=NullAuditLogger(), gateway=SimpleNamespace(chat=decide, selected_model=lambda: ""),
                 extra={"secretary_enabled": True, "secretary_gateway": secretary})
             master._system_prompt = lambda: "master"
             draft = {"request_advice": True, "continue_iteration": True, "dag_nodes": []}

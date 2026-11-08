@@ -55,7 +55,7 @@ def main() -> int:
                 with path.open('x', encoding='utf-8') as stream:
                     yaml.safe_dump(body, stream, allow_unicode=True, sort_keys=False)
         print('轻量模型：' + args.alias)
-        print('启动：.venv/bin/python -m spiritscout --config .spiritscout-ollama/system.yaml')
+        print('启动：./launch.sh start --offline')
         print('正常模式仍使用 configs/system.yaml；不要同时让两种模式争用同一 GPU。')
         return 0
     except (OSError, ValueError, urllib.error.URLError) as error:

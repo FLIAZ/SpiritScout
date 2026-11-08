@@ -89,6 +89,7 @@ class SessionCreatePayload(BaseModel):
     title: str = Field(default="", max_length=80)
     model: str = Field(default="", max_length=512)
     project_id: str = Field(default="", max_length=64)
+    browser_account_ids: list[Annotated[str, Field(pattern=r'^[a-zA-Z0-9_-]{1,64}$')]] = Field(default_factory=list, max_length=6)
     no_llm: StrictBool = False
     authorized: StrictBool = True
     budget_tokens: StrictInt | None = None

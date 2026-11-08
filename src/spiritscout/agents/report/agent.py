@@ -136,7 +136,7 @@ class ReportAgent:
         # 任务状态层摘要（解题过程记录）
         task_states = [r["data"] for r in
                        self.bb.query(BlackboardLayer.TASK_STATE, limit=10000)
-                       if "dag_snapshot" not in r["data"]]
+                       if isinstance(r["data"].get("task"), dict)]
         current_task_ids = {
             str(task_id) for task_id in (context or {}).get("current_task_ids", [])
         }

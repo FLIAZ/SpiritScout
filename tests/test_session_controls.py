@@ -22,6 +22,34 @@ from spiritscout.web.sessions import Session, SessionManager
 
 
 class SessionControlTests(unittest.IsolatedAsyncioTestCase):
+    async def test_restore_unpaused_releases_existing_waiter(self):
+        gate = PauseGate()
+        gate.pause()
+        waiter = asyncio.create_task(gate.wait())
+        await asyncio.sleep(0)
+        gate.restore(False)
+        await asyncio.wait_for(waiter, 1)
+        self.assertFalse(gate.paused)
+
+    async def test_continue_restored_paused_session_releases_rebuilt_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = SessionManager(SystemConfig(workspace=WorkspaceConfig(root=tmp)), [])
+            workspace = manager.root / "sess-restored"
+            workspace.mkdir()
+            session = Session(session_id="sess-restored",mode="ctf",target="fixture",workspace=workspace,status="interrupted")
+            session.pause_gate.restore(True)
+            manager._sessions[session.session_id] = session
+            async def rebuild(sid):
+                session.pause_gate = PauseGate()
+                session.pause_gate.restore(True)
+                session.status = "running"
+                return session
+            manager.resume = AsyncMock(side_effect=rebuild)
+            await manager.set_paused(session.session_id,False)
+            manager.resume.assert_awaited_once_with(session.session_id)
+            await asyncio.wait_for(session.pause_gate.wait(), 1)
+            self.assertFalse(session.pause_gate.paused)
+
     async def test_pause_resume_keeps_task_and_route_state_without_restarting(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             manager = SessionManager(SystemConfig(workspace=WorkspaceConfig(root=tmp)), [])

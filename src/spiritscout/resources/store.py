@@ -22,6 +22,7 @@ from spiritscout.config.settings import McpServerConfig
 from spiritscout.core.audit import sanitize_record
 from spiritscout.core.exceptions import SpiritScoutError
 from spiritscout.core.ids import new_id
+from spiritscout.core.storage_codec import unpack_json
 
 # 资源配置里的凭据字段：资源页/提案展示不回显（用户自己填的 key，
 # 与会话页 agent 数据流的原文监控是两回事）
@@ -81,27 +82,32 @@ CREATE TABLE IF NOT EXISTS proposals(id TEXT PRIMARY KEY,thread_id TEXT,state TE
 CREATE TABLE IF NOT EXISTS resource_imports(source TEXT PRIMARY KEY,identity TEXT,high_water INTEGER,legacy_version TEXT);
 """
 
-# 项目列表的聚合查询：最新观测与 accepted 判据都按项目作用域取，
-# 避免项目 A 的指纹/状态串到项目 B。
+# 先按项目/资产选出最新观测，再一次聚合；避免每个项目重复扫描全部资产。
+# 相同时间按观测 id 决定先后；LEFT JOIN 保留空项目及孤儿观测的 last_seen。
 _PROJECT_STATS_SQL = """
+WITH ranked AS (
+  SELECT o.project_id,a.kind,o.observed_at,o.data,
+    ROW_NUMBER() OVER (
+      PARTITION BY o.project_id,o.asset_id
+      ORDER BY o.observed_at DESC,o.id DESC) AS position
+  FROM observations o
+  JOIN projects p ON p.project_id=o.project_id
+  LEFT JOIN assets a ON a.id=o.asset_id
+), stats AS (
+  SELECT project_id,
+    SUM(CASE WHEN kind!='finding' THEN 1 ELSE 0 END) AS asset_count,
+    SUM(CASE WHEN kind='finding'
+      AND json_extract(data,'$.fingerprint.status')='accepted'
+      THEN 1 ELSE 0 END) AS finding_count,
+    MAX(observed_at) AS last_seen
+  FROM ranked WHERE position=1
+  GROUP BY project_id
+)
 SELECT p.project_id,p.name,p.description,p.created_at,p.updated_at,
-  (SELECT COUNT(DISTINCT o.asset_id) FROM observations o
-     JOIN assets a ON a.id=o.asset_id
-    WHERE o.project_id=p.project_id AND a.kind!='finding') AS asset_count,
-  (SELECT COUNT(*) FROM assets a
-    WHERE a.kind='finding' AND EXISTS (
-      SELECT 1 FROM observations o
-       WHERE o.asset_id=a.id AND o.project_id=p.project_id
-         AND json_extract(o.data,'$.fingerprint.status')='accepted'
-         AND NOT EXISTS (
-           SELECT 1 FROM observations o2
-            WHERE o2.asset_id=a.id AND o2.project_id=p.project_id
-              AND (o2.observed_at>o.observed_at
-                   OR (o2.observed_at=o.observed_at AND o2.id>o.id))))) AS finding_count,
-  (SELECT MAX(o.observed_at) FROM observations o
-    WHERE o.project_id=p.project_id) AS last_seen
-FROM projects p
-ORDER BY COALESCE(last_seen,0) DESC, p.name
+  COALESCE(s.asset_count,0) AS asset_count,
+  COALESCE(s.finding_count,0) AS finding_count,s.last_seen
+FROM projects p LEFT JOIN stats s ON s.project_id=p.project_id
+ORDER BY COALESCE(s.last_seen,0) DESC,p.name
 """
 
 
@@ -111,8 +117,9 @@ def resource_root(cfg: Any) -> Path:
 
 @lru_cache(maxsize=1)
 def builtin_skills() -> dict[str, dict[str, Any]]:
-    path = Path(__file__).parents[1] / "knowledge/data/security_skills.json"
-    return {item["skill_id"]: item for item in json.loads(path.read_text())}
+    directory = Path(__file__).parents[1] / "knowledge/data"
+    return {item["skill_id"]: item for name in ("security_skills.json", "ai_security.json", "awdp_audit.json")
+            for item in json.loads((directory / name).read_text())}
 
 
 def _normalize_project(name: str, *, truncate: bool = False) -> tuple[str, str]:
@@ -978,7 +985,7 @@ class ResourceStore:
         from datetime import datetime
 
         for layer, key, version, data, updated in rows:
-            asset = record_asset(layer, json.loads(data))
+            asset = record_asset(layer, unpack_json(data))
             if asset:
                 # 来源前缀是工作区目录名；正常 Web 会话目录名等于 session_id，
                 # 自动继承项目。手工改过目录名的旧会话不自动归属：不改前缀，

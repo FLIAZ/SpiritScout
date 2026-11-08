@@ -18,8 +18,10 @@ def is_frozen() -> bool:
 
 
 def app_root() -> Path:
-    """运行根目录：源码为仓库根，冻结构建为可执行文件所在目录。"""
+    """发行包可指定可写的数据目录；裸单文件默认使用程序旁边。"""
     if is_frozen():
+        if value := os.environ.get("SPIRITSCOUT_DATA_HOME"):
+            return Path(value).expanduser().resolve()
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parents[2]
 

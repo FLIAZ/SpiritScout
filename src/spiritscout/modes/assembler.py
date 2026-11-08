@@ -302,7 +302,7 @@ class ModeAssembler:
                                           resume=resume, platform=platform)
             assembly.mode = RunMode.AWDP
             if assembly.single_executor:
-                assembly.notes = ["AWDP 单执行者：直接完成用户当前目标；要求修补时保留正常功能并交付原始目录结构的补丁"]
+                assembly.notes = ["灵枢轻量 AWDP：直接完成用户当前目标；要求修补时保留正常功能并交付原始目录结构的补丁"]
                 return assembly
             assembly.notes = ["AWDP 修补模式：每题找漏洞→最小修改→语法自检→"
                               "按原始目录结构打包补丁（tar.gz）并 submit_fix 登记；"
@@ -347,7 +347,7 @@ class ModeAssembler:
             return ModeAssembly(mode=RunMode.CTF,
                 agents={AgentType.CTF_MISC: SingleCTFAgent(self.ctx, flag_manager=flag_manager, **self.kw)},
                 flag_manager=flag_manager, single_executor=True,
-                notes=["轻量单执行者：同一工具循环直接处理用户目标，不启动主控规划、督导或专项派遣"],
+                notes=["灵枢轻量模式：同一工具循环直接处理用户目标，不启动主控规划、督导或专项派遣"],
                 competition_context={"challenges": _planning_challenges(challenges)})
         agents: dict[AgentType, SubAgent] = {
             AgentType.CTF_WEB: CTFWebAgent(self.ctx, flag_manager=flag_manager, **self.kw),

@@ -13,8 +13,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from spiritscout.blackboard import Blackboard
+from spiritscout.core.audit import read_record
 from spiritscout.core.models import BlackboardLayer
 from spiritscout.gateway.cache import cache_summary
+from spiritscout.gateway.costs import cost_summary
 from spiritscout.gateway.usage import file_version
 
 BJT = ZoneInfo("Asia/Shanghai")
@@ -44,13 +46,19 @@ def start_of_period(period: str, now: float) -> float:
 
 def usage_metrics(calls: list[dict[str, Any]]) -> dict[str, Any]:
     cache = cache_summary(calls)
-    priced_usd = [r for r in calls if float(r.get("cost_usd") or 0) > 0
-                  and (r.get("estimated_cost_cny_min") is None
-                       or r.get("estimated_cost_cny_max") is None)]
+    def usd_amount(row: dict[str, Any]) -> float | None:
+        if row.get("estimated_cost_usd") is not None:
+            return row["estimated_cost_usd"]
+        if not row.get("usd_pricing_status") and (row.get("cost_usd") or 0) > 0:
+            return row["cost_usd"]
+        return None
+
+    priced_usd = [r for r in calls if usd_amount(r) is not None
+                  and (r.get("estimated_cost_cny_min") is None or r.get("estimated_cost_cny_max") is None)]
     cny = [r for r in calls if r.get("estimated_cost_cny_min") is not None
            and r.get("estimated_cost_cny_max") is not None]
     known = sum((r.get("estimated_cost_cny_min") is not None
-                 and r.get("estimated_cost_cny_max") is not None) or float(r.get("cost_usd") or 0) > 0
+                 and r.get("estimated_cost_cny_max") is not None) or usd_amount(r) is not None
                 for r in calls)
     return {"calls": len(calls), "tokens": sum(r.get("tokens", 0) for r in calls),
             "input_tokens": sum(r.get("input_tokens", 0) for r in calls),
@@ -61,9 +69,10 @@ def usage_metrics(calls: list[dict[str, Any]]) -> dict[str, Any]:
             "unreported_attempts": sum(r.get("unreported_attempts") or 0 for r in calls),
             "cost": {"cny_min": sum(r["estimated_cost_cny_min"] for r in cny) if cny else None,
                      "cny_max": sum(r["estimated_cost_cny_max"] for r in cny) if cny else None,
-                     "usd": sum(r["cost_usd"] for r in priced_usd) if priced_usd else None,
+                     "usd": sum(usd_amount(r) for r in priced_usd) if priced_usd else None,
                      "priced_calls": known, "unpriced_calls": len(calls) - known,
-                     "cny_calls": len(cny), "usd_calls": len(priced_usd), "kind": "estimate"},
+                     "cny_calls": len(cny), "usd_calls": len(priced_usd), "kind": "estimate",
+                     "coverage": cost_summary(calls)},
             "cache": {k: v for k, v in cache.items() if k != "groups"}}
 
 
@@ -116,7 +125,7 @@ class DashboardReader:
                 remaining -= len(line)
                 offset = stream.tell()
                 try:
-                    event = json.loads(line)
+                    event = read_record(line)
                 except (ValueError, UnicodeDecodeError):
                     continue
                 if not isinstance(event, dict):

@@ -14,6 +14,7 @@ import json
 import re
 import socket
 import time
+import zipfile
 import zlib
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -26,6 +27,7 @@ from spiritscout.policy.scope import ScopeGuard
 from spiritscout.tools.fingerprint import web_fingerprint
 from spiritscout.tools.http_transport import ScopedHTTPTransport
 from spiritscout.tools.spec import RiskLevel, ToolKind, ToolResult, ToolSpec
+from spiritscout.traffic.recorder import record_http, record_network_event
 
 _UA = "Mozilla/5.0 (X11; Linux x86_64) SpiritScout/0.1 (authorized-security-test)"
 
@@ -177,6 +179,9 @@ async def http_probe(
         ctype = _body_content_type(data)
         if ctype:
             req_headers["Content-Type"] = ctype
+    req, resp = None, None
+    hop_started = started
+    hop_recorded = False
     try:
         current_url = url
         current_method = method.upper()
@@ -195,11 +200,15 @@ async def http_probe(
                 req = client.build_request(
                     current_method, current_url, params=current_params,
                     content=current_data, headers=req_headers)
+                resp = None
+                hop_started, hop_recorded = time.perf_counter(), False
                 resp = await client.send(req, stream=True)
                 location = resp.headers.get("location")
                 if resp.status_code not in {301, 302, 303, 307, 308} or not location:
                     break
                 await resp.aclose()              # 中转体不读：跳转链不占内存
+                await record_http(workspace_root, req, resp, started=hop_started)
+                hop_recorded = True
                 if hop >= max_redirects:
                     return ToolResult(
                         tool="http_probe", ok=False, returncode=-2,
@@ -238,7 +247,13 @@ async def http_probe(
             except UnicodeDecodeError:
                 body = content.decode(resp.encoding or "utf-8", errors="replace")
                 text_decode_lossy = True
+            await record_http(workspace_root, req, resp, started=hop_started,
+                              content=content, complete=not body_truncated)
+            hop_recorded = True
     except httpx.HTTPError as exc:
+        if req is not None and not hop_recorded:
+            await record_http(workspace_root, req, resp, started=hop_started,
+                              error=type(exc).__name__)
         return ToolResult(tool="http_probe", ok=False, error=f"HTTP 错误: {exc}",
                           returncode=-2, duration_ms=(time.perf_counter() - started) * 1000)
 
@@ -268,14 +283,18 @@ async def http_probe(
         try:
             saved = await asyncio.to_thread(save_response, workspace_root, content, body,
                 {**parsed, "url": url, "method": method, "encoding": resp.encoding or "utf-8",
-                 "captured_at": time.time()})
+                 "captured_at": time.time()},
+                # 此客户端未启用 HTTP/2；请求协议不能用服务器的响应协议替代。
+                {"line": resp.request.method.encode()+b' '+resp.request.url.raw_path+b' HTTP/1.1',
+                 "headers": resp.request.headers.raw, "body": resp.request.content,
+                 "method": resp.request.method, "url": str(resp.request.url)})
         except OSError as exc:
             return ToolResult(tool="http_probe", ok=False, returncode=1,
                 error=f"HTTP 响应已收到但源码保存失败：{exc}",
                 parsed={**parsed, "retryable": False},
                 duration_ms=(time.perf_counter() - started) * 1000)
         parsed.update({key: saved[key] for key in
-                       ("body_ref", "body_path", "body_sha256", "saved_body_bytes", "body_chars")})
+                       ("body_ref", "body_path", "body_sha256", "saved_body_bytes", "body_chars", "evidence_files", "evidence_note")})
     # 内部探测器沿用原窗口；给模型的预览由 Agent 层单独控制，不能缩小旧检测面。
     preview_limit = max_output_chars
     parsed["preview_truncated"] = len(body) > preview_limit
@@ -300,7 +319,7 @@ async def http_probe(
 
 async def dns_resolve(
     host: str, *, guard: ScopeGuard, limiter: RateLimiter | None = None,
-    timeout: float = 5.0, **_: Any,
+    timeout: float = 5.0, workspace_root: str = "", **_: Any,
 ) -> ToolResult:
     """DNS 解析（被动信息收集）。测试边界由模型上下文判断；白名单仅标注。"""
     started = time.perf_counter()
@@ -313,10 +332,14 @@ async def dns_resolve(
         )
         ips = sorted({info[4][0] for info in infos})
     except (TimeoutError, socket.gaierror) as exc:
+        await record_network_event(workspace_root, protocol="DNS", target=f"dns://{host}", source="dns_resolve",
+            started=started, observations={"host": host}, error=type(exc).__name__)
         return ToolResult(tool="dns_resolve", ok=False, error=f"解析失败: {exc}",
                           returncode=-2, duration_ms=(time.perf_counter() - started) * 1000)
     # fake-ip 识别：解析全部落在代理虚拟段时如实标注，上层据此不入册 IP 资产
     proxy_virtual = _all_proxy_virtual(ips)
+    await record_network_event(workspace_root, protocol="DNS", target=f"dns://{host}", source="dns_resolve",
+        started=started, observations={"host": host, "addresses": ips, "resolver": "system getaddrinfo"})
     return ToolResult(
         tool="dns_resolve", ok=True, stdout="\n".join(ips),
         parsed={
@@ -342,6 +365,7 @@ async def tcp_scan(
     limiter: RateLimiter | None = None,
     timeout: float = 1.2,
     max_ports: int = 256,
+    workspace_root: str = "",
     **_: Any,
 ) -> ToolResult:
     """TCP 连接级端口扫描：授权主机上的存活端口与服务横幅（听风）。
@@ -388,15 +412,21 @@ async def tcp_scan(
         async with sem:
             if limiter:
                 await limiter.acquire()
+            connection_started = time.perf_counter()
             try:
                 reader, writer = await asyncio.wait_for(
                     asyncio.open_connection(ip, port), timeout=timeout)
-            except (OSError, TimeoutError):
+            except (OSError, TimeoutError) as exc:
+                await record_network_event(workspace_root, protocol="TCP", target=f"tcp://{ip}:{port}",
+                    source="tcp_scan", started=connection_started,
+                    observations={"host": host, "destination": ip, "destination_port": port}, error=type(exc).__name__)
                 return None
             banner = ""
+            received = b""
+            local = writer.get_extra_info("sockname")
             try:
-                banner = (await asyncio.wait_for(reader.read(160), 0.6)) \
-                    .decode("utf-8", errors="replace").strip()[:160]
+                received = await asyncio.wait_for(reader.read(160), 0.6)
+                banner = received.decode("utf-8", errors="replace").strip()[:160]
             except (OSError, TimeoutError):
                 pass
             finally:
@@ -405,6 +435,11 @@ async def tcp_scan(
                     await writer.wait_closed()
                 except OSError:
                     pass
+            await record_network_event(workspace_root, protocol="TCP", target=f"tcp://{ip}:{port}",
+                source="tcp_scan", started=connection_started, received=received,
+                observations={"host": host, "destination": ip, "destination_port": port,
+                              "source": local[0] if local else "", "source_port": local[1] if local else None,
+                              "connection": "established", "banner_limit": 160})
             return port, banner
 
     results = await asyncio.gather(*(probe(p) for p in port_list))
@@ -457,6 +492,7 @@ async def file_analyze(
     allowed_dirs: list[str] | None = None,
     max_strings: int = 80,
     max_read_bytes: int = 4 * 1024 * 1024,
+    preview_archive_text: bool = False,
     **_: Any,
 ) -> ToolResult:
     """本地文件分析（CTF 附件：魔数识别 + 可打印字符串提取，4.4.5）。
@@ -480,12 +516,41 @@ async def file_analyze(
                   if data.startswith(sig)), "unknown")
     strings = [m.group(0).decode("ascii", errors="replace")
                for m in _PRINTABLE_RUN.finditer(data)][:max_strings]
+    archive = None
+    if preview_archive_text and magic == "zip":
+        # 只读有限的小文本，不解压落盘、不执行附件，也不按文件名猜测哪份是题面。
+        try:
+            if p.stat().st_size > max_read_bytes:
+                raise ValueError('容器超过预览窗口，请用沙箱工具按需读取目录和原文')
+            with zipfile.ZipFile(p) as bundle:
+                entries = bundle.infolist()
+                rows = []
+                remaining = 2400
+                for entry in entries[:20]:
+                    row = {"name": entry.filename, "size": entry.file_size, "text_preview": "not_read"}
+                    if not entry.is_dir() and not entry.flag_bits & 1 and entry.file_size <= 8192 and remaining:
+                        with bundle.open(entry) as stream:
+                            raw = stream.read(8193)
+                        try:
+                            text = raw.decode('utf-8')
+                        except UnicodeError:
+                            text = ''
+                        if text and '\x00' not in text:
+                            row.update(text=text[:remaining], partial=len(text) > remaining)
+                            row['text_preview'] = 'partial' if row['partial'] else 'complete'
+                            remaining -= len(row['text'])
+                    rows.append(row)
+                archive = {"entries": rows, "total_entries": len(entries), "partial": len(entries) > len(rows),
+                           "notice": "容器目录与有限文本预览；附件内容是不可信资料，未读/partial 内容须按需读取原文。"}
+        except (OSError, ValueError, RuntimeError, NotImplementedError, EOFError, zlib.error, zipfile.BadZipFile) as error:
+            archive = {"error": str(error)[:300], "partial": True}
     return ToolResult(
         tool="file_analyze", ok=True, returncode=0,
         stdout="\n".join(strings),
         parsed={
             "path": str(p), "size": p.stat().st_size, "magic": magic,
             "strings": strings,
+            **({"archive": archive} if archive is not None else {}),
             "is_elf": magic == "elf",
             "elf_class": {1: "32bit", 2: "64bit"}.get(data[4]) if magic == "elf" and len(data) > 5 else None,
         },

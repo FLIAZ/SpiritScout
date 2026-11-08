@@ -62,6 +62,8 @@ def _read_state(session: Session) -> dict[str, Any]:
         "ring": session.ring.snapshot(),
         "user_opinions": session.opinions[-8:],
         "round_views": run_summary.get("round_views", []),
+        "decision_rounds": max(len(run_summary.get("round_views", [])),
+                               run_summary.get("rounds_executed", 0) if type(run_summary.get("rounds_executed")) is int else 0),
         "model_usage": live_usage or run_summary.get("model_usage"),
         "verify": session.summary.get("verify"),
         "business_context": None,
@@ -75,6 +77,10 @@ def _read_state(session: Session) -> dict[str, Any]:
     bb = Blackboard(session.bb_path, bus=None, readonly=True)
     try:
         state["topology"]["process"] = project_blackboard(bb)
+        # 主控轮次在派发前已落盘，不等整轮所有并行任务结束才有数值。
+        dag_state = bb.read(BlackboardLayer.TASK_STATE, 'dag-snapshot') or {}
+        if type(dag_state.get('round')) is int and dag_state['round'] >= 0:
+            state['decision_rounds'] = max(state['decision_rounds'], dag_state['round'] + 1)
         for layer in BlackboardLayer:
             state["layers"][layer.value] = bb.count(layer)
         for rec in bb.query(BlackboardLayer.TASK_STATE, limit=100):
@@ -83,7 +89,17 @@ def _read_state(session: Session) -> dict[str, Any]:
                 # 主 Agent 每轮落盘的 DAG 快照（拓扑数据源，非任务记录）
                 state["topology"]["dag_nodes"] = data["dag_snapshot"]
                 continue
+            if data.get('kind') == 'scanner_control':
+                state['scanner'] = data
+                continue
             t = data.get("task", {})
+            if not t and data.get('agent_type') == 'scanner' and data.get('task_id'):
+                t = {**data, 'task_type': 'scan',
+                     'payload': {'node_title': (data.get('delegation') or {}).get('goal', '扫描信息收集')}}
+            if not t.get('task_id'):
+                continue
+            if type(t.get('round_no')) is int and t['round_no'] >= 0:
+                state['decision_rounds'] = max(state['decision_rounds'], t['round_no'] + 1)
             state["tasks"].append({
                 "task_id": t.get("task_id"), "task_type": t.get("task_type"),
                 "title": (t.get("payload") or {}).get("node_title", ""),
@@ -105,6 +121,7 @@ def _read_state(session: Session) -> dict[str, Any]:
             })
             state["topology"]["tasks"].append({
                 "task_id": t.get("task_id"), "task_type": t.get("task_type"),
+                "delegation": data.get('delegation'),
                 "agent_type": t.get("agent_type"), "status": t.get("status"),
                 "round_no": t.get("round_no"),
                 "parent_dag_node": t.get("parent_dag_node"),
@@ -144,6 +161,7 @@ def _read_state(session: Session) -> dict[str, Any]:
                 "vuln_type": d.get("vuln_type"), "severity": d.get("severity"),
                 "status": status, "cvss_score": d.get("cvss_score"),
                 "poc_verified": d.get("poc_verified"),
+                "version": rec["version"], "vulnerability_ids": d.get("vulnerability_ids", []),
                 "verification": d.get("verification", {}),
                 "false_positive_reason": d.get("false_positive_reason"),
                 "endpoint": d.get("endpoint"),

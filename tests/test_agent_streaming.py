@@ -10,6 +10,7 @@ from spiritscout.agents.sub.base import SubAgent
 from spiritscout.config.settings import ModelEntry
 from spiritscout.core.audit import NullAuditLogger
 from spiritscout.core.models import AgentType, RouteState, Task, TaskStatus
+from spiritscout.ctf.agents import _DeltaEmitter
 from spiritscout.gateway import ModelGateway, ModelRegistry
 from spiritscout.gateway.backends import MockBackend
 from spiritscout.gateway.streaming import AuditStream
@@ -91,3 +92,28 @@ class AgentStreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("".join(r["text"] for r in deltas if r["kind"] == "reasoning"), "分析" * 3000)
         self.assertEqual(deltas[-1]["text"], "结果")
         self.assertTrue(all(len(r["text"]) <= 4000 for r in deltas))
+
+    def test_local_display_stream_preserves_large_chunks_and_retry_reset(self) -> None:
+        audit = NullAuditLogger()
+        scope = ExecutionScope(agent_id="local-display", task_id="display-task", route_id="display-route")
+        token = current_execution_scope.set(scope)
+        try:
+            sink = _DeltaEmitter(audit, "local-display", route="display", challenge="fixture",
+                                 turn=2, interval=3600)
+            original = "配置说明" * 2500
+            sink("text", original)
+            sink("text", "尚未刷出的旧尾部")
+            sink("reset", "")
+            self.assertFalse(sink.has_public_text)
+            sink("text", "重新生成的说明")
+            sink.flush()
+        finally:
+            current_execution_scope.reset(token)
+        deltas = [record["detail"] for record in audit.records]
+        reset = next(i for i, detail in enumerate(deltas) if detail["kind"] == "reset")
+        self.assertEqual("".join(detail["text"] for detail in deltas[:reset]), original)
+        self.assertEqual(deltas[reset]["text"], "")
+        self.assertEqual("".join(detail["text"] for detail in deltas[reset + 1:]), "重新生成的说明")
+        self.assertTrue(all(len(detail["text"]) <= 4000 for detail in deltas))
+        self.assertTrue(all(detail["task_id"] == scope.task_id and detail["route_id"] == scope.route_id
+                            and detail["turn"] == 2 for detail in deltas))

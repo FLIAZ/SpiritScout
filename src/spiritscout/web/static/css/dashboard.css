@@ -92,8 +92,8 @@
 /* 用量总览：沿用全站明暗主题，蓝 / 绿 / 紫分别对应输入、缓存、输出。 */
 .dash-console { --dash-input:#527ce0; --dash-cache:#159c82; --dash-output:#9a77cc; --dash-cost:#c29139; --dash-unknown:var(--ink-3); gap:20px; }
 .dash-heading { display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap; }
-.dash-heading h2 { margin:0; font-size:23px; font-weight:650; letter-spacing:-.04em; }
-.dash-heading p { margin:7px 0 0; color:var(--ink-2); font-size:12px; }
+.dash-heading h2 { margin:0; font-size:var(--page-title-size); font-weight:700; line-height:var(--heading-leading); }
+.dash-heading p { margin:8px 0 0; color:var(--ink-2); font-size:13px; line-height:1.7; }
 .dash-toolbar { padding:6px; border:1px solid var(--line); border-radius:12px; background:var(--surface); }
 .dash-range-note { padding:0 10px; color:var(--ink-3); font-size:11px; }
 .dash-periods button, .dash-toggle button { border-radius:8px; }
@@ -113,7 +113,7 @@
 .dash-health .dash-incomplete { color:var(--warn); }
 .dash-usage-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:20px; }
 .dash-panel { border-radius:14px; padding:22px; }
-.dash-panel h3 { font-size:14px; letter-spacing:-.02em; }
+.dash-panel h3 { font-size:14px; line-height:1.5; }
 .dash-token-total { display:flex; align-items:baseline; flex-wrap:wrap; gap:10px; margin:20px 0; }
 .dash-token-total strong { font:600 28px var(--mono); letter-spacing:-.04em; overflow-wrap:anywhere; }
 .dash-token-total > span { color:var(--ink-3); font-size:11px; }

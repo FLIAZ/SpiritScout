@@ -1,0 +1,39 @@
+# Windows 宿主运行 Ollama / llama.cpp；容器提供完整 Linux 沙箱。
+name: spiritscout-light-test
+services:
+  spiritscout:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        INSTALL_TOOLKIT: ${INSTALL_TOOLKIT:-0}
+        INSTALL_AUDIT: ${INSTALL_AUDIT:-1}
+    image: spiritscout-light:local
+    restart: unless-stopped
+    stop_grace_period: 60s
+    shm_size: "512mb"
+    ports:
+      - "127.0.0.1:${SPIRITSCOUT_LIGHT_PORT:-8001}:10010"
+    environment:
+      SPIRITSCOUT_ADMIN_USERNAME: "${SPIRITSCOUT_ADMIN_USERNAME:-spiritscout}"
+      SPIRITSCOUT_ADMIN_PASSWORD: "${SPIRITSCOUT_ADMIN_PASSWORD:?先执行 python deploy.py init 生成 .env}"
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - light-data:/app/.spiritscout-light
+      - type: bind
+        source: ./.spiritscout-light-config
+        target: /app/light-config
+        bind:
+          create_host_path: false
+    working_dir: /app
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+    cap_add:
+      - SYS_ADMIN
+    command: [python, -m, spiritscout, --config, light-config/system.yaml]
+volumes:
+  light-data:

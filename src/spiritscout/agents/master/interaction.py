@@ -57,6 +57,10 @@ class MasterInteraction:
             feed = self._drain_user_feed()
             if not feed:
                 return True
+            control = self.ctx.extra.get('scan_controller')
+            if control is not None:
+                batch = ':'.join(str(item.get('statement_id') or id(item)) for item in feed)
+                await control.hold_for_user(batch)
             seed = self.ctx.extra.get("dialogue_history")
             history = seed if isinstance(seed, list) else getattr(self, "_chat_history", [])
             self._chat_history = history
@@ -111,6 +115,7 @@ class MasterInteraction:
         situation = self._engagement_status()
         payload = {
             "mission": self._mission()[:1000],
+            "scanner": self._scanner_context(),
             "world_state": self._world_state(),
             "agents": [a.value for a in self.ctx.agents],
             "roster": roster,
@@ -162,6 +167,9 @@ class MasterInteraction:
             steering = self._target_steering(raw, current, allow_broadcast=True)
             if len(steering) != len(raw):
                 raise ValueError("指令收件任务尚未就绪或无效，消息保留待重试")
+            control_result = await self._apply_scanner_control(data)
+            if control_result is not None and not control_result['ok']:
+                raise ValueError(control_result['error'])
             return reply, steering
         except (SpiritScoutError, OSError, ValueError, TypeError) as exc:
             # 对话通道失败不影响主链路，但留痕可见
@@ -324,6 +332,7 @@ class MasterInteraction:
         try:
             payload: dict[str, Any] = {
                 "action": "steer",
+                "scanner": self._scanner_context(),
                 "mission": self._mission()[:1000],
                 "world_state": self._world_state(),
                 "business_context": shared_context(self.ctx.blackboard),
@@ -424,7 +433,9 @@ class MasterInteraction:
             items = data.get("steering")
             if not isinstance(items, list):
                 raise TypeError("steering 应答不是列表")
-            return self._target_steering(items, digest["tasks"])
+            steering = self._target_steering(items, digest["tasks"])
+            await self._apply_scanner_control(data)
+            return steering
         except Exception:  # noqa: BLE001 —— 督导失败不拖垮派发
             return []
 

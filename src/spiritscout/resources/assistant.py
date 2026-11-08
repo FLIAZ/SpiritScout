@@ -503,6 +503,9 @@ class ResourceAssistant:
 
 
 def validate_skill(data: dict[str, Any]) -> None:
+    from spiritscout.resources.skill_search import validate_metadata
+
+    validate_metadata(data)
     if "files" in data:
         data["body"] = project_body(data["files"])
     if not re.fullmatch(r"[a-zA-Z0-9_-]{1,100}", str(data.get("skill_id", ""))):

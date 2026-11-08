@@ -20,6 +20,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from spiritscout.blackboard.store import Blackboard
 from spiritscout.core.exceptions import ConfigurationError
+from spiritscout.core.storage_codec import pack_json, unpack_json
 from spiritscout.tools.invocation import ExecutionScope
 from spiritscout.tools.run_lock import ExecutionRunLock
 from spiritscout.tools.spec import ToolResult
@@ -142,7 +143,7 @@ class ExecutionJournal:
             version = (conn.execute("SELECT COALESCE(MAX(version),0) "
                                     "FROM execution_schema_migrations").fetchone()[0]
                        if migrated else 0)
-        if version > 3:
+        if version > 4:
             raise ConfigurationError("执行台账版本高于当前程序支持版本，请使用匹配的程序")
         if version and version < 3:
             blackboard.backup_before_upgrade(3)
@@ -169,6 +170,9 @@ class ExecutionJournal:
                 raise ConfigurationError("执行数据库属于其他工作区密钥，不能共用或接管")
             conn.execute("INSERT OR IGNORE INTO execution_schema_migrations VALUES(3, ?)",
                          (time.time(),))
+            # 编码升级不改变表结构；事务内写入版本，旧程序明确拒绝压缩记录。
+            conn.execute("INSERT OR IGNORE INTO execution_schema_migrations VALUES(4, ?)",
+                         (time.time(),))
 
     def begin(self, invocation_id: str, tool: str, digest: str, replay_policy: str, *,
               params: dict[str, Any] | None = None, scope: ExecutionScope | None = None) -> None:
@@ -189,8 +193,7 @@ class ExecutionJournal:
     def transition(self, invocation_id: str, status: str, *, effect: str = "none",
                    result: ToolResult | None = None) -> None:
         now = time.time()
-        encrypted = (self._cipher.encrypt(json.dumps(
-            asdict(result), ensure_ascii=False, default=str).encode())
+        encrypted = (self._cipher.encrypt(pack_json(asdict(result), default=str))
                      if result is not None else None)
         with self.blackboard.transaction() as conn:
             cursor = conn.execute(
@@ -217,7 +220,7 @@ class ExecutionJournal:
                                (invocation_id,)).fetchone()
         if row is None or row[0] is None:
             return None
-        return ToolResult(**json.loads(self._cipher.decrypt(row[0])))
+        return ToolResult(**unpack_json(self._cipher.decrypt(row[0])))
 
     def approval(self, invocation_id: str, action: str, allow: bool) -> None:
         """裁决持久化后才继续执行；重启后不把历史批准转为新调用的许可。"""
@@ -226,14 +229,14 @@ class ExecutionJournal:
                          (invocation_id, action, int(allow), time.time()))
 
     def _encrypt(self, data: Any) -> bytes:
-        return self._cipher.encrypt(json.dumps(data, ensure_ascii=False, allow_nan=False).encode())
+        return self._cipher.encrypt(pack_json(data, allow_nan=False))
 
     def parameters(self, invocation_id: str) -> dict[str, Any] | None:
         """内部核对用，不通过公开列表接口暴露参数。"""
         with self.blackboard.transaction() as conn:
             row = conn.execute("SELECT params_cipher FROM tool_invocations WHERE invocation_id=?",
                                (invocation_id,)).fetchone()
-        return json.loads(self._cipher.decrypt(row[0])) if row and row[0] else None
+        return unpack_json(self._cipher.decrypt(row[0])) if row and row[0] else None
 
     def activate_run(self, lock: ExecutionRunLock) -> None:
         """持有排他运行锁后才核对旧状态，不凭 PID/时间猜测执行者是否存活。"""
@@ -308,7 +311,7 @@ class ExecutionJournal:
             result = dict(row)
             tails: list[list] = []
             while row["schema_version"] == 2:
-                delta = json.loads(self._cipher.decrypt(row["state_cipher"]))
+                delta = unpack_json(self._cipher.decrypt(row["state_cipher"]))
                 base = delta.get("base_checkpoint")
                 if (type(base) is not int or base >= row["checkpoint_id"]
                         or not isinstance(delta.get("tail"), list) or len(tails) >= 31):
@@ -322,7 +325,7 @@ class ExecutionJournal:
                     raise ConfigurationError("对话检查点基线缺失，未恢复执行")
             if row["schema_version"] != 1:
                 raise ConfigurationError("不支持的检查点版本，未恢复执行")
-            state = json.loads(self._cipher.decrypt(row["state_cipher"]))
+            state = unpack_json(self._cipher.decrypt(row["state_cipher"]))
             if tails:
                 messages = state["messages"]
                 for tail in reversed(tails):

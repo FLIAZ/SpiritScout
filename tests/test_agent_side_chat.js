@@ -7,12 +7,12 @@ const elements=new Map();
 function get(s){if(!elements.has(s))elements.set(s,element());return elements.get(s);}
 const requests=[],S={cur:'parent',view:'session',tab:'chat',sessions:[]};
 let nextResponse=null;
-const context=vm.createContext({S,$:get,esc:String,mdRender:String,actorName:String,document:{activeElement:null},openSession(){throw Error('不应跳离主会话');},setTimeout(){return 1;},clearTimeout(){},api:async(url,options)=>{
+const context=vm.createContext(require('./helpers/i18n').context({S,$:get,esc:String,mdRender:String,actorName:String,document:{activeElement:null},openSession(){throw Error('不应跳离主会话');},setTimeout(){return 1;},clearTimeout(){},api:async(url,options)=>{
  requests.push({url,body:options && JSON.parse(options.body)});
  if(nextResponse)return nextResponse;
  if(url.endsWith('/conversation'))return {session:{status:'completed',side_session:{task_id:'task'}},messages:[{role:'user',content:'第一问'},{role:'assistant',content:'第一答'}]};
  return {session_id:'child',side_session:{actor:'recon',parent_session_id:'parent'}};
-}});
+}}));
 vm.runInContext(fs.readFileSync('src/spiritscout/web/static/js/agent-side-chat.js','utf8')+'\nglobalThis.chat=AgentSideChat;',context);
 const agent={actor:'recon',taskId:'task',status:'执行中',tasks:new Map([['task',{id:'task'}]])};
 const input=get('textarea'),form=get('form');

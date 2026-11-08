@@ -29,6 +29,7 @@ from spiritscout.gateway.backends import (
 from spiritscout.gateway.cache import PrefixTracker, cache_summary
 from spiritscout.gateway.capabilities import EndpointCapabilities
 from spiritscout.gateway.context import DecisionMemory
+from spiritscout.gateway.costs import configured_usd
 from spiritscout.gateway.pricing import estimate_deepseek_cny
 from spiritscout.gateway.registry import ModelRegistry
 from spiritscout.gateway.session_model import Selector, model_entries_source, selection
@@ -186,6 +187,13 @@ async def _chat_decision_once(
         kwargs["preserve_context"] = True
         if audit is not None and memory.segment_changed:
             audit.log("context.decision_segment", actor, memory.segment_info)
+        if memory.pending_compaction:
+            from spiritscout.gateway.manual_context import record_result
+
+            record_result(memory.blackboard, memory.pending_compaction,
+                f"decision:{memory.checkpoint_key or actor}",
+                memory.segment_info["estimated_tokens_before"], memory.segment_info["estimated_tokens_after"],
+                audit=audit, actor=actor)
     resp = await gateway.chat(messages, **kwargs)
     if output_lost(resp):
         if audit is not None:
@@ -337,6 +345,8 @@ class ModelGateway:
         self._missing_selection = ""
         self._entries_source = model_entries_source()
         self._entries_version: list | None = None
+        from spiritscout.gateway.official_prices import price_catalog
+        self.pricing = price_catalog()
 
     def _refresh_selection_registry(self) -> None:
         entries = self._entries_source() if self._entries_source else None
@@ -434,6 +444,7 @@ class ModelGateway:
                     on_delta=_relay if on_delta is not None else None,
                     # 思考强度按每个候选模型各自声明的档位把关（主备档位可能不同）
                     reasoning_effort=self._resolve_effort(candidate, reasoning_effort),
+                    requested_reasoning_effort=reasoning_effort,
                     task_type=task_type,
                     preserve_context=preserve_context, preserve_tool_order=preserve_tool_order,
                 )
@@ -501,10 +512,14 @@ class ModelGateway:
         tool_choice: str | dict[str, Any] | None = None,
         on_delta: DeltaCallback | None = None,
         reasoning_effort: str = "",
+        requested_reasoning_effort: str = "",
         task_type: str = "execution",
         preserve_context: bool = False,
         preserve_tool_order: bool = False,
     ) -> ChatResponse:
+        if entry.auth_method == 'kimi_oauth':
+            from spiritscout.web.provider_auth import access_token
+            entry = entry.model_copy(update={'api_key': await access_token(entry)})
         backend: ChatBackend = backend_for(entry, self._mock, capabilities=self.endpoint_capabilities)
         messages = copy.deepcopy(messages)
         if entry.context_window and not preserve_context:
@@ -520,11 +535,16 @@ class ModelGateway:
             tools = copy.deepcopy(tools)
             if not preserve_tool_order:
                 tools = sorted(tools, key=lambda t: str(t.get("function", {}).get("name", t.get("name", ""))))
-            tools = json.loads(json.dumps(tools, ensure_ascii=False, sort_keys=True))
+                tools = json.loads(json.dumps(tools, ensure_ascii=False, sort_keys=True))
+            # 保留工具契约时也保留字段顺序。约束解码端点会按 properties 顺序生成参数；
+            # 将 search/replace 排成 replace/search 会让小模型先生成新文、再选择要替换的原文。
         # 输出上限落点：调用点显式给定值优先（小通道定值）；否则按模型档案
         # 声明下发；档案也没声明就 None（请求不带该字段，端点自定）
         if max_tokens is None and entry.max_output_tokens > 0:
             max_tokens = entry.max_output_tokens
+        from spiritscout.gateway.billing import quote_for
+
+        pricing_snapshot = await quote_for(entry, self.pricing)
         started = time.perf_counter()
         wall = time.time()                      # 记账用墙钟（时序图按日聚合）
         scope = current_execution_scope.get() or ExecutionScope()
@@ -533,8 +553,17 @@ class ModelGateway:
                      for line in str(m.get("content") or "").splitlines() if line.startswith("ROLE: ")), "")
         prefix = self.prefix_tracker.observe(
             (entry.key, entry.provider, entry.base_url or "", entry.model, actor, scope.task_id or "", scope.route_id or "", task_type, role),
-            messages, tools)
+            messages, tools,
+            conversation_key=(actor, scope.task_id or '', scope.route_id or '', task_type),
+            model_identity=(entry.key, entry.provider, entry.base_url or '', entry.model),
+            request_options={'api_format': entry.api_format, 'reasoning_effort': reasoning_effort,
+                'temperature': temperature, 'max_tokens': max_tokens, 'tool_choice': tool_choice,
+                'response_format': response_format, 'prompt_caching': entry.prompt_caching})
         call = {"call_id": f"model-{uuid.uuid4().hex}", "model": entry.model, "model_key": entry.key, "provider_ref": entry.provider_ref, "runtime_version": __version__,
+                "pricing_snapshot": pricing_snapshot,
+                "api_format": entry.api_format, "configured_context_window": entry.context_window,
+                "requested_reasoning_effort": requested_reasoning_effort,
+                "sent_reasoning_effort": reasoning_effort,
                 "task_type": task_type, "task_id": scope.task_id, "route_id": scope.route_id, "cache_scope": role or task_type, **prefix}
         self.audit.log("model.started", actor, call)
         stream = None
@@ -607,15 +636,23 @@ class ModelGateway:
         metrics = {key: raw.get(key) for key in ("cached_input_tokens", "cache_write_tokens", "first_delta_ms")}
         metrics.update(runtime_version=__version__, usage_status=raw.get("usage_status", "unknown"),
                        call_status=status, **attempts.metrics())
+        metrics.update(configured_usd(entry, raw))
+        metrics.update({key: call[key] for key in (
+            "model_key", "provider_ref", "api_format", "configured_context_window",
+            "requested_reasoning_effort", "sent_reasoning_effort")})
         metrics.update({key: raw[key] for key in ('queue_duration_ms', 'load_duration_ms',
                         'prompt_eval_duration_ms', 'eval_duration_ms', 'eval_tokens_per_second') if key in raw})
         metrics["patch_optimization_enabled"] = self.config.compact_decision_patches
-        metrics.update(estimate_deepseek_cny(entry, wall, raw["prompt_tokens"],
-                                             raw.get("cached_input_tokens"), raw["completion_tokens"]))
+        if entry.billing_scheme == 'manual':
+            metrics.update(estimate_deepseek_cny(entry, wall, raw["prompt_tokens"],
+                                                 raw.get("cached_input_tokens"), raw["completion_tokens"]))
+        else:
+            from spiritscout.gateway.billing import estimate
+            metrics.update(estimate(entry, call['pricing_snapshot'], wall, raw))
         metrics.update({key: call[key] for key in ("cache_scope", "task_id", "route_id")})
         metrics.update(input_tokens=raw["prompt_tokens"], output_tokens=raw["completion_tokens"],
                        task_type=call["task_type"], actor=actor, call_id=call["call_id"])
-        metrics.update({key: call[key] for key in ("request_bytes", "reused_prefix_bytes", "new_suffix_bytes", "context_parts")})
+        metrics.update({key: call[key] for key in ("request_bytes", "reused_prefix_bytes", "new_suffix_bytes", "context_parts", "cache_diagnostics")})
         total_tokens = raw["prompt_tokens"] + raw["completion_tokens"]
         cost = (
             raw["prompt_tokens"] / 1e6 * entry.cost_input_per_mtok
@@ -627,6 +664,8 @@ class ModelGateway:
             cost += min(read, raw["prompt_tokens"]) / 1e6 * (entry.cost_cached_input_per_mtok - entry.cost_input_per_mtok)
         if write is not None and entry.cost_cache_write_per_mtok is not None:
             cost += min(write, max(0, raw["prompt_tokens"] - (read or 0))) / 1e6 * (entry.cost_cache_write_per_mtok - entry.cost_input_per_mtok)
+        if entry.billing_scheme != 'manual':
+            cost = 0.0  # 旧 USD 累加器不能混入人民币参考价或订阅费；新费用视图使用覆盖率。
         self.budget.record(entry.key, total_tokens, cost, ts=wall, **metrics)
         return metrics, total_tokens, cost
 
@@ -660,7 +699,7 @@ class ModelGateway:
 class AgentBoundGateway:
     """按 Agent 绑定模型的网关包装（Web 编队页分配）。
 
-    chat 未显式给 model 时注入该 Agent 被指派的模型；模型为空 = 不干预
+    chat 未显式给 model 时优先采用会话统一选择，再采用该 Agent 被指派的模型；模型为空 = 不干预
     （维持档位路由现状）。其余属性（budget/usage_report/...）全部透传内层网关，
     预算计量、限流、主备切换、降级语义不变——本包装只改「谁来答」，不改治理。
     """
@@ -676,7 +715,7 @@ class AgentBoundGateway:
 
     def _bound_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
         if not kwargs.get("model"):
-            selected = self._inner.selected_model() if self._prefer_session else ""
+            selected = self._inner.selected_model()
             if selected or self._model:
                 kwargs["model"] = selected or self._model
         return kwargs

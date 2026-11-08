@@ -100,6 +100,33 @@ class LaunchScriptTests(unittest.TestCase):
                 self.assertEqual(start['args'][-1], '.spiritscout-ollama/system.yaml')
                 path.write_text('fixture: true\n', encoding='utf-8')
 
+    def test_llama_configuration_uses_offline_profile_and_session_guard(self) -> None:
+        models = self.root / '.spiritscout-ollama/models.yaml'
+        content = 'models:\n  - model: fixture\n    local_runtime: llama_cpp\n'
+        models.write_text(content, encoding='utf-8')
+        for command in ('start', 'restart'):
+            with self.subTest(command=command):
+                call, = self.calls(self.launch(command, '--offline'))
+                self.assertEqual(call['args'], ['-m', 'spiritscout', '--config',
+                                               '.spiritscout-ollama/system.yaml'])
+                self.assertEqual(call['cost_map'], 'True')
+        self.assertEqual(models.read_text(encoding='utf-8'), content)
+        self.assertFalse((self.root / '.spiritscout-llama').exists())
+        self.running_session('.spiritscout-ollama')
+        for command in ('stop', 'restart'):
+            with self.subTest(command=command):
+                blocked = self.launch(command, '--offline')
+                self.assertEqual(blocked.returncode, 1)
+                self.assertIn(f'{command} --offline 8001 --force', blocked.stderr)
+
+    def test_removed_llama_flag_points_to_offline_without_starting(self) -> None:
+        for command in ('start', 'stop', 'restart'):
+            with self.subTest(command=command):
+                result = self.launch(command, '--llama')
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('统一使用 --offline', result.stderr)
+                self.assertEqual(result.stdout, '')
+
     def test_initialization_failure_does_not_start_console(self) -> None:
         (self.root / '.spiritscout-ollama/models.yaml').unlink()
         self.env['FIXTURE_SETUP_EXIT'] = '7'

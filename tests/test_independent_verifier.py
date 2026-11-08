@@ -52,6 +52,41 @@ class Fixture(BaseHTTPRequestHandler):
 
 
 class VerifierTests(unittest.IsolatedAsyncioTestCase):
+    async def test_scanner_candidate_enters_existing_queue_and_retains_source_evidence(self):
+        from spiritscout.tools.scan_evidence import submit_candidate
+        self.ctx.builtin_ctx['workspace_root'] = self.tmp.name
+
+        self.bb.write(BlackboardLayer.RECON_CLUE, 'scan-fixture', {
+            'clue_type': 'scanner_finding', 'scanner': 'nuclei', 'value': self.url + '/record/2',
+            'template_id': 'fixture-idor', 'severity': 'high', 'scan_evidence': {
+                'vulnerability_ids': ['CVE-fixture-only'], 'files': {}, 'missing': ['poc']}},
+            agent_type=AgentType.SCANNER, updated_by='scanner')
+        queue = VerificationQueue(self.ctx, lambda: dict(self.rules))
+        queue.start()
+        try:
+            out = submit_candidate(self.bb, Path(self.tmp.name), {'finding_id': 'scan-fixture',
+                'title': '扫描疑似越权', 'vuln_type': 'idor', 'reason': '命中需要独立对照',
+                'status': 'accepted', 'poc_verified': True})
+            pending = self.bb.read(BlackboardLayer.VULN, out['vuln_id'])
+            self.assertEqual(pending['status'], 'candidate')
+            self.assertFalse(pending['poc_verified'])
+            await queue.drain()
+            confirmed = self.bb.read(BlackboardLayer.VULN, out['vuln_id'])
+            self.assertEqual(confirmed['status'], 'accepted')
+            self.assertTrue(confirmed['poc_verified'])
+            execution_files = confirmed['verification']['executions'][0]['files']
+            self.assertTrue((Path(self.tmp.name)/execution_files['request']).is_file())
+            self.assertIn(b'GET / HTTP/1.1', (Path(self.tmp.name)/execution_files['request']).read_bytes())
+            self.assertEqual((Path(self.tmp.name)/execution_files['response_body']).read_bytes(),b'public-home')
+            self.assertEqual(confirmed['vulnerability_ids'], ['CVE-fixture-only'])
+            self.assertEqual(len(Fixture.hits), 2, '复测使用两个真实独立 HTTP 请求')
+            duplicate = submit_candidate(self.bb, Path(self.tmp.name), {'finding_id': 'scan-fixture',
+                'title': '扫描疑似越权', 'vuln_type': 'idor', 'reason': '同一命中再次交接'})
+            self.assertFalse(duplicate['created'])
+            self.assertEqual(self.bb.read(BlackboardLayer.VULN, out['vuln_id'])['status'], 'accepted')
+        finally:
+            await queue.close()
+
     async def test_reading_source_keeps_original_execution_and_is_not_independent_control(self) -> None:
         from spiritscout.tools.http_responses import SPEC, http_response_read
 

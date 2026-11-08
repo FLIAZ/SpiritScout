@@ -15,6 +15,9 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
+.playwright-mcp/
+dist/
+build/
 
 # PyInstaller 构建产物
 build/
@@ -22,6 +25,11 @@ dist/
 
 # 运行数据与本地凭据（绝不进镜像层）
 .spiritscout/
+.spiritscout-ollama/
+.spiritscout-llama/
+.spiritscout-light/
+.spiritscout-light-config/
+.spiritscout-updates/
 .tools/
 .env
 .env.*
@@ -33,6 +41,12 @@ configs/agent_models.yaml
 .idea/
 .vscode/
 *.log
+/guide_snapshot.yml
+/login_sms.yml
+/login_snapshot.yml
+/checkpoints_all.json
+/cscene_instances_full.json
+/COMPETITION_STRATEGY_OPTIMIZATION_2026-10-22.md
 
 # 本机专用验证项目，不进入 SpiritScout 构建上下文
 ctfy-docker/

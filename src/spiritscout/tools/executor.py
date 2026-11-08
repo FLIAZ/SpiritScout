@@ -10,6 +10,7 @@ from __future__ import annotations
 import abc
 import asyncio
 import contextlib
+import os
 import shlex
 import time
 import uuid
@@ -83,11 +84,17 @@ class ToolExecutor(abc.ABC):
         started = time.perf_counter()
         rollback = _RollbackStack()
         # start_new_session：独立进程组，超时/取消可整组终止
+        proxy_env = {}
+        if getattr(self, "traffic_workspace", None):
+            from spiritscout.traffic.proxy import tool_environment
+
+            proxy_env = await tool_environment(self.traffic_workspace)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env={**os.environ, **proxy_env} if proxy_env else None,
                 **process_options(),
             )
         except OSError as exc:

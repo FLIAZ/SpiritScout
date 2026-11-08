@@ -61,7 +61,7 @@ def _bound_model(cfg: SystemConfig, models: list[ModelEntry],
     """
     from spiritscout.gateway.session_model import current_model, model_entries_source
 
-    selected = current_model() if agent == "master" else ""
+    selected = current_model()
     if selected:
         source = model_entries_source()
         available = source() if source else models
@@ -553,7 +553,8 @@ async def _master_reply(cfg: SystemConfig, models: list[ModelEntry],
                         project_memory: dict[str, Any] | None = None,
                         run_facts: str | None = None,
                         session: Session | None = None,
-                        execution_request: dict[str, Any] | None = None) -> str:
+                        execution_request: dict[str, Any] | None = None,
+                        execution_only: bool = False) -> str:
     """续聊沿用原始上下文，按需读取执行记录或生成新的交付文件。"""
     from spiritscout.web.conversation import (
         TOOLS,
@@ -572,6 +573,14 @@ async def _master_reply(cfg: SystemConfig, models: list[ModelEntry],
         "工具回执 pending_dispatch 不等于已执行。")
     if kind == "rules":
         system += "\n用户正在补充规则，确认收到的约定；是否继续执行仍按当前消息判断。"
+    if execution_only:
+        system += ("\n本轮已由意图模型判断为继续执行任务。现在调用 request_execution 交接当前目标，"
+                   "需要回读的证据和剩余验证写入目标交给执行者；不在续聊入口重复调查。")
+    context_tools = [tool for tool in TOOLS if not execution_only or tool['function']['name'] == 'request_execution']
+    # 与轻量执行者采用相同兼容边界；Ollama 原生协议不接受聚合 required。
+    require_tool = execution_only and bool(models) and all(
+        entry.local_runtime == 'llama_cpp' and entry.provider == 'openai_compatible'
+        and entry.api_format in {'auto', 'chat_completions'} for entry in models)
     facts: dict[str, Any] = {}
     if run_facts:
         facts["execution_facts"] = run_facts
@@ -592,9 +601,12 @@ async def _master_reply(cfg: SystemConfig, models: list[ModelEntry],
             resp = await gateway.chat(messages, task_type="meta_planning",
                 model=_bound_model(cfg, models), preserve_context=True,
                 timeout_seconds=min(60, cfg.gateway.request_timeout_seconds),
-                **({"tools": TOOLS, "tool_choice": "auto"} if resources is not None else {}))
+                **({"tools": context_tools, "tool_choice": "required" if require_tool else "auto"}
+                   if resources is not None else {}))
             calls = getattr(resp, "tool_calls", None) or []
             if not calls:
+                if execution_only:
+                    raise SpiritScoutError("未收到有效的继续执行工具调用，消息保留待重试")
                 text = (resp.content or "").strip()
                 if not text:
                     raise SpiritScoutError("会话模型未返回回复")
@@ -616,6 +628,9 @@ async def _master_reply(cfg: SystemConfig, models: list[ModelEntry],
                 audit.log("master.context_tool", "master", {"name": call.get("name"), "ok": result.get("ok")})
                 messages.append({"role": "tool", "tool_call_id": native["id"],
                                  "content": json.dumps(result, ensure_ascii=False)})
+            if request:
+                # 模型已通过工具提交执行目标；直接交接，避免再问一轮模型又停留在续聊查询。
+                return "已接收本次执行目标，继续处理。"
     except (SpiritScoutError, OSError, ValueError, TypeError) as exc:
         audit.log("master.reply_failed", "master", {"error": str(exc)[:200]})
         if session is not None:
@@ -1564,12 +1579,20 @@ class SessionManager:
             await self._mcp_preflight.close()
 
     async def create(self, payload: dict[str, Any], plan: LaunchPlan, *,
-                     staged_files: list[Path] | None = None) -> Session:
+                     staged_files: list[Path] | None = None, automation_id: str | None = None) -> Session:
         """创建会话并入队启动（payload 已经 app 层合规校验；plan 由 launch 装配）。
 
         staged_files：用户任务下达前暂存的附件——在此移入会话工作区并注入
         赛题载荷（必须在入队前完成，会话任务可能即刻开工）。
         """
+        if getattr(self, "_update_maintenance", False):
+            raise SpiritScoutError("系统正在更新，暂不启动新会话")
+        if automation_id is not None:
+            if len(automation_id) != 32 or any(c not in "0123456789abcdef" for c in automation_id):
+                raise SpiritScoutError("自动任务运行标识不合法")
+            existing = self.get(f"sess-auto-{automation_id}")
+            if existing is not None:
+                return existing
         # 热生效：Web 端改模型注册表后，新会话立即用新配置；
         # 加载失败显式报错（不静默退回旧配置）。先于建目录，失败不留痕。
         from spiritscout.config import load_model_config
@@ -1587,7 +1610,7 @@ class SessionManager:
         if project_id and store.project(project_id) is None:
             # 建工作区之前拒绝：不存在半成品目录
             raise SpiritScoutError(f"项目不存在: {project_id}")
-        session_id = f"sess-{uuid.uuid4().hex[:8]}"
+        session_id = f"sess-auto-{automation_id}" if automation_id else f"sess-{uuid.uuid4().hex[:8]}"
         session = Session(
             session_id=session_id,
             mode=str(payload["mode"]), target=plan.target,
@@ -1615,6 +1638,10 @@ class SessionManager:
         try:
             # 成员行无论是否加入项目都写：空串 = 明确未分类（启动对账事实源）
             store.set_session_project(session.session_id, session.project_id)
+            if payload.get('browser_account_ids'):
+                from spiritscout.resources.browser_accounts import BrowserAccounts
+
+                BrowserAccounts(store).bind(session.session_id, payload['browser_account_ids'])
             cfg = self._session_cfg(session, payload.get("budget_tokens"))
             session.approvals = ApprovalBroker(AuditLogger(cfg.audit_log_path))
             session.questions = QuestionBroker(
@@ -2011,6 +2038,8 @@ class SessionManager:
         是否开工、进哪个分支由 _run 的语义路由结合上下文裁决；
         CTF 已破题的赛题不再重解，未破题的与用户意见一起进入新一轮决策环。
         """
+        if getattr(self, "_update_maintenance", False):
+            raise SpiritScoutError("系统正在更新，暂不恢复会话")
         from spiritscout.config import load_model_config
         session = self._sessions.get(session_id)
         if session is None:
@@ -2199,11 +2228,18 @@ class SessionManager:
                 auto_mode = bool(plan.mode_auto or
                                  (session.launch_request or {}).get("mode_auto"))
                 if turn_feed and session.has_runtime_state() and not no_llm and models:
+                    lightweight_resume = cfg.gateway.lightweight_local and mode in (RunMode.CTF, RunMode.AWDP)
+                    if lightweight_resume:
+                        self._set_phase(session, "intent_routing", audit)
+                        intent = await _llm_route_intent(cfg, models, route_mission, audit, history=route_history)
+                        if intent == 'rules':
+                            session.standing_rules = route_mission
                     self._set_phase(session, "master_reply", audit)
                     reply = await _master_reply(cfg, models, route_mission, audit, kind="dialogue",
                         history=route_history, project_memory=project_memory,
                         run_facts=_session_run_facts(session), session=session,
-                        execution_request=execution_request)
+                        execution_request=execution_request,
+                        execution_only=lightweight_resume and intent in ('task', 'task_with_rules'))
                     audit.log("master.reply", "master", {"text": reply})
                     _remember_reply(session, reply)
                     continuation_handled = True
@@ -2211,7 +2247,7 @@ class SessionManager:
                         session.acknowledge_user_feed(turn_feed)
                         self._persist(session)
                         session.status = session.phase = "completed"
-                        session.summary = {**session.summary, "intent": "dialogue"}
+                        session.summary = {**session.summary, "intent": intent if lightweight_resume else "dialogue"}
                         return
                     route_mission = str(execution_request["mission"])
                 if not auto_mode:
@@ -2561,6 +2597,11 @@ class SessionManager:
         if session is None:
             return None
         self.ensure_storage_idle(session_id)
+        if not paused and session.status in TERMINAL_STATES and session.pause_gate.paused:
+            session = await self.resume(session_id)
+            session.pause_gate.resume()
+            self._persist(session)
+            return session
         if session.status != "running":
             raise SpiritScoutError("任务已结束，不能切换暂停状态；可发送新消息继续对话")
         if session.status == "running":
@@ -2623,10 +2664,22 @@ class SessionManager:
         if not confirm:
             raise SpiritScoutError("删除会话需显式 confirm=true（连工作区一并移除）")
         self._sessions.pop(session_id, None)
+        # 先从注册表移除以拒绝新采集，再等抓包/解析写入结束，最后删除目录。
+        traffic = getattr(self, "_traffic_capture", None)
+        cancelled = False
+        if traffic is not None:
+            cleanup = asyncio.create_task(traffic.stop(session_id, deleting=True))
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                await cleanup
+                cancelled = True
         try:
             self._resources().remove_session(session_id)
         except (OSError, sqlite3.Error, SpiritScoutError) as exc:
             print(f"[spiritscout] 删除会话成员行失败（{session_id}）: {exc}",
                   file=sys.stderr)
         shutil.rmtree(session.workspace, ignore_errors=True)
+        if cancelled:
+            raise asyncio.CancelledError
         return session

@@ -12,11 +12,11 @@ const renderer = source.slice(
   source.indexOf("function statsHtml"));
 assert.ok(renderer.includes("projectCardsHtml"), "找不到 projectCardsHtml 渲染函数");
 
-const context = vm.createContext({
+const context = vm.createContext(require('./helpers/i18n').context({
   ALL: "*",
   esc: value => String(value).replace(/[&<>"]/g, c =>
     ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c])),
-});
+}));
 vm.runInContext(renderer, context);
 const render = (catalog, active) => {
   context.__catalog = catalog;

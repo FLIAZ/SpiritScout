@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import nullcontext
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
@@ -246,6 +247,78 @@ class ResourceStoreTests(unittest.TestCase):
             self.assertEqual(stats[beta_id]["finding_count"], 0)
             # 资产级未分类与项目桶互斥：共享资产仍被项目 A 观测
             self.assertEqual(store.assets(unclassified=True)["total"], 1)
+
+    def test_project_counts_use_latest_observation_within_each_project(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ResourceStore(directory)
+            alpha, beta, empty = [store.create_project(name)["project_id"]
+                                  for name in ("Alpha", "Beta", "Empty")]
+            store.set_session_project("sess-a", alpha)
+            store.set_session_project("sess-b", beta)
+            finding = {"asset_type": "finding", "value": "https://shared.test/",
+                       "fingerprint": {"vuln_type": "fixture", "status": "accepted"}}
+            store.observe(finding, "sess-a:finding@1", 10)
+            store.observe({**finding, "fingerprint": {
+                "vuln_type": "fixture", "status": "pending"}}, "sess-a:finding@2", 10)
+            store.observe(finding, "sess-b:finding@1", 5)
+            asset = {"asset_type": "endpoint", "value": "https://shared.test/"}
+            store.observe(asset, "sess-a:asset@1", 4)
+            store.observe(asset, "sess-b:asset@1", 6)
+            # 历史孤儿观测仍影响 last_seen，但不凭空增加资产数。
+            with store.connection() as conn:
+                conn.execute(
+                    "INSERT INTO observations(asset_id,source,observed_at,digest,data,project_id) "
+                    "VALUES(?,?,?,?,?,?)", ("missing-asset", "legacy", 99, "", "{}", alpha))
+            items = store.projects()["items"]
+            self.assertEqual([row["project_id"] for row in items], [alpha, beta, empty])
+            self.assertEqual([(row["asset_count"], row["finding_count"], row["last_seen"])
+                              for row in items], [(1, 0, 99), (1, 1, 6), (0, 0, None)])
+            # 同一时间戳按插入顺序取最后一条；其他项目的记录不参与覆盖。
+            store.observe(finding, "sess-a:finding@3", 10)
+            self.assertEqual(store.projects()["items"][0]["finding_count"], 1)
+
+    def test_project_overview_avoids_repeated_full_catalog_scans(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ResourceStore(directory)
+            assets, observations = {}, []
+            for project in range(24):
+                for item in range(40):
+                    key = str(project * 20 + item)
+                    kind = "finding" if int(key) % 4 == 0 else "endpoint"
+                    assets[key] = (key, kind, key, "", 1, 3)
+                    for version in range(3):
+                        data = json.dumps({"fingerprint": {
+                            "status": "accepted" if project % 2 == 0 else "pending"}})
+                        observations.append((key, f"p{project}-{item}-{version}",
+                                             version + 1, "", data, f"p{project}"))
+            with store.connection() as conn:
+                conn.executemany("INSERT INTO projects VALUES(?,?,?,?,?,?)", [
+                    (f"p{p}", f"Project {p}", f"project{p}", "", 1, 1) for p in range(26)])
+                conn.executemany("INSERT INTO assets VALUES(?,?,?,?,?,?)", assets.values())
+                conn.executemany(
+                    "INSERT INTO observations(asset_id,source,observed_at,digest,data,project_id) "
+                    "VALUES(?,?,?,?,?,?)", observations)
+                conn.commit()
+                steps = 0
+
+                def progress() -> int:
+                    nonlocal steps
+                    steps += 1000
+                    return 0
+
+                conn.set_progress_handler(progress, 1000)
+                try:
+                    with patch.object(store, "connection", return_value=nullcontext(conn)):
+                        result = store.projects()
+                finally:
+                    conn.set_progress_handler(None, 0)
+            items = {row["project_id"]: row for row in result["items"]}
+            self.assertEqual(len(items), 26)
+            for project in range(24):
+                self.assertEqual(items[f"p{project}"]["asset_count"], 30)
+                self.assertEqual(items[f"p{project}"]["finding_count"], 10 if project % 2 == 0 else 0)
+            # 用宽松的 SQL 工作量预算验证复杂度，不依赖机器耗时或具体执行计划。
+            self.assertLess(steps, len(observations) * 250)
 
     def test_delete_project_only_unbinds(self) -> None:
         """删除项目：观测/成员行转未分类，资产与发现绝不删除。"""

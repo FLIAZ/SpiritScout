@@ -192,6 +192,7 @@ def parse_skill_archive(content: bytes) -> tuple[list[dict[str, Any]], list[str]
         item = {'skill_id': skill_id, 'description': metadata.get('description', ''),
                 'domain': metadata.get('domain', 'custom'), 'enabled': True, 'body': body, 'path': name,
                 'source': 'archive', 'files': {'SKILL.md': body}}
+        item.update({key: metadata[key] for key in ('tier', 'tags', 'aliases') if key in metadata})
         for path, raw in sorted(files.items()):
             candidate = PurePosixPath(path)
             owners = [parent for parent in roots.values() if candidate.is_relative_to(parent)]

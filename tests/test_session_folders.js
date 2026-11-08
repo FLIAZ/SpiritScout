@@ -12,7 +12,7 @@ const grouping = source.slice(
   source.indexOf("/* 折叠状态"));
 assert.ok(grouping.includes("function sessionGroups"), "找不到 sessionGroups 分组函数");
 
-const context = vm.createContext({});
+const context = vm.createContext(require('./helpers/i18n').context({}));
 vm.runInContext(grouping, context);
 const group = (sessions, projects) => {
   context.__sessions = sessions;

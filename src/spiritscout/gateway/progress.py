@@ -19,8 +19,15 @@ EXPLORATION_PROGRESS_GUIDANCE = (
     '探索展示：仅开始新意图、改变验证方法或更新尝试结论时，在本次已有公开说明中输出 '
     '{"progress":"简短进展","exploration":{"intent":"要确认的问题","attempt":"验证方法",'
     '"from":"转向前的尝试标题（可省）","reason":"依据（可省）","state":"running"}}。'
-    'intent/attempt 用简短稳定标题，同一问题和方法沿用标题；请求、脚本、读取、重试属于其内部执行，'
-    '不要逐步建节点。其余回合照常说明并沿用当前尝试，无需重复结构。state 可为 '
+    'intent/attempt 用简短稳定标题，同一问题和方法沿用标题。只有足以改变判断的新发现、'
+    '关键验证的重大突破、或有证据的方向转变，才在 exploration 内额外标注 '
+    '"milestone":{"kind":"discovery","title":"具体新发现",'
+    '"basis":"本次实际观察及其对判断的影响","next":"因此下一步验证什么",'
+    '"evidence_refs":["已有证据引用，可省"]}。kind 仅为 discovery/breakthrough/turning_point。'
+    '新里程碑开启新的展示节点，即使意图和方法标题不变；后续普通执行沿用该节点。'
+    '同一发现只标注一次；一般请求、脚本、读取、重试和无结论的持续验证不建节点，'
+    '不要把每次工具成功或子任务完成称为突破。没有实际依据不标注里程碑，'
+    '不编造证据引用或把待验证观察写成已确认漏洞。其余回合照常说明，无需重复结构。state 可为 '
     'running/blocked/supported/refuted/exhausted/closed，描述公开验证状态，不输出内部推理；'
     '不为绘图增加调用，不改变原工具决策格式；JSON 决策已有字段保持不变。')
 
@@ -28,7 +35,7 @@ EXPLORATION_PROGRESS_GUIDANCE = (
 
 def ensure_exploration_progress(state: dict[str, Any]) -> None:
     """旧会话只在末尾追加一次展示约定，保留已缓存历史前缀。"""
-    if state.get('exploration_display_v1'):
+    if state.get('exploration_display_v2'):
         return
     messages = state.setdefault('messages', [])
     if not any(EXPLORATION_PROGRESS_GUIDANCE in str(message.get('content') or '')
@@ -36,9 +43,10 @@ def ensure_exploration_progress(state: dict[str, Any]) -> None:
         messages.append({'role': 'user', 'content': EXPLORATION_PROGRESS_GUIDANCE,
                          '_context_contract': True})
     state['exploration_display_v1'] = True
+    state['exploration_display_v2'] = True
 
 
-def public_exploration(value: Any) -> dict[str, str] | None:
+def public_exploration(value: Any) -> dict[str, Any] | None:
     """只接受模型明确声明的公开层级，不分析正文猜意图或提升为事实。"""
     if not isinstance(value, dict):
         return None
@@ -51,10 +59,23 @@ def public_exploration(value: Any) -> dict[str, str] | None:
             result[key] = value[key].strip()[:limit]
     if isinstance(value.get('state'), str) and value['state'] in {'running', 'blocked', 'supported', 'refuted', 'exhausted', 'closed'}:
         result['state'] = value['state']
+    milestone = value.get('milestone')
+    if (isinstance(milestone, dict)
+            and milestone.get('kind') in ('discovery', 'breakthrough', 'turning_point')
+            and all(isinstance(milestone.get(key), str) and milestone[key].strip()
+                    for key in ('title', 'basis'))):
+        public = {key: milestone[key].strip()[:limit]
+                  for key, limit in (('kind', 30), ('title', 100), ('basis', 600))}
+        if isinstance(milestone.get('next'), str):
+            public['next'] = milestone['next'].strip()[:400]
+        if isinstance(milestone.get('evidence_refs'), list):
+            public['evidence_refs'] = list(dict.fromkeys(ref.strip()[:300]
+                for ref in milestone['evidence_refs'][:20] if isinstance(ref, str) and ref.strip()))
+        result['milestone'] = public
     return result
 
 
-def publish_progress(audit: Any, actor: str, content: str, **context: Any) -> None:
+def publish_progress(audit: Any, actor: str, content: str, **context: Any) -> dict[str, Any] | None:
     """将模型本次已有的公开说明保存为可回放事件，归属到实际任务／路线。"""
     if audit is None:
         return
@@ -77,5 +98,6 @@ def publish_progress(audit: Any, actor: str, content: str, **context: Any) -> No
     detail.update(context)
     if not detail.get('task_id'):
         return
-    audit.log('agent.progress', actor, {**detail, 'text': text[:2400],
-                                     **({'exploration': exploration} if exploration else {})})
+    detail = {**detail, 'text': text[:2400], **({'exploration': exploration} if exploration else {})}
+    audit.log('agent.progress', actor, detail)
+    return detail

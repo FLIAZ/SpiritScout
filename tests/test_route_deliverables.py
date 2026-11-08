@@ -70,10 +70,10 @@ class TaskIntentTests(unittest.IsolatedAsyncioTestCase):
         agent.agent_type = AgentType.RECON
         agent.enable_llm_planning = True
         agent.ctx = SimpleNamespace(
-            audit=Mock(), ring=None,
+            audit=Mock(), ring=None, builtin_ctx={},
             policy=SimpleNamespace(guard=SimpleNamespace(scope=SimpleNamespace(
                 allowed_domains=[], allowed_cidrs=[], allowed_urls=[]))),
-            gateway=SimpleNamespace(chat=AsyncMock(return_value=SimpleNamespace(
+            gateway=SimpleNamespace(selected_model=lambda: "", chat=AsyncMock(return_value=SimpleNamespace(
                 content=json.dumps({"paths": [], "rationale": "无"})))))
         return agent
 

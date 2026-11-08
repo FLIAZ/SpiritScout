@@ -830,6 +830,26 @@ class EmptyReplyRepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/kb", self.state["conclusion_text"])
         self.assertEqual(self.state["empty_replies"], 0)
 
+    async def test_background_notification_is_injected_before_next_model_call(self) -> None:
+        from spiritscout.tools.background import Job, ShellJobs
+
+        agent = self._agent([self._reply("已收到后台输出")])
+        task = self._task()
+        with tempfile.TemporaryDirectory() as temp:
+            agent.ctx.builtin_ctx["workspace_root"] = temp
+            jobs = ShellJobs(temp,audit=NullAuditLogger())
+            scope = agent._tool_ctx(task)["workspace_scope"]
+            job = Job("fixture-job",scope,owner=agent.agent_id)
+            jobs.notify(job,"condition",agent.agent_id,matched=True,contains="READY")
+            try:
+                plan = RoutePlan(name="solve",strategy="",steps=[{"action":"investigate"}])
+                await agent._solve_turn(task,self._route(),plan)
+                messages = agent.ctx.gateway.chat.call_args.args[0]
+                self.assertIn("READY",json.dumps(messages,ensure_ascii=False))
+                self.assertEqual(jobs.drain(agent.agent_id,scope),[])
+            finally:
+                await jobs.aclose()
+
 
 class BlackboardDedupTests(unittest.TestCase):
     """同层同 dedup_key 只存一条：后续写入升级既有记录而非追加新条。"""

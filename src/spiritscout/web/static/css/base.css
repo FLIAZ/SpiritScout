@@ -14,6 +14,8 @@
   --shadow: none;
   --shadow-raise: 0 1px 3px rgba(20,18,12,.08);
   --radius: 6px;
+  --page-title-size: 22px;
+  --heading-leading: 1.45;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   color-scheme: light;
 }
@@ -56,7 +58,7 @@
 [hidden] { display: none !important; }
 body {
   margin: 0; background: var(--bg); color: var(--ink);
-  font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+  font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
         "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
   -webkit-font-smoothing: antialiased;
 }
@@ -73,27 +75,10 @@ code, .mono { font-family: var(--mono); font-size: .92em; }
 ::placeholder { color: var(--ink-3); }
 
 /* ================= 骨架布局 ================= */
-#app { display: grid; grid-template-columns: 236px 1fr; min-height: 100vh; }
-.side {
-  min-width: 0;
-  background: linear-gradient(165deg, color-mix(in srgb, var(--accent) 3%, var(--surface)), var(--surface) 42%);
-  border-right: 1px solid var(--line);
-  display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh;
-  z-index: 2;
-}
 .brand { padding: 24px 18px 20px; }
 .brand h1 { margin: 0; font-size: 17px; font-weight: 700; letter-spacing: .01em; }
 .brand h1 em { font-style: normal; color: var(--accent); }
 .brand small { color: var(--ink-3); font-size: 10.5px; letter-spacing: .12em; font-family: var(--mono); }
-.side > nav { padding: 4px 10px; display: flex; flex-direction: column; gap: 2px; }
-.side > nav button {
-  display: flex; align-items: center; gap: 9px; width: 100%;
-  padding: 8px 10px; border: 0; border-radius: 8px; background: none;
-  color: var(--ink-2); font-weight: 500; text-align: left;
-}
-.side > nav button:hover { background: var(--surface-2); color: var(--ink); }
-.side > nav button.on { background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; }
-.side > nav button svg { flex: none; }
 .side-label {
   padding: 14px 18px 6px; font-size: 11px; font-weight: 600;
   color: var(--ink-3); letter-spacing: .08em;
@@ -181,9 +166,6 @@ code, .mono { font-family: var(--mono); font-size: .92em; }
 #btn-theme:hover, #btn-logout:hover { color: var(--ink); border-color: var(--ink-3); }
 main { min-width: 0; padding: 22px 26px 40px; }
 @media (max-width: 860px) {
-  #app { grid-template-columns: minmax(0, 1fr); }
-  .side { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
-  #sess-list { max-height: 180px; }
   main { padding: 16px; }
   #view-session { height: auto; }
   #tab-area { min-height: 58vh; }
@@ -250,6 +232,7 @@ main { min-width: 0; padding: 22px 26px 40px; }
 .btn {
   border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink);
   border-radius: 6px; padding: 7px 14px; font-weight: 600; font-size: 13px;
+  line-height: 1.5; white-space: nowrap; flex-shrink: 0;
   transition: border-color .15s, background .15s, color .15s;
 }
 .btn:hover { border-color: var(--ink-3); }

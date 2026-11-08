@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import re
+import shlex
 import uuid
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,8 @@ def model_preview(result: ToolResult) -> str:
     return json.dumps(header, ensure_ascii=False, separators=(',', ':')) + '\n' + text
 
 
-def save_response(workspace: str, content: bytes, text: str, metadata: dict[str, Any]) -> dict[str, Any]:
+def save_response(workspace: str, content: bytes, text: str, metadata: dict[str, Any],
+                  request: dict[str, Any] | None = None) -> dict[str, Any]:
     # 沙箱 cwd 位于 sandbox/<题目>/；返回相对项目根的路径会让后续原文读取失败。
     root = (Path(workspace) / 'http-responses').resolve()
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -46,6 +48,23 @@ def save_response(workspace: str, content: bytes, text: str, metadata: dict[str,
         with path.open('xb') as stream:
             path.chmod(0o600)
             stream.write(data)
+    if request is not None:
+        headers = request['headers']
+        raw = request['line'] + b'\r\n' + b'\r\n'.join(k+b': '+v for k,v in headers) + b'\r\n\r\n' + request['body']
+        argv = ['curl', '--path-as-is', '--request', request['method'], request['url']]
+        for key, value in headers:
+            argv.extend(['--header', key.decode('latin-1')+': '+value.decode('latin-1')])
+        if request['body']:
+            argv.extend(['--data-binary', '@request-body.bin'])
+        for name, data in [('request.http',raw), ('request-body.bin',request['body']),
+                           ('poc.sh',shlex.join(argv).encode())]:
+            with (folder/name).open('xb') as output:
+                (folder/name).chmod(0o600)
+                output.write(data)
+        info['evidence_files'] = {key:f'http-responses/{ref}/{name}' for key,name in
+            (('request','request.http'),('response_body','body.bin'),('response_metadata','metadata.json'),
+             ('poc','poc.sh'),('request_body','request-body.bin'))}
+        info['evidence_note'] = '最终 HTTP 请求与已保存的解压后响应正文、原响应头分开交付；不是原始网络帧。PoC 从实际请求重建，尚未另行执行。'
     return info
 
 

@@ -20,10 +20,10 @@ const SessionStorage = (() => {
   }
   function result(job) {
     if (job.status === "failed") {
-      message(`清理未完成：${job.error || "请重新扫描后重试"}`, true);
+      message(I18n.t`清理未完成：${job.error || I18n.t("请重新扫描后重试")}`, true);
     } else {
-      message(`已释放 ${bytes(job.released_bytes)}。` +
-        (job.warnings?.length ? ` ${job.warnings.join("；")}` : "会话、对话与成果已保留。"), job.status === "partial");
+      message(I18n.t`已释放 ${bytes(job.released_bytes)}。` +
+        (job.warnings?.length ? ` ${job.warnings.join("；")}` : I18n.t("会话、对话与成果已保留。")), job.status === "partial");
     }
   }
   async function poll(id, token) {
@@ -32,20 +32,20 @@ const SessionStorage = (() => {
       const job = await api(`/api/sessions/${encodeURIComponent(id)}/storage/job`);
       if (token !== version) return;
       if (job.status === "running") {
-        message(job.phase || "正在清理…");
+        message(job.phase || I18n.t("正在清理…"));
         timer = setTimeout(() => poll(id, token), 1200);
       } else {
         await inspect(id, token, job);
       }
     } catch (e) {
       if (token !== version) return;
-      message(`暂时无法读取进度：${e.message}。正在重试；后台任务继续执行。`, true);
+      message(I18n.t`暂时无法读取进度：${e.message}。正在重试；后台任务继续执行。`, true);
       timer = setTimeout(() => poll(id, token), 3000);
     }
   }
   async function inspect(id, token, finished = null) {
     stop(); preview = null; ready();
-    node("details").textContent = "正在分析存储…";
+    node("details").textContent = I18n.t("正在分析存储…");
     try {
       const [data, job] = await Promise.all([
         api(`/api/sessions/${encodeURIComponent(id)}/storage`),
@@ -54,7 +54,7 @@ const SessionStorage = (() => {
       if (token !== version) return;
       preview = data;
       const db = data.database || {};
-      node("details").innerHTML = `<dl class="storage-stats">
+      node("details").innerHTML = I18n.html`<dl class="storage-stats">
         <div><dt>会话总占用</dt><dd>${bytes(data.bytes)}</dd></div>
         <div><dt>数据库文件</dt><dd>${bytes(db.bytes)}</dd></div>
         <div><dt>下载缓存</dt><dd>${bytes(data.cache_bytes)}</dd></div>
@@ -63,17 +63,17 @@ const SessionStorage = (() => {
         检查点共 ${Number(db.checkpoints || 0)} 个，清理时保留各恢复键的最新依赖链。</p>
         <p class="muted">释放量在完成后按实际磁盘占用计算；数据库收缩需要额外空闲空间。</p>`;
       if (job.status === "running") {
-        preview.blocked_reason = "正在清理存储";
+        preview.blocked_reason = I18n.t("正在清理存储");
         ready(); poll(id, token);
       } else {
         ready();
         if (["completed", "partial", "failed"].includes(job.status)) result(job);
-        else message(data.blocked_reason || "选择清理内容，确认后执行。旧 DAG 历史和旧检查点清理后无法回溯。");
+        else message(data.blocked_reason || I18n.t("选择清理内容，确认后执行。旧 DAG 历史和旧检查点清理后无法回溯。"));
       }
     } catch (e) {
       if (token !== version) return;
       preview = null; ready();
-      node("details").textContent = "分析未完成，可点击重新扫描。";
+      node("details").textContent = I18n.t("分析未完成，可点击重新扫描。");
       message(e.message, true);
     }
   }
@@ -85,17 +85,17 @@ const SessionStorage = (() => {
     if (!dlg.open) dlg.showModal();
     node("select").disabled = true;
     node("view").disabled = true;
-    node("details").textContent = "正在扫描会话占用…";
-    message("只扫描占用，不会自动删除数据。");
+    node("details").textContent = I18n.t("正在扫描会话占用…");
+    message(I18n.t("只扫描占用，不会自动删除数据。"));
     try {
       const data = await api("/api/storage/sessions");
       if (token !== version) return;
-      node("total").textContent = `全部会话占用 ${bytes(data.total_bytes)} · 按占用从大到小排列`;
+      node("total").textContent = I18n.t`全部会话占用 ${bytes(data.total_bytes)} · 按占用从大到小排列`;
       node("select").innerHTML = data.sessions.map(s =>
         `<option value="${esc(s.session_id)}">${esc(s.title)} · ${bytes(s.bytes)}${s.blocked_reason ? ` · ${esc(s.blocked_reason)}` : ""}</option>`).join("");
       if (!data.sessions.length) {
-        node("details").textContent = "还没有会话数据。";
-        message("无需清理"); return;
+        node("details").textContent = I18n.t("还没有会话数据。");
+        message(I18n.t("无需清理")); return;
       }
       session = data.sessions.some(s => s.session_id === id) ? id : data.sessions[0].session_id;
       node("select").value = session;
@@ -105,7 +105,7 @@ const SessionStorage = (() => {
       await inspect(session, token);
     } catch (e) {
       if (token !== version) return;
-      node("details").textContent = "扫描失败，可点击重新扫描。";
+      node("details").textContent = I18n.t("扫描失败，可点击重新扫描。");
       message(e.message, true);
     } finally { selxSync(node("select")); }
   }
@@ -113,7 +113,7 @@ const SessionStorage = (() => {
     if (node("clean").disabled || !preview || preview.blocked_reason) return;
     const id = session, token = ++version;
     stop(); preview = null; ready();
-    message("正在提交清理任务…");
+    message(I18n.t("正在提交清理任务…"));
     try {
       await api(`/api/sessions/${encodeURIComponent(id)}/storage/cleanup`, {
         method: "POST", body: JSON.stringify({confirm:true,
@@ -124,7 +124,7 @@ const SessionStorage = (() => {
       if (token !== version) return;
       // 请求响应丢失时任务可能已启动；重新查询，不直接再次提交。
       await inspect(id, token);
-      if (token === version) message(`提交结果：${e.message}。请以当前任务状态为准。`, true);
+      if (token === version) message(I18n.t`提交结果：${e.message}。请以当前任务状态为准。`, true);
     }
   }
   node("close").onclick = () => node("dlg").close();

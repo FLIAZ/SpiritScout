@@ -41,14 +41,14 @@ const TopologyLayout = (() => {
   function project(process) {
     const records = (process.nodes || []).filter(n => ["finding", "evidence", "rule", "milestone"].includes(n.kind));
     const groups = new Map(), nodeToGroup = new Map(), facts = [];
-    const labels = {assets:"资产与接口", evidence:"页面与响应依据", rules:"任务、授权与规则"};
+    const labels = {assets:I18n.t("资产与接口"), evidence:I18n.t("页面与响应依据"), rules:I18n.t("任务、授权与规则")};
     for (const node of records) {
       const type = node.reference_type || (node.layer === "asset" ? "assets" :
         node.kind === "evidence" || /^https?:\/\/\S+$/.test(node.title || "") ? "evidence" :
         node.kind === "rule" ? "rules" : "");
       if (!type) { facts.push({...node}); continue; }
       if (!groups.has(type)) groups.set(type, {id:`__process_group:${type}`, kind:"collection",
-        title:labels[type] || "参考资料", members:[], reference_type:type});
+        title:labels[type] || I18n.t("参考资料"), members:[], reference_type:type});
       groups.get(type).members.push(node);
       nodeToGroup.set(node.id, groups.get(type).id);
     }
@@ -104,7 +104,7 @@ const TopologyLayout = (() => {
       right += cols * (width + gapX) + gapX;
       bottom = Math.max(bottom, top);
     };
-    place([...references, ...shared], "参考资料与共享事实", 1);
+    place([...references, ...shared], I18n.t("参考资料与共享事实"), 1);
     const routes=new Map();
     for(const node of routeNodes) {
       const key=JSON.stringify([node.task_id,node.route_id]);
@@ -113,11 +113,11 @@ const TopologyLayout = (() => {
     }
     for(const route of routes.values()) {
       route.sort((a,b)=>a.turn-b.turn);
-      place(route.map(n=>n.id),`解题路线 · ${route[0].route_title || "调查"}`,Math.min(3,route.length),true);
+      place(route.map(n=>n.id),I18n.t`解题路线 · ${route[0].route_title || I18n.t("调查")}`,Math.min(3,route.length),true);
     }
     for (const [depth, column] of graph.columns.entries()) {
       const items = column.filter(id => main.includes(id));
-      place(items, depth ? `事实依赖 · 第 ${depth + 1} 层` : "观察与已知事实", Math.min(3, Math.ceil(Math.sqrt(items.length))));
+      place(items, depth ? I18n.t`事实依赖 · 第 ${depth + 1} 层` : I18n.t("观察与已知事实"), Math.min(3, Math.ceil(Math.sqrt(items.length))));
     }
     return {x, y, width:Math.max(width + pad * 2, right), height:bottom + pad, sections};
   }
@@ -130,8 +130,8 @@ const TopologyLayout = (() => {
       const note=(task.routes || []).filter(route=>route.status==="running").map(route=>route.note).filter(Boolean).join("；")
         || task.result_summary || (task.routes || []).map(route=>route.note).filter(Boolean).at(-1);
       return {task_id:task.task_id, actor:summary?.actor || task.agent_type || task.task_type,
-        title:summary?.title || task.title || "子任务", status:task.status,
-        text:summary?.waiting || summary?.text || note || "尚未收到阶段说明。", updated:summary?.updated};
+        title:summary?.title || task.title || I18n.t("子任务"), status:task.status,
+        text:summary?.waiting || summary?.text || note || I18n.t("尚未收到阶段说明。"), updated:summary?.updated};
     });
     if (!tasks.length) rows.push(...summaries);
     return rows.sort((a,b)=>Number(terminal.has(a.status))-Number(terminal.has(b.status))
@@ -193,8 +193,8 @@ const TopologyLayout = (() => {
     const split=dual(state.topology?.process || {},[]), records=[...split.records], nodes=[], edges=[];
     const assets=split.assets.nodes, references=split.exploration.nodes.filter(n=>n.kind==='rule' || n.reference_type==='evidence');
     const excluded=new Set([...assets,...references].map(n=>n.id));
-    const origin={id:'__process_origin',kind:'origin',view_kind:'origin',title:state.session?.title || state.session?.target || '当前任务',
-      description:state.session?.target || '会话任务入口',status:state.session?.status,projection:true};
+    const origin={id:'__process_origin',kind:'origin',view_kind:'origin',title:state.session?.title || state.session?.target || I18n.t('当前任务'),
+      description:state.session?.target || I18n.t('会话任务入口'),status:state.session?.status,projection:true};
     nodes.push(origin);records.push(origin);
     const known=new Map(), goalByDag=new Map(), intentsByTask=new Map();
     const add=n=>{if(!known.has(n.id)){known.set(n.id,n);nodes.push(n);if(!records.some(r=>r.id===n.id))records.push(n);}return n.id;};
@@ -215,19 +215,34 @@ const TopologyLayout = (() => {
         intentsByTask.get(taskId).push(record.id);
       }
     }
-    const taskRows=new Map([...(state.topology?.tasks || []),...(state.tasks || [])].filter(t=>t.task_id).map(t=>[t.task_id,t]));
+    const taskRows=new Map();
+    for(const task of [...(state.topology?.tasks || []),...(state.tasks || [])])if(task.task_id) {
+      const previous=taskRows.get(task.task_id);
+      taskRows.set(task.task_id,{...previous,...task,delegation:task.delegation || previous?.delegation});
+    }
     for(const dag of state.topology?.dag_nodes || []) {
       if(!dag.node_id) continue;
       const same=[...known.values()].find(n=>n.view_kind==='goal' && (dag.task_ids || []).includes(n.task_id));
-      const id=same?.id || add({id:`__process_goal:${dag.node_id}`,kind:'goal',view_kind:'goal',title:dag.title || dag.tactic || '任务目标',
+      const id=same?.id || add({id:`__process_goal:${dag.node_id}`,kind:'goal',view_kind:'goal',title:dag.title || dag.tactic || I18n.t('任务目标'),
         status:dag.status,reason:dag.cancel_reason || dag.skip_reason || '',projection:true,dag_id:dag.node_id});
       goalByDag.set(dag.node_id,id);
       for(const taskId of dag.task_ids || []) if(!taskRows.has(taskId)) taskRows.set(taskId,{task_id:taskId,parent_dag_node:dag.node_id,status:dag.status});
     }
     for(const dag of state.topology?.dag_nodes || [])for(const parent of dag.depends_on || [])
-      if(goalByDag.has(parent) && goalByDag.has(dag.node_id))link(goalByDag.get(parent),goalByDag.get(dag.node_id),'dependency','已保存的目标依赖');
+      if(goalByDag.has(parent) && goalByDag.has(dag.node_id))link(goalByDag.get(parent),goalByDag.get(dag.node_id),'dependency',I18n.t('已保存的目标依赖'));
+    for(const [taskId,task] of taskRows) {
+      if(task.agent_type!=='scanner' || !task.delegation?.goal)continue;
+      const parent=`__scan_assignment:${taskId}`;
+      const id=add({id:`__process_scan_assignment:${taskId}`,kind:'goal',view_kind:'goal',
+        title:task.delegation.goal,reason:task.delegation.reason || '',
+        description:I18n.t`主 Agent 派遣探微 · ${task.delegation.target || ''}`,
+        task_id:taskId,status:task.status,actor:'master',projection:true});
+      goalByDag.set(parent,id);
+      taskRows.set(taskId,{...task,parent_dag_node:parent});
+      link(origin.id,id,'spawns',I18n.t('主 Agent 的真实扫描派遣，执行与其他角色并行'));
+    }
     for(const fact of known.values())if(fact.task_id && !taskRows.has(fact.task_id))
-      taskRows.set(fact.task_id,{task_id:fact.task_id,title:fact.actor ? `${fact.actor} 的探索任务` : '已记录的探索任务',agent_type:fact.actor});
+      taskRows.set(fact.task_id,{task_id:fact.task_id,title:fact.actor ? I18n.t`${fact.actor} 的探索任务` : I18n.t('已记录的探索任务'),agent_type:fact.actor});
     const publicProgress=new Map(),stageRows=new Map();
     const stageKey=s=>JSON.stringify([s.task_id,s.route_id || '',s.turn>0 ? s.turn : s.step_id || s.id]);
     // 服务端目录独立于聊天窗口；实时正文只补充尚未进入目录的阶段。
@@ -268,21 +283,48 @@ const TopologyLayout = (() => {
           }
           known.get(questionId).semantic_group=true;
           const key=JSON.stringify([stage.task_id,stage.route_id || '',intentTitle,attemptTitle]);
-          const declaredAttempt=nodes.filter(n=>n.view_kind==='attempt' && !n.semantic_group && n.task_id===stage.task_id && n.route_id===stage.route_id && n.title===attemptTitle);
-          const id=attemptByScope.get(key) || (declaredAttempt.length===1 ? declaredAttempt[0].id : null) || add({id:`__process_attempt:${key}`,kind:'intent',view_kind:'attempt',
-            node_type:'attempt',title:attemptTitle,task_id:stage.task_id,route_id:stage.route_id,
-            actor:stage.actor,semantic_group:true,projection:true,sequence:stage.sequence || stage.turn || 0,progress:[],turns:[],tool_call_ids:[],
-            description:stage.semantic_origin==='reviewed_public_progress' ? '依据已有公开说明整理' : '模型公开声明的验证方法'});
+          const milestone=annotation.milestone;
+          const validMilestone=milestone && ['discovery','breakthrough','turning_point'].includes(milestone.kind)
+            && typeof milestone.title==='string' && milestone.title.trim()
+            && typeof milestone.basis==='string' && milestone.basis.trim();
+          const signature=validMilestone ? JSON.stringify([milestone.kind,milestone.title.trim(),milestone.basis.trim(),milestone.evidence_refs || []]) : '';
+          const boundary=validMilestone && known.get(attemptByScope.get(key))?.milestone_signature!==signature;
+          const previous=active;
+          const declaredAttempt=nodes.filter(n=> {
+            if(n.view_kind!=='attempt' || n.semantic_group || n.task_id!==stage.task_id || n.route_id!==stage.route_id || n.title!==attemptTitle)return false;
+            const parents=split.edges.filter(e=>e.target===n.id && known.get(e.source)?.view_kind==='intent');
+            return !parents.length || parents.some(e=>e.source===questionId);
+          });
+          // 方法名相同也可以有新的发现；普通回合继续归入该方法最近的里程碑。
+          const id=boundary ? `__process_milestone:${stageKey(stage)}` : attemptByScope.get(key)
+            || (declaredAttempt.length===1 ? declaredAttempt[0].id : null) || `__process_attempt:${key}`;
+          if(!known.has(id))add({id,kind:boundary ? 'milestone' : 'intent',view_kind:boundary ? milestone.kind : 'attempt',
+            node_type:boundary ? 'milestone' : 'attempt',title:boundary ? milestone.title.trim() : attemptTitle,
+            method_title:attemptTitle,intent_title:intentTitle,task_id:stage.task_id,route_id:stage.route_id,
+            actor:stage.actor,semantic_group:true,projection:true,sequence:stage.sequence || stage.turn || 0,
+            progress:[],turns:[],tool_call_ids:[],
+            ...(boundary ? {reason:milestone.basis,next:milestone.next || '',evidence_refs:milestone.evidence_refs || [],milestone_signature:signature,
+              description:I18n.t('模型报告的公开发现；证据状态以原始记录和独立复核为准')} :
+              {description:stage.semantic_origin==='reviewed_public_progress' ? I18n.t('依据已有公开说明整理') : I18n.t('模型公开声明的验证方法')})});
           if(active && active.id!==id && active.state==='running') {
             active.state='';
             if(!['failed','cancelled'].includes(active.status))active.status=active.progress.some(p=>p.pending_calls?.length) ? 'waiting' : 'done';
           }
           attemptByScope.set(key,id);active=known.get(id);
           active.semantic_group=true;active.progress ||= [];active.turns ||= [];active.tool_call_ids ||= [];
-          active.reason=annotation.reason || active.reason || '';
+          active.method_title ||= attemptTitle;active.intent_title ||= intentTitle;
+          if(active.node_type!=='milestone')active.reason=annotation.reason || active.reason || '';
           active.state=annotation.state || active.state || '';
-          if(annotation.from)active.from_attempt=annotation.from;
-          if(!split.edges.some(e=>e.source===questionId && e.target===id))link(questionId,id,'tries','该意图下模型明确声明的验证方法');
+          if(boundary && previous && previous.id!==id) {
+            link(previous.id,id,'advance',I18n.t('同一路线的公开推进顺序；判断依据见节点，不表示独立验证通过'));
+            if(previous.intent_title!==intentTitle)link(questionId,id,'tries',I18n.t('该发现所属的公开意图'));
+          } else if(!edges.some(e=>e.target===id) && !split.edges.some(e=>e.source===questionId && e.target===id)) {
+            link(questionId,id,'tries',I18n.t('该意图下模型明确声明的验证方法或发现'));
+          }
+          if(annotation.from && previous && previous.id!==id
+              && [previous.title,previous.method_title].includes(annotation.from))
+            link(previous.id,id,'redirects',annotation.reason || active.reason || I18n.t('模型明确标注的尝试转向'));
+          else if(annotation.from)active.from_attempt=annotation.from;
         }
         if(!active)continue; // 无语义标注的历史保持公开记录，不能按时间臆造意图。
         active.progress.push(stage);
@@ -294,8 +336,13 @@ const TopologyLayout = (() => {
       }
     }
     for(const node of known.values())if(node.from_attempt) {
-      const candidates=nodes.filter(n=>n.view_kind==='attempt' && n.task_id===node.task_id && n.route_id===node.route_id && n.title===node.from_attempt && n.id!==node.id);
-      if(candidates.length===1)link(candidates[0].id,node.id,'redirects',node.reason || '模型明确标注的尝试转向');
+      const candidates=nodes.filter(n=>n.semantic_group && n.task_id===node.task_id && n.route_id===node.route_id && [n.title,n.method_title].includes(node.from_attempt) && n.id!==node.id);
+      if(candidates.length===1)link(candidates[0].id,node.id,'redirects',node.reason || I18n.t('模型明确标注的尝试转向'));
+    }
+    // 公开事件用于分组和回放，不能覆盖 exploration_write 后来保存的当前修订。
+    for(const record of split.exploration.nodes)if(record.kind==='exploration' && record.state) {
+      const node=known.get(record.id);
+      if(node) {node.state=record.state;node.reason=record.reason || '';}
     }
     for(const [taskId,task] of taskRows) {
       const parent=goalByDag.get(task.parent_dag_node);
@@ -308,16 +355,21 @@ const TopologyLayout = (() => {
         intentsByTask.set(taskId,[parent]);known.get(parent).progress=stages;
       } else if(!explicit.length) {
         const id=add({id:`__process_intent:${taskId}`,kind:'intent',view_kind:'intent',task_id:taskId,
-          title:task.title || latest?.route_title || latest?.title || task.agent_type || '任务探索',
+          title:task.title || latest?.route_title || latest?.title || task.agent_type || I18n.t('任务探索'),
           description:latest?.title || task.result_summary || '',status:task.status,actor:latest?.actor || task.agent_type,
           projection:true,progress:stages,body:task.result_summary || ''});
         intentsByTask.set(taskId,[id]);
       } else for(const id of explicit) {const n=known.get(id);if(!n.semantic_group && explicit.length===1)n.progress=stages;}
       for(const id of intentsByTask.get(taskId)) if(parent && !split.edges.some(e=>e.target===id && !excluded.has(e.source)))
-        link(parent,id,'spawns','任务派发归属');
+        link(parent,id,'spawns',I18n.t('任务派发归属'));
     }
     for(const edge of split.edges) if(known.has(edge.source) && known.has(edge.target)) {
-      const kind=edge.kind==='derives' && known.get(edge.source).view_kind==='goal' ? 'spawns' : edge.kind;
+      let kind=edge.kind==='derives' && known.get(edge.source).view_kind==='goal' ? 'spawns' : edge.kind;
+      if(kind==='derives') {
+        const declared=edges.find(e=>e.source===edge.source && e.target===edge.target && ['redirects','tries'].includes(e.kind));
+        if(declared)kind=declared.kind;
+        else if(known.get(edge.source).view_kind==='intent' && known.get(edge.target).view_kind==='attempt')kind='tries';
+      }
       link(edge.source,edge.target,kind,edge.detail);
       const saved=edges.find(e=>e.source===edge.source && e.target===edge.target && e.kind===kind);
       saved.references.push(...edge.references);
@@ -325,18 +377,18 @@ const TopologyLayout = (() => {
     for(const fact of [...known.values()].filter(n=>['fact','vulnerability','hint'].includes(n.view_kind))) {
       if(!fact.task_id || edges.some(e=>e.target===fact.id)) continue;
       const source=fact.provenance?.producer || {};
-      const exact=nodes.filter(n=>n.view_kind==='attempt' && n.task_id===fact.task_id && n.route_id===fact.route_id
+      const exact=nodes.filter(n=>(n.view_kind==='attempt' || n.node_type==='milestone') && n.task_id===fact.task_id && n.route_id===fact.route_id
         && (source.tool_call_id && n.tool_call_ids?.includes(source.tool_call_id) || source.turn>0 && n.turns?.includes(source.turn)));
-      if(exact.length===1){link(exact[0].id,fact.id,'task_output','产出来源明确记录了该任务、路线与执行步骤，不等于独立验证');continue;}
+      if(exact.length===1){link(exact[0].id,fact.id,'task_output',I18n.t('产出来源明确记录了该任务、路线与执行步骤，不等于独立验证'));continue;}
       const intents=intentsByTask.get(fact.task_id) || [];
       // 只在归属唯一时展示任务产出；并行分支的歧义不能凭时间补边。
       const sameRoute=intents.filter(id=>fact.route_id && known.get(id).route_id===fact.route_id);
       const producer=sameRoute.length===1 ? sameRoute[0] : intents.length===1 ? intents[0] : null;
-      if(producer) link(producer,fact.id,fact.view_kind==='hint' ? 'hint' : 'task_output','仅表示已记录的任务归属，不等于证据验证');
+      if(producer) link(producer,fact.id,fact.view_kind==='hint' ? 'hint' : 'task_output',I18n.t('仅表示已记录的任务归属，不等于证据验证'));
     }
     for(const node of known.values()) if(['goal','intent','attempt'].includes(node.view_kind) && !edges.some(e=>e.target===node.id))
-      link(origin.id,node.id,'scope','会话目标或探索归属，不等于证据因果');
-    const referenceGroup={id:'__process_references',kind:'collection',title:'资料与规则',members:references};
+      link(origin.id,node.id,'scope',I18n.t('会话目标或探索归属，不等于证据因果'));
+    const referenceGroup={id:'__process_references',kind:'collection',title:I18n.t('资料与规则'),members:references};
     records.push(referenceGroup);
     const enriched=new Map(nodes.map(n=>[n.id,n]));
     return {nodes,edges,records:records.map(n=>enriched.get(n.id) || n),groups:[referenceGroup],assets:split.assets,links:split.links,references,
@@ -357,7 +409,7 @@ const TopologyLayout = (() => {
     if(query || state) {
       const needle=query.trim().toLocaleLowerCase();
       const status=n=>({completed:'done',closed:'done',active:'running',pending:'open',created:'open',queued:'open'}[n.state || n.status] || n.state || n.status);
-      const keep=new Set(visible.filter(n=>(!needle || `${n.title} ${n.record_id || ''}`.toLocaleLowerCase().includes(needle))
+      const keep=new Set(visible.filter(n=>(!needle || `${n.title} ${n.reason || ''} ${n.next || ''} ${n.record_id || ''}`.toLocaleLowerCase().includes(needle))
         && (!state || status(n)===state)).map(n=>n.id));
       const queue=[...keep];
       for(let i=0;i<queue.length;i++)for(const parent of preds.get(queue[i]) || [])if(!keep.has(parent) && !hidden.has(parent)){keep.add(parent);queue.push(parent);}
@@ -368,7 +420,7 @@ const TopologyLayout = (() => {
   }
   function reasoningLayout(nodes,edges,heights,nodeWidth=232) {
     const ids=nodes.map(n=>n.id),preds=new Map(ids.map(id=>[id,edges.filter(e=>e.target===id && e.kind!=='redirects').map(e=>e.source)]));
-    const base=layers(ids,preds),depth=new Map(),floor={origin:0,hint:0,goal:1,intent:2,attempt:3,fact:4,vulnerability:4};
+    const base=layers(ids,preds),depth=new Map(),floor={origin:0,hint:0,goal:1,intent:2,attempt:3,discovery:3,breakthrough:3,turning_point:3,fact:4,vulnerability:4};
     for(const id of ids.slice().sort((a,b)=>base.depth.get(a)-base.depth.get(b))) {
       let d=floor[nodes.find(n=>n.id===id).view_kind] || 0;
       for(const parent of preds.get(id)) if(depth.has(parent) && base.depth.get(parent)<base.depth.get(id)) d=Math.max(d,depth.get(parent)+1);

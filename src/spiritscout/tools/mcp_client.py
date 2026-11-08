@@ -353,7 +353,7 @@ def build_client(spec: Any) -> McpClient:
         # launch.sh 直接调用 venv 解释器、不激活 PATH；本项目模块沿用当前解释器。
         command = sys.executable
     if chrome_mcp:
-        if is_frozen():
+        if is_frozen() and command == sys.executable:
             # 单文件程序没有模块入口，由主入口转交 Chrome MCP 子命令。
             args = ["--run-chrome-mcp", *args[2:]]
         # SDK 只继承基础环境；显式转交连接配置与当前桌面的显示连接。
@@ -363,7 +363,12 @@ def build_client(spec: Any) -> McpClient:
             "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "XAUTHORITY",
             "DBUS_SESSION_BUS_ADDRESS") if key in os.environ}, **env}
         env["SPIRITSCOUT_CHROME_DEFER_START"] = "1"
-        return ChromeMcpClient(spec.name, command=command, args=args,
+        client_type = ChromeMcpClient
+        if env.get('SPIRITSCOUT_BROWSER_ACCOUNT'):
+            from spiritscout.tools.browser_accounts import AccountChromeMcpClient
+
+            client_type = AccountChromeMcpClient
+        return client_type(spec.name, command=command, args=args,
                                env=env, timeout=timeout)
     return McpStdioClient(spec.name, command=command,
                           args=args,

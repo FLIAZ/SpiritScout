@@ -1,0 +1,32 @@
+/* 命令与解释成列，沿用控制台的纸面、墨色与琥珀色选择态。 */
+.command-menu { position: fixed; z-index: 100; max-height: min(360px, 45vh); overflow: auto;
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius);
+  box-shadow: var(--shadow-raise); padding: 5px; color: var(--ink); }
+.command-menu-head { display: flex; justify-content: space-between; gap: 10px; padding: 7px 9px;
+  font-size: 12px; color: var(--ink-2); border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+.command-menu-head small { color: var(--ink-2); font-size: 11px; }
+.command-menu [role="option"] { display: flex; align-items: baseline; gap: 16px; width: 100%;
+  border: 0; border-left: 2px solid transparent; background: transparent; color: var(--ink);
+  padding: 8px 10px; text-align: left; border-radius: 3px; }
+.command-menu [role="option"] code { min-width: 8ch; color: var(--accent-ink); }
+.command-menu [role="option"] span { font-size: 13px; }
+.command-menu [role="option"] small { display: block; font-size: 11px; color: var(--ink-2); }
+.command-menu [role="option"][aria-selected="true"], .command-menu [role="option"]:hover {
+  background: var(--accent-soft); border-left-color: var(--accent); }
+.command-menu [role="option"][aria-disabled="true"] { opacity: .65; cursor: default; }
+.command-empty { font-size: 12px; padding: 8px; margin: 0; }
+.command-feedback { margin: 2px 6px 10px; padding: 10px 12px; background: var(--surface-2);
+  border-radius: var(--radius); color: var(--ink-2); font-size: 12px; max-height: 230px; overflow: auto; }
+.command-feedback-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; color: var(--ink); }
+.command-feedback-head button { border: 0; background: transparent; color: var(--ink-2); font-size: 20px;
+  line-height: 1; min-width: 28px; min-height: 28px; }
+.command-feedback p { margin: 6px 0 0; overflow-wrap: anywhere; }
+.command-help { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 20px; margin: 7px 0; }
+.command-help > div { display: flex; gap: 8px; }
+.command-help dt { min-width: 8ch; color: var(--accent-ink); }
+.command-help dd { margin: 0; }
+@media (max-width: 600px) {
+  .command-menu-head { display: block; }
+  .command-menu-head small { display: block; }
+  .command-help { grid-template-columns: 1fr; }
+}

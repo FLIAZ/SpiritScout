@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import unittest
 
@@ -14,12 +15,15 @@ class LocalHttpGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_streaming_with_tools_over_real_http(self) -> None:
         """真实 LiteLLM 流式路径也必须兼容项目 MCP SDK；不访问付费模型。"""
         requests: list[dict] = []
+        authorization: list[bytes] = []
         chunks: list[tuple[str, str]] = []
 
         async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
             try:
                 header = await reader.readuntil(b'\r\n\r\n')
                 headers = dict(line.split(b':', 1) for line in header.split(b'\r\n')[1:] if b':' in line)
+                authorization.append(next((value.strip() for key, value in headers.items()
+                                           if key.lower() == b'authorization'), b''))
                 size = int(next(value for key, value in headers.items() if key.lower() == b'content-length'))
                 requests.append(json.loads(await reader.readexactly(size)))
                 events = [
@@ -45,12 +49,22 @@ class LocalHttpGatewayTests(unittest.IsolatedAsyncioTestCase):
         try:
             port = server.sockets[0].getsockname()[1]
             gateway = ModelGateway(ModelRegistry([ModelEntry(model='fixture', provider='openai_compatible',
-                base_url=f'http://127.0.0.1:{port}/v1', api_key='local-test-only')]),
+                base_url=f'http://127.0.0.1:{port}/v1', local_runtime='llama_cpp')]),
                 config=GatewayConfig(request_timeout_seconds=5))
-            tools = [{'type': 'function', 'function': {'name': 'local_probe', 'description': 'fixture',
-                      'parameters': {'type': 'object', 'properties': {}}}}]
-            response = await gateway.chat([{'role': 'user', 'content': 'fixture'}], max_tokens=16,
-                                          tools=tools, on_delta=lambda kind, text: chunks.append((kind, text)))
+            from spiritscout.awdp.editor import SCHEMA
+
+            tools = [SCHEMA]
+            malformed = '{"tests":[{"code":"assert True\n"}]}'
+            messages = [{'role': 'user', 'content': 'fixture'},
+                {'role': 'assistant', 'content': '', 'tool_calls': [
+                    {'id': 'broken', 'type': 'function', 'function': {'name': 'verify_patch', 'arguments': malformed}},
+                    {'id': 'valid', 'type': 'function', 'function': {'name': 'edit_source', 'arguments': '{"edits":[]}'}}]},
+                {'role': 'tool', 'tool_call_id': 'broken', 'content': 'Invalid JSON; not executed'},
+                {'role': 'tool', 'tool_call_id': 'valid', 'content': 'No edits; not executed'}]
+            original = copy.deepcopy(messages)
+            response = await gateway.chat(messages, max_tokens=16, preserve_context=True,
+                                          tools=tools, preserve_tool_order=True,
+                                          on_delta=lambda kind, text: chunks.append((kind, text)))
             self.assertEqual(response.content, 'ok')
             self.assertEqual(response.prompt_tokens, 10)
             self.assertEqual(response.completion_tokens, 1)
@@ -58,8 +72,16 @@ class LocalHttpGatewayTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(gateway.budget.used_tokens, 11)
             self.assertIn(('text', 'ok'), chunks)
             self.assertEqual(len(requests), 1)
+            self.assertEqual(authorization, [b'Bearer no-key'])
             self.assertTrue(requests[0]['stream'])
             self.assertEqual(requests[0]['tools'], tools)
+            self.assertEqual(messages, original)
+            calls = requests[0]['messages'][1]['tool_calls']
+            self.assertEqual(json.loads(calls[0]['function']['arguments']), {'_invalid_json_not_executed': malformed})
+            self.assertEqual(calls[1]['function']['arguments'], '{"edits":[]}')
+            properties = requests[0]['tools'][0]['function']['parameters']['properties']
+            self.assertEqual(list(properties), ['source_ref', 'path', 'sha256', 'edits'])
+            self.assertEqual(list(properties['edits']['items']['properties']), ['search', 'search_ref', 'replace'])
         finally:
             server.close()
             await server.wait_closed()

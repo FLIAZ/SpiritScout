@@ -27,6 +27,8 @@ ARG PIP_INDEX_URL=https://pypi.org/simple
 
 # 0 = 只装核心依赖（默认）；1 = 额外安装 .[toolkit] 工具箱
 ARG INSTALL_TOOLKIT=0
+# 0 = 核心部署；1 = 加装 AWDP 离线源码扫描器与符号导航
+ARG INSTALL_AUDIT=0
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -40,6 +42,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
  && apt-get -o Acquire::Retries=3 update \
  && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
       python3 python3-venv bubblewrap ca-certificates curl git procps libstdc++6 libarchive13 chromium tini \
+ && if [ "$INSTALL_AUDIT" = "1" ]; then \
+      apt-get -o Acquire::Retries=3 install -y --no-install-recommends universal-ctags; fi \
  && rm -rf /var/lib/apt/lists/*
 
 RUN /usr/bin/python3 -m venv /opt/venv \
@@ -53,6 +57,9 @@ COPY deploy/container_entrypoint.py ./deploy/container_entrypoint.py
 COPY deploy.py ./deploy.py
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -e . --index-url "$PIP_INDEX_URL"
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ "$INSTALL_AUDIT" = "1" ]; then pip install -e '.[audit]' --index-url "$PIP_INDEX_URL"; fi
 
 # 可选工具箱：部分包需要编译（gmpy2 等），装完保留编译链以免后续 pip 不可用
 RUN if [ "$INSTALL_TOOLKIT" = "1" ]; then \

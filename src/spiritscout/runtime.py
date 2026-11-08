@@ -183,6 +183,9 @@ class _Infra:
     experience_deferred: bool = False   # 退场提炼托管后台中：close 跳过经验库
 
     async def close(self) -> None:
+        jobs = getattr(self.tools, "background_jobs", None)
+        if jobs is not None:
+            await jobs.aclose()
         if self.questions is not None:
             self.questions.bind_context(None)
         try:
@@ -387,6 +390,8 @@ async def _build_infra(
                 max_output_chars=cfg.executor.max_output_chars, audit=audit,
             )
         workspace = Path(cfg.workspace.root).resolve()
+        if isinstance(executor, LocalExecutor):
+            executor.traffic_workspace = workspace
         workspace.mkdir(parents=True, exist_ok=True)
         from spiritscout.tools.journal import ExecutionJournal
 
@@ -450,12 +455,25 @@ async def _build_infra(
             if search_config.enabled:
                 builtin_ctx["_search"] = search_service(search_config, search_root, api_key=search_key)
         registry.register_builtin("web_search", web_search, SEARCH_SPEC)
+        from spiritscout.cve.service import CVEService
+        from spiritscout.tools.cve import SPEC as CVE_SPEC
+        from spiritscout.tools.cve import cve_lookup
+
+        builtin_ctx["_cve"] = CVEService(cfg.cve) if cfg.cve.enabled else None
+        registry.register_builtin("cve_lookup", cve_lookup, CVE_SPEC)
+
         # 外部 MCP 服务器：握手 + 工具清单并入智能体工具目录（失败留痕跳过，
         # 不阻断开工——MCP 是增益能力而非主链依赖；多台服务器并发握手，
         # 慢服务器不拖累开工时序）
         mcp_tools: dict[str, dict[str, Any]] = {}
         enabled_specs = [s for s in cfg.mcp_servers if s.enabled
                          and not (authorization.mode == RunMode.COMPETITION and is_search_server(s))]
+        account_base = next((s for s in enabled_specs if list(s.args[:2]) == [
+            '-m', 'spiritscout.tools.chrome_mcp'] and not s.env.get('SPIRITSCOUT_BROWSER_ACCOUNT')), None)
+        if not cfg.gateway.lightweight_local and resources is not None:
+            from spiritscout.tools.browser_accounts import session_specs
+
+            enabled_specs = session_specs(enabled_specs, resources, workspace.name)
         if enabled_specs:
             from spiritscout.tools.diagnostics import (
                 browser_tool_guidance,
@@ -469,7 +487,9 @@ async def _build_infra(
                 try:
                     if list(spec.args[:2]) == ["-m", "spiritscout.tools.chrome_mcp"]:
                         spec = spec.model_copy(update={"env": {
-                            **spec.env, "SPIRITSCOUT_CHROME_OUTPUT_DIR": str(workspace / "browser-output"),
+                            **spec.env, "SPIRITSCOUT_CHROME_OUTPUT_DIR": str(
+                                workspace / "browser-output" / spec.name if spec.env.get('SPIRITSCOUT_BROWSER_ACCOUNT')
+                                else workspace / "browser-output"),
                             "SPIRITSCOUT_CHROME_PROFILE_DIR": (
                                 spec.env.get("SPIRITSCOUT_CHROME_PROFILE_DIR")
                                 or os.environ.get("SPIRITSCOUT_CHROME_PROFILE_DIR")
@@ -512,17 +532,34 @@ async def _build_infra(
                     )
                     from spiritscout.tools.chrome_mcp import cdp_endpoint
 
-                    browser_gate = browser_lock(cdp_endpoint(
+                    browser_gate = browser_lock(f'account:{workspace}:{spec.name}' if hasattr(client, 'account_id') else cdp_endpoint(
                         spec.env.get("SPIRITSCOUT_CHROME_CDP_URL")
                         or os.environ.get("SPIRITSCOUT_CHROME_CDP_URL", "")))
                     register_handoff(registry, mcp_tools, spec, client, tools,
                                      question_broker, audit, browser_gate)
+                if hasattr(client, 'account_id'):
+                    from spiritscout.tools.browser_account_auth import (
+                        register_account_auth,
+                    )
+                    from spiritscout.tools.browser_handoff import browser_lock
+
+                    browser_gate = browser_lock(f'account:{workspace}:{spec.name}')
+                    client.on_cache_error = lambda message, account=client.account_id: audit.log(
+                        'system.lifecycle', 'browser', {'action': 'account_cache_failed',
+                                                       'account_id': account, 'message': message})
+                    register_account_auth(registry, mcp_tools, spec, client, question_broker, browser_gate)
                 for t in tools:
                     if authorization.mode == RunMode.COMPETITION and is_search_tool(t["name"]):
                         continue
+                    anonymous_browser = (spec.env.get('SPIRITSCOUT_CHROME_ISOLATED') == '1'
+                                         and not hasattr(client, 'account_id'))
                     t = {**t, "description": (t.get("description") or t["name"])
                          + browser_tool_guidance(t["name"])
-                         + (chrome_tool_guidance(t["name"]) if shared_browser else "")
+                         + (chrome_tool_guidance(t["name"], isolated=anonymous_browser) if shared_browser else "")
+                         + (" 当前是会话隔离浏览器，默认未登录。通常无需账号，先判断当前步骤是否确实依赖登录身份；"
+                            "仅在匿名方式不足且有现场依据时，搜索 account_request 申请对应平台的已存账号，"
+                            "等待用户明确同意；没有申请工具或未获同意时继续匿名方式或报告所缺条件。"
+                            if anonymous_browser and t['name'] == 'browser_navigate' else "")
                          + (" 当前为会话独立的无头浏览器，不含用户已有登录态；"
                             "并行处理不同题目时使用各自标签，依据当前标签快照操作。"
                             if spec.name == "chrome" and not shared_browser else "")}
@@ -609,6 +646,36 @@ async def _build_infra(
                     "readiness": "tool_catalog",
                     "tools": [t["name"] for t in tools]})
 
+            if (account_base is not None and resources is not None
+                    and not cfg.gateway.lightweight_local):
+                from spiritscout.resources.browser_accounts import BrowserAccounts
+                from spiritscout.tools.browser_account_access import (
+                    register_account_access,
+                )
+                from spiritscout.tools.browser_accounts import account_spec
+
+                accounts = BrowserAccounts(resources)
+                granted_clients: dict[str, Any] = {}
+
+                async def _activate_account(key: str, site: str, version: int) -> list[str]:
+                    # 只由已收到明确用户答复的入口调用；授权不跨运行保存。
+                    granted_spec = account_spec(account_base, accounts, key,
+                                                approved_origin=site, expected_version=version)
+                    client = granted_clients.get(granted_spec.name)
+                    if client is not None:
+                        if client.identity['version'] != version:
+                            raise ValueError('账号上下文已失效，请重新启动会话')
+                    else:
+                        ready = await _start_mcp(granted_spec)
+                        if ready[1] is None:
+                            raise RuntimeError('账号浏览器未能准备就绪')
+                        _register_mcp(ready, late=True)
+                        granted_clients[granted_spec.name] = ready[1]
+                    return [name for name, entry in mcp_tools.items() if entry['server'] == granted_spec.name]
+
+                register_account_access(registry, mcp_tools, account_base, accounts,
+                                        question_broker, _activate_account)
+
             # 并发握手但只等一个宽限期：快服务器照常开工前并入；慢/卡死的
             # 转入后台续握、就绪一台并入一台（活目录，智能体下回合可见）
             startup = [asyncio.ensure_future(_start_mcp(s)) for s in enabled_specs]
@@ -636,6 +703,20 @@ async def _build_infra(
         from spiritscout.tools.http_responses import http_response_read
 
         registry.register_builtin("http_response_read", http_response_read, RESPONSE_SPEC)
+        from spiritscout.traffic.tools import FUNCTIONS as TRAFFIC_FUNCTIONS
+        from spiritscout.traffic.tools import SPECS as TRAFFIC_SPECS
+
+        for name, function in TRAFFIC_FUNCTIONS.items():
+            registry.register_builtin(name, function, TRAFFIC_SPECS[name])
+        from spiritscout.tools.background import SPECS as BACKGROUND_SPECS
+        from spiritscout.tools.background import ShellJobs
+
+        registry.background_jobs = ShellJobs(str(workspace), audit=audit,
+            guard_root=builtin_ctx.get("guard_root", ""), pause_gate=pause_gate)
+        for name, method in (("shell_start", "start"), ("shell_status", "status"),
+                             ("shell_wait", "wait"), ("shell_watch", "watch"), ("shell_events", "events"),
+                             ("shell_stop", "stop"), ("task_wait", "delay")):
+            registry.register_builtin(name, getattr(registry.background_jobs, method), BACKGROUND_SPECS[name])
 
         from spiritscout.tools.cyberchef import SPECS as CYBERCHEF_SPECS
         from spiritscout.tools.cyberchef import cyberchef_bake, cyberchef_operations
@@ -647,6 +728,18 @@ async def _build_infra(
                          ("tcp_scan", tcp_scan), ("file_analyze", file_analyze),
                          ("sandbox_exec", sandbox_exec)):
             registry.register_builtin(name, fn, BUILTIN_SPECS[name])
+        from spiritscout.tools.scanner import SPEC as SCANNER_SPEC
+        from spiritscout.tools.scanner import NucleiScanner
+
+        registry.register_builtin("nuclei_scan", NucleiScanner(cfg.scanner, blackboard).run, SCANNER_SPEC)
+        from spiritscout.tools.metasploit import SPEC as METASPLOIT_SPEC
+        from spiritscout.tools.metasploit import MetasploitScanner
+
+        registry.register_builtin("metasploit_scan", MetasploitScanner(cfg.scanner, blackboard).run, METASPLOIT_SPEC)
+        from spiritscout.tools.images import SPEC as IMAGE_SPEC
+        from spiritscout.tools.images import view_image
+
+        registry.register_builtin("view_image", view_image, IMAGE_SPEC)
         # 移除已从注册表删除的角色模型指派，并记录审计。
         bound = dict(agent_models or {})
         known_registry = ModelRegistry(models)
@@ -853,9 +946,21 @@ async def _run_master(
     verifier = VerificationQueue(_sub_ctx(infra), verification_rules, enabled=enable_llm_planning)
     verifier.start()
     master.ctx.extra["verification_drain"] = verifier.drain
+    from spiritscout.agents.scan_control import ScannerController
+
+    scanner = None
+    if (enable_llm_planning and infra.cfg.scanner.enabled and not infra.cfg.gateway.lightweight_local
+            and infra.authorization.mode in (RunMode.SRC, RunMode.CTF)):
+        scanner = ScannerController(infra, assembly, mission=mission,
+            standing_rules=standing_rules, dialogue_history=dialogue_history)
+        master.ctx.extra['scan_controller'] = scanner
+        infra.builtin_ctx['_scan_control'] = scanner
     run_summary: dict[str, Any] = {}
     try:
         run_summary = await master.run(authorization=infra.authorization, target=target)
+        # 先停止发现分支，再排空复核队列，避免 drain 之后又提交新候选。
+        if scanner is not None:
+            await scanner.finish_discovery()
         await verifier.drain()
         run_summary["verification"] = verifier.stats()
     except asyncio.CancelledError:
@@ -871,6 +976,9 @@ async def _run_master(
                                      error=f"{type(exc).__name__}: {exc}")
         raise
     finally:
+        if scanner is not None:
+            await scanner.close()
+            infra.builtin_ctx.pop('_scan_control', None)
         await verifier.close()
     run_summary["recovery_mode"] = recovery_context.get("mode", "history_replan")
     if infra.tools.journal is not None:
@@ -891,8 +999,9 @@ async def _run_master(
 def _write_report_file(path: Path, body: str, *, contest: str) -> Path:
     header = (f"# 灵枢 SpiritScout CTF WriteUp\n\n> 生成时间："
               f"{datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')} ｜ 赛制：{contest}\n\n")
-    path.write_text(header + body.strip() + "\n", encoding="utf-8")
-    return path
+    from spiritscout.ctf.report_evidence import save_writeup
+
+    return save_writeup(path, header + body.strip() + "\n")
 
 
 def _write_competition_summary(
@@ -960,18 +1069,21 @@ async def _render_writeup(
     enable_llm: bool, fallback_context: dict[str, Any],
 ) -> Path:
     """WriteUp 优先由灵枢亲自撰写（全场脉络在它手里）；LLM 不可用回退模板。"""
+    from spiritscout.ctf.report_evidence import technical_appendix
+
+    digest = build_digest(challenges=challenges, flags=flag_manager.all(), run_summary=run_summary,
+                          blackboard=infra.blackboard, journal=getattr(getattr(infra, 'tools', None), 'journal', None), workspace=infra.workspace)
     body = None
     if enable_llm:
         body = await writeup_body(
             AgentBoundGateway(infra.gateway, infra.agent_models.get("master", ""), prefer_session=True),
-            digest=build_digest(challenges=challenges, flags=flag_manager.all(),
-                                run_summary=run_summary, blackboard=infra.blackboard),
+            digest=digest,
             audit=infra.audit)
     if body:
         return _write_report_file(Path(report_path), body, contest=contest)
     report = ReportAgent(infra.blackboard)
     return report.generate_writeup(challenges, flag_manager.all(), report_path,
-                                   context=fallback_context)
+                                   context={**fallback_context, 'technical_appendix': technical_appendix(digest)})
 
 
 def _distill_digest(infra: _Infra, assembly: Any,
@@ -1619,7 +1731,8 @@ async def run_ctf_engagement(
             complete = bool(flag_manager.completed_ids())
             run_summary["answers_complete"] = complete
             digest = build_digest(challenges=challenges, flags=flag_manager.all(),
-                                  run_summary=run_summary, blackboard=infra.blackboard)
+                                  run_summary=run_summary, blackboard=infra.blackboard,
+                                  journal=getattr(getattr(infra, 'tools', None), 'journal', None), workspace=infra.workspace)
             digest['local_answer_completion'] = flag_manager.completions
             digest['chronology'] = [{"type": row['event']['type'],
                                      "turn": row['event'].get('detail', {}).get('turn'),

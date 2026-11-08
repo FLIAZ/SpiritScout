@@ -1,0 +1,11 @@
+'use strict';
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+const source=fs.readFileSync('src/spiritscout/web/static/js/views.js','utf8');
+const chips={innerHTML:''};
+const S={state:{session:{status:'running',mode:'ctf',phase:'executing'},vulns:{by_status:{}},flags:{},round_views:[],decision_rounds:3}};
+const ctx=vm.createContext(require('./helpers/i18n').context({S,TERMINAL:new Set(['completed']),$:()=>chips}));
+vm.runInContext(source.slice(source.indexOf('function flagChipValue'),source.indexOf('/* ================= 拓扑画布')),ctx);
+ctx.renderChips();assert.match(chips.innerHTML,/<b>3<\/b>主控轮次/);
+S.state.decision_rounds=0;ctx.renderChips();assert.match(chips.innerHTML,/<b>0<\/b>主控轮次/);
+delete S.state.decision_rounds;S.state.round_views=[{},{}];ctx.renderChips();assert.match(chips.innerHTML,/<b>2<\/b>主控轮次/);
+console.log('live decision rounds: current/zero values and historical fallback passed');

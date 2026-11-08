@@ -23,9 +23,11 @@ PKG = ROOT / "src" / "spiritscout"
 datas = [
     (str(PKG / "web" / "static"), "spiritscout/web/static"),
     (str(PKG / "knowledge" / "data"), "spiritscout/knowledge/data"),
+    (str(PKG / "awdp" / "data"), "spiritscout/awdp/data"),
     (str(PKG / "agents" / "report" / "templates"), "spiritscout/agents/report/templates"),
-    (str(PKG / "tools" / "cyberchef_worker.mjs"), "spiritscout/tools"),
 ]
+for worker in sorted((PKG / "tools").glob("*.mjs")):
+    datas.append((str(worker), "spiritscout/tools"))
 # 首次启动复制到可执行文件旁的配置模板（不直接使用仓库里的本地配置）。
 for template in sorted((ROOT / "configs").glob("*.example.yaml")):
     datas.append((str(template), "configs"))

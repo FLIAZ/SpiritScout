@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StrictBool
 
 from spiritscout.blackboard import Blackboard
-from spiritscout.core.audit import AuditLogger
+from spiritscout.core.audit import AuditLogger, read_record
 from spiritscout.knowledge import merge as experience_merge
 from spiritscout.knowledge.experience import (
     ExperienceStore,
@@ -64,7 +64,7 @@ def read_distill_events(audit_path: str | Path, *, limit: int = 8) -> list[dict[
         if '"experience.distill"' not in line:
             continue
         try:
-            record = json.loads(line)
+            record = read_record(line)
         except ValueError:
             continue
         if not isinstance(record, dict) or record.get('type') != 'experience.distill':

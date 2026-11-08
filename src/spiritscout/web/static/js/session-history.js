@@ -14,8 +14,8 @@ const SessionHistory = (() => {
     const root = $("#trace-history");
     if (!root) return;
     root.querySelector("[data-history-status]").textContent = message || error ||
-      (busy ? "正在读取记录…" : pending ? "有新消息 · 回到最新即可继续跟随" :
-        pages[first]?.has_more || first > 0 ? "向上滚动查看更早记录" : "已到会话开头");
+      (busy ? I18n.t("正在读取记录…") : pending ? I18n.t("有新消息 · 回到最新即可继续跟随") :
+        pages[first]?.has_more || first > 0 ? I18n.t("向上滚动查看更早记录") : I18n.t("已到会话开头"));
     root.querySelector('[data-history="latest"]').disabled = busy;
     const oldestButton = root.querySelector('[data-history="oldest"]');
     if (oldestButton) oldestButton.disabled = busy || !pages.length || (!pages[0].has_more && first === 0);
@@ -25,6 +25,7 @@ const SessionHistory = (() => {
   }
   // 用户消息目录独立于滚动窗口；同次发送只按消息信封 ID 分组。
   let anchorKey = null, anchorIndex = null, previewBar = null;
+  let renderedSession = null;
   const anchorRows = () => [...box().children].filter(el => el.classList.contains("tl-user") && el.dataset.historyId);
   const messageKey = (detail, id) => detail?.message_id
     ? JSON.stringify(["message", String(detail.message_id)]) : JSON.stringify(["event", String(id)]);
@@ -32,7 +33,7 @@ const SessionHistory = (() => {
     const text = row.querySelector(".btxt")?.textContent.trim();
     if (text) return text;
     const name = row.querySelector(".fc-name")?.textContent.trim();
-    return name ? `[附件] ${name}` : "用户消息";
+    return name ? I18n.t`[附件] ${name}` : I18n.t("用户消息");
   }
   function groupsFromEvents(items) {
     const groups = [], byKey = new Map();
@@ -43,7 +44,7 @@ const SessionHistory = (() => {
       let group = byKey.get(key);
       if (!group) { group = {key, ids: [], parts: []}; byKey.set(key, group); groups.push(group); }
       group.ids.push(String(item.id));
-      group.parts.push(kind === "user.message" ? String(d.content || "").trim() : `[附件] ${d.name || "附件"}`);
+      group.parts.push(kind === "user.message" ? String(d.content || "").trim() : I18n.t`[附件] ${d.name || I18n.t("附件")}`);
     }
     return groups;
   }
@@ -77,14 +78,14 @@ const SessionHistory = (() => {
         for (const item of result.items) recordAnchor(item, state);
         const next = Number(result.older_cursor);
         if (result.has_more && (!Number.isFinite(next) || next <= 0 || (before !== null && next >= before)))
-          throw new Error("存档点分页游标未向前推进");
+          throw new Error(I18n.t("存档点分页游标未向前推进"));
         state.before = next;
         if (!result.has_more) { state.complete = true; break; }
         before = next;
         refreshAnchors();
       }
     } catch (e) {
-      if (anchorIndex === state && e.name !== "AbortError") state.error = e.message || "存档点读取失败";
+      if (anchorIndex === state && e.name !== "AbortError") state.error = e.message || I18n.t("存档点读取失败");
     } finally {
       if (anchorIndex === state) { state.loading = false; refreshAnchors(); }
     }
@@ -93,7 +94,7 @@ const SessionHistory = (() => {
     const root = $("#um-rail"), state = indexForSession();
     if (!root || !state) return;
     // 兼容由旧渲染入口产生的行；完整事件目录优先，不用 DOM 文本覆盖原文。
-    for (const row of anchorRows()) if (!state.events.has(row.dataset.historyId)) {
+    for (const row of renderedSession === state.session ? anchorRows() : []) if (!state.events.has(row.dataset.historyId)) {
       const file = row.querySelector(".fc-name");
       recordAnchor({id: Number(row.dataset.historyId), event: {type: file ? "user.attachment" : "user.message",
         detail: {message_id: row.dataset.messageId, ...(file ? {name: file.textContent.trim()} : {content: anchorText(row)})}}}, state);
@@ -123,15 +124,15 @@ const SessionHistory = (() => {
           el.addEventListener("mouseleave", hideAnchorPreview);
         }
         el.disabled = busy; el.dataset.historyId = group.ids[0]; el.dataset.ids = group.ids.join("|");
-        const text = group.parts.filter(Boolean).join("\n").slice(0, 400) || "用户消息";
-        el.dataset.preview = text; el.setAttribute("aria-label", `回到这条消息：${text.slice(0, 60)}`);
+        const text = group.parts.filter(Boolean).join("\n").slice(0, 400) || I18n.t("用户消息");
+        el.dataset.preview = text; el.setAttribute("aria-label", I18n.t`回到这条消息：${text.slice(0, 60)}`);
         return el;
       });
       if (state.error || (state.loading && !bars.length)) {
         const button = document.createElement("button"); button.type = "button"; button.className = "btn sm";
         button.textContent = state.loading ? "…" : "↻"; button.disabled = state.loading;
-        button.title = state.error ? `存档点未补全：${state.error}，点击重试` : "正在补全会话存档点";
-        button.setAttribute("aria-label", state.error ? "重试加载会话存档点" : "正在补全会话存档点");
+        button.title = state.error ? I18n.t`存档点未补全：${state.error}，点击重试` : I18n.t("正在补全会话存档点");
+        button.setAttribute("aria-label", state.error ? I18n.t("重试加载会话存档点") : I18n.t("正在补全会话存档点"));
         button.style.padding = "0"; button.style.width = "24px"; button.style.height = "22px";
         button.addEventListener("click", () => loadAnchorIndex({retry: true})); bars.push(button);
       }
@@ -167,7 +168,7 @@ const SessionHistory = (() => {
   async function locate(ids) {
     await navigate(async () => {
       const numbers = ids.map(Number).filter(Number.isFinite);
-      if (!numbers.length) throw new Error("消息游标无效");
+      if (!numbers.length) throw new Error(I18n.t("消息游标无效"));
       // 新消息可能在回看期间到达：补取最新页后仍保持回看，不偷换为跟随模式。
       if (Math.max(...numbers) > pages.at(-1).cursor) {
         const result = await read();
@@ -175,9 +176,9 @@ const SessionHistory = (() => {
       }
       let index = pageForIds(ids);
       while (index < 0 && pages[0].has_more) { await prependPage(); index = pageForIds(ids); }
-      if (index < 0) throw new Error("未找到这条消息，请刷新存档点后重试");
+      if (index < 0) throw new Error(I18n.t("未找到这条消息，请刷新存档点后重试"));
       return index;
-    }, "正在定位消息…", ids);
+    }, I18n.t("正在定位消息…"), ids);
   }
   function showAnchorPreview(bar) {
     const tip = $("#um-preview"), wrap = bar.closest(".trace-wrap");
@@ -480,7 +481,7 @@ const SessionHistory = (() => {
     controller?.abort(); controller = new AbortController();
     const result = await api(`/api/sessions/${session}/audit-page?activity=true&limit=${PAGE_SIZE}` +
       (before === null ? "" : `&before=${before}`), {signal: controller.signal});
-    if (!active(session, token)) { const e = new Error("会话已切换"); e.name = "AbortError"; throw e; }
+    if (!active(session, token)) { const e = new Error(I18n.t("会话已切换")); e.name = "AbortError"; throw e; }
     for (const item of result.items) recordAnchor(item);
     result.touched = ++cacheClock;
     return result;
@@ -499,7 +500,7 @@ const SessionHistory = (() => {
   }
   async function prependPage() {
     const before = pages[0].older_cursor, result = await read(before);
-    if (Number(result.older_cursor) >= Number(before)) throw new Error("历史分页游标未向前推进");
+    if (Number(result.older_cursor) >= Number(before)) throw new Error(I18n.t("历史分页游标未向前推进"));
     pages.unshift({...result, start: result.older_cursor}); first++; last++;
   }
   async function fillWindow() {
@@ -530,7 +531,7 @@ const SessionHistory = (() => {
       busy = false; trimCache(); controls();
       if (ids) {
         const target = anchorRows().find(row => ids.includes(row.dataset.historyId));
-        if (!target) throw new Error("当前记录中未显示这条消息");
+        if (!target) throw new Error(I18n.t("当前记录中未显示这条消息"));
         jumpToAnchor(target);
       }
       retryKind = ""; retryIds = null;
@@ -538,7 +539,7 @@ const SessionHistory = (() => {
       if (!active(session, token) || e.name === "AbortError") return;
       if (!committed) { pages = old.pages; first = old.first; last = old.last; past = old.past || pending; }
       busy = false; ignoreScroll = false; scrollTop = box().scrollTop;
-      error = `定位失败：${e.message}，点击重试`; controls();
+      error = I18n.t`定位失败：${e.message}，点击重试`; controls();
     }
   }
   async function latest({initial = false} = {}) {
@@ -549,6 +550,9 @@ const SessionHistory = (() => {
     if (initial) {
       pages = []; first = 0; last = -1; past = false;
       box().replaceChildren(); $("#events").replaceChildren();
+      renderedSession = session;
+      $("#um-rail")?.replaceChildren();
+      anchorKey = null;
       ToolParameters.reset(session);
     }
     try {
@@ -560,7 +564,7 @@ const SessionHistory = (() => {
       S.evSeen = result.cursor; busy = false; controls(); startStreams(false);
     } catch (e) {
       if (!active(session, token) || e.name === "AbortError") return;
-      busy = false; ignoreScroll = false; error = `读取失败：${e.message}`; controls();
+      busy = false; ignoreScroll = false; error = I18n.t`读取失败：${e.message}`; controls();
       if (pages.length) startStreams(false);
     }
   }
@@ -602,7 +606,7 @@ const SessionHistory = (() => {
     } catch (e) {
       if (!active(session, token) || e.name === "AbortError") return;
       first = old.first; last = old.last; past = old.past || pending;
-      busy = false; ignoreScroll = false; error = `读取失败：${e.message}，继续滚动或点击重试`; controls();
+      busy = false; ignoreScroll = false; error = I18n.t`读取失败：${e.message}，继续滚动或点击重试`; controls();
     }
   }
   // 回到初始消息：沿 older_cursor 逐页向旧端补读直到会话开头，一次重绘定位到第一条记录。
@@ -610,7 +614,7 @@ const SessionHistory = (() => {
     if (busy || !pages.length) return;
     const session = S.cur, token = version;
     busy = true; error = ""; past = true; retryDirection = -1; retryKind = ""; retryIds = null;
-    controls("正在定位会话开头…");
+    controls(I18n.t("正在定位会话开头…"));
     const old = {first, last};
     let added = 0;
     try {
@@ -628,7 +632,7 @@ const SessionHistory = (() => {
     } catch (e) {
       if (!active(session, token) || e.name === "AbortError") return;
       first = old.first + added; last = old.last + added;
-      busy = false; ignoreScroll = false; error = `读取失败：${e.message}，继续滚动或点击重试`; controls();
+      busy = false; ignoreScroll = false; error = I18n.t`读取失败：${e.message}，继续滚动或点击重试`; controls();
     }
   }
   function onScroll() {
@@ -661,7 +665,7 @@ const SessionHistory = (() => {
         if (!result.has_more || result.older_cursor <= seen) break;
         const next = Number(result.older_cursor);
         if (!Number.isFinite(next) || next <= 0 || (before !== null && next >= before))
-          throw new Error("历史分页游标未向前推进");
+          throw new Error(I18n.t("历史分页游标未向前推进"));
         before = next;
       }
       for (const batch of batches) for (const item of batch) enqueue(item.event, item.id, session);
@@ -711,5 +715,8 @@ const SessionHistory = (() => {
       if (scrollFrame !== null) cancelAnimationFrame(scrollFrame);
       scrollFrame = null; pages = []; first = 0; last = -1; busy = false; past = false; ignoreScroll = false;
       anchorKey = null; anchorIndex = null; hideAnchorPreview();
+      renderedSession = null;
+      const rail = $("#um-rail");
+      if (rail) { rail.replaceChildren(); rail.hidden = true; }
     }};
 })();

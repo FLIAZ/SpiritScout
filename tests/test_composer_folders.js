@@ -1,6 +1,6 @@
 "use strict";
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
-const context=vm.createContext({});
+const context=vm.createContext(require('./helpers/i18n').context({}));
 vm.runInContext(fs.readFileSync('src/spiritscout/web/static/js/composer-folders.js','utf8'),context);
 const collect=vm.runInContext('ComposerFolders.collect',context);
 const file=(name,size=3)=>({isFile:true,name,file:resolve=>resolve({name,size})});

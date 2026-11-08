@@ -85,7 +85,7 @@ class SkillAgentFlowTests(unittest.IsolatedAsyncioTestCase):
         agent._system_prompt = Mock(return_value='侦察职责')
         gateway = SimpleNamespace(skill_runtime=self.runtime, chat=AsyncMock(side_effect=[
             reply(request('skill_open', skill_id='flow-skill')), reply({'paths': [], 'rationale': '已核对参考'})]))
-        agent.ctx = SimpleNamespace(audit=Mock(), ring=None, blackboard=None, gateway=gateway)
+        agent.ctx = SimpleNamespace(audit=Mock(), ring=None, blackboard=None, gateway=gateway, builtin_ctx={})
         result = await agent._llm_chat_json('path_planner', {'mission': '核对版本'}, _allow_ask=False)
         self.assertEqual(result['rationale'], '已核对参考')
         self.assertIn('完整原文保留', str(gateway.chat.call_args.args[0]))
@@ -128,7 +128,7 @@ class SkillAgentFlowTests(unittest.IsolatedAsyncioTestCase):
         agent._world_state = Mock(return_value={})
         agent._system_prompt = Mock(return_value='业务职责')
         agent._explore_brief = Mock(return_value='业务现场')
-        agent.ctx = SimpleNamespace(audit=Mock(), ring=None, builtin_ctx={}, mcp_tools={},
+        agent.ctx = SimpleNamespace(audit=Mock(), ring=None, blackboard=None, builtin_ctx={}, mcp_tools={},
             gateway=SimpleNamespace(skill_runtime=self.runtime, chat=AsyncMock(return_value=SimpleNamespace(
                 content='读取业务参考', reasoning='', tool_calls=[{'id': 'open', 'name': 'skill_open',
                 'arguments': {'skill_id': 'flow-skill'}}]))))

@@ -19,6 +19,10 @@ venv/
 # 运行时数据：会话工作区 / 审计日志 / 报告（本地私有，不入库）
 .spiritscout/
 .spiritscout-ollama/
+.spiritscout-llama
+.spiritscout-light/
+.spiritscout-light-config/
+.spiritscout-updates/
 .playwright-mcp/
 execution.key
 .execution-locks/
@@ -57,7 +61,13 @@ configs/models.yaml
 /home.html
 /login_sms.yml
 /login_snapshot.yml
+/guide_snapshot.yml
+/checkpoints_all.json
+/cscene_instances_full.json
 
 # 维护者本机的独立 Docker 验证项目；协作者无需下载，不随仓库分发
 /ctfy-docker/
 /tsecbench-docker/
+
+# 隔离打包环境
+.venv-build/

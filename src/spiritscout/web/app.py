@@ -1,14 +1,14 @@
-"""FastAPI 控制台装配：认证、生命周期、会话控制、SSE 和静态页面。
+"""FastAPI 控制台装配：认证、生命周期、会话控制和静态页面。
 
-请求模型、状态投影、模型配置及文件路由按职责分离；本模块保留原请求模型
+请求模型、状态投影、只读会话查询、模型配置及文件路由按职责分离；保留原请求模型
 和 _read_state 的导入路径。启动请求仍由 launch.prepare_launch 校验。
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
-import json
 import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -16,26 +16,25 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
     PlainTextResponse,
     RedirectResponse,
     Response,
-    StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
 
 from spiritscout import __version__
-from spiritscout.blackboard import Blackboard
 from spiritscout.config.settings import ModelEntry, SystemConfig
-from spiritscout.core.audit import AuditLogger
+from spiritscout.core.audit import AuditLogger, read_record
 from spiritscout.core.exceptions import (
     ConfigurationError,
     RuleConflictError,
     SpiritScoutError,
 )
-from spiritscout.core.models import BlackboardLayer, RunMode
+from spiritscout.core.models import RunMode
 from spiritscout.launch import LaunchRequest, prepare_launch
 from spiritscout.web import auth as web_auth
 from spiritscout.web import vault
@@ -49,12 +48,6 @@ from spiritscout.web.api_schemas import (
     SessionPatchPayload,
     StorageCleanupPayload,
 )
-from spiritscout.web.events import (
-    read_activity_page,
-    read_audit_page,
-    read_typed_page,
-    stream_audit,
-)
 from spiritscout.web.file_routes import (
     mount_artifact_routes,
     mount_collaboration_routes,
@@ -62,12 +55,9 @@ from spiritscout.web.file_routes import (
     resolve_staged_uploads,
 )
 from spiritscout.web.model_routes import mount_agent_routes, mount_model_routes
+from spiritscout.web.session_queries import mount_session_read_routes
 from spiritscout.web.session_state import _read_state as _read_state
-from spiritscout.web.sessions import (
-    TERMINAL_STATES,
-    Session,
-    SessionManager,
-)
+from spiritscout.web.sessions import Session, SessionManager
 
 _STATIC = Path(__file__).parent / "static" / "index.html"
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -77,7 +67,7 @@ _LOGIN = _STATIC_DIR / "login.html"
 _LOCAL_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 
 # 未登录也可访问：登录页、登录/登出接口、前端静态资源
-_PUBLIC_PATHS = frozenset({"/login", "/api/auth/login", "/api/auth/logout"})
+_PUBLIC_PATHS = frozenset({"/login", "/api/auth/login", "/api/auth/logout", "/api/updates/health"})
 
 
 def _is_public_path(path: str) -> bool:
@@ -120,8 +110,19 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         # 监督协程在 lifespan 内启动（不隶属任何请求任务组），
         # 关停时停掉所有未终态会话，避免孤儿任务
-        manager.start()
-        resource_assistant.start()
+        await updater.start()
+        async def start_services():
+            # 候选版本健康检查完成之前不启动自动任务或恢复模型作业。
+            while updater.busy():
+                await asyncio.sleep(.2)
+            manager.start()
+            traffic_capture.start_supervisor()
+            scheduler.start()
+            resource_assistant.start()
+            storage.start_maintenance()
+        startup = asyncio.create_task(start_services())
+        if not updater.busy():
+            await startup
         # 读取已存在的资产，不启动旧会话或发起网络探测。
         for path in (Path(cfg.workspace.root)/"sessions").glob("sess-*"):
             try:
@@ -129,19 +130,45 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             except (OSError,ValueError,sqlite3.Error):
                 pass
         yield
+        startup.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await startup
+        await updater.close()
+        await scheduler.close()
+        await traffic_capture.aclose()
         await close_manual_distills(manager)
         await storage.close()
         await resource_assistant.close()
         await manager.aclose()
+        await account_browsers.aclose()
 
     app = FastAPI(title="灵枢 SpiritScout 控制台", version=__version__,
                   lifespan=lifespan)
     app.state.manager = manager
+    from spiritscout.web.updates import mount_updates
+
+    updater = mount_updates(app, cfg, manager)
+    from spiritscout.web.scheduler import mount_scheduler
+
+    async def automation_launch(payload, run_id):
+        return await _create_session(SessionCreatePayload.model_validate(payload), automation_id=run_id)
+
+    scheduler = mount_scheduler(app, Path(cfg.workspace.root), manager, launch=automation_launch)
+    app.state.scheduler = scheduler
+    from spiritscout.web.background_tasks import mount_background_tasks
+
+    mount_background_tasks(app, manager)
     app.state.storage = storage
     app.state.auth = admin_store
     app.state.auth_enabled = auth_enabled
     mount_resources(app, cfg, resource_store, resource_assistant)
+    from spiritscout.web.browser_accounts import mount_browser_accounts
+
+    account_browsers = mount_browser_accounts(app, cfg, resource_store)
     mount_projects(app, resource_store, manager)
+    from spiritscout.web.traffic import mount_traffic
+
+    traffic_capture = mount_traffic(app, resource_store, manager)
     from spiritscout.web.console_insights import mount_console_insights
     from spiritscout.web.session_experience import (
         close_manual_distills,
@@ -203,7 +230,17 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             if fetch_site == "cross-site" or (origin and origin != expected):
                 return _secure(PlainTextResponse(
                     "拒绝跨站写请求", status_code=403))
-        return _secure(await call_next(request))
+        mutation = request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        managed = mutation and not path.startswith(("/api/updates/", "/api/auth/"))
+        if managed and updater.busy():
+            return _secure(JSONResponse({"detail": "系统正在更新，暂不接受新的写入操作"}, status_code=503))
+        if managed:
+            updater.writes += 1
+        try:
+            return _secure(await call_next(request))
+        finally:
+            if managed:
+                updater.writes -= 1
 
     # ------------------------------------------------------------ 登录
 
@@ -255,19 +292,22 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
-        html = _STATIC.read_text(encoding="utf-8")
+        html = _STATIC.read_text(encoding="utf-8").replace(
+            "__SPIRITSCOUT_VERSION__", __version__)
         if cfg.gateway.lightweight_local:
             # 轻量部署标记：前端据此收窄模式入口（只留 CTF/AWDP）
             html = html.replace(
                 "<head>", "<head><script>window.__SPIRITSCOUT_LIGHT__=true</script>", 1)
-        return HTMLResponse(html)
+        return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
-    app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+    # 仅压缩公开静态资源；SSE 和文件下载保持原有流式传输行为。
+    app.mount("/static", GZipMiddleware(
+        StaticFiles(directory=_STATIC_DIR), minimum_size=1024, compresslevel=5,
+    ), name="static")
 
     # ------------------------------------------------------------ 会话 CRUD
 
-    @app.post("/api/sessions", status_code=201)
-    async def create_session(payload: SessionCreatePayload) -> dict[str, Any]:
+    async def _create_session(payload: SessionCreatePayload, *, automation_id: str | None = None) -> dict[str, Any]:
         # 安全相关布尔/数值在请求模型处强类型校验；其余字段透传。
         # 授权模型：Web 在场即声明（G1 语义不变、勾选摩擦去除）——
         # 创建行为本身即授权确认，human_confirmed 照旧落审计
@@ -289,6 +329,18 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                 422, "轻量本地部署仅支持 CTF 解题与 AWDP 修补模式；"
                      "SRC/智能体模式请使用正常部署")
         staged = resolve_staged_uploads(cfg, payload)
+        if payload.get('browser_account_ids'):
+            if cfg.gateway.lightweight_local:
+                raise HTTPException(422, '浏览器账号用于常规部署；轻量模式保持独立')
+            from spiritscout.resources.browser_accounts import BrowserAccounts
+
+            try:
+                BrowserAccounts(resource_store).validate_selection(payload['browser_account_ids'])
+            except KeyError:
+                raise HTTPException(422, '选择的浏览器账号不存在，请刷新账号列表') from None
+            if not any(s.enabled and list(s.args[:2]) == ['-m', 'spiritscout.tools.chrome_mcp']
+                       for s in resource_store.effective_mcp(cfg.mcp_servers)):
+                raise HTTPException(422, '使用浏览器账号前请启用内置 Chrome MCP')
         try:
             plan = prepare_launch(LaunchRequest(
                 mode=mode,
@@ -322,10 +374,15 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         normalized = dict(payload, mode=plan.authorization.mode.value,
                           mode_auto=plan.mode_auto)
         try:
-            session = await manager.create(normalized, plan, staged_files=staged)
+            session = await manager.create(normalized, plan, staged_files=staged,
+                **({"automation_id": automation_id} if automation_id else {}))
         except SpiritScoutError as exc:   # 模型注册表为空/损坏（热加载）
             raise HTTPException(422, str(exc)) from exc
         return {**session.brief(), "request": session.request}
+
+    @app.post("/api/sessions", status_code=201)
+    async def create_session(payload: SessionCreatePayload) -> dict[str, Any]:
+        return await _create_session(payload)
 
     @app.post("/api/sessions/{session_id}/model")
     async def set_session_model(session_id: str, payload: SessionModelPayload) -> dict[str, Any]:
@@ -364,42 +421,17 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
 
     mount_agent_routes(app, cfg)
 
-    @app.get("/api/sessions")
-    def list_sessions() -> dict[str, Any]:
-        return {"sessions": [s.brief(include_summary=False)
-                             for s in manager.list()]}
-
     def _require(session_id: str) -> Session:
         session = manager.get(session_id)
         if session is None:
             raise HTTPException(404, f"会话不存在: {session_id}")
         return session
 
-    @app.get("/api/sessions/{session_id}")
-    def get_session(session_id: str) -> dict[str, Any]:
-        session = _require(session_id)
-        detail = session.brief()
-        detail["request"] = session.request
-        # 本题附件常驻可见：滑窗滚出首屏后，界面仍要有附件存在的凭据
-        try:
-            detail["attachments"] = [
-                {"name": p.name, "size": p.stat().st_size}
-                for p in sorted((session.workspace / "attachments").iterdir())
-                if p.is_file()]
-        except OSError:
-            detail["attachments"] = []
-        return detail
+    mount_session_read_routes(app, manager, _require)
 
-    @app.get("/api/sessions/{session_id}/conversation")
-    def agent_conversation(session_id: str) -> dict[str, Any]:
-        """旁路栏只读取对话与待办，不重建主会话黑板快照。"""
-        session = _require(session_id)
-        if not session.request.get("side_agent"):
-            raise HTTPException(422, "该会话不是子 Agent 旁路会话")
-        return {"session": session.brief(include_summary=False),
-                "messages": copy.deepcopy(session.dialogue_history),
-                "pending_approvals": session.approvals.view(),
-                "pending_questions": session.questions.view()}
+    from spiritscout.web.agent_commands import mount_command_routes
+
+    mount_command_routes(app, manager)
 
     @app.patch("/api/sessions/{session_id}")
     async def patch_session(session_id: str,
@@ -422,127 +454,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                 raise HTTPException(422, str(exc)) from exc
         return session.brief(include_summary=False)
 
-    @app.get("/api/sessions/{session_id}/state")
-    def session_state(session_id: str) -> dict[str, Any]:
-        return _read_state(_require(session_id))
-
-    @app.get("/api/sessions/{session_id}/topology/rules")
-    def topology_rules(session_id: str, record_id: str = Query(..., max_length=300),
-                       offset: int = Query(0, ge=0), limit: int = Query(6000, ge=1, le=12000)) -> dict[str, Any]:
-        from spiritscout.web.process_graph import rules_text
-
-        session = _require(session_id)
-        if not session.bb_path.exists():
-            raise HTTPException(404, "规则尚未保存")
-        bb = Blackboard(session.bb_path, bus=None, readonly=True)
-        try:
-            row = bb.read_versioned(BlackboardLayer.TARGET_AUTH, record_id)
-        finally:
-            bb.close()
-        if row is None:
-            raise HTTPException(404, "规则记录不存在")
-        text = rules_text(row[0])
-        return {"text": text[offset:offset + limit], "version": row[1],
-                "next_offset": offset + limit if offset + limit < len(text) else None}
-
-    @app.get("/api/sessions/{session_id}/deliverables")
-    def session_deliverables(session_id: str, kind: str = "all",
-                             q: str = Query("", max_length=200),
-                             offset: int = Query(0, ge=0),
-                             limit: int = Query(60, ge=1, le=200)) -> dict[str, Any]:
-        from spiritscout.web.deliverables import read_deliverables
-
-        try:
-            return read_deliverables(_require(session_id).workspace, kind=kind,
-                                     query=q, offset=offset, limit=limit)
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
-
-    @app.get("/api/sessions/{session_id}/vulnerabilities")
-    def session_vulnerabilities(session_id: str, offset: int = Query(0, ge=0),
-                                limit: int = Query(50, ge=1, le=200)) -> JSONResponse:
-        from spiritscout.web.deliverables import read_vulnerability_page
-
-        return JSONResponse(read_vulnerability_page(_require(session_id).workspace, offset, limit),
-                            headers={"Cache-Control": "no-store"})
-
-    @app.get("/api/sessions/{session_id}/record-history")
-    def session_record_history(session_id: str, layer: str = Query(..., max_length=40),
-                               record_id: str = Query(..., max_length=300),
-                               before: int = Query(0, ge=0), limit: int = Query(20, ge=1, le=50)) -> JSONResponse:
-        from spiritscout.web.deliverables import read_record_history
-
-        page = read_record_history(_require(session_id).workspace, layer, record_id, before, limit)
-        return JSONResponse(page, headers={"Cache-Control": "no-store"})
-
     mount_artifact_routes(app, _require)
-    @app.get("/api/sessions/{session_id}/executions")
-    async def session_executions(session_id: str, after: int = Query(0, ge=0),
-                                  limit: int = Query(100, ge=1, le=500)) -> dict[str, Any]:
-        """执行元数据分页；不返回参数、凭据或原始工具输出。"""
-        from spiritscout.tools.journal import read_execution_page
-
-        return read_execution_page(_require(session_id).bb_path, after=after, limit=limit)
-
-    @app.get("/api/sessions/{session_id}/tool-parameters")
-    def session_tool_parameters(session_id: str, tool: str = Query(..., max_length=300),
-                               digest: str = Query(..., pattern=r"^[0-9a-f]{64}$")) -> JSONResponse:
-        from spiritscout.web.tool_parameters import read_tool_parameters
-
-        result = read_tool_parameters(_require(session_id).workspace, tool, digest)
-        return JSONResponse(result, headers={"Cache-Control": "no-store"})
-
-    @app.get("/api/sessions/{session_id}/recovery")
-    async def session_recovery(session_id: str) -> dict[str, Any]:
-        from spiritscout.tools.journal import read_recovery_view
-
-        session = _require(session_id)
-        return read_recovery_view(session.bb_path, include_inflight=session.status != "running")
-
-    @app.get("/api/sessions/{session_id}/execution-events")
-    async def session_execution_events(session_id: str, after: int = Query(0, ge=0),
-                                        limit: int = Query(100, ge=1, le=500)) -> dict[str, Any]:
-        """数据库事件游标独立于原 JSONL SSE 的行号，断线后可补读。"""
-        from spiritscout.tools.journal import read_execution_page
-
-        page = read_execution_page(_require(session_id).bb_path, events=True,
-                                   after=after, limit=limit)
-        return {"cursor_version": "execution-v1", **page}
-
-    @app.get("/api/sessions/{session_id}/audit-page")
-    def session_audit_page(session_id: str, before: int | None = Query(None, ge=0),
-                           limit: int = Query(160, ge=1, le=250),
-                           activity: bool = False,
-                           types: str | None = Query(None)) -> dict[str, Any]:
-        if types:
-            wanted = {name for name in types.split(",") if name}
-            return read_typed_page(_require(session_id).audit_path, wanted,
-                                   before=before, limit=limit)
-        reader = read_activity_page if activity else read_audit_page
-        return reader(_require(session_id).audit_path, before=before, limit=limit)
-
-    @app.get("/api/sessions/{session_id}/events")
-    async def session_events(session_id: str, request: Request) -> StreamingResponse:
-        session = _require(session_id)
-        try:
-            # ?last=N 供前端看门狗显式断点续传（EventSource 自动重连走头部）
-            last = int(request.query_params.get("last")
-                       or request.headers.get("last-event-id", "0") or 0)
-        except ValueError:
-            last = 0
-        byte_mode = request.query_params.get("cursor") == "bytes"
-        try:
-            offset = int(request.headers.get("last-event-id")
-                         or request.query_params.get("offset", "0")) if byte_mode else None
-        except ValueError:
-            offset = 0
-        return StreamingResponse(
-            stream_audit(session.audit_path, last,
-                         byte_offset=offset,
-                         is_terminal=lambda: session.status in TERMINAL_STATES),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
 
     @app.post("/api/sessions/{session_id}/stop")
     async def stop_session(session_id: str) -> dict[str, Any]:
@@ -664,7 +576,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                 if '"experience.distill"' not in line:
                     continue
                 try:
-                    rec = json.loads(line)
+                    rec = read_record(line)
                 except ValueError:
                     continue
                 if rec.get("type") != "experience.distill":

@@ -235,7 +235,7 @@ class ToolRegistry:
         if action not in (None, ActionCategory.ANALYSIS.value) and self.policy is None:
             return ToolResult(tool=name, ok=False, returncode=-3,
                               error="敏感动作缺少策略与即时审批通道，未执行")
-        if spec.allowed_params:
+        if spec.allowed_params or spec.strict_params:
             unknown = set(params) - spec.allowed_params
             if unknown:
                 reason = f"工具 {name} 非法参数: {sorted(unknown)}"
@@ -284,7 +284,7 @@ class ToolRegistry:
             if name in self._builtins:
                 # 普通工具数据由模型传入；保留运行身份只能由调用上下文注入。
                 arguments = {**builtin_ctx, **params}
-                for reserved in ("_run_mode", "_lightweight_local"):
+                for reserved in ("_run_mode", "_lightweight_local", "_scan_control"):
                     if reserved in builtin_ctx:
                         arguments[reserved] = builtin_ctx[reserved]
                     else:

@@ -1,0 +1,1310 @@
+{
+  "rules": [
+    {
+      "id": "awdp.python-code-command",
+      "languages": [
+        "python"
+      ],
+      "severity": "WARNING",
+      "mode": "taint",
+      "message": "请求数据进入动态代码或 shell 命令；需核对真实入口、权限和防护，当前仅是候选。",
+      "metadata": {
+        "cwe": [
+          "CWE-78",
+          "CWE-95"
+        ],
+        "category": "security",
+        "confidence": "MEDIUM",
+        "verification": "unverified"
+      },
+      "pattern-sources": [
+        {
+          "pattern": "$REQ.args.get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.args[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.form.get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.form[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.values.get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.GET.get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.GET[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.POST.get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.POST[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.get_json(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.body",
+          "exact": true
+        }
+      ],
+      "pattern-sinks": [
+        {
+          "patterns": [
+            {
+              "pattern": "eval($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "exec($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "os.system($DATA)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "os.popen($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "subprocess.run($DATA, ..., shell=True, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "subprocess.Popen($DATA, ..., shell=True, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "subprocess.call($DATA, ..., shell=True, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "subprocess.check_output($DATA, ..., shell=True, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "awdp.python-sql",
+      "languages": [
+        "python"
+      ],
+      "severity": "WARNING",
+      "mode": "taint",
+      "message": "请求数据进入 SQL 语句本身；参数绑定值不属于本规则的 sink；需核对真实入口、权限和防护，当前仅是候选。",
+      "metadata": {
+        "cwe": [
+          "CWE-89"
+        ],
+        "category": "security",
+        "confidence": "MEDIUM",
+        "verification": "unverified"
+      },
+      "pattern-sources": [
+        {
+          "pattern": "$REQ.args.get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.args[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.form.get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.form[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.values.get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.GET.get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.GET[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.POST.get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.POST[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.get_json(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.body",
+          "exact": true
+        }
+      ],
+      "pattern-sinks": [
+        {
+          "patterns": [
+            {
+              "pattern": "$DB.execute($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "$DB.executemany($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "awdp.python-template-deserialization",
+      "languages": [
+        "python"
+      ],
+      "severity": "WARNING",
+      "mode": "taint",
+      "message": "请求数据进入反序列化或模板源码；需核对真实入口、权限和防护，当前仅是候选。",
+      "metadata": {
+        "cwe": [
+          "CWE-502",
+          "CWE-1336"
+        ],
+        "category": "security",
+        "confidence": "MEDIUM",
+        "verification": "unverified"
+      },
+      "pattern-sources": [
+        {
+          "pattern": "$REQ.args.get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.args[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.form.get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.form[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.values.get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.GET.get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.GET[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.POST.get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.POST[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.get_json(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.body",
+          "exact": true
+        }
+      ],
+      "pattern-sinks": [
+        {
+          "patterns": [
+            {
+              "pattern": "pickle.loads($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "pickle.load($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "flask.render_template_string($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "jinja2.Template($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "awdp.python-file-path",
+      "languages": [
+        "python"
+      ],
+      "severity": "WARNING",
+      "mode": "taint",
+      "message": "请求数据作为文件路径，需核对规范化与目录边界；需核对真实入口、权限和防护，当前仅是候选。",
+      "metadata": {
+        "cwe": [
+          "CWE-22"
+        ],
+        "category": "security",
+        "confidence": "MEDIUM",
+        "verification": "unverified"
+      },
+      "pattern-sources": [
+        {
+          "pattern": "$REQ.args.get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.args[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.form.get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.form[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.values.get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.GET.get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.GET[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.POST.get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.POST[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.get_json(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.body",
+          "exact": true
+        }
+      ],
+      "pattern-sinks": [
+        {
+          "patterns": [
+            {
+              "pattern": "open($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "flask.send_file($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "awdp.php-code-command",
+      "languages": [
+        "php"
+      ],
+      "severity": "WARNING",
+      "mode": "taint",
+      "message": "请求数据进入动态代码或系统命令；需核对真实入口、权限和防护，当前仅是候选。",
+      "metadata": {
+        "cwe": [
+          "CWE-78",
+          "CWE-95"
+        ],
+        "category": "security",
+        "confidence": "MEDIUM",
+        "verification": "unverified"
+      },
+      "pattern-sources": [
+        {
+          "pattern": "$_GET[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$_POST[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$_REQUEST[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$_COOKIE[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$_FILES[...]",
+          "exact": true
+        }
+      ],
+      "pattern-sinks": [
+        {
+          "patterns": [
+            {
+              "pattern": "eval($DATA)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "system($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "exec($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "shell_exec($DATA)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "passthru($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "popen($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "awdp.php-file-deserialization",
+      "languages": [
+        "php"
+      ],
+      "severity": "WARNING",
+      "mode": "taint",
+      "message": "请求数据进入包含/反序列化/文件读取边界；需核对真实入口、权限和防护，当前仅是候选。",
+      "metadata": {
+        "cwe": [
+          "CWE-98",
+          "CWE-502",
+          "CWE-22"
+        ],
+        "category": "security",
+        "confidence": "MEDIUM",
+        "verification": "unverified"
+      },
+      "pattern-sources": [
+        {
+          "pattern": "$_GET[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$_POST[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$_REQUEST[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$_COOKIE[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$_FILES[...]",
+          "exact": true
+        }
+      ],
+      "pattern-sinks": [
+        {
+          "patterns": [
+            {
+              "pattern": "include $DATA;"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "require $DATA;"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "include_once $DATA;"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "require_once $DATA;"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "unserialize($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "file_get_contents($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "awdp.php-sql",
+      "languages": [
+        "php"
+      ],
+      "severity": "WARNING",
+      "mode": "taint",
+      "message": "请求数据进入 SQL 语句本身；需核对真实入口、权限和防护，当前仅是候选。",
+      "metadata": {
+        "cwe": [
+          "CWE-89"
+        ],
+        "category": "security",
+        "confidence": "MEDIUM",
+        "verification": "unverified"
+      },
+      "pattern-sources": [
+        {
+          "pattern": "$_GET[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$_POST[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$_REQUEST[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$_COOKIE[...]",
+          "exact": true
+        },
+        {
+          "pattern": "$_FILES[...]",
+          "exact": true
+        }
+      ],
+      "pattern-sinks": [
+        {
+          "patterns": [
+            {
+              "pattern": "mysqli_query($CONN, $DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "$DB->query($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "awdp.javascript-code-command",
+      "languages": [
+        "javascript",
+        "typescript"
+      ],
+      "severity": "WARNING",
+      "mode": "taint",
+      "message": "请求数据进入动态代码或 shell 命令；需核对真实入口、权限和防护，当前仅是候选。",
+      "metadata": {
+        "cwe": [
+          "CWE-78",
+          "CWE-95"
+        ],
+        "category": "security",
+        "confidence": "MEDIUM",
+        "verification": "unverified"
+      },
+      "pattern-sources": [
+        {
+          "pattern": "$REQ.query",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.body",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.params",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.cookies",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.headers",
+          "exact": true
+        }
+      ],
+      "pattern-sinks": [
+        {
+          "patterns": [
+            {
+              "pattern": "eval($DATA)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "child_process.exec($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "child_process.execSync($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "new Function($DATA)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "awdp.javascript-sql",
+      "languages": [
+        "javascript",
+        "typescript"
+      ],
+      "severity": "WARNING",
+      "mode": "taint",
+      "message": "请求数据进入 SQL 语句，须区分参数值和动态查询结构；需核对真实入口、权限和防护，当前仅是候选。",
+      "metadata": {
+        "cwe": [
+          "CWE-89"
+        ],
+        "category": "security",
+        "confidence": "MEDIUM",
+        "verification": "unverified"
+      },
+      "pattern-sources": [
+        {
+          "pattern": "$REQ.query",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.body",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.params",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.cookies",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.headers",
+          "exact": true
+        }
+      ],
+      "pattern-sinks": [
+        {
+          "patterns": [
+            {
+              "pattern": "$DB.query($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "$DB.execute($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "awdp.javascript-file-path",
+      "languages": [
+        "javascript",
+        "typescript"
+      ],
+      "severity": "WARNING",
+      "mode": "taint",
+      "message": "请求数据进入文件读取路径；需核对真实入口、权限和防护，当前仅是候选。",
+      "metadata": {
+        "cwe": [
+          "CWE-22"
+        ],
+        "category": "security",
+        "confidence": "MEDIUM",
+        "verification": "unverified"
+      },
+      "pattern-sources": [
+        {
+          "pattern": "$REQ.query",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.body",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.params",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.cookies",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.headers",
+          "exact": true
+        }
+      ],
+      "pattern-sinks": [
+        {
+          "patterns": [
+            {
+              "pattern": "fs.readFile($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "fs.readFileSync($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "$RES.sendFile($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "awdp.java-command",
+      "languages": [
+        "java"
+      ],
+      "severity": "WARNING",
+      "mode": "taint",
+      "message": "请求数据影响执行的程序或命令；参数数组仍需核对选项/程序可控性；需核对真实入口、权限和防护，当前仅是候选。",
+      "metadata": {
+        "cwe": [
+          "CWE-78"
+        ],
+        "category": "security",
+        "confidence": "MEDIUM",
+        "verification": "unverified"
+      },
+      "pattern-sources": [
+        {
+          "pattern": "$REQ.getParameter(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.getHeader(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.getQueryString()",
+          "exact": true
+        }
+      ],
+      "pattern-sinks": [
+        {
+          "patterns": [
+            {
+              "pattern": "Runtime.getRuntime().exec($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "new ProcessBuilder($DATA)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "awdp.java-sql",
+      "languages": [
+        "java"
+      ],
+      "severity": "WARNING",
+      "mode": "taint",
+      "message": "请求数据进入 SQL 语句；需核对真实入口、权限和防护，当前仅是候选。",
+      "metadata": {
+        "cwe": [
+          "CWE-89"
+        ],
+        "category": "security",
+        "confidence": "MEDIUM",
+        "verification": "unverified"
+      },
+      "pattern-sources": [
+        {
+          "pattern": "$REQ.getParameter(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.getHeader(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$REQ.getQueryString()",
+          "exact": true
+        }
+      ],
+      "pattern-sinks": [
+        {
+          "patterns": [
+            {
+              "pattern": "$ST.executeQuery($DATA)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "$ST.executeUpdate($DATA)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "$ST.execute($DATA)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "awdp.go-shell",
+      "languages": [
+        "go"
+      ],
+      "severity": "WARNING",
+      "mode": "taint",
+      "message": "请求数据作为 shell 程序文本；需核对真实入口、权限和防护，当前仅是候选。",
+      "metadata": {
+        "cwe": [
+          "CWE-78"
+        ],
+        "category": "security",
+        "confidence": "MEDIUM",
+        "verification": "unverified"
+      },
+      "pattern-sources": [
+        {
+          "pattern": "$R.FormValue(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$R.URL.Query().Get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$R.Header.Get(...)",
+          "exact": true
+        }
+      ],
+      "pattern-sinks": [
+        {
+          "patterns": [
+            {
+              "pattern": "exec.Command(\"sh\", \"-c\", $DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "exec.Command(\"/bin/sh\", \"-c\", $DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "exec.Command(\"bash\", \"-c\", $DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "awdp.go-sql",
+      "languages": [
+        "go"
+      ],
+      "severity": "WARNING",
+      "mode": "taint",
+      "message": "请求数据进入 SQL 语句本身；需核对真实入口、权限和防护，当前仅是候选。",
+      "metadata": {
+        "cwe": [
+          "CWE-89"
+        ],
+        "category": "security",
+        "confidence": "MEDIUM",
+        "verification": "unverified"
+      },
+      "pattern-sources": [
+        {
+          "pattern": "$R.FormValue(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$R.URL.Query().Get(...)",
+          "exact": true
+        },
+        {
+          "pattern": "$R.Header.Get(...)",
+          "exact": true
+        }
+      ],
+      "pattern-sinks": [
+        {
+          "patterns": [
+            {
+              "pattern": "$DB.Query($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "$DB.QueryRow($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "$DB.Exec($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "awdp.ruby-code-command",
+      "languages": [
+        "ruby"
+      ],
+      "severity": "WARNING",
+      "mode": "taint",
+      "message": "请求数据进入代码执行或单字符串命令；需核对真实入口、权限和防护，当前仅是候选。",
+      "metadata": {
+        "cwe": [
+          "CWE-78",
+          "CWE-95"
+        ],
+        "category": "security",
+        "confidence": "MEDIUM",
+        "verification": "unverified"
+      },
+      "pattern-sources": [
+        {
+          "pattern": "params[...]",
+          "exact": true
+        },
+        {
+          "pattern": "request.body.read",
+          "exact": true
+        },
+        {
+          "pattern": "request.params[...]",
+          "exact": true
+        }
+      ],
+      "pattern-sinks": [
+        {
+          "patterns": [
+            {
+              "pattern": "eval($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "system($DATA)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "exec($DATA)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "IO.popen($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "awdp.ruby-deserialization",
+      "languages": [
+        "ruby"
+      ],
+      "severity": "WARNING",
+      "mode": "taint",
+      "message": "请求数据进入对象反序列化；需核对运行版本与允许类型；需核对真实入口、权限和防护，当前仅是候选。",
+      "metadata": {
+        "cwe": [
+          "CWE-502"
+        ],
+        "category": "security",
+        "confidence": "MEDIUM",
+        "verification": "unverified"
+      },
+      "pattern-sources": [
+        {
+          "pattern": "params[...]",
+          "exact": true
+        },
+        {
+          "pattern": "request.body.read",
+          "exact": true
+        },
+        {
+          "pattern": "request.params[...]",
+          "exact": true
+        }
+      ],
+      "pattern-sinks": [
+        {
+          "patterns": [
+            {
+              "pattern": "Marshal.load($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "YAML.load($DATA, ...)"
+            },
+            {
+              "focus-metavariable": "$DATA"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "awdp.native-memory-hotspot",
+      "languages": [
+        "c",
+        "cpp"
+      ],
+      "severity": "WARNING",
+      "message": "无界写入/格式化调用热点；需人工核对攻击者输入、长度、对象生命周期与真实可达性。",
+      "metadata": {
+        "cwe": [
+          "CWE-120",
+          "CWE-134"
+        ],
+        "category": "security",
+        "confidence": "LOW",
+        "verification": "unverified"
+      },
+      "pattern-either": [
+        {
+          "pattern": "gets(...)"
+        },
+        {
+          "pattern": "strcpy(...)"
+        },
+        {
+          "pattern": "strcat(...)"
+        },
+        {
+          "pattern": "sprintf(...)"
+        }
+      ]
+    }
+  ]
+}

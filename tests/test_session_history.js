@@ -13,7 +13,7 @@ const box={children:[],scrollTop:0,clientHeight:200,
   querySelectorAll(){return this.children;},
   addEventListener(name,fn){handlers[name]=fn;}};
 const controls={querySelector(s){return s.includes('status')?status:button;}};
-const ctx=vm.createContext({S:{cur:'one',view:'session',think:new Map()},AbortController,performance,
+const ctx=vm.createContext(require('./helpers/i18n').context({S:{cur:'one',view:'session',think:new Map()},AbortController,performance,
   requestAnimationFrame(fn){const id=++frameId;frames.set(id,fn);return id;},cancelAnimationFrame(id){frames.delete(id);},
   $:s=>s==='#trace-box'?box:s==='#trace-history'?controls:s==='#trace-jump'?{}:
     s==='#events'?{replaceChildren(){}}:undefined,
@@ -29,7 +29,7 @@ const ctx=vm.createContext({S:{cur:'one',view:'session',think:new Map()},AbortCo
     const before=Number(new URL(url,'http://local').searchParams.get('before')||1000);
     return {items:[0,1,2,3].map(i=>({id:before-30+i*10,event:{type:'user.message',ts:String(before-30+i*10)}})),
       cursor:before,older_cursor:before-40,has_more:before>100,activity_count:4};},
-});
+}));
 vm.runInContext(historySource.replace('return {open:', 'return {cachedPages:() => pages.filter(page => page.items).length, open:'),ctx);
 const history=vm.runInContext('SessionHistory',ctx);
 async function settle(){for(let i=0;i<30;i++){const pending=[...frames];frames.clear();pending.forEach(([,fn])=>{fn();duringFrame?.();});await new Promise(r=>setImmediate(r));}}
@@ -123,15 +123,15 @@ assert.equal(JSON.stringify(groups[1].parts),JSON.stringify(['[附件] F2','M2']
 console.log('session history anchors: message-id grouping and conservative legacy isolation passed');
 
 const directionBox={scrollTop:83,scrollHeight:900,clientHeight:200},moves=[],pendingFrames=[];
-const directionContext=vm.createContext({box:()=>directionBox,scrollTop:83,scrollDirection:0,scrollFrame:null,
+const directionContext=vm.createContext(require('./helpers/i18n').context({box:()=>directionBox,scrollTop:83,scrollDirection:0,scrollFrame:null,
   busy:false,ignoreScroll:false,past:true,S:{view:'session'},Math,
-  requestAnimationFrame(fn){pendingFrames.push(fn);return 1;},markActiveAnchor(){},hideAnchorPreview(){},move:n=>moves.push(n)});
+  requestAnimationFrame(fn){pendingFrames.push(fn);return 1;},markActiveAnchor(){},hideAnchorPreview(){},move:n=>moves.push(n)}));
 const onScroll=vm.runInContext(`(${historySource.match(/  function onScroll\(\) \{[\s\S]*?\n  \}/)[0]})`,directionContext);
 directionBox.scrollTop=163;onScroll();pendingFrames.splice(0).forEach(fn=>fn());
 assert.deepEqual(moves,[],'顶端区域向下80px不能反向加载旧页');
 directionBox.scrollTop=100;onScroll();pendingFrames.splice(0).forEach(fn=>fn());
 assert.deepEqual(moves,[-1],'向上接近顶端仍正常加载旧页');
-const innerContext=vm.createContext({box:()=>directionBox,getComputedStyle:()=>({overflowY:'auto',overscrollBehaviorY:'auto'})});
+const innerContext=vm.createContext(require('./helpers/i18n').context({box:()=>directionBox,getComputedStyle:()=>({overflowY:'auto',overscrollBehaviorY:'auto'})}));
 const consumes=vm.runInContext(`(${historySource.match(/  function innerConsumesScroll\(target, delta\) \{[\s\S]*?\n  \}/)[0]})`,innerContext);
 const output={nodeType:1,scrollTop:120,scrollHeight:1000,clientHeight:240,parentElement:directionBox};
 assert.equal(consumes(output,-80),true,'内层可滚动时不能抢走滚轮事件');
@@ -141,7 +141,7 @@ const markSource=historySource.match(/  function markActiveAnchor\(\) \{[\s\S]*?
 const groupData=[{key:'first',ids:['10']},{key:'second',ids:['40','41']},{key:'file-only',ids:['80']}];
 const bars=groupData.map(group=>({dataset:{anchorGroup:group.key},classList:{toggle(_,on){this.active=on;}}}));
 const anchorBox={children:[],getBoundingClientRect:()=>({top:0})};
-const markContext=vm.createContext({$:()=>({hidden:false,children:bars}),box:()=>anchorBox,indexForSession:()=>({groups:groupData}),visibleRect:()=>true});
+const markContext=vm.createContext(require('./helpers/i18n').context({$:()=>({hidden:false,children:bars}),box:()=>anchorBox,indexForSession:()=>({groups:groupData}),visibleRect:()=>true}));
 const mark=vm.runInContext(`(${markSource})`,markContext);
 const row=(id,top,user=false)=>({dataset:{historyId:String(id)},classList:{contains:name=>name==='tl-user'&&user},getBoundingClientRect:()=>({top,bottom:top+100})});
 const selected=()=>bars.filter(bar=>bar.classList.active).map(bar=>bar.dataset.anchorGroup);
@@ -152,3 +152,15 @@ anchorBox.children=[row(41,-10,true),row(42,50)];mark();assert.deepEqual(selecte
 anchorBox.children=[row(80,12.4,true)];mark();assert.deepEqual(selected(),['file-only'],'仅附件独立成点，容忍子像素舍入');
 anchorBox.children=[row(39,-80),row(40,49,true)];mark();assert.deepEqual(selected(),['first'],'向上越过用户消息切回前一点');
 console.log('archive point selection: offscreen ownership, message boundaries and attachment-only passed');
+
+// 切会话后首个 controls() 早于新记录清屏，旧 DOM 不得写入新目录。
+const refreshAnchorsSource=historySource.match(/  function refreshAnchors\(\) \{[\s\S]*?\n  \}\n  function markActiveAnchor/)[0].replace(/\n  function markActiveAnchor[\s\S]*/,"");
+const imported=[],rail={children:[],hidden:false,setAttribute(){},replaceChildren(...bars){this.children=bars;}};
+const index={session:'new',events:new Map(),groups:[],revision:0,groupsRevision:0,loading:false,error:'',complete:true};
+const anchorIsolationContext=vm.createContext(require('./helpers/i18n').context({$:()=>rail,indexForSession:()=>index,renderedSession:'old',anchorKey:null,busy:false,
+  anchorRows:()=>[{dataset:{historyId:'1'},querySelector:()=>({textContent:'上一会话附件'})}],
+  recordAnchor:item=>imported.push(item),anchorText:()=>"上一会话内容",previewBar:null,hideAnchorPreview(){},markActiveAnchor(){},loadAnchorIndex(){}}));
+vm.runInContext(`(${refreshAnchorsSource})()`,anchorIsolationContext);
+assert.equal(imported.length,0,'上一会话仍可见的 DOM 不能变成当前会话存档点');
+assert.equal(rail.children.length,0);
+console.log('session history: old DOM cannot seed another session archive index');

@@ -10,7 +10,7 @@ const AgentWorkbench = (() => {
     if (!/^(agent\.(turn|delta|tool_call|tool_result|conclude|note|error|ask_user|ask_answered)|task\.(start|done|failed|cancelled|pruned)|model\.(started|call|failed|cancelled))$/.test(type)) return;
     let agent = store.agents.get(actor);
     if (!agent) {
-      agent = {actor, status:"等待事件", turn:0, blocks:[], tools:new Map(), calls:new Set(), tasks:new Map(), callTasks:new Map(), taskId:"", updated:event.ts};
+      agent = {actor, status:"等待事件", turn:0, sequence:0, blocks:[], tools:new Map(), calls:new Set(), tasks:new Map(), callTasks:new Map(), taskId:"", updated:event.ts};
       store.agents.set(actor, agent);
       if (!store.selected) store.selected = actor;
     }
@@ -28,7 +28,7 @@ const AgentWorkbench = (() => {
       if (!text) return;
       let block = key && agent.blocks.find(b => b.key === key);
       if (!block) {
-        block = {kind, text:"", key, ts:event.ts, route:d.route || d.route_id || "", taskId};
+        block = {id:++agent.sequence, kind, text:"", key, ts:event.ts, route:d.route || d.route_id || "", taskId};
         agent.blocks.push(block);
       }
       const joined = block.text + String(text);
@@ -53,13 +53,14 @@ const AgentWorkbench = (() => {
       }
     }
     if (type === "agent.tool_call") {
-      for (const c of d.calls || []) agent.tools.set(toolKey(c.id), {taskId, route:d.route || d.route_id || "", name:c.name, status:"执行中", text:c.preview || (c.arguments ? JSON.stringify(c.arguments,null,2) : "等待工具返回"), ts:event.ts});
+      for (const c of d.calls || []) agent.tools.set(toolKey(c.id), {taskId, route:d.route || d.route_id || "", name:c.name, status:"执行中", text:c.preview || (c.arguments ? JSON.stringify(c.arguments,null,2) : I18n.t("等待工具返回")), ts:event.ts});
       agent.status="工具执行中";
     }
     if (type === "agent.tool_result") {
-      const tool=agent.tools.get(toolKey(d.id)) || {name:d.name || "工具反馈"};
+      const tool=agent.tools.get(toolKey(d.id)) || {name:d.name || I18n.t("工具反馈")};
       Object.assign(tool,{status:d.ok === false ? "失败" : "已返回",text:SessionObserver.resultSummary(d),ts:event.ts, raw:SessionObserver.cleanText(typeof d.result === "object" ? JSON.stringify(d.result,null,2) : d.result || d.note || d.error).slice(-limit)});
       agent.tools.set(toolKey(d.id),Object.assign(tool,{taskId}));
+      if(Array.isArray(d.images))tool.images=d.images;
       agent.status=agent.calls.size ? "模型生成中" : "执行中";
     }
     if (type === "agent.note") append("进展",d.text);
@@ -93,7 +94,7 @@ const AgentWorkbench = (() => {
       root.querySelector(".aw-content").hidden=true;
       root.querySelector(".aw-toggle").setAttribute("aria-expanded","false");
     }
-    root.querySelector(".aw-count").textContent=`${agents.length} 个实例`;
+    root.querySelector(".aw-count").textContent=I18n.t`${agents.length} 个实例`;
     if (root.querySelector(".aw-content").hidden) return;
     const taskSelect=root.querySelector("[data-aw-task]");
     const side=root.querySelector("[data-aw-side]");
@@ -106,36 +107,41 @@ const AgentWorkbench = (() => {
       if(taskSelect.dataset.signature!==taskSignature) {
         taskSelect.dataset.signature=taskSignature;
         if(store.task && !selected?.tasks.has(store.task)) store.task="";
-        taskSelect.innerHTML='<option value="">全部任务</option>'+(selected ? [...selected.tasks.values()].map(t=>`<option value="${esc(t.id)}">${esc(t.title || t.id)} · ${esc(t.status)}</option>`).join("") : "");
+        taskSelect.innerHTML=I18n.html('<option value="">全部任务</option>')+(selected ? [...selected.tasks.values()].map(t=>`<option value="${esc(t.id)}">${esc(t.title || t.id)} · ${esc(I18n.t(t.status))}</option>`).join("") : "");
         taskSelect.value=store.task;
       }
       taskSelect.disabled=!selected;
       if(typeof selxSync==="function") selxSync(taskSelect);
     }
     const name=root.querySelector("[data-aw-name]"),target=root.querySelector("[data-aw-target]");
-    if(name) name.textContent=selected ? `${actorName(selected.actor)} · ${selected.status}` : "等待派发";
+    if(name) name.textContent=selected ? `${actorName(selected.actor)} · ${I18n.t(selected.status)}` : I18n.t("等待派发");
     if(target) target.textContent=selected ? (selected.tasks.get(store.task || selected.taskId)?.target || selected.target || "") : "";
     const follow=root.querySelector("[data-aw-follow]");
-    if(follow) {follow.setAttribute("aria-pressed",String(store.follow));follow.textContent=store.follow ? "跟随最新" : "暂停跟随";}
+    if(follow) {follow.setAttribute("aria-pressed",String(store.follow));follow.textContent=store.follow ? I18n.t("跟随最新") : I18n.t("暂停跟随");}
     const navSignature=JSON.stringify(agents.map(a=>[a.actor,a.status,a.turn,store.selected]));
     if(nav.dataset.signature !== navSignature) {
       const focus=document.activeElement?.dataset.awActor, offset=nav.scrollLeft, vertical=nav.scrollTop;
       nav.dataset.signature=navSignature;
-      nav.innerHTML=agents.map(a=>`<button type="button" data-aw-actor="${esc(a.actor)}" aria-pressed="${a.actor===store.selected}" class="aw-agent ${a.actor===store.selected ? "selected" : ""}"><strong>${esc(actorName(a.actor))}</strong><small>${esc(a.status)}${a.turn ? ` · 第 ${esc(a.turn)} 回合` : ""}</small><span>${esc(a.actor)}</span></button>`).join("");
+      nav.innerHTML=agents.map(a=>`<button type="button" data-aw-actor="${esc(a.actor)}" aria-pressed="${a.actor===store.selected}" class="aw-agent ${a.actor===store.selected ? "selected" : ""}"><strong>${esc(actorName(a.actor))}</strong><small>${esc(I18n.t(a.status))}${a.turn ? I18n.t` · 第 ${esc(a.turn)} 回合` : ""}</small><span>${esc(a.actor)}</span></button>`).join("");
       nav.scrollLeft=offset;nav.scrollTop=vertical;
       if(focus) [...nav.querySelectorAll("button")].find(b=>b.dataset.awActor===focus)?.focus({preventScroll:true});
     }
-    if (!selected) { pane.innerHTML='<p class="aw-empty">尚未派发子 Agent。派发后可在这里按角色查看分析、工具反馈与产出。</p>';return; }
+    if (!selected) { pane.innerHTML=I18n.html('<p class="aw-empty">尚未派发子 Agent。派发后可在这里按角色查看分析、工具反馈与产出。</p>');return; }
     const bodySignature=JSON.stringify([store.task,selected, [...selected.tools], [...selected.calls]]);
     if (pane.dataset.signature===bodySignature) return;
-    const same=pane.dataset.actor===selected.actor;
+    const same=pane.dataset.actor===selected.actor && pane.dataset.task===store.task;
+    const positions=new Map(same?[...pane.querySelectorAll('[data-aw-entry]')].map(el=>[el.dataset.awEntry,[...el.querySelectorAll('.aw-markdown pre,.aw-markdown table')].map(part=>[part.scrollTop,part.scrollLeft])]):[]);
     const opened=new Set([...pane.querySelectorAll("details[open]")].map(el=>el.dataset.awTool));
     const oldScroll=pane.scrollTop, stick=pane.scrollHeight-pane.scrollTop-pane.clientHeight<40;
-    pane.dataset.signature=bodySignature;pane.dataset.actor=selected.actor;
+    pane.dataset.signature=bodySignature;pane.dataset.actor=selected.actor;pane.dataset.task=store.task;
     const blocks=selected.blocks.filter(b=>!store.task || b.taskId===store.task);
-    const blockHtml=b=>`<article class="aw-entry ${b.kind === "错误" ? "bad" : ""}"><header><b>${esc(b.kind)}</b><time>${esc(evElapsed(b.ts))}</time>${b.taskId ? `<small>${esc(b.taskId)}</small>` : ""}${b.route ? `<small>${esc(b.route)}</small>` : ""}</header><div class="md aw-markdown">${mdRender(b.text)}</div>${b.clipped ? '<small>此块仅展示最近 24,000 字，完整记录可通过「导出审计」下载。</small>' : ""}</article>`;
-    pane.innerHTML=`<div class="aw-columns"><section><h4>实时分析与输出</h4>${blocks.filter(b=>["分析","输出"].includes(b.kind)).map(blockHtml).join("") || '<p class="aw-empty">尚未收到模型输出。旧记录或未返回流式文本的端点可能没有分析正文。</p>'}</section><section><h4>执行反馈与产出</h4>${blocks.filter(b=>!["分析","输出"].includes(b.kind)).map(blockHtml).join("")}${[...selected.tools.entries()].filter(([,t])=>!store.task || t.taskId===store.task).map(([id,t])=>`<article class="aw-entry ${t.status === "失败" ? "bad" : ""}"><header><b>${esc(SessionObserver.toolName(t.name))}</b><span>${esc(t.status)}</span></header><div class="md aw-markdown">${mdRender(t.text)}</div>${t.raw && t.raw !== t.text ? `<details data-aw-tool="${esc(String(id))}"><summary>展开工具反馈（最多 24,000 字）</summary><pre>${esc(t.raw)}</pre></details>` : ""}</article>`).join("") || '<p class="aw-empty">等待工具反馈与结论</p>'}</section></div>`;
+    const blockHtml=b=>`<article data-aw-entry="block:${b.id}" class="aw-entry ${b.kind === "错误" ? "bad" : ""}"><header><b>${esc(I18n.t(b.kind))}</b><time>${esc(evElapsed(b.ts))}</time>${b.taskId ? `<small>${esc(b.taskId)}</small>` : ""}${b.route ? `<small>${esc(b.route)}</small>` : ""}</header><div class="md aw-markdown">${mdRender(b.text)}</div>${b.clipped ? I18n.html('<small>此块仅展示最近 24,000 字，完整记录可通过「导出审计」下载。</small>') : ""}</article>`;
+    pane.innerHTML=I18n.html`<div class="aw-columns"><section><h4>实时分析与输出</h4>${blocks.filter(b=>["分析","输出"].includes(b.kind)).map(blockHtml).join("") || I18n.html('<p class="aw-empty">尚未收到模型输出。旧记录或未返回流式文本的端点可能没有分析正文。</p>')}</section><section><h4>执行反馈与产出</h4>${blocks.filter(b=>!["分析","输出"].includes(b.kind)).map(blockHtml).join("")}${[...selected.tools.entries()].filter(([,t])=>!store.task || t.taskId===store.task).map(([id,t])=>`<article data-aw-entry="tool:${esc(String(id))}" class="aw-entry ${t.status === "失败" ? "bad" : ""}"><header><b>${esc(SessionObserver.toolName(t.name))}</b><span>${esc(I18n.t(t.status))}</span></header><div class="md aw-markdown">${mdRender(t.text)}</div>${t.images?.length && typeof FileCards!=="undefined" ? `<div class="tl-images">${t.images.map(image=>FileCards.imageCard(image)).join("")}</div>` : ""}${t.raw && t.raw !== t.text ? I18n.html`<details data-aw-tool="${esc(String(id))}"><summary>展开工具反馈（最多 24,000 字）</summary><pre>${esc(t.raw)}</pre></details>` : ""}</article>`).join("") || I18n.html('<p class="aw-empty">等待工具反馈与结论</p>')}</section></div>`;
     if(same) for(const el of pane.querySelectorAll("details")) if(opened.has(el.dataset.awTool)) el.open=true;
+    pane.querySelectorAll('[data-aw-entry]').forEach(el=>{
+      const saved=positions.get(el.dataset.awEntry);if(!saved)return;
+      el.querySelectorAll('.aw-markdown pre,.aw-markdown table').forEach((part,i)=>{if(saved[i]){part.scrollTop=saved[i][0];part.scrollLeft=saved[i][1];}});
+    });
     pane.scrollTop=same && (!store.follow || !stick) ? oldScroll : pane.scrollHeight;
   }
   function push(event) { reduce(store,event); if (timer===null) timer=setTimeout(render,120); }
@@ -152,7 +158,7 @@ const AgentWorkbench = (() => {
     root.querySelector("[data-aw-task]")?.addEventListener("change",e=>{store.task=e.target.value;render();});
     root.querySelector("[data-aw-follow]")?.addEventListener("click",e=>{
       store.follow=!store.follow;e.target.setAttribute("aria-pressed",String(store.follow));
-      e.target.textContent=store.follow ? "跟随最新" : "暂停跟随";
+      e.target.textContent=store.follow ? I18n.t("跟随最新") : I18n.t("暂停跟随");
       if(store.follow) root.querySelector(".aw-pane").scrollTop=root.querySelector(".aw-pane").scrollHeight;
     });
     root.querySelector("[data-aw-side]")?.addEventListener("click",openSide);
