@@ -1,0 +1,54 @@
+name: Windows release build
+on:
+  push:
+    branches: [codex/release-v0.21.0]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      PYTHON_DOTENV_DISABLED: '1'
+      LITELLM_LOCAL_MODEL_COST_MAP: 'True'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: e27624149755be0bdb345fb83efe99adeffb5d35
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.11'
+      - name: Build executable
+        shell: pwsh
+        run: ./scripts/build-exe.ps1
+      - name: Verify first startup
+        shell: pwsh
+        run: |
+          $env:SPIRITSCOUT_DATA_HOME = Join-Path $env:RUNNER_TEMP 'spiritscout-smoke'
+          New-Item -ItemType Directory -Force $env:SPIRITSCOUT_DATA_HOME | Out-Null
+          $app = Start-Process -FilePath (Resolve-Path dist/SpiritScout.exe) -ArgumentList '--host','127.0.0.1','--port','18001' -PassThru
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              if ($app.HasExited) { throw 'Executable exited before readiness' }
+              try {
+                $response = Invoke-WebRequest http://127.0.0.1:18001/login -TimeoutSec 2
+                if ($response.StatusCode -eq 200) { $ready = $true; break }
+              } catch { Start-Sleep -Seconds 1 }
+            }
+            if (-not $ready) { throw 'Login page did not become ready' }
+            if (-not (Test-Path "$env:SPIRITSCOUT_DATA_HOME/configs/models.yaml")) { throw 'Missing initial model registry' }
+          } finally { if (-not $app.HasExited) { Stop-Process -Id $app.Id -Force } }
+      - name: Package executable
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/SpiritScout.exe,LICENSE -DestinationPath dist/SpiritScout-v0.21.0-windows-x86_64.zip
+          $hash = (Get-FileHash dist/SpiritScout-v0.21.0-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  SpiritScout-v0.21.0-windows-x86_64.zip" | Set-Content dist/SHA256SUMS-windows-x86_64 -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spiritscout-windows-x86_64
+          path: |
+            dist/SpiritScout-v0.21.0-windows-x86_64.zip
+            dist/SHA256SUMS-windows-x86_64
+          if-no-files-found: error
