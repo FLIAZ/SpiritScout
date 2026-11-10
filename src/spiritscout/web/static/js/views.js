@@ -1,9 +1,10 @@
 /* ================= 视图：会话详情/拓扑/报告 ================= */
 /* ================= 会话详情 ================= */
-const TABS = ["chat", "topo", "coverage", "assets", "challenges", "vulns", "flags", "experience", "traffic", "background", "events", "deliverables", "report"];
+const TABS = ["chat", "topo", "assets", "challenges", "vulns", "flags", "experience", "traffic", "background", "events", "deliverables", "report"];
 const STEERING_STATUS_CN = {delivered: I18n.t("已投递"), accepted: I18n.t("计划执行"), completed: I18n.t("已报告完成"), blocked: I18n.t("执行受阻")};
 function openSession(id) {
   if (typeof ComposerCommands !== "undefined") ComposerCommands.reset();
+  if (typeof AssetSecretViewer !== "undefined") AssetSecretViewer.close();
   if (S.cur !== id) {
     S.state = null;
     // 附件暂存是会话私有状态：切到另一会话即清空，上一会话的 chip
@@ -637,6 +638,19 @@ function topoRecordDetail(p) {
   if(p.kind==="milestone") return I18n.html`<p class="td-note">路线推进说明；属于 Agent 当时的观察与计划，不自动代表已验证事实。</p><p class="td-note topo-rule-content">${esc(p.body)}</p>`;
   if(p.kind==="rule") return I18n.html('<p class="td-note topo-rule-content">正在读取原文…</p><button class="btn sm" data-rules-more hidden>继续读取原文</button>');
   const source = p.provenance?.producer || {};
+  let payload={};try{payload=JSON.parse(p.body || '{}');}catch{/* 历史记录仍按原文显示。 */}
+  const attrs=payload.attrs || {},fingerprint=payload.fingerprint || {};
+  const scriptIntel=p.node_type==='script' ? I18n.html`<section class="topo-related"><b>脚本情报</b>
+    <p class="td-note"><code>SHA256 ${esc(fingerprint.sha256 || I18n.t('未记录'))}</code></p>
+    <p class="td-note">静态接口 ${Number(attrs.route_count || (attrs.routes || []).length)} 条 · 秘密引用 ${(attrs.secrets || []).length} 条 · ${esc(attrs.verification_status || I18n.t('待核实'))}</p>
+    ${(attrs.routes || []).length ? `<details><summary>静态接口线索</summary><pre>${esc(attrs.routes.join('\n'))}</pre></details>` : ''}
+    ${[...(attrs.parameters || []),...(attrs.config_keys || [])].length ? `<details><summary>参数与配置键</summary><pre>${esc([...(attrs.parameters || []),...(attrs.config_keys || [])].join('\n'))}</pre></details>` : ''}
+    ${(attrs.algorithm_calls || []).length ? `<details><summary>算法调用证据</summary><pre>${esc(attrs.algorithm_calls.join('\n'))}</pre></details>` : ''}
+    ${attrs.analysis && Object.keys(attrs.analysis).length ? `<details><summary>逆向分析</summary><pre>${esc(JSON.stringify(attrs.analysis,null,2))}</pre></details>` : ''}
+    ${attrs.script_ref ? `<p class="td-note">脱敏源码引用：<code>${esc(attrs.script_ref)}</code> · Agent 可分页读取</p>` : ''}
+    ${attrs.source_map_url ? `<p class="td-note">Source map：${esc(attrs.source_map_url)}${attrs.source_index != null ? ` · #${esc(String(attrs.source_index))}` : ''}</p>` : ''}
+    ${(attrs.secrets || []).length ? `<div>${attrs.secrets.map(secret=>`<p class="td-note"><code>${esc(secret.secret_ref)}</code> · ${esc(secret.kind)} · ${esc(secret.status || I18n.t('待核实'))} <button type="button" class="btn sm" data-secret-ref="${esc(secret.secret_ref)}" data-secret-target="${esc(payload.value || p.title)}">查看明文（会记录）</button></p>`).join('')}</div>` : ''}
+  </section>` : '';
   const origins = [source.agent_id || p.actor, source.tool_name, source.step_id].filter(Boolean);
   const relations = [...(S.topoGraph?.edges || []),...(S.topoGraph?.links || []),...(S.topoGraph?.assets?.edges || [])].flatMap(e => e.references || [e]).filter(e => e.target === p.id || e.source === p.id
     || p.relation && e.record_id === p.record_id);
@@ -644,11 +658,14 @@ function topoRecordDetail(p) {
   const collection = S.topoGraph?.groups.find(g => g.members.some(n => n.id === p.id));
   const assetRelations = [...(S.topoProcess?.values() || [])].filter(n=>n.relation &&
     [n.source_ref,n.target_ref].includes(`${p.layer}:${p.record_id}`));
+  const isAsset=S.topoGraph?.assets?.nodes.some(n=>n.id===p.id);
   return I18n.html`${collection ? I18n.html`<button class="topo-back" data-topo-record="${esc(collection.id)}">← 返回${esc(collection.title)}</button>` : ""}<div class="td-agent">${esc(origins.join(" · ") || I18n.t("未记录来源"))}</div>
     <p class="td-note topo-fact-text">${esc(p.title)}</p>
+    ${scriptIntel}
+    ${isAsset && p.layer && p.record_id ? `<section class="asset-test-summary" data-asset-tests-summary><h4>${I18n.t('关联测试记录')}</h4><p class="muted">${I18n.t('正在读取…')}</p></section>` : ''}
     ${assetRelations.length ? I18n.html`<div class="topo-related"><b>资产关系与依据</b>${assetRelations.map(n=>`<button data-topo-record="${esc(n.id)}">${esc(n.title)}</button>`).join("")}</div>` : ''}
     ${related.length ? I18n.html`<div class="topo-related"><b>明确引用的关联记录</b>${related.map(id => `<button data-topo-record="${esc(id)}">${esc(S.topoProcess?.get(id)?.title || id)}</button>`).join("")}</div>` : I18n.html('<p class="td-note">暂无明确的事实依赖关系。</p>')}
-    <details class="topo-original"><summary>查看完整记录与来源</summary><p class="td-note">${esc(p.layer || "")} · ${esc(p.record_id || "")} · v${esc(String(p.version || ""))}</p><pre>${esc(p.body || I18n.t("规则原文保存在黑板，按引用读取。"))}</pre></details>`;
+    ${isAsset && p.layer && p.record_id ? `<button type="button" class="btn sm" data-archive-ref="${esc(p.layer+':'+p.record_id)}">${I18n.t('查看原始记录与版本')}</button>` : I18n.html`<details class="topo-original"><summary>查看完整记录与来源</summary><p class="td-note">${esc(p.layer || "")} · ${esc(p.record_id || "")} · v${esc(String(p.version || ""))}</p><pre>${esc(p.body || I18n.t("规则原文保存在黑板，按引用读取。"))}</pre></details>`}`;
 }
 
 window.addEventListener("resize", () => { if (S.tab === "topo" && S.state) drawTopo(); });
@@ -735,11 +752,14 @@ function showNodeDetail(nodeId) {
   panel.querySelector(".td-body").innerHTML = body;
   topoFocus(nodeId);
   const record=S.topoProcess?.get(nodeId);
+  if(record && typeof CoveragePage!=='undefined')CoveragePage.assetSummary(record,panel);
   if(record?.kind==="rule") loadTopoRules(record);
   panel.querySelector(".td-close").onclick = () => { panel.hidden = true; panel._curId = null; topoFocus(null); };
   panel.querySelectorAll("[data-topo-record]").forEach(button => {
     button.onclick = () => {panel._curId = null;showNodeDetail(button.dataset.topoRecord);};
   });
+  if (typeof AssetSecretViewer !== "undefined") AssetSecretViewer.bind(panel);
+  panel.querySelectorAll('[data-archive-ref]').forEach(button=>button.onclick=()=>SessionArchive.openReference(button.dataset.archiveRef));
   panel.querySelectorAll("[data-topo-page]").forEach(button => {
     button.onclick = () => {S.topoPages[nodeId] += Number(button.dataset.topoPage);panel._curId=null;showNodeDetail(nodeId);};
   });

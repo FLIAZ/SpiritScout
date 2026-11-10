@@ -10,6 +10,9 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
+
+import httpx
 
 from spiritscout.core.models import RunMode, Scope
 from spiritscout.ctf.agents import _http_observation, _obs_text
@@ -27,15 +30,25 @@ class HTTPResponseTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.requests = 0
+        self.release = asyncio.Event()
+        self.handlers = set()
         self.source = ('<html>\r\n' + 'const pad="填充"; ' * 5000
                        + '\r\nconst answer=[17,29,255];\r\n' + 'const pad="填充"; ' * 5000 + '\r\n</html>')
         self.short = '<html>\r\n<script>const hidden=[17,29,255];</script><!--中间线索--></html>'
 
         async def serve(reader, writer):
+            task = asyncio.current_task()
+            self.handlers.add(task)
             try:
                 request = await reader.readuntil(b'\r\n\r\n')
                 self.requests += 1
                 path = request.split(b' ')[1]
+                if path in (b'/read-timeout', b'/body-timeout'):
+                    if path == b'/body-timeout':
+                        writer.write(b'HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npart')
+                        await writer.drain()
+                    await self.release.wait()
+                    return
                 payload = (self.short if path == b'/short' else self.source).encode()
                 if path == b'/invalid':
                     payload = b'const marker="\xff\xc0\xa0";'
@@ -52,13 +65,17 @@ class HTTPResponseTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 writer.close()
                 await writer.wait_closed()
+                self.handlers.discard(task)
 
         self.server = await asyncio.start_server(serve, '127.0.0.1', 0)
         self.base = f'http://127.0.0.1:{self.server.sockets[0].getsockname()[1]}'
 
     async def asyncTearDown(self):
+        self.release.set()
         self.server.close()
         await self.server.wait_closed()
+        if self.handlers:
+            await asyncio.gather(*self.handlers)
         self.temp.cleanup()
 
     async def fetch(self, path='', **kwargs):
@@ -69,6 +86,60 @@ class HTTPResponseTests(unittest.IsolatedAsyncioTestCase):
         result = await http_response_read(workspace_root=str(self.root), body_ref=ref, **kwargs)
         self.assertTrue(result.ok, result.error)
         return json.loads(result.stdout)
+
+    async def test_empty_transport_errors_keep_type_phase_and_execution_uncertainty(self):
+        for error, phase, state in (
+            (httpx.ConnectTimeout, 'connect', 'not_sent'),
+            (httpx.PoolTimeout, 'pool', 'not_sent'),
+            (httpx.WriteTimeout, 'write', 'unknown'),
+            (httpx.ReadTimeout, 'read', 'unknown'),
+        ):
+            with self.subTest(error=error.__name__):
+                calls = []
+                def fail(request):
+                    calls.append(request)
+                    try:
+                        raise TimeoutError()
+                    except TimeoutError as cause:
+                        raise error('', request=request) from cause
+                with patch('spiritscout.tools.builtin.ScopedHTTPTransport', return_value=httpx.MockTransport(fail)):
+                    result = await self.fetch('/action', method='POST', data='x=1', timeout=.1)
+                self.assertFalse(result.ok)
+                self.assertTrue(result.timed_out)
+                self.assertIn(error.__name__, result.error)
+                self.assertEqual(len(calls), 1, '不能自动重放结果未知的写操作')
+                failure = result.parsed['http_failure']
+                self.assertEqual((failure['phase'], failure['request_state']), (phase, state))
+                self.assertIn('TimeoutError', failure['exception_chain'])
+
+    async def test_real_read_and_body_timeout_do_not_retry_or_claim_business_failure(self):
+        for path, state, status in (('/read-timeout', 'unknown', None),
+                                    ('/body-timeout', 'response_incomplete', 200)):
+            with self.subTest(path=path):
+                before = self.requests
+                result = await self.fetch(path, method='POST', data='action=once', timeout=.15)
+                self.assertFalse(result.ok)
+                self.assertTrue(result.timed_out)
+                failure = result.parsed['http_failure']
+                self.assertEqual(failure['error_type'], 'ReadTimeout')
+                self.assertEqual(failure['request_state'], state)
+                self.assertEqual(failure['status_code'], status)
+                self.assertEqual(self.requests - before, 1)
+
+    async def test_connect_failure_after_redirect_does_not_claim_original_post_unsent(self):
+        calls = []
+        def redirect_then_fail(request):
+            calls.append(request)
+            if len(calls) == 1:
+                return httpx.Response(303, headers={'Location': '/next'})
+            raise httpx.ConnectTimeout('', request=request)
+        with patch('spiritscout.tools.builtin.ScopedHTTPTransport',
+                   return_value=httpx.MockTransport(redirect_then_fail)):
+            result = await self.fetch('/action', method='POST', data='x=1')
+        failure = result.parsed['http_failure']
+        self.assertEqual(failure['request_state'], 'unknown')
+        self.assertEqual(failure['completed_redirects'], 1)
+        self.assertEqual([r.method for r in calls], ['POST', 'GET'])
 
     async def test_model_mode_param_does_not_collide_with_ambient_context(self):
         # 环境 mode（RunMode）曾与工具参数 mode 同名撞成

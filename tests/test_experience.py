@@ -451,6 +451,11 @@ class ExperiencePageTests(unittest.TestCase):
                                  ["sess-gone", "sess-known"])
                 self.assertEqual(data["history"][0]["result"], "error")
                 self.assertIn("模型输出为空", data["history"][0]["error"])
+                self.assertEqual(data["history"][1]["session_title"], "会员接口越权测试")
+                self.assertEqual(data["history"][0]["session_title"], "")
+                session.title = "重命名后的会员测试"
+                renamed = client.get("/api/experience").json()
+                self.assertEqual(renamed["history"][1]["session_title"], "重命名后的会员测试")
                 # 标签过滤走查询参数
                 filtered = client.get("/api/experience", params={"tag": "web"}).json()
                 self.assertEqual(filtered["total"], 1)

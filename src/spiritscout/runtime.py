@@ -485,6 +485,9 @@ async def _build_infra(
             async def _start_mcp(spec: Any) -> tuple[Any, Any, list[dict[str, Any]], str]:
                 client = None
                 try:
+                    from spiritscout.traffic.proxy import tool_environment
+
+                    egress_env = await tool_environment(workspace)
                     if list(spec.args[:2]) == ["-m", "spiritscout.tools.chrome_mcp"]:
                         spec = spec.model_copy(update={"env": {
                             **spec.env, "SPIRITSCOUT_CHROME_OUTPUT_DIR": str(
@@ -495,11 +498,14 @@ async def _build_infra(
                                 or os.environ.get("SPIRITSCOUT_CHROME_PROFILE_DIR")
                                 or str(Path(cfg.workspace.guard_root or cfg.workspace.root) / "browser-profile")),
                             "SPIRITSCOUT_CHROME_MODE": (
-                                "cdp" if authorization.mode == RunMode.SRC else "headless")}})
+                                ('session' if egress_env.get('SPIRITSCOUT_EGRESS_SOCKET') else 'cdp')
+                                if authorization.mode == RunMode.SRC else "headless")}})
                     from spiritscout.tools.mcp_preflight import current_preflight
 
                     pool = current_preflight.get()
-                    warmed = await pool.take(spec) if pool is not None else None
+                    if egress_env.get('SPIRITSCOUT_EGRESS_SOCKET'):
+                        spec = spec.model_copy(update={'env': {**spec.env, **egress_env}})
+                    warmed = await pool.take(spec) if pool is not None and not egress_env.get('SPIRITSCOUT_EGRESS_SOCKET') else None
                     client = warmed[0] if warmed is not None else build_client(spec)
                     # 启动前登记所有权；gather 尚未完成时取消也能完整回收。
                     mcp_clients.append(client)
@@ -524,6 +530,8 @@ async def _build_infra(
                 shared_browser = ((spec.name == "chrome" or list(spec.args[:2]) == [
                     "-m", "spiritscout.tools.chrome_mcp"])
                                   and spec.env.get("SPIRITSCOUT_CHROME_MODE", "cdp") == "cdp")
+                independent_browser_label = ('会话独立的无头浏览器'
+                    if spec.env.get('SPIRITSCOUT_CHROME_MODE') == 'headless' else '会话独立浏览器')
                 browser_gate = None
                 if shared_browser:
                     from spiritscout.tools.browser_handoff import (
@@ -560,7 +568,7 @@ async def _build_infra(
                             "仅在匿名方式不足且有现场依据时，搜索 account_request 申请对应平台的已存账号，"
                             "等待用户明确同意；没有申请工具或未获同意时继续匿名方式或报告所缺条件。"
                             if anonymous_browser and t['name'] == 'browser_navigate' else "")
-                         + (" 当前为会话独立的无头浏览器，不含用户已有登录态；"
+                         + (f" 当前为{independent_browser_label}，不含用户已有登录态；"
                             "并行处理不同题目时使用各自标签，依据当前标签快照操作。"
                             if spec.name == "chrome" and not shared_browser else "")}
                     exposed_name = f"mcp__{spec.name}__{t['name']}"
@@ -607,9 +615,14 @@ async def _build_infra(
                                         _timeout=float(spec.timeout),
                                         _browser_gate=browser_gate,
                                         _properties=frozenset(properties),
+                                        _remote_egress_unverified=bool(spec.env.get('SPIRITSCOUT_EGRESS_SOCKET')
+                                            and spec.transport in {'http', 'sse'}),
                                         _name=exposed_name, **kwargs: Any) -> ToolResult:
                         # ToolRegistry 会追加内置上下文；远端只接收 schema 声明的参数。
                         arguments = {k: v for k, v in kwargs.items() if k in _properties}
+                        if _remote_egress_unverified:
+                            return ToolResult(tool=_name, ok=False, returncode=-3,
+                                error='此远程 MCP 的服务端目标出口尚未验证；工具仍保留，本次调用未发出。可使用会话隔离的本地 stdio MCP。')
                         try:
                             if _browser_gate is not None:
                                 async with _browser_gate:
@@ -639,6 +652,8 @@ async def _build_infra(
                         "tool": t["name"], "timeout": float(spec.timeout),
                         "schema": model_tool, "risk": risk.value,
                         "target_params": list(target_params),
+                        'egress_status': ('unverified' if spec.transport in {'http', 'sse'} else 'isolated')
+                            if spec.env.get('SPIRITSCOUT_EGRESS_SOCKET') else 'direct',
                         "scope_enforcement": spec.scope_enforcement}
                 audit.log("system.lifecycle", "runtime", {
                     "action": "mcp_server_ready", "server": spec.name,
@@ -703,6 +718,10 @@ async def _build_infra(
         from spiritscout.tools.http_responses import http_response_read
 
         registry.register_builtin("http_response_read", http_response_read, RESPONSE_SPEC)
+        from spiritscout.tools.js_intel import SPEC as JS_READ_SPEC
+        from spiritscout.tools.js_intel import js_source_read
+
+        registry.register_builtin('js_source_read', js_source_read, JS_READ_SPEC)
         from spiritscout.traffic.tools import FUNCTIONS as TRAFFIC_FUNCTIONS
         from spiritscout.traffic.tools import SPECS as TRAFFIC_SPECS
 

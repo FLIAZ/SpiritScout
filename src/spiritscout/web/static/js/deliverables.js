@@ -1,8 +1,9 @@
 /* 会话档案：按需分页读取持久化数据；请求世代隔离会话切换和检索竞争。 */
 const SessionArchive = (() => {
-  const categories = [["all", I18n.t("全部档案")], ["fact", I18n.t("事实记录")], ["evidence", I18n.t("原始证据")],
-    ["finding", I18n.t("待核验发现")], ["hypothesis", I18n.t("推测与缺口")], ["asset", I18n.t("资产记录")], ["file", I18n.t("文件")], ["outcome", I18n.t("任务结论")]];
-  let session = null, kind = "all", query = "", items = [], selected = null;
+  const categories = [["sources", I18n.t("证据与文件")], ["evidence", I18n.t("原始证据")], ["file", I18n.t("文件")],
+    ["all", I18n.t("全部原始记录")], ["fact", I18n.t("事实原始记录")], ["finding", I18n.t("发现原始记录")],
+    ["hypothesis", I18n.t("探索与推测原文")], ["asset", I18n.t("资产原始记录")], ["outcome", I18n.t("任务结论")]];
+  let session = null, kind = "sources", query = "", items = [], selected = null;
   let counts = {}, total = 0, more = false, generation = 0, loading = false, lastLoad = 0, timer;
   const label = key => categories.find(c => c[0] === key)?.[1] || key;
   function filters() {
@@ -10,7 +11,7 @@ const SessionArchive = (() => {
     const signature = JSON.stringify([kind, counts]);
     if (root.dataset.signature === signature) return;
     root.dataset.signature = signature;
-    root.innerHTML = categories.map(([key, title]) => `<button type="button" data-kind="${key}" aria-pressed="${key === kind}" class="${key === kind ? "on" : ""}"><span>${title}</span><span class="archive-filter-count">${key === "all" ? Object.values(counts).reduce((a,b) => a+b,0) : counts[key] || 0}</span></button>`).join("");
+    root.innerHTML = categories.map(([key, title]) => `<button type="button" data-kind="${key}" aria-pressed="${key === kind}" class="${key === kind ? "on" : ""}"><span>${title}</span><span class="archive-filter-count">${key === "all" ? Object.values(counts).reduce((a,b) => a+b,0) : key === 'sources' ? (counts.evidence || 0)+(counts.file || 0) : counts[key] || 0}</span></button>`).join("");
   }
   function refsFor(item) {
     return (item.refs || []).map(ref => ({...ref,
@@ -24,6 +25,7 @@ const SessionArchive = (() => {
       return;
     }
     const record=JSON.stringify([session,item.layer,item.record_id]), previous=root.dataset.record===record ? root.querySelector('.archive-history') : null;
+    const previousCurrent=root.dataset.record===record ? root.querySelector('.archive-current') : null;
     const focus=previous?.contains(document.activeElement) ? document.activeElement : null;
     const positions=previous?[...previous.querySelectorAll('pre')].map(el=>[el,el.scrollTop,el.scrollLeft]):[];
     const top=root.scrollTop,left=root.scrollLeft;
@@ -40,6 +42,7 @@ const SessionArchive = (() => {
       ${item.kind === "file" ? I18n.html`<dt>文件大小</dt><dd>${esc(fmtSize(item.size) || "0 B")}</dd>` : ""}</dl>
       ${refs.length ? I18n.html`<section class="archive-sources"><h5>引用来源 <span>${refs.length}</span></h5>${refs.map(ref => `<div class="archive-source"><code>${esc(ref.id || I18n.t("证据"))}</code><p>${esc(ref.caption)}</p>${ref.note ? `<small>${esc(ref.note)}</small>` : ""}${ref.record_id ? I18n.html`<small>黑板记录 ${esc(ref.record_id)}</small>` : ""}</div>`).join("")}</section>` : item.kind !== "file" ? I18n.html('<p class="archive-note">没有附带证据引用，请结合来源核验。</p>') : ""}
       ${item.record_id ? I18n.html`<details class="archive-history" data-layer="${esc(item.layer)}" data-record="${esc(item.record_id)}"><summary>版本历史</summary><p>历史版本仅供参考，使用前需复核。</p><div class="archive-history-list"></div></details>` : ""}
+      ${item.record_id && item.layer ? `<details class="archive-current" data-ref="${esc(item.layer+':'+item.record_id+'@'+item.version)}"><summary>${I18n.t('读取记录原文')}</summary><div></div></details>` : ''}
       ${item.kind === "file" ? I18n.html`<div class="archive-file-ops"><a class="btn archive-download" download href="/api/sessions/${encodeURIComponent(session)}/artifacts/download?path=${encodeURIComponent(item.path)}">下载文件</a><button type="button" class="btn" data-archive-share data-path="${esc(item.path)}">发送到会话</button></div>` : ""}`;
     const placeholder=root.querySelector('.archive-history');
     if(previous&&placeholder){
@@ -52,6 +55,14 @@ const SessionArchive = (() => {
       focus?.focus({preventScroll:true});root.scrollTop=top;root.scrollLeft=left;
     }
     const history=root.querySelector('.archive-history');if(history)history.dataset.version=String(item.version||'');
+    const current=root.querySelector('.archive-current');
+    if(previousCurrent&&current){
+      if(previousCurrent.dataset.ref===current.dataset.ref){
+        const positions=[...previousCurrent.querySelectorAll('pre')].map(el=>[el,el.scrollTop,el.scrollLeft]);
+        current.replaceWith(previousCurrent);positions.forEach(([el,top,left])=>{el.scrollTop=top;el.scrollLeft=left;});
+      }else if(previousCurrent.open)current.open=true;
+      root.scrollTop=top;root.scrollLeft=left;
+    }
   }
   function formatTime(value) {
     const date = new Date(typeof value === "number" ? value * 1000 : value);
@@ -115,13 +126,24 @@ const SessionArchive = (() => {
     }
   }
   function reset(id) {
-    clearTimeout(timer); generation++; session = id; kind = "all"; query = "";
+    clearTimeout(timer); generation++; session = id; kind = "sources"; query = "";
     items = []; counts = {}; total = 0; more = false; selected = null; loading = false; lastLoad = 0;
     $("#archive-search").value = ""; $("#archive-sync").textContent = I18n.t("等待读取");
     $("#archive-error").hidden = true; render();
   }
   function changeFilter() {
     generation++; loading = false; items = []; selected = null; lastLoad = 0; render(); load();
+  }
+  function openReference(ref) {
+    if (!S.cur) return;
+    if (session !== S.cur) reset(S.cur);
+    const value = String(ref || "").replace(/@\d+$/, "");
+    const separator = value.indexOf(":");
+    kind = "all"; query = (separator >= 0 ? value.slice(separator + 1) : value).trim();
+    items = []; selected = null; lastLoad = 0;
+    $("#archive-search").value = query; render();
+    const tab = document.querySelector('[data-tab="deliverables"]');
+    if (tab && S.tab !== "deliverables") tab.click(); else load();
   }
   async function exportResults() {
     const id = session, currentKind = kind, currentQuery = query, button = $("#archive-export");
@@ -173,6 +195,15 @@ const SessionArchive = (() => {
     };
     $("#archive-detail").addEventListener("toggle", async event => {
       const box = event.target;
+      if(box.matches?.('.archive-current') && box.open && !box.dataset.loaded){
+        box.dataset.loaded='loading';const id=session,body=box.querySelector('div');body.textContent=I18n.t('正在读取…');
+        try{
+          const data=await api(`/api/sessions/${encodeURIComponent(id)}/coverage/evidence?`+new URLSearchParams({ref:box.dataset.ref}));
+          if(session!==id||!box.isConnected)return;
+          const pre=document.createElement('pre');pre.textContent=JSON.stringify(data.data || data,null,2);body.replaceChildren(pre);box.dataset.loaded='yes';
+        }catch(error){if(session!==id||!box.isConnected)return;box.dataset.loaded='';body.textContent=I18n.t`原文读取失败：${error.message}。重新展开可重试。`;}
+        return;
+      }
       if (!box.matches?.(".archive-history") || !box.open || box.dataset.loaded) return;
       box.dataset.loaded = "loading";
       const id = session;
@@ -251,7 +282,7 @@ const SessionArchive = (() => {
     filters();
   }
   if (typeof document !== "undefined") init();
-  return {reset, load, refsFor, refreshIfStale() {
+  return {reset, load, refsFor, openReference, refreshIfStale() {
     if (!loading && Date.now() - lastLoad > 12000) load();
   }};
 })();

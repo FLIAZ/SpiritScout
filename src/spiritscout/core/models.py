@@ -74,6 +74,7 @@ class AgentType(str, enum.Enum):
     BUSINESS_CONTEXT = "business_context"  # 业务流程理解与上下文建模
     RECON = "recon"                # 侦察
     SCANNER = "scanner"            # 与主流程并行的信息收集
+    JS_REVERSE = 'js_reverse'
     PORT_SCAN = "port_scan"        # 端口扫描
     WEB_VULN = "web_vuln"          # Web 漏洞
     HOST_VULN = "host_vuln"        # 主机漏洞
@@ -91,6 +92,7 @@ class BlackboardLayer(str, enum.Enum):
 
     TARGET_AUTH = "target_auth"    # 目标与授权层
     ASSET = "asset"                # 资产层
+    JS_INTEL = 'js_intel'          # 脚本逆向情报与受限秘密引用
     RECON_CLUE = "recon_clue"      # 侦察线索层
     VULN = "vuln"                  # 漏洞层
     CREDENTIAL = "credential"      # 凭据层
@@ -153,7 +155,7 @@ class Asset(BaseModel):
     """资产（资产层）。"""
 
     asset_id: str
-    asset_type: Literal["domain", "ip", "url", "service", "endpoint", "app"]
+    asset_type: Literal["domain", "ip", "url", "service", "endpoint", "app", "script"]
     value: str                          # 域名/IP/URL/服务标识
     port: int | None = None
     service: str | None = None
@@ -164,6 +166,9 @@ class Asset(BaseModel):
 
     def dedup_key(self) -> str:
         """汇聚引擎去重键（6.1 一致性）。"""
+        if self.asset_type == "endpoint":
+            method = str(self.attrs.get("method") or "UNKNOWN").upper()
+            return f"endpoint|{method}|{self.value}"
         return f"{self.asset_type}|{self.value}|{self.port or ''}"
 
 

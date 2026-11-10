@@ -8,8 +8,21 @@ from typing import Any
 from spiritscout.core.models import AgentType, BlackboardLayer
 from spiritscout.tools.spec import ToolResult
 
-TOOLS = ('nuclei_scan', 'metasploit_scan', 'http_probe')
+TOOLS = ('nuclei_scan', 'metasploit_scan', 'http_probe', 'asset_discover', 'sandbox_exec')
+
+SCHEMA = {'type': 'function', 'function': {
+    'name': 'scanner_control',
+    'description': '读取并行扫描者状态，或派遣有现场依据的独立扫描。先 status 获取 revision；'
+                   'dispatch 立即返回，主线继续分析，观察写入共享黑板。禁止为猜测创建无目标枚举任务。',
+    'parameters': {'type': 'object', 'properties': {
+        'action': {'type': 'string', 'enum': ['status', 'dispatch', 'stop']},
+        'revision': {'type': 'integer'}, 'reason': {'type': 'string'},
+        'target': {'type': 'string'}, 'goal': {'type': 'string'},
+        'tools': {'type': 'array', 'items': {'type': 'string', 'enum': list(TOOLS)}},
+        'constraints': {'type': 'string', 'description': '授权边界、已有证据、不要重复的测试、预期可区分结果'},
+    }, 'required': ['action']}}}
 GUIDANCE = (
+    'SRC 允许只读资产发现时，首轮可派遣 tools:["asset_discover"]；DNS 记录、被动子域和 HTTP 基线会并行采集，产出严格限于会话和派遣范围。'
     '扫描者「探微」由你管理，待命不代表获准扫描。结合用户原话和最新规则判断是否允许扫描；'
     '禁止扫描、仅被动分析或范围不明时不要派遣。需要扫描时在既有决策 JSON 中增加 '
     'scan_control:{"action":"dispatch","revision":scanner.revision,"reason":"依据用户规则的派遣理由",'
@@ -50,10 +63,13 @@ class ScannerController:
         worker = self.infra.blackboard.read(BlackboardLayer.TASK_STATE, self.worker_id) if self.worker_id else None
         return {'status': self.status, 'revision': self.revision, 'forbidden': self.forbidden,
                 'permitted': self.permitted, 'assignment': copy.deepcopy(self.assignment),
-                'worker': worker or {}, 'available_tools': dict(self.available),
+                'worker': worker or {}, 'available_tools': {'asset_discover': True, 'http_probe': True,
+                                                          'sandbox_exec': True, **self.available},
                 'capabilities': {'nuclei_scan': '选择本地模板检测，保存原始请求/响应和命中',
+                                 'asset_discover': '并行 DNS、被动子域和 HTTP 基线，范围内资产入册',
                                  'metasploit_scan': '模块 info/check 或辅助模块 run，不执行 exploit',
-                                 'http_probe': '按派遣目标补充 HTTP 环境观察'},
+                                 'http_probe': '按派遣目标补充 HTTP 环境观察',
+                                 'sandbox_exec': '沙箱脚本按证据补充路径或参数探测，保留输出与退出码'},
                 'deployment': 'not_checked' if not self.available else 'checked',
                 'last_result': dict(self.last_result), 'guidance': GUIDANCE}
 

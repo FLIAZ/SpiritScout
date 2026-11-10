@@ -25,9 +25,14 @@ from spiritscout.traffic import recorder
 from spiritscout.traffic.capture_io import wait_io
 
 _ACTIVE: dict[str, SessionProxy] = {}
+_REQUIRED: set[str] = set()
 _HEX = re.compile(r"^[a-f0-9]{32}$")
 _SHA = re.compile(r"^[a-f0-9]{64}$")
 _SEARCH_LIMIT = 1024 * 1024
+
+
+class EgressUnavailable(ValueError):
+    """已选定的目标出口不可用；调用方应返回失败而不能改走直连。"""
 
 
 def executable() -> str | None:
@@ -171,7 +176,7 @@ class SessionProxy:
 
     async def environment(self) -> dict[str, str]:
         if self.state != "running" or self.proc is None or self.proc.returncode is not None:
-            raise ValueError("会话代理已停止，请重新启用录制")
+            raise EgressUnavailable("会话代理已停止，当前网络调用未发出")
         scope, invocation = current_execution_scope.get(), current_invocation.get()
         identifier = uuid.uuid4().hex
         try:
@@ -184,7 +189,8 @@ class SessionProxy:
             self.error = "调用归属保存失败，相关流量的发起者保持未知"
         address = self.address.replace("http://", f"http://{identifier}:{quote(self.secret, safe='')}@", 1)
         bundle = str(self.workspace / "traffic-ca" / "proxy-ca.pem")
-        return {"HTTP_PROXY": address, "HTTPS_PROXY": address, "http_proxy": address, "https_proxy": address,
+        return {**({'SPIRITSCOUT_EGRESS_SOCKET': self.egress_socket} if getattr(self, 'egress_socket', '') else {}),
+                "HTTP_PROXY": address, "HTTPS_PROXY": address, "http_proxy": address, "https_proxy": address,
                 "ALL_PROXY": address, "all_proxy": address, "NO_PROXY": "", "no_proxy": "",
                 "SSL_CERT_FILE": bundle, "CURL_CA_BUNDLE": bundle, "REQUESTS_CA_BUNDLE": bundle,
                 "NODE_EXTRA_CA_CERTS": bundle, "NODE_USE_ENV_PROXY": "1", "GIT_SSL_CAINFO": bundle}
@@ -278,7 +284,25 @@ class SessionProxy:
 
 async def tool_environment(workspace: Path) -> dict[str, str]:
     proxy = _ACTIVE.get(str(workspace.resolve()))
-    return await proxy.environment() if proxy else {}
+    if proxy:
+        return await proxy.environment()
+    if str(workspace.resolve()) in _REQUIRED:
+        raise EgressUnavailable('会话目标代理不可用，未回退直连')
+    meta = workspace / 'meta.json'
+    if meta.is_file():
+        try:
+            data = json.loads(meta.read_text())
+        except (json.JSONDecodeError, UnicodeError):
+            # 通用工作区也可能有同名材料。已绑定出口的进程内权威记录
+            # 已在上方 fail-closed；损坏的正式会话由 SessionManager 隔离。
+            return {}
+        request = data.get('request') if isinstance(data, dict) else None
+        binding = (request.get('proxy_binding') or {}) if isinstance(request, dict) else {}
+        if not isinstance(binding, dict):
+            raise EgressUnavailable('会话代理绑定格式无效，未回退直连')
+        if binding.get('id', 'direct') != 'direct':
+            raise EgressUnavailable('会话目标代理不可用，未回退直连')
+    return {}
 
 
 class ProxyManager:
@@ -300,6 +324,14 @@ class ProxyManager:
             self.queue.task_done()
 
     def status(self, session_id: str) -> dict[str, Any]:
+        session = self.manager.get(session_id)
+        binding = ((getattr(session, 'request', {}) or {}).get('proxy_binding') or {})
+        if binding.get('id', 'direct') != 'direct':
+            active = _ACTIVE.get(str(session.workspace.resolve()))
+            status = active.status() if active else {'available': bool(executable()), 'status': 'stopped',
+                'address': '', 'records': 0, 'error': ''}
+            return {**status, 'binding': binding, 'locked': True,
+                    'coverage': 'HTTP / DNS / 本地命令 / 沙箱 / 本地 stdio MCP 使用固定出口；浏览器使用会话隔离实例。远程 MCP 下游待验证。'}
         if session_id in self.sessions:
             return self.sessions[session_id].status()
         return {"available": bool(executable()), "status": "stopped", "address": "", "records": 0,

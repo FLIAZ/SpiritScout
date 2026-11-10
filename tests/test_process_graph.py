@@ -11,6 +11,20 @@ from spiritscout.web.process_graph import project_blackboard, rules_text
 
 
 class ProcessGraphTests(unittest.TestCase):
+    def test_legacy_js_intel_projects_as_script_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bb = Blackboard(Path(tmp) / 'bb.db')
+            self.addCleanup(bb.close)
+            bb.write(BlackboardLayer.JS_INTEL, 'legacy-script', {
+                'script_url': 'https://fixture.test/app.js', 'sha256': 'abc',
+                'routes': ['/api/user'], 'script_ref': 'secret-reference'})
+            graph = project_blackboard(bb)
+            node = next(item for item in graph['nodes'] if item['record_id'] == 'legacy-script')
+            self.assertEqual(node['node_type'], 'script')
+            self.assertEqual(node['reference_type'], 'assets')
+            self.assertIn('legacy_js_intel', node['body'])
+            self.assertIn('https://fixture.test/app.js', node['title'])
+
     def test_only_blackboard_facts_rules_and_explicit_evidence_links(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bb = Blackboard(Path(tmp) / 'bb.db')

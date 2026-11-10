@@ -122,7 +122,9 @@ def mount_traffic(app: FastAPI, store: Any, manager: Any) -> CaptureManager:
 
     @app.post("/api/sessions/{session_id}/traffic/proxy")
     async def proxy_start(session_id: str, payload: ProxyStart) -> JSONResponse:
-        require(session_id)
+        session = require(session_id)
+        if ((getattr(session, 'request', {}) or {}).get('proxy_binding') or {}).get('id', 'direct') != 'direct':
+            raise HTTPException(409, '此会话已绑定固定出口，不能替换；请在代理池配置新会话方案')
         try:
             return respond(await monitor.proxies.start(session_id, payload.upstream))
         except (OSError, ValueError) as exc:
@@ -130,7 +132,9 @@ def mount_traffic(app: FastAPI, store: Any, manager: Any) -> CaptureManager:
 
     @app.delete("/api/sessions/{session_id}/traffic/proxy")
     async def proxy_stop(session_id: str) -> JSONResponse:
-        require(session_id)
+        session = require(session_id)
+        if ((getattr(session, 'request', {}) or {}).get('proxy_binding') or {}).get('id', 'direct') != 'direct':
+            raise HTTPException(409, '固定出口随会话运行，请使用停止会话结束连接')
         await monitor.proxies.stop(session_id)
         return respond(monitor.proxies.status(session_id))
 

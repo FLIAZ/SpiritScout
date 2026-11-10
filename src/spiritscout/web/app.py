@@ -136,6 +136,7 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         await updater.close()
         await scheduler.close()
         await traffic_capture.aclose()
+        await proxy_benchmarks.close()
         await close_manual_distills(manager)
         await storage.close()
         await resource_assistant.close()
@@ -162,6 +163,9 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     app.state.auth = admin_store
     app.state.auth_enabled = auth_enabled
     mount_resources(app, cfg, resource_store, resource_assistant)
+    from spiritscout.web.proxies import mount_proxies
+
+    proxy_benchmarks = mount_proxies(app, resource_store, manager)
     from spiritscout.web.browser_accounts import mount_browser_accounts
 
     account_browsers = mount_browser_accounts(app, cfg, resource_store)
@@ -535,6 +539,8 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             item["source_title"] = titles.get(
                 str(item.get("source_session") or ""), "")
         data["history"] = _distill_history(cfg)
+        for event in data["history"]:
+            event["session_title"] = titles.get(str(event.get("session_id") or ""), "")
         return data
 
     @app.delete("/api/experience/{insight_id}")

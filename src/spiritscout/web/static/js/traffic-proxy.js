@@ -22,13 +22,17 @@ const TrafficProxy = (() => {
       const active = ["starting", "running", "stopping"].includes(data.status);
       get("[data-proxy-enable]").disabled = busy || active || !data.available;
       get("[data-proxy-stop]").disabled = busy || !active;
+      if (data.locked) {
+        get('[data-proxy-enable]').disabled = true;
+        get('[data-proxy-stop]').disabled = true;
+      }
       get("[data-proxy-upstream]").disabled = busy || active;
       get("[data-proxy-env]").disabled = busy || data.status !== "running";
       get("[data-proxy-ca]").hidden = data.status !== "running";
       get("[data-proxy-ca]").href = base + "/ca";
       if (data.status !== "running") { get("[data-proxy-environment]").hidden = true; get("[data-proxy-environment] pre").textContent = ""; }
       const unavailable = data.available ? "" : I18n.t("可选代理未构建。普通工具记录、PCAP 导入与数据包分析仍可使用；需要录制命令的 HTTP/HTTPS 流量时，运行 scripts/build-traffic-proxy.sh。");
-      tell(data.error || lastError || unavailable, Boolean(data.error || lastError));
+      tell(data.error || lastError || (data.locked ? `${data.binding.name} · 固定出口 · ${data.coverage}` : unavailable), Boolean(data.error || lastError));
     }
     async function refresh() {
       if (unsupported) return;

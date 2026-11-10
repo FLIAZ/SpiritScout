@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 import os
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from spiritscout.platform_support import chrome_executable, node_cli_command
 
@@ -86,10 +88,10 @@ def command(endpoint: str, env: dict[str, str]) -> list[str]:
         env[key] = str(temporary.resolve())
     env.setdefault("npm_config_cache", str(Path.cwd() / ".tools" / "chrome-mcp" / "npm-cache"))
     mode = env.get("SPIRITSCOUT_CHROME_MODE", "cdp")
-    if mode == "headless":
+    if mode in {'headless', 'session'}:
         # 使用本机已安装浏览器；配置目录由 MCP 隔离，不读取用户 Chrome 登录态。
         executable = chrome_executable(env)
-        connection = ["--headless", "--isolated"]
+        connection = ['--isolated', *(['--headless'] if mode == 'headless' else [])]
         if executable:
             connection += ["--executable-path", executable]
         if hasattr(os, "geteuid") and os.geteuid() == 0:
@@ -110,6 +112,19 @@ def command(endpoint: str, env: dict[str, str]) -> list[str]:
         # 禁用账号上下文的代码回显；不加载可能开启 trace/session 录制的外部配置。
         env.pop('PLAYWRIGHT_MCP_CONFIG', None)
         privacy = ['--codegen', 'none']
+    if env.get('SPIRITSCOUT_EGRESS_SOCKET'):
+        # 此代码运行于隔离命名空间内，HTTP_PROXY 已指向其中的桥接监听器。
+        proxy = urlsplit(env['HTTP_PROXY'])
+        directory = Path(env['SPIRITSCOUT_EGRESS_SOCKET']).parent
+        config = directory / ('browser-' + uuid.uuid4().hex + '.json')
+        with config.open('x') as target:
+            config.chmod(0o600)
+            json.dump({'browser': {'launchOptions': {'proxy': {
+                'server': f'http://{proxy.hostname}:{proxy.port}',
+                'username': unquote(proxy.username or ''), 'password': unquote(proxy.password or ''),
+                'bypass': ''}, 'args': ['--ozone-platform=wayland'] if env.get('WAYLAND_DISPLAY') else []},
+                'contextOptions': {'ignoreHTTPSErrors': True}}}, target)
+        privacy += ['--config', str(config)]
     return [*prefix, *connection, *privacy, "--caps", "storage",
             "--snapshot-boxes", "--output-dir", str(output)]
 
@@ -117,7 +132,13 @@ def command(endpoint: str, env: dict[str, str]) -> list[str]:
 def main() -> int:
     try:
         env = dict(os.environ)
-        endpoint = ("" if env.get("SPIRITSCOUT_CHROME_MODE") == "headless" else
+        if env.get('SPIRITSCOUT_CHROME_MODE') == 'session':
+            from spiritscout.tools.browser_desktop import desktop_environment
+
+            env = desktop_environment(env)
+            if not env.get('DISPLAY') and not env.get('WAYLAND_DISPLAY'):
+                env['SPIRITSCOUT_CHROME_MODE'] = 'headless'
+        endpoint = ("" if env.get("SPIRITSCOUT_CHROME_MODE") in {'headless', 'session'} else
                     cdp_endpoint(env.get("SPIRITSCOUT_CHROME_CDP_URL", "")))
         if endpoint and env.get("SPIRITSCOUT_CHROME_DEFER_START") != "1":
             from spiritscout.tools.browser_desktop import ensure_browser

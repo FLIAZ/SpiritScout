@@ -103,12 +103,14 @@ def mount_session_read_routes(app: FastAPI, manager: SessionManager,
     def session_coverage(session_id: str, q: str = Query('', max_length=200),
                          status: str = Query('', max_length=30), identity: str = Query('', max_length=100),
                          test_type: str = Query('', max_length=100), offset: int = Query(0, ge=0),
+                         asset_ref: str = Query('', max_length=500), include_unattempted: bool = True,
                          limit: int = Query(50, ge=1, le=100)) -> JSONResponse:
         from spiritscout.web.coverage import read_coverage
 
         try:
             result = read_coverage(_require(session_id).workspace, query=q, status=status,
-                                   identity=identity, test_type=test_type, offset=offset, limit=limit)
+                                   identity=identity, test_type=test_type, offset=offset, limit=limit,
+                                   asset_ref=asset_ref, include_unattempted=include_unattempted)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
         return JSONResponse(result, headers={'Cache-Control': 'no-store'})

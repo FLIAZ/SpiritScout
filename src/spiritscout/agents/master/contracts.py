@@ -18,6 +18,7 @@ from spiritscout.policy.engine import PolicyEngine
 
 # 战术 → 子 Agent 映射；模式装配时可覆盖或扩展。
 TACTIC_AGENT_MAP: dict[str, tuple[AgentType, str]] = {
+    'JS-REVERSE': (AgentType.JS_REVERSE, 'js_reverse'),
     "BUSINESS-CONTEXT": (AgentType.BUSINESS_CONTEXT, "business_context"),
     "TA0043": (AgentType.RECON, "recon"),          # 侦察
     "TA0001": (AgentType.WEB_VULN, "web_probe"),   # 初始访问（T1190 Web 打点）

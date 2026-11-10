@@ -33,6 +33,12 @@ class HTTPAddressResolutionTests(unittest.TestCase):
         self.assertEqual(agent._resolve_http(task, {"path": "/login"})[0],
                          "http://challenge.test:8443/login")
         self.assertIsNone(agent._resolve_http(task, {"path": "/login", "url": "invalid"}))
+        for path in ("/include?file=data://text/plain;base64,ZXhhbXBsZQ==",
+                     "/fetch?url=https://reference.test/item", "//reference.test/item"):
+            with self.subTest(path=path):
+                self.assertEqual(agent._resolve_http(task, {"path": path})[0],
+                                 "http://challenge.test:8443" + path)
+        self.assertIsNone(agent._resolve_http(task, {"path": "https://reference.test/item"}))
 
 
 class CompetitionSummaryTests(unittest.TestCase):
@@ -300,6 +306,21 @@ class RecordReplayTests(unittest.IsolatedAsyncioTestCase):
         return Task(task_id="task-1", task_type="ctf_solve", target="http://t",
                     agent_type=AgentType.CTF_WEB,
                     payload={"challenge": {"url": "http://t"}})
+
+    async def test_http_failure_keeps_diagnostics_and_original_execution_reference(self):
+        agent = self._agent()
+        failure = {'error_type': 'ConnectTimeout', 'phase': 'connect', 'request_state': 'not_sent'}
+        agent.ctx.tools.call.return_value = ToolResult(tool='http_probe', ok=False,
+            error='ConnectTimeout：未发出请求', parsed={'http_failure': failure},
+            invocation_id='inv-failed')
+        state = {'observations': []}
+        out = await agent._tool_http(self._task(), SimpleNamespace(name='solve'), state, {'path': '/api'})
+        self.assertFalse(out.ok)
+        self.assertIn('ConnectTimeout', out.text)
+        self.assertIn('inv-failed', out.text)
+        self.assertEqual(out.metadata['http_failure'], failure)
+        self.assertEqual(state['observations'][0]['http_failure'], failure)
+        agent.ctx.tools.call.assert_awaited_once()
 
     async def test_legacy_record_does_not_bypass_context_aware_registry(self) -> None:
         agent = self._agent()
@@ -1131,6 +1152,45 @@ class SendFileToolTests(unittest.TestCase):
                 with self.subTest(path=bad):
                     self.assertFalse(agent._tool_send_file(
                         self._task(), route, {}, {"path": bad}).ok)
+
+
+class EvidenceDrivenPathTests(unittest.IsolatedAsyncioTestCase):
+    def test_repeated_agents_keep_unique_instance_owned_tool_contracts(self):
+        import copy
+
+        from spiritscout.ctf.agents import CTFWebAgent
+
+        template = copy.deepcopy(CTFWebAgent.tool_schemas)
+        ctx = SimpleNamespace(mode=RunMode.CTF, shared_cache=None,
+            gateway=SimpleNamespace(config=SimpleNamespace(lightweight_local=False)),
+            audit=NullAuditLogger(), builtin_ctx={}, blackboard=None, policy=None)
+        ctx.for_agent = lambda role: ctx
+        first = CTFWebAgent(ctx, flag_manager=FlagManager())
+        second = CTFWebAgent(ctx, flag_manager=FlagManager())
+        for agent in (first, second):
+            names = [schema['function']['name'] for schema in agent._model_tool_schemas()]
+            self.assertEqual(len(names), len(set(names)))
+            self.assertEqual(names.count('history_read'), 1)
+            self.assertEqual(names.count('evidence_memory'), 1)
+        self.assertEqual(first.tool_schemas, second.tool_schemas)
+        first.tool_schemas[0]['function']['description'] = 'instance-local edit'
+        self.assertNotEqual(first.tool_schemas, second.tool_schemas)
+        self.assertEqual(CTFWebAgent.tool_schemas, template)
+
+    async def test_no_implicit_dictionary_and_explicit_paths_are_deduplicated(self):
+        agent = object.__new__(CTFBaseAgent)
+        agent.ctx = SimpleNamespace(tools=SimpleNamespace(call=AsyncMock(return_value=ToolResult(
+            tool='http_probe', ok=True, parsed={'status_code': 404}))))
+        agent.challenge_of = lambda task: {'url': 'http://fixture.test'}
+        agent._tool_ctx = lambda task: {}
+        for args in ({}, {'paths': []}, {'paths': ['//other.test'], 'reason': '核实接口'},
+                     {'paths': ['/api', None], 'reason': '核实接口'}, {'paths': ['/api'], 'reason': ' '}):
+            self.assertFalse((await agent._tool_probe_paths(None, None, {}, args)).ok)
+        agent.ctx.tools.call.assert_not_awaited()
+        result = await agent._tool_probe_paths(None, None, {}, {
+            'paths': ['/api/config', '/api/config'], 'reason': '前端引用该配置接口，对比真实配置与页面默认值'})
+        self.assertTrue(result.ok)
+        agent.ctx.tools.call.assert_awaited_once_with('http_probe', {'url': 'http://fixture.test/api/config'})
 
 
 if __name__ == "__main__":

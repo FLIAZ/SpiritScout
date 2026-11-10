@@ -90,6 +90,9 @@ class ToolExecutor(abc.ABC):
 
             proxy_env = await tool_environment(self.traffic_workspace)
         try:
+            from spiritscout.tools.egress_isolation import isolate_command
+
+            cmd = isolate_command(cmd, proxy_env)
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,

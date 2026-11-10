@@ -93,9 +93,10 @@ def _files(workspace: Path) -> list[dict[str, Any]]:
 def read_deliverables(workspace: Path, *, kind: str = "all", query: str = "",
                       offset: int = 0, limit: int = 60) -> dict[str, Any]:
     """只读已有数据库，返回完整分类计数与独立分页，不受状态页采样影响。"""
-    if kind != "all" and kind not in _KINDS:
+    if kind not in {"all", "sources"} and kind not in _KINDS:
         raise ValueError("未知档案分类")
     items: list[dict[str, Any]] = []
+    invocations: list[dict[str, Any]] = []
     db = workspace / "bb.db"
     if db.is_file():
         with closing(sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
@@ -104,9 +105,20 @@ def read_deliverables(workspace: Path, *, kind: str = "all", query: str = "",
             rows = conn.execute("SELECT * FROM bb_records WHERE layer IN "
                                 "('topology','asset','vuln','recon_clue','task_state') "
                                 "ORDER BY updated_at DESC,record_id").fetchall() if exists else []
+            invocation_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='tool_invocations'").fetchone()
+            if invocation_table:
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(tool_invocations)")}
+                optional = [field for field in ("task_id", "route_id", "agent_id", "identity_id")
+                            if field in columns]
+                selected = ["invocation_id", "tool_name", "execution_status", "effect_status",
+                            "created_at", "updated_at", *optional]
+                invocations = [dict(row) for row in conn.execute(
+                    f"SELECT {','.join(selected)} FROM tool_invocations "
+                    "ORDER BY updated_at DESC,invocation_id").fetchall()]
         for row in rows:
             try:
-                data = json.loads(row["data"])
+                data = unpack_json(row["data"])
             except (TypeError, ValueError):
                 continue
             if not isinstance(data, dict):
@@ -144,6 +156,14 @@ def read_deliverables(workspace: Path, *, kind: str = "all", query: str = "",
                         decision.get("reason") or item.get("benefit"),
                         status={"accepted": "已采纳", "partial": "部分采纳", "rejected": "未采纳", "needs_evidence": "待补证"}.get(decision.get("verdict"), "待评估"),
                         refs=[{"id": ref, "kind": "版本化记录"} for ref in item.get("evidence_refs", [])])
+            elif data.get("kind") == "exploration":
+                text = data.get('text') or data.get('node_type')
+                evidence_refs = data.get('evidence_refs')
+                evidence_refs = evidence_refs if isinstance(evidence_refs, list) else []
+                add('hypothesis', 'exploration', text, data.get('reason') or text,
+                    status=str(data.get('state') or 'open'),
+                    refs=[{'id': ref, 'kind': '原始证据'} for ref in evidence_refs
+                          if isinstance(ref, str)])
             elif data.get("kind") == "finding":
                 text = data.get("text") or data.get("note") or data.get("value") or data.get("summary")
                 add("finding", "finding", data.get("title") or text, text,
@@ -166,12 +186,28 @@ def read_deliverables(workspace: Path, *, kind: str = "all", query: str = "",
                     add("outcome", "task", (task.get("payload") or {}).get("node_title")
                         or task.get("task_type"), task["result_summary"],
                         status=str(task.get("status") or "未记录状态"))
+    for invocation in invocations:
+        invocation_id = str(invocation.get("invocation_id") or "")
+        tool = str(invocation.get("tool_name") or "未记录工具")
+        scope = " / ".join(str(invocation.get(field) or "") for field in
+                           ("agent_id", "task_id", "route_id", "identity_id")
+                           if invocation.get(field))
+        items.append({
+            "id": f"execution:{invocation_id}", "kind": "evidence",
+            "title": f"{tool} · {invocation_id[:16]}", "text": invocation_id,
+            "path": f"工具执行 / {invocation_id}", "source": scope or "execution-journal",
+            "updated_at": invocation.get("updated_at") or invocation.get("created_at"),
+            "status": str(invocation.get("execution_status") or "未记录状态"),
+            "refs": [{"id": invocation_id, "kind": "工具执行", "title": tool,
+                      "note": str(invocation.get("effect_status") or "none")}],
+        })
     items.extend(_files(workspace))
     # 旧记录也走脱敏口，响应只含白名单投影，不返回原始请求体和头部。
     items = sanitize_record({"detail": {"items": items}})["detail"]["items"]
     counts = {category: sum(item["kind"] == category for item in items) for category in sorted(_KINDS)}
     needle = query.strip().casefold()
-    filtered = [item for item in items if (kind == "all" or item["kind"] == kind)
+    filtered = [item for item in items if (kind == "all" or item["kind"] == kind
+                or kind == "sources" and item["kind"] in {"evidence", "file"})
                 and (not needle or needle in json.dumps(item, ensure_ascii=False).casefold())]
     return {"items": filtered[offset:offset + limit], "total": len(filtered), "counts": counts,
             "offset": offset, "limit": limit, "has_more": offset + limit < len(filtered)}

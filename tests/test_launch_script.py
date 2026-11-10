@@ -1,13 +1,16 @@
-"""启动脚本参数分发与独立部署的会话保护回归，不启动真实服务。"""
+"""启动脚本参数分发、会话保护与服务退出回归，不调用模型。"""
 from __future__ import annotations
 
 import json
 import os
 import shutil
+import signal
+import socket
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -174,6 +177,89 @@ class LaunchScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn('缺少虚拟环境', result.stderr)
         self.assertEqual(result.stdout, '')
+
+
+@unittest.skipUnless(sys.platform == 'linux', '验证本机 POSIX 信号退出')
+class ServerShutdownTests(unittest.TestCase):
+    def test_sigint_with_open_event_stream_reaches_lifespan_cleanup(self) -> None:
+        # 通过产品入口启动真实 Uvicorn，保留一个永不终态的 SSE 消费者。
+        # 原实现会一直等 HTTP 排空，永远无法进入 lifespan 收尾。
+        with tempfile.TemporaryDirectory(prefix='spirit shutdown ') as temp:
+            root = Path(temp)
+            marker = root / 'closed'
+            listener = socket.socket()
+            self.addCleanup(listener.close)
+            listener.bind(('127.0.0.1', 0))
+            listener.listen()
+            port = listener.getsockname()[1]
+            script = textwrap.dedent('''\
+                import sys
+                from contextlib import asynccontextmanager
+                from pathlib import Path
+                from types import SimpleNamespace
+                from unittest.mock import patch
+                import uvicorn
+                from fastapi import FastAPI
+                from fastapi.responses import StreamingResponse
+                from spiritscout import __main__ as entry
+                from spiritscout.web.events import stream_audit
+
+                marker = Path(sys.argv[1])
+                fd = int(sys.argv[2])
+                @asynccontextmanager
+                async def lifespan(app):
+                    try:
+                        yield
+                    finally:
+                        marker.write_text('cleanup complete')
+                app = FastAPI(lifespan=lifespan)
+                app.state.auth_enabled = False
+                app.state.updater = SimpleNamespace(configure_launch=lambda *args: None)
+                @app.get('/events')
+                async def events():
+                    return StreamingResponse(stream_audit(marker.parent / 'audit.jsonl'),
+                                             media_type='text/event-stream')
+                cfg = SimpleNamespace(models_config_path='unused', web=SimpleNamespace(
+                    host='127.0.0.1', port=0, max_concurrent_sessions=1))
+                run = uvicorn.run
+                def serve(app, **kwargs):
+                    return run(app, fd=fd, **kwargs)
+                # 隔离配置和模型预热，HTTP 服务、信号和事件流均使用真实实现。
+                with patch.object(entry, '_find_dotenv', return_value=None), \
+                     patch.object(entry, 'load_system_config', return_value=cfg), \
+                     patch.object(entry, 'load_model_config', return_value=[]), \
+                     patch('spiritscout.web.create_app', return_value=app), \
+                     patch('uvicorn.run', side_effect=serve), \
+                     patch.dict(sys.modules, {'litellm': SimpleNamespace()}):
+                    entry.main([])
+                ''')
+            with (root / 'output').open('w+') as output:
+                process = subprocess.Popen(
+                    [sys.executable, '-c', script, str(marker), str(listener.fileno())],
+                    pass_fds=(listener.fileno(),), stdout=output, stderr=output)
+                try:
+                    client = socket.create_connection(('127.0.0.1', port), timeout=15)
+                    self.addCleanup(client.close)
+                    client.sendall(b'GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n')
+                    response = b''
+                    while b': hb\n\n' not in response:
+                        chunk = client.recv(4096)
+                        self.assertTrue(chunk, 'SSE 未成功建立')
+                        response += chunk
+                    self.assertIn(b'200 OK', response)
+                    started = time.monotonic()
+                    process.send_signal(signal.SIGINT)
+                    process.wait(timeout=12)
+                    self.assertLess(time.monotonic() - started, 12)
+                    self.assertEqual(marker.read_text(), 'cleanup complete')
+                    self.assertIn(process.returncode, (0, -signal.SIGINT))
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait(timeout=5)
+                    output.seek(0)
+                    if not marker.exists():
+                        self.fail('服务未执行退出清理：' + output.read())
 
 
 if __name__ == '__main__':

@@ -134,12 +134,14 @@ $("#btn-logout").onclick = async () => {
 
 /* ================= 视图切换 ================= */
 const VIEWS = { home: "#view-home", session: "#view-session", dash: "#view-dash",
+                proxy: '#view-proxy',
                 agents: "#view-agents", models: "#view-models", mcp:"#view-mcp", skill:"#view-skill", 'browser-accounts': '#view-browser-accounts', projects:"#view-projects", exp:"#view-exp", traffic:"#view-traffic", schedules:"#view-schedules" };
 function show(view) {
   if (typeof ConsoleSidebar !== "undefined") ConsoleSidebar.closeOnMobile();
   if (typeof ComposerCommands !== "undefined") ComposerCommands.reset();
   if(view!=="mcp" && typeof ExaSettings!=="undefined") ExaSettings.clear();
   S.view = view;
+  if (typeof ProxyPoolPage !== 'undefined') ProxyPoolPage.navigate(view);
   if(typeof BrowserAccountsPage!=='undefined')BrowserAccountsPage.navigate(view);
   if (view !== "session" && typeof BackgroundTasks !== "undefined") BackgroundTasks.close();
   if (typeof SchedulePage !== "undefined") { if (view === "schedules") SchedulePage.open(); else SchedulePage.close(); }

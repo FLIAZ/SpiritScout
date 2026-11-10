@@ -212,6 +212,13 @@ def _build_argv(workspace: Path, rundir: Path, inner: list[str], *,
         argv += ["--setenv", key, value]
     if background_output.get() is not None:
         argv += ["--setenv", "PYTHONUNBUFFERED", "1"]
+    socket_path = (proxy_env or {}).get('SPIRITSCOUT_EGRESS_SOCKET')
+    if socket_path and not offline_execution.get():
+        from spiritscout.tools.egress_isolation import relay_command
+
+        mounted = '/tmp/spiritscout-egress.sock'
+        argv += ['--unshare-net', '--ro-bind', socket_path, mounted]
+        inner = relay_command(inner, mounted)
     return [*argv, *inner]
 
 

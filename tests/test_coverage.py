@@ -37,6 +37,20 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(unknown['test_type'], '')
         self.assertEqual(read_coverage(self.root, identity='member-a', query='权限')['total'], 1)
 
+    def test_asset_detail_uses_exact_reference_and_only_explicit_test_records(self) -> None:
+        self.explore(evidence_refs=['missing-execution'])
+        self.bb.write(BlackboardLayer.ASSET, 'orders-other', {'value': '/api/orders/export'}, updated_by='recon')
+        self.explore(asset_refs=['asset:orders-other'], identity='member-b')
+        self.assertEqual(read_coverage(self.root, asset_ref='asset:login', include_unattempted=False)['total'], 0)
+        page = read_coverage(self.root, asset_ref='asset:orders@1', include_unattempted=False)
+        self.assertEqual(page['total'], 1)
+        self.assertEqual(page['items'][0]['asset'], '/api/orders')
+        self.assertEqual(page['identities'], ['member-a'])
+        self.assertEqual(page['counts'], {'pending': 1})
+        all_tests = read_coverage(self.root, include_unattempted=False)
+        self.assertEqual(all_tests['total'], 2)
+        self.assertEqual(read_coverage(self.root)['total'], 3, '旧接口继续保留未关联资产投影')
+
     def test_explicit_independent_confirmation_and_changed_version(self) -> None:
         data = {'title': '订单权限', 'status': 'accepted', 'poc_verified': True,
                 'verification': {'verdict': 'confirmed'}}

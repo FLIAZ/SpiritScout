@@ -175,6 +175,7 @@ def safe_asset(data: dict[str, Any]) -> tuple[str, str, str, dict[str, Any]]:
         "service",
         "endpoint",
         "app",
+        "script",
         "finding",
     }:
         raise ValueError("共享库仅保存网络资产与发现摘要，不收录凭据类型")
@@ -209,7 +210,7 @@ def safe_asset(data: dict[str, Any]) -> tuple[str, str, str, dict[str, Any]]:
                         )
                     ]
                 ),
-                "",
+                url.fragment if kind == "script" else "",
             )
         )
     elif kind == "ip":
@@ -242,8 +243,20 @@ def safe_asset(data: dict[str, Any]) -> tuple[str, str, str, dict[str, Any]]:
                 "status_code",
                 "kind",
                 "source",
+                "sources",
                 "finding_type",
                 "parameter",
+                "params",
+                "param_locations",
+                "template",
+                "verification_status",
+                "route_count",
+                "config_keys",
+                "algorithm_calls",
+                "source_script_url",
+                "source_script_urls",
+                "source_map_url",
+                "source_index",
             )
             if key in attrs
         },
@@ -481,6 +494,7 @@ class ResourceStore:
         with self.connection() as conn:
             conn.execute(
                 "DELETE FROM session_projects WHERE session_id=?", (session_id,))
+            conn.execute("DELETE FROM settings WHERE kind='session_egress' AND id=?", (session_id,))
 
     def projects(self) -> dict[str, Any]:
         """项目总览：项目桶 + 未分类（资产级互斥）+ 全部。"""
@@ -649,6 +663,15 @@ class ResourceStore:
             }
             for row in rows
         ]
+
+    def setting(self, kind: str, key: str) -> dict[str, Any] | None:
+        """按引用读取一份配置，避免为读取单个源码解密全部会话材料。"""
+        with self.connection() as conn:
+            row = conn.execute('SELECT * FROM settings WHERE kind=? AND id=?', (kind, key)).fetchone()
+        if row is None:
+            return None
+        return {'id': row['id'], 'version': row['version'], 'updated_at': row['updated_at'],
+                'data': json.loads(self.cipher().decrypt(row['data']))}
 
     def save(self, kind: str, key: str, data: dict[str, Any], expected: int) -> int:
         cipher = self.cipher()

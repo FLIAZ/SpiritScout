@@ -186,7 +186,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"灵枢 Web 控制台: http://{host}:{port}  "
           f"({auth_note}，并发上限 {cfg.web.max_concurrent_sessions}，"
           "Ctrl+C 停止)")
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    # SSE 会等待运行中的会话结束；会话清理却在 HTTP 请求排空之后执行。
+    # 限制排空等待，让 Ctrl+C 能进入 lifespan 清理，避免长连接无限阻塞退出。
+    uvicorn.run(app, host=host, port=port, log_level="warning",
+                timeout_graceful_shutdown=5)
     return 0
 
 

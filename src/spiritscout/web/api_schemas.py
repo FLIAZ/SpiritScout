@@ -76,6 +76,7 @@ class SessionCreatePayload(BaseModel):
     mission: str | None = None
     target: str | None = None
     scope: list[str] = Field(default_factory=list)
+    proxy_plan_id: str = Field(default='direct', pattern=r'^(direct|proxy-[a-f0-9]{12})$')
     upload_ids: list[str] = Field(default_factory=list, max_length=20)
     platform: str | None = None
     flag_format: str | None = None

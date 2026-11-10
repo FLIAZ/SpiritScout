@@ -33,7 +33,7 @@ class AgentProfile:
             return self.key not in {AgentType.MASTER, AgentType.SECRETARY, AgentType.REPORT, AgentType.SCANNER}
         if name in {"cyberchef_operations", "cyberchef_bake"}:
             return self.key not in {AgentType.MASTER, AgentType.SECRETARY, AgentType.REPORT}
-        if name in {"http_response_read", "traffic_search", "traffic_get", "traffic_body_read"}:
+        if name in {"http_response_read", "traffic_search", "traffic_get", "traffic_body_read", 'js_source_read'}:
             return self.allows_tool("http_probe")
         if name in {"asset_memory_lookup", "web_search", "cve_lookup"}:
             return self.key not in {AgentType.MASTER, AgentType.SECRETARY, AgentType.REPORT}
@@ -55,6 +55,10 @@ class AgentProfile:
 
 
 PROFILES: tuple[AgentProfile, ...] = (
+    AgentProfile(AgentType.JS_REVERSE, '析微', 'JavaScript 静态逆向、接口线索与敏感常量分析',
+        ('src',), 'available', True, '以脚本实证交接假设，敏感常量用 secret_ref 复用。',
+        ('读取授权脚本', '分析接口与配置', '发布 JS_INTEL'),
+        ('授权内脚本读取', 'JS_INTEL', '会话秘密引用'), ('http_probe',)),
     AgentProfile(
         AgentType.VERIFIER, "鉴真", "独立危害复测：依据用户规则排除误报，确认实际影响后收录",
         ("src", "ctf", "competition"), "available", True,
@@ -99,7 +103,7 @@ PROFILES: tuple[AgentProfile, ...] = (
         ("src", "ctf"), "available", True,
         "依据用户授权、规则和现场选择目标与模板；命中是待验证线索，不自动扩围。",
         ("理解目标与规则", "按需选择扫描", "保存原始证据", "共享线索"),
-        ("Nuclei", "HTTP 探测", "扫描原始输出"),
+        ("并行 DNS / 被动子域 / HTTP 基线", "Nuclei", "HTTP 探测", "扫描原始输出"),
         ("nuclei_scan", "metasploit_scan", "http_probe", "sandbox_exec"),
     ),
     AgentProfile(
@@ -240,6 +244,12 @@ def agent_prompt_parts(agent: AgentType | str, *, allow_search: bool = True) -> 
            if profile.key == AgentType.MASTER else "")
     )
     common = (
+        '优先读取 world_state.intelligence_summary：其中统一汇总扫描资产、JS 静态接口、技术指纹、'
+        '失败证据和漏洞候选；先按 blackboard_ref 定位，再用 blackboard_read 读取必要原文，'
+        '不要在已有负证据上重复空转。SRC 的脚本、静态接口和 source map 统一登记在资产图；'
+        'asset_intelligence 仅保留旧调用方所需的 JS 子集。'
+        '敏感常量只以 secret_ref 交接；HTTP 工具可通过 secret_headers 按 Header 名注入秘密引用，'
+        '不要索取、复制或猜测秘密明文，引用默认未验证。需要脚本分析时可派遣 JS-REVERSE 战术。'
         "工具选择以完成当前问题的最小成本为准：网页正文、源码、接口响应优先使用 HTTP 工具；"
         "文件分析和计算优先已有文件工具或短脚本。仅在需要 JavaScript 渲染、页面交互、"
         "用户登录态或 HTTP 证据不足时按需使用浏览器；用户明确要求浏览器时直接遵循。"
