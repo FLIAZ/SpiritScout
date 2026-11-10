@@ -5,11 +5,11 @@ const SessionTopology = (() => {
   const edgeMeta={tries:[I18n.t('验证方法'),'chain'],redirects:[I18n.t('转向'),'chain'],scope:[I18n.t('目标'),'spawn'],spawns:[I18n.t('派生'),'spawn'],stage:[I18n.t('展开'),'chain'],advance:[I18n.t('推进'),'chain'],derives:[I18n.t('意图链'),'chain'],produces:[I18n.t('产出'),'yield'],task_output:[I18n.t('任务产出'),'yield'],evidence:[I18n.t('依据'),'proof'],dependency:[I18n.t('目标依赖'),'chain'],hint:[I18n.t('提示'),'chain']};
   const statuses={open:I18n.t('待探索'),pending:I18n.t('待执行'),created:I18n.t('已创建'),queued:I18n.t('待执行'),running:I18n.t('执行中'),active:I18n.t('执行中'),waiting:I18n.t('等待中'),blocked:I18n.t('受阻'),supported:I18n.t('有支持'),refuted:I18n.t('已反驳'),exhausted:I18n.t('已走不通'),closed:I18n.t('已结束'),done:I18n.t('已完成'),completed:I18n.t('已完成'),failed:I18n.t('失败'),cancelled:I18n.t('已撤销'),pruned:I18n.t('已暂缓'),stopped:I18n.t('已停止'),interrupted:I18n.t('已中断'),candidate:I18n.t('候选'),accepted:I18n.t('已收录')};
   const evidence={unverified:I18n.t('待核实'),observed:I18n.t('已观察'),supported:I18n.t('有依据'),independently_verified:I18n.t('独立复测通过'),conflicting:I18n.t('有冲突'),expired:I18n.t('已过期')};
-  const assetTypes={domain:I18n.t('域名'),ip:I18n.t('主机'),url:I18n.t('网址'),service:I18n.t('服务'),endpoint:I18n.t('接口'),app:I18n.t('应用'),asset:I18n.t('资产')};
+  const assetTypes={domain:I18n.t('域名'),ip:I18n.t('主机'),url:I18n.t('网址'),service:I18n.t('服务'),endpoint:I18n.t('接口'),app:I18n.t('应用'),script:I18n.t('脚本情报'),asset:I18n.t('资产')};
   const icons={flag:'<path d="M5 20V4m0 1c4-4 7 4 14 0v10c-7 4-10-4-14 0"/>',target:'<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1"/>',compass:'<circle cx="12" cy="12" r="8"/><path d="m15 9-2 4-4 2 2-4 4-2Z"/>',flask:'<path d="M9 3h6m-5 0v7l-5 8c-1 2 0 3 2 3h10c2 0 3-1 2-3l-5-8V3M8 15h8"/>',bug:'<path d="M9 5 7 3m8 2 2-2M4 9h4m8 0h4M4 15h4m8 0h4M12 8v12"/><rect x="8" y="6" width="8" height="14" rx="4"/>',bulb:'<path d="M9 18h6m-5 3h4M8 14a6 6 0 1 1 8 0l-1 2H9l-1-2Z"/>'};
   const icon=name=>`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || icons.compass}</svg>`;
   let session=null,model=null,viewport=null,layout=null,visible=null,observer=null;
-  const ui={query:'',state:'',collapsed:new Set(),manual:new Map(),assetQuery:'',assetPage:0};
+  const ui={query:'',state:'',collapsed:new Set(),manual:new Map(),assetQuery:'',assetPage:0,assetCollapsed:new Set()};
   function host() {return document.querySelector(S.tab==='assets' ? '#asset-library' : '#topo');}
   function detailPanel() {return host()?.querySelector('.topo-detail');}
   function detailMarkup(assets=false) {
@@ -164,15 +164,20 @@ const SessionTopology = (() => {
   }
   function assetRows() {
     const panel=document.querySelector('#asset-library'),list=panel?.querySelector('.rg-asset-results');if(!list)return;
-    const needle=ui.assetQuery.toLocaleLowerCase(),assets=model.assets.nodes.filter(n=>`${n.title} ${n.node_type || ''}`.toLocaleLowerCase().includes(needle));
-    ui.assetPage=Math.min(ui.assetPage,Math.max(0,Math.ceil(assets.length/40)-1));
-    const rows=assets.slice(ui.assetPage*40,ui.assetPage*40+40);
-    list.innerHTML=rows.length ? I18n.html`<div class="rg-asset-table"><table><thead><tr><th>类型</th><th>资产</th><th>来源状态</th><th>关联</th></tr></thead><tbody>${rows.map(n=>I18n.html`<tr><td><span class="rg-asset-type">${esc(assetTypes[n.node_type] || I18n.t('资产'))}</span></td><td><button data-topo-record="${esc(n.id)}">${esc(n.title)}</button></td><td>${esc(evidence[n.evidence_state] || I18n.t('待核实'))}</td><td>${model.assets.edges.filter(e=>e.source===n.id || e.target===n.id).length} 条资产关系 · ${model.links.filter(e=>e.source===n.id || e.target===n.id).length} 条探索关联</td></tr>`).join('')}</tbody></table></div>` : I18n.html('<div class="rg-asset-empty">尚无匹配的资产记录。资产发现和关系登记后会显示在这里。</div>');
-    list.innerHTML+=I18n.html`<div class="rg-asset-pagination"><span>${assets.length} 条资产${model.has_more ? I18n.t(' · 当前为有界目录') : ''}</span><button data-asset-page="-1" ${!ui.assetPage ? 'disabled' : ''}>上一页</button><span>${ui.assetPage+1} / ${Math.max(1,Math.ceil(assets.length/40))}</span><button data-asset-page="1" ${(ui.assetPage+1)*40>=assets.length ? 'disabled' : ''}>下一页</button></div>`;
+    const groups=TopologyLayout.assetTree(model.assets,ui.assetQuery);
+    ui.assetPage=Math.min(ui.assetPage,Math.max(0,Math.ceil(groups.length/40)-1));
+    function branch(node) {
+      const collapsed=!ui.assetQuery && ui.assetCollapsed.has(node.id),children=node.children.length;
+      return `<li><div class="rg-asset-entry">${children ? `<button class="rg-asset-toggle" data-asset-collapse="${esc(node.id)}" aria-expanded="${!collapsed}" aria-label="${esc((collapsed ? I18n.t('展开') : I18n.t('收起'))+' '+node.title)}">${collapsed ? '▸' : '▾'}</button>` : '<span class="rg-asset-spacer"></span>'}${node.records.length ? `<button type="button" class="rg-asset-path" data-topo-record="${esc(node.records[0].id)}" title="${esc(node.id)}">${esc(node.title)}</button>` : `<span class="rg-asset-path" title="${esc(node.id)}">${esc(node.title)}</span>`}${node.records.map(n=>`<button class="rg-asset-record" data-topo-record="${esc(n.id)}"><span class="rg-asset-type">${esc(assetTypes[n.node_type] || I18n.t('资产'))}</span> <span>${esc(evidence[n.evidence_state] || I18n.t('待核实'))}</span></button>`).join('')}</div>${children && !collapsed ? `<ul>${node.children.map(branch).join('')}</ul>` : ''}</li>`;
+    }
+    list.innerHTML=groups.length ? `<ul class="rg-asset-tree">${groups.slice(ui.assetPage*40,ui.assetPage*40+40).map(branch).join('')}</ul>` : I18n.html('<div class="rg-asset-empty">尚无匹配的资产记录。资产发现和关系登记后会显示在这里。</div>');
+    list.innerHTML+=I18n.html`<div class="rg-asset-pagination"><span>${model.assets.nodes.length} 条资产${model.has_more ? I18n.t(' · 当前为有界目录') : ''}</span><button data-asset-page="-1" ${!ui.assetPage ? 'disabled' : ''}>上一页</button><span>${ui.assetPage+1} / ${Math.max(1,Math.ceil(groups.length/40))}</span><button data-asset-page="1" ${(ui.assetPage+1)*40>=groups.length ? 'disabled' : ''}>下一页</button></div>`;
     wireRecords(list);list.querySelectorAll('[data-asset-page]').forEach(button=>button.onclick=()=>{ui.assetPage+=Number(button.dataset.assetPage);assetRows();});
+    list.querySelectorAll('[data-asset-collapse]').forEach(button=>button.onclick=()=>{const id=button.dataset.assetCollapse;ui.assetCollapsed.has(id) ? ui.assetCollapsed.delete(id) : ui.assetCollapsed.add(id);assetRows();});
   }
+
   function render(state,progress=[],assets=false) {
-    if(session!==S.cur){session=S.cur;viewport=null;layout=null;ui.query='';ui.state='';ui.collapsed.clear();ui.manual.clear();ui.assetQuery='';ui.assetPage=0;}
+    if(session!==S.cur){session=S.cur;viewport=null;layout=null;ui.query='';ui.state='';ui.collapsed.clear();ui.manual.clear();ui.assetQuery='';ui.assetPage=0;ui.assetCollapsed.clear();}
     model=TopologyLayout.reasoning(state,progress);S.topoGraph=model;S.topoProcess=new Map(model.records.map(n=>[n.id,n]));
     const panel=document.querySelector(assets ? '#asset-library' : '#topo');if(!panel)return;
     const same=panel.dataset.scrollSession===S.cur,previous=same?panel.querySelector('.topo-detail'):null,detailId=previous && !previous.hidden ? previous._curId : null,scroll=previous?.scrollTop || 0;
@@ -185,7 +190,7 @@ const SessionTopology = (() => {
     panel.dataset.graphSignature=signature;
     panel.dataset.scrollSession=S.cur;
     if(assets) {
-      panel.className='asset-library';panel.innerHTML=I18n.html`<header class="rg-asset-head"><div><h3>资产</h3><p>资产与关系独立保存，探索节点通过引用关联到这里。</p></div><label>查找资产<input type="search" data-asset-search placeholder="搜索域名、网址或资产类型" value="${esc(ui.assetQuery)}"></label></header><div class="rg-asset-results"></div>${detailMarkup(true)}`;
+      panel.className='asset-library';panel.innerHTML=I18n.html`<header class="rg-asset-head"><div><h3>资产与情报</h3><p>脚本、静态接口、source map 与其他入口统一保存；关系和探索假设通过引用关联。</p></div><label>查找资产<input type="search" data-asset-search placeholder="搜索域名、接口、脚本或资产类型" value="${esc(ui.assetQuery)}"></label></header><div class="rg-asset-results"></div>${detailMarkup(true)}`;
       assetRows();panel.querySelector('[data-asset-search]').oninput=event=>{ui.assetQuery=event.target.value;ui.assetPage=0;assetRows();};
       const restored=panel.querySelector('.rg-asset-results');restored.scrollTop=listTop;restored.scrollLeft=listLeft;
       const table=restored.querySelector('.rg-asset-table');if(table)table.scrollLeft=tableLeft;

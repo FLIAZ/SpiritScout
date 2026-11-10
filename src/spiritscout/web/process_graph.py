@@ -50,12 +50,21 @@ def project_blackboard(blackboard: Any) -> dict[str, Any]:
     aliases: dict[str, set[str]] = {}
     has_more = False
     for layer in (BlackboardLayer.TARGET_AUTH, BlackboardLayer.ASSET,
+                  BlackboardLayer.JS_INTEL,
                   BlackboardLayer.RECON_CLUE, BlackboardLayer.VULN,
                   BlackboardLayer.CREDENTIAL, BlackboardLayer.TOPOLOGY):
         records = blackboard.query(layer, limit=201)
         has_more = has_more or len(records) > 200
         for rec in records[:200]:
             data, key = rec['data'], rec['record_id']
+            if layer == BlackboardLayer.JS_INTEL:
+                # 历史只读兼容：旧 JS 情报作为脚本资产显示，不再形成第二套数据源。
+                data = {'asset_type': 'script',
+                        'value': data.get('script_url') or data.get('source_map_url') or key,
+                        'fingerprint': {'sha256': data.get('sha256', '')},
+                        'attrs': {**data, 'kind': ('source_map_source' if data.get('source_map_url')
+                                                  else 'javascript'),
+                                  'source': 'legacy_js_intel'}}
             if layer == BlackboardLayer.TOPOLOGY and data.get('kind') not in {'finding', 'exploration'}:
                 continue
             if layer == BlackboardLayer.RECON_CLUE and data.get('clue_type') == 'user_reply':
@@ -75,7 +84,7 @@ def project_blackboard(blackboard: Any) -> dict[str, Any]:
                              and isinstance(data.get('detail'), str) else '')
                          or data.get('value') or data.get('detail') or key))
             refs = [ref for ref in (data.get('evidence_refs') or []) if isinstance(ref, str)]
-            reference_type = ('assets' if layer == BlackboardLayer.ASSET or
+            reference_type = ('assets' if layer in {BlackboardLayer.ASSET, BlackboardLayer.JS_INTEL} or
                               layer == BlackboardLayer.TOPOLOGY and data.get('type') == 'asset' else
                               'rules' if is_rule else
                               'evidence' if layer == BlackboardLayer.RECON_CLUE

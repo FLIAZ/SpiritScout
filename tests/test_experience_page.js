@@ -69,7 +69,7 @@ const moreEl = () => page.querySelector("[data-more]");
     history: [
       {session_id: "sess-gone", ts: "2026-10-17T10:00:00", result: "error",
        outcome: "failed", error: "ValueError: 模型输出为空"},
-      {session_id: "sess-live", ts: "2026-10-17T09:00:00", result: "ok",
+      {session_id: "sess-live", session_title: "会员接口 <越权> 测试", ts: "2026-10-17T09:00:00", result: "ok",
        outcome: "completed", insights: 2},
     ],
   };
@@ -87,6 +87,9 @@ const moreEl = () => page.querySelector("[data-more]");
   assert.match(hist, /失败/);
   assert.match(hist, /模型输出为空/);
   assert.match(hist, /data-open-session="sess-live"/);
+  assert.match(hist, /会员接口 &lt;越权&gt; 测试/);
+  assert.match(hist, /title="sess-live"/);
+  assert.match(hist, />sess-gone<\//, "无标题的历史会话回退到 ID");
   assert.doesNotMatch(hist, /data-open-session="sess-gone"/);
   assert.equal(moreEl().hidden, false, "还有下一页时展示加载更多");
 

@@ -1826,3 +1826,16 @@ main:has(> #view-session:not([hidden])) { min-height: 0; height: 100%; padding: 
 #view-home .composer { position: relative; }
 #view-home.file-drag .composer, #view-session.file-drag .composer-dock .comp { outline: 2px dashed var(--accent); outline-offset: 3px; }
 #home-drop-status, #comp-drop-status { position: absolute; bottom: calc(100% + 8px); left: 0; right: 0; pointer-events: none; margin: 0; padding: 8px 12px; color: var(--accent-ink); background: var(--accent-soft); border-radius: 8px; font-size: 12px; }
+
+.rg-asset-tree,.rg-asset-tree ul { list-style:none; margin:0; padding:0; }
+.rg-asset-tree { padding:12px 18px; }
+.rg-asset-tree ul { margin-left:12px; padding-left:18px; border-left:1px solid var(--line); }
+.rg-asset-tree > li + li { margin-top:12px; }
+.rg-asset-entry { display:flex; align-items:center; gap:9px; min-height:36px; padding:4px 0; }
+.rg-asset-path { font:12px var(--mono); overflow-wrap:anywhere; min-width:0; }
+.rg-asset-toggle,.rg-asset-spacer { flex:none; width:22px; }
+.rg-asset-tree button { border:0; background:transparent; color:var(--ink-2); cursor:pointer; }
+.rg-asset-toggle { padding:4px; }
+.rg-asset-record { font-size:11px; text-align:left; white-space:nowrap; }
+.rg-asset-record:hover,.rg-asset-record.is-selected { color:var(--accent-ink); text-decoration:underline; }
+.rg-asset-tree button:focus-visible { outline:2px solid var(--accent-ink); outline-offset:2px; }

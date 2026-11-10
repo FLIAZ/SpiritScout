@@ -146,6 +146,13 @@ def _connect(workspace: Path, *, write: bool = False) -> Iterator[sqlite3.Connec
 
 
 def _append(workspace: Path, record: dict[str, Any]) -> int:
+    from spiritscout.resources.session_secrets import redact_known
+
+    # 普通列表、模型流量工具和搜索索引只存引用；原始取证载体保留既有私有读取契约。
+    raw = record.get('raw')
+    record = redact_known(workspace, {key: value for key, value in record.items() if key != 'raw'})
+    if raw:
+        record['raw'] = raw
     with _connect(workspace, write=True) as conn:
         cursor = conn.execute("""INSERT INTO exchanges
             (captured_at,method,url,host,status,error,duration_ms,request_bytes,response_bytes,

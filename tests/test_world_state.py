@@ -22,6 +22,73 @@ from spiritscout.policy.scope import ScopeGuard
 
 
 class WorldStateSnapshotTests(unittest.TestCase):
+    def test_empty_blackboard_does_not_emit_placeholder_intelligence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bb = Blackboard(Path(tmp) / "bb.db")
+            self.addCleanup(bb.close)
+            self.assertNotIn("intelligence_summary", world_state.snapshot(blackboard=bb))
+
+    def test_asset_intelligence_exposes_scripts_and_js_discovered_endpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bb = Blackboard(Path(tmp) / "bb.db")
+            self.addCleanup(bb.close)
+            bb.write(BlackboardLayer.ASSET, "script", {
+                "asset_id": "script", "asset_type": "script", "value": "https://a.test/app.js",
+                "attrs": {"route_count": 1, "secrets": [{"secret_ref": "secret-reference"}]},
+            })
+            bb.write(BlackboardLayer.ASSET, "endpoint", {
+                "asset_id": "endpoint", "asset_type": "endpoint", "value": "https://a.test/api/user",
+                "attrs": {"method": "GET", "params": ["id"], "source": "model_observed",
+                          "sources": ["js_static", "model_observed"]},
+            })
+            state = world_state.snapshot(blackboard=bb)
+            intelligence = state["asset_intelligence"]
+            self.assertEqual(intelligence["scripts_total"], 1)
+            self.assertEqual(intelligence["js_endpoints_total"], 1)
+            self.assertEqual(intelligence["scripts"][0]["url"], "https://a.test/app.js")
+            self.assertEqual(intelligence["scripts"][0]["secret_count"], 1)
+            self.assertEqual(intelligence["endpoints"][0], {
+                "blackboard_ref": {"layer": "asset", "record_id": "endpoint", "version": 1},
+                "url": "https://a.test/api/user", "method": "GET", "params": ["id"],
+            })
+
+    def test_intelligence_summary_unifies_scanner_js_failures_and_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bb = Blackboard(Path(tmp) / "bb.db")
+            self.addCleanup(bb.close)
+            bb.write(BlackboardLayer.ASSET, "page", {
+                "asset_id": "page", "asset_type": "url", "value": "https://a.test/login?token=plain-secret",
+                "fingerprint": {"server": "nginx", "technologies": [{"name": "Vue"}]},
+            })
+            bb.write(BlackboardLayer.ASSET, "script", {
+                "asset_id": "script", "asset_type": "script", "value": "https://a.test/app.js",
+                "attrs": {"route_count": 1, "secrets": [{"secret_ref": "secret-reference"}]},
+            })
+            bb.write(BlackboardLayer.ASSET, "endpoint", {
+                "asset_id": "endpoint", "asset_type": "endpoint", "value": "https://a.test/api/user",
+                "attrs": {"method": "POST", "params": ["id"], "sources": ["js_static"]},
+            })
+            bb.write(BlackboardLayer.RECON_CLUE, "failed-probe", {
+                "clue_type": "scanner_observation", "value": "https://a.test/admin?auth=plain-secret",
+                "detail": {"tool": "http_probe", "ok": False, "error": "403 plain-secret",
+                           "result": {"body": "plain-secret"}},
+                "raw_output": "plain-secret", "verification_status": "unverified",
+            })
+            bb.write(BlackboardLayer.VULN, "candidate", {
+                "vuln_id": "candidate", "title": "对象越权候选", "vuln_type": "idor",
+                "target": "https://a.test", "endpoint": "https://a.test/api/user?id=plain-secret",
+                "status": "candidate", "severity": "medium", "poc_code": "plain-secret",
+            })
+            summary = world_state.snapshot(blackboard=bb)["intelligence_summary"]
+            self.assertEqual(summary["assets_by_type"], {"endpoint": 1, "script": 1, "url": 1})
+            self.assertEqual(summary["vulnerabilities"]["by_status"], {"candidate": 1})
+            self.assertEqual(summary["negative_evidence"]["samples"][0]["failure_mode"], "access_denied")
+            self.assertIn("nginx", [item["name"] for item in summary["technologies"]])
+            self.assertIn("Vue", [item["name"] for item in summary["technologies"]])
+            encoded = json.dumps(summary, ensure_ascii=False)
+            self.assertNotIn("plain-secret", encoded)
+            self.assertIn("token=%E2%80%A6", encoded)
+
     def test_incremental_facts_preserve_versions_retirement_and_full_authorization(self) -> None:
         def fact(key, version=1):
             return {"blackboard_ref": {"layer": "topology", "record_id": key, "version": version},

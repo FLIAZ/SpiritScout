@@ -13,13 +13,14 @@ import ipaddress
 import json
 import re
 import socket
+import ssl
 import time
 import zipfile
 import zlib
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, quote_plus, urljoin, urlparse
 
 import httpx
 
@@ -149,6 +150,34 @@ def _body_content_type(data: Any) -> str:
     return "application/x-www-form-urlencoded"
 
 
+def _http_failure(exc: httpx.HTTPError, *, method: str, timeout: float,
+                  response: httpx.Response | None, redirects: int) -> dict[str, Any]:
+    """传输失败不代表业务拒绝；重定向前的请求也可能已经产生副作用。"""
+    before_send = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
+    phase = ('connect' if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)) else
+             'pool' if isinstance(exc, httpx.PoolTimeout) else
+             'write' if isinstance(exc, (httpx.WriteError, httpx.WriteTimeout)) else
+             'read' if isinstance(exc, (httpx.ReadError, httpx.ReadTimeout)) else 'protocol')
+    request_state = ('response_incomplete' if response is not None else
+                     'not_sent' if before_send and not redirects else 'unknown')
+    chain, seen = [], set()
+    cause: BaseException | None = exc
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        chain.append(type(cause).__name__)
+        cause = cause.__cause__ or cause.__context__
+    return {'error_type': type(exc).__name__, 'phase': phase,
+            'timed_out': isinstance(exc, httpx.TimeoutException), 'timeout_seconds': timeout,
+            'method': method, 'request_state': request_state, 'completed_redirects': redirects,
+            'status_code': response.status_code if response is not None else None,
+            'exception_chain': chain,
+            'guidance': ('本次未发出目标请求；这是连接或连接池故障，不是业务条件被否定。'
+                         '先核对目标可用性、代理和在途扫描负载，再决定是否重试。'
+                         if request_state == 'not_sent' else
+                         '请求可能已执行，未取得完整响应；不能判定业务成功或失败。'
+                         '有副作用的请求应先核对目标状态，不要盲目重复提交；传输故障不构成业务假设的反证。')}
+
+
 async def http_probe(
     url: str,
     *,
@@ -156,6 +185,9 @@ async def http_probe(
     params: dict[str, Any] | None = None,
     data: Any = None,
     headers: dict[str, str] | None = None,
+    secret_headers: dict[str, Any] | None = None,
+    secret_cookies: dict[str, str] | None = None,
+    secret_params: dict[str, str] | None = None,
     guard: ScopeGuard,
     limiter: RateLimiter | None = None,
     timeout: float = 15.0,
@@ -174,6 +206,56 @@ async def http_probe(
 
     req_headers = {"User-Agent": _UA, "Accept-Encoding": "gzip, deflate, identity",
                    **(headers or {})}
+    injected_secrets = {}
+    def redact_injected(value):
+        if isinstance(value, dict):
+            return {key: redact_injected(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [redact_injected(item) for item in value]
+        if isinstance(value, (str, bytes)):
+            for secret, reference in injected_secrets.items():
+                variants = {secret, quote(secret, safe=''), quote_plus(secret), json.dumps(secret)[1:-1]}
+                for variant in sorted(variants, key=len, reverse=True):
+                    value = value.replace(variant.encode(), reference.encode()) if isinstance(value, bytes) else value.replace(variant, reference)
+        return value
+    if secret_headers or secret_cookies or secret_params:
+        from spiritscout.agents.scoped_assets import _within
+        from spiritscout.resources.session_secrets import SessionSecrets
+
+        if not workspace_root or not _within(url, guard.scope):
+            raise ValueError('秘密引用需要会话工作区及当前授权内的目标')
+        vault = SessionSecrets(workspace_root)
+        for header, binding in (secret_headers or {}).items():
+            reference = binding
+            prefix = ''
+            if isinstance(binding, dict):
+                if set(binding) - {'secret_ref', 'prefix'}:
+                    raise ValueError('秘密 Header 绑定字段无效')
+                reference, prefix = binding.get('secret_ref'), binding.get('prefix', '')
+            if not isinstance(reference, str) or not isinstance(prefix, str) or any(char in prefix for char in '\r\n'):
+                raise ValueError('秘密 Header 引用或前缀无效')
+            value = vault.resolve(reference, url)
+            req_headers[header] = prefix + value
+            injected_secrets[value] = reference
+        cookies = []
+        for name, reference in (secret_cookies or {}).items():
+            value = vault.resolve(reference, url)
+            if not re.fullmatch(r'[A-Za-z0-9_.-]+', name) or any(char in value for char in ';\r\n'):
+                raise ValueError('Cookie 名称或秘密值格式无效')
+            injected_secrets[value] = reference
+            cookies.append(name + '=' + value)
+        if cookies:
+            if any(name.lower() == 'cookie' for name in req_headers):
+                raise ValueError('请勿同时提供 Cookie Header 与 secret_cookies')
+            req_headers['Cookie'] = '; '.join(cookies)
+        if secret_params:
+            params = dict(params or {})
+            for name, reference in secret_params.items():
+                value = vault.resolve(reference, url)
+                injected_secrets[value] = reference
+                params[name] = value
+        # 防止重定向将注入值转交另一地址；后续请求应重新解析引用。
+        max_redirects = 0
     if data is not None and not any(
             str(k).lower() == "content-type" for k in req_headers):
         ctype = _body_content_type(data)
@@ -188,9 +270,17 @@ async def http_probe(
         current_data = data
         current_params = params
         redirect_chain: list[str] = []
+        import ssl
+
+        from spiritscout.traffic.proxy import tool_environment
+
+        proxy_env = await tool_environment(Path(workspace_root)) if workspace_root else {}
+        transport = (httpx.AsyncHTTPTransport(proxy=proxy_env['HTTPS_PROXY'],
+                     verify=ssl.create_default_context(cafile=proxy_env['SSL_CERT_FILE']), trust_env=False)
+                     if proxy_env else ScopedHTTPTransport(guard))
         async with httpx.AsyncClient(
             follow_redirects=False, timeout=timeout, trust_env=False,
-            transport=ScopedHTTPTransport(guard),
+            transport=transport,
         ) as client:
             for hop in range(max(0, max_redirects) + 1):
                 if limiter:
@@ -254,7 +344,15 @@ async def http_probe(
         if req is not None and not hop_recorded:
             await record_http(workspace_root, req, resp, started=hop_started,
                               error=type(exc).__name__)
-        return ToolResult(tool="http_probe", ok=False, error=f"HTTP 错误: {exc}",
+        failure = _http_failure(exc, method=method.upper(), timeout=timeout,
+                                response=resp, redirects=len(redirect_chain))
+        detail = str(exc).strip()
+        message = f"HTTP {failure['error_type']}（阶段 {failure['phase']}，超时设置 {timeout:g}s）"
+        if detail:
+            message += f"：{detail}"
+        return ToolResult(tool="http_probe", ok=False,
+                          error=redact_injected(message + '。' + failure['guidance']),
+                          parsed={'http_failure': failure}, timed_out=failure['timed_out'],
                           returncode=-2, duration_ms=(time.perf_counter() - started) * 1000)
 
     title = ""
@@ -281,13 +379,17 @@ async def http_probe(
         from spiritscout.tools.http_responses import save_response
 
         try:
-            saved = await asyncio.to_thread(save_response, workspace_root, content, body,
-                {**parsed, "url": url, "method": method, "encoding": resp.encoding or "utf-8",
+            safe_parsed = redact_injected(parsed)
+            if injected_secrets:
+                safe_parsed['secret_redacted'] = True
+                safe_parsed['secret_refs'] = list(injected_secrets.values())
+            saved = await asyncio.to_thread(save_response, workspace_root, redact_injected(content), redact_injected(body),
+                {**safe_parsed, "url": redact_injected(url), "method": method, "encoding": resp.encoding or "utf-8",
                  "captured_at": time.time()},
                 # 此客户端未启用 HTTP/2；请求协议不能用服务器的响应协议替代。
-                {"line": resp.request.method.encode()+b' '+resp.request.url.raw_path+b' HTTP/1.1',
-                 "headers": resp.request.headers.raw, "body": resp.request.content,
-                 "method": resp.request.method, "url": str(resp.request.url)})
+                {"line": redact_injected(resp.request.method.encode()+b' '+resp.request.url.raw_path+b' HTTP/1.1'),
+                 "headers": [(key, redact_injected(value)) for key, value in resp.request.headers.raw], "body": redact_injected(resp.request.content),
+                 "method": resp.request.method, "url": redact_injected(str(resp.request.url))})
         except OSError as exc:
             return ToolResult(tool="http_probe", ok=False, returncode=1,
                 error=f"HTTP 响应已收到但源码保存失败：{exc}",
@@ -312,7 +414,7 @@ async def http_probe(
             "危险操作仍须按独立审批通道处理。")
     return ToolResult(
         tool="http_probe", ok=True, returncode=0,
-        stdout=body, parsed=parsed,
+        stdout=redact_injected(body), parsed=redact_injected(parsed),
         duration_ms=(time.perf_counter() - started) * 1000,
     )
 
@@ -327,11 +429,25 @@ async def dns_resolve(
         await limiter.acquire()
     loop = asyncio.get_running_loop()
     try:
-        infos = await asyncio.wait_for(
-            loop.getaddrinfo(host, None, family=socket.AF_INET), timeout=timeout
-        )
-        ips = sorted({info[4][0] for info in infos})
-    except (TimeoutError, socket.gaierror) as exc:
+        from spiritscout.traffic.proxy import tool_environment
+
+        env = await tool_environment(Path(workspace_root)) if workspace_root else {}
+        if env:
+            async with httpx.AsyncClient(proxy=env['HTTPS_PROXY'], trust_env=False,
+                    verify=ssl.create_default_context(cafile=env['SSL_CERT_FILE']), timeout=timeout) as client:
+                async with client.stream('GET', 'https://dns.google/resolve', params={'name': host, 'type': 'A'}) as response:
+                    response.raise_for_status()
+                    content, truncated = await _response_window(response, 65536)
+                    if truncated:
+                        raise ValueError('DNS 响应超过上限')
+                    answer = json.loads(content)
+                    ips = sorted({str(ipaddress.ip_address(row['data'])) for row in answer.get('Answer', []) if row.get('type') == 1})
+        else:
+            infos = await asyncio.wait_for(
+                loop.getaddrinfo(host, None, family=socket.AF_INET), timeout=timeout
+            )
+            ips = sorted({info[4][0] for info in infos})
+    except (TimeoutError, socket.gaierror, httpx.HTTPError, ValueError) as exc:
         await record_network_event(workspace_root, protocol="DNS", target=f"dns://{host}", source="dns_resolve",
             started=started, observations={"host": host}, error=type(exc).__name__)
         return ToolResult(tool="dns_resolve", ok=False, error=f"解析失败: {exc}",
@@ -339,7 +455,7 @@ async def dns_resolve(
     # fake-ip 识别：解析全部落在代理虚拟段时如实标注，上层据此不入册 IP 资产
     proxy_virtual = _all_proxy_virtual(ips)
     await record_network_event(workspace_root, protocol="DNS", target=f"dns://{host}", source="dns_resolve",
-        started=started, observations={"host": host, "addresses": ips, "resolver": "system getaddrinfo"})
+        started=started, observations={"host": host, "addresses": ips, "resolver": "proxied DoH" if env else "system getaddrinfo"})
     return ToolResult(
         tool="dns_resolve", ok=True, stdout="\n".join(ips),
         parsed={
@@ -378,6 +494,12 @@ async def tcp_scan(
     host = str(host or "").strip()
     if not host:
         return ToolResult(tool="tcp_scan", ok=False, returncode=-1, error="host 必填")
+    if workspace_root:
+        from spiritscout.traffic.proxy import tool_environment
+
+        if await tool_environment(Path(workspace_root)):
+            return ToolResult(tool='tcp_scan', ok=False, returncode=-3,
+                              error='当前 TCP 扫描尚未支持会话代理出口；本次调用未发送直连流量')
     loop = asyncio.get_running_loop()
     try:
         infos = await asyncio.wait_for(

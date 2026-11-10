@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
-const context=vm.createContext(require('./helpers/i18n').context({}));
+const context=vm.createContext(require('./helpers/i18n').context({URL}));
 vm.runInContext(fs.readFileSync('src/spiritscout/web/static/js/topology.js','utf8'),context);
 const layout=vm.runInContext('TopologyLayout',context);
 const state={session:{title:'验证测试环境的访问边界',target:'https://fixture.test',status:'running'},topology:{process:{nodes:[
@@ -237,3 +237,30 @@ assert.ok(managedScan.edges.some(e=>e.source===scanAssignment.id && e.target===s
 assert.equal(managedScan.nodes.find(n=>n.view_kind==='attempt').progress[0].tools[0].name,'nuclei_scan');
 assert.ok(!layout.reasoning({scanner:{status:'idle'}}).nodes.some(n=>n.id.startsWith('__process_scan_assignment:')),'idle capacity does not invent a dispatched task');
 console.log('managed scanner: actual master assignment, public stages and tool details appear without idle placeholders');
+
+const assetRecords=[
+ {id:'home',title:'https://fixture.test/',node_type:'url'},
+ {id:'users',title:'https://fixture.test/api/users',node_type:'endpoint'},
+ {id:'query',title:'https://fixture.test/api/users?page=2',node_type:'endpoint'},
+ {id:'script',title:'main.js',node_type:'script',body:JSON.stringify({value:'https://fixture.test/static/main.js'})},
+ {id:'other',title:'https://other.test/api/users',node_type:'endpoint'},
+ {id:'ip',title:'127.0.0.1',node_type:'ip'},
+ {id:'service',title:'tcp:8000',node_type:'service'},
+];
+const assetGraph={nodes:assetRecords,edges:[{source:'ip',target:'service',kind:'hosts'},{source:'service',target:'ip',kind:'hosts'}]};
+const assetOriginal=JSON.stringify(assetGraph),tree=layout.assetTree(assetGraph);
+assert.equal(JSON.stringify(assetGraph),assetOriginal);
+assert.equal(tree.length,3,'URL origins and non-URL parents remain separate');
+const host=tree.find(n=>n.id==='https://fixture.test');
+assert.equal(host.records[0].id,'home');
+assert.equal(host.children.find(n=>n.title==='api').children[0].records[0].id,'users');
+assert.equal(host.children.find(n=>n.title==='api').children[0].children[0].records[0].id,'query');
+assert.equal(tree.find(n=>n.id==='ip').children[0].records[0].id,'service','explicit hierarchy handles cycles without dropping records');
+const matched=layout.assetTree(assetGraph,'main.js');
+assert.equal(matched.length,1);
+assert.equal(matched[0].children.length,1,'search retains ancestors while filtering unrelated paths');
+assert.equal(matched[0].children[0].children[0].records[0].id,'script');
+console.log('asset tree: origins, paths, query variants, script values, parent relations, cycles and search passed');
+
+const withDomain=layout.assetTree({nodes:[...assetRecords,{id:'domain',node_type:'domain',title:'fixture.test',body:'null'}],edges:[]});
+assert.equal(withDomain.find(n=>n.id==='domain').children[0].id,'https://fixture.test','domain parent owns its URL path tree');

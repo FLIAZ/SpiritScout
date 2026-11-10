@@ -8,7 +8,7 @@ Assign tasks in your browser, let agents collaborate, and inspect their progress
 
 **[简体中文](README.md) · English**
 
-[![Version](https://img.shields.io/badge/version-v0.21.0-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11--3.14-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.21.1-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11--3.14-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
 
 [Interface preview](#interface-preview) · [Quick start](#quick-start) · [Capabilities and modes](#capabilities-and-modes) · [Architecture](#architecture) · [Deployment guide (中文)](docs/部署与配置.md) · [Contributing (中文)](CONTRIBUTING.md)
 
@@ -79,6 +79,20 @@ Actual interface with local demo data. Click an image to enlarge.
 <td width="33%" align="center" valign="top">
 <a href="docs/images/screenshots/ctf-writeup.png"><img src="docs/images/screenshots/ctf-writeup.png" alt="CTF write-ups" width="100%"></a><br>
 <b>CTF write-ups</b>
+</td>
+</tr>
+<tr>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/background-tasks.png"><img src="docs/images/screenshots/background-tasks.png" alt="Background tasks" width="100%"></a><br>
+<b>Background tasks</b>
+</td>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/deliverables.png"><img src="docs/images/screenshots/deliverables.png" alt="Archives and files" width="100%"></a><br>
+<b>Archives and files</b>
+</td>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/proxy-pool.png"><img src="docs/images/screenshots/proxy-pool.png" alt="Proxy pool" width="100%"></a><br>
+<b>Proxy pool</b>
 </td>
 </tr>
 </table>
@@ -309,7 +323,7 @@ The topology shows persistent blackboard facts, evidence, and user-rule referenc
 
 Agent competition mode preserves unfinished instances across investigation stages. Deferring dispatch, cancelling running work, and releasing an instance are explicit model decisions; elapsed time alone does not force a switch.
 
-Current code version: **v0.21.0**. See [Version management (中文)](CONTRIBUTING.md#版本管理) for the single source of truth, increment rules, and historical version notes.
+Current code version: **v0.21.1**. See [Version management (中文)](CONTRIBUTING.md#版本管理) for the single source of truth, increment rules, and historical version notes.
 
 Follow the [Agent working rules](AGENTS.md): keep changes in the same batch under one version, and obtain explicit user approval before changing the version or pushing to a remote.
 `ctfy-docker/` and `tsecbench-docker/` are local validation projects for the maintainer, are excluded from the repository, and are not required for contributors.

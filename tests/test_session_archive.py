@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 from spiritscout.blackboard import Blackboard
 from spiritscout.config.settings import SystemConfig, WorkspaceConfig
 from spiritscout.core.models import BlackboardLayer
+from spiritscout.tools.invocation import ExecutionScope
+from spiritscout.tools.journal import ExecutionJournal
 from spiritscout.web.app import create_app
 from spiritscout.web.deliverables import open_artifact, read_deliverables
 from spiritscout.web.sessions import Session
@@ -58,6 +60,40 @@ class SessionArchiveTests(unittest.TestCase):
         self.assertEqual(read_deliverables(self.workspace)["counts"], first["counts"])
         self.assertEqual(len(read_deliverables(self.workspace, kind="file")["items"]), 1)
 
+    def test_evidence_and_files_default_group_preserves_other_original_records(self) -> None:
+        self.bb.write(BlackboardLayer.ASSET, 'compressed-asset', {
+            'value': 'https://archive.test/api', 'attrs': {'notes': '长记录' * 12000}}, updated_by='recon')
+        self.bb.write(BlackboardLayer.TOPOLOGY, 'test-attempt', {
+            'kind': 'exploration', 'node_type': 'attempt', 'text': '对照账号权限',
+            'state': 'blocked', 'reason': '缺少第二个账号', 'asset_refs': ['asset:compressed-asset']},
+            updated_by='tester')
+        page = read_deliverables(self.workspace, kind='sources')
+        self.assertEqual({row['kind'] for row in page['items']}, {'evidence', 'file'})
+        self.assertEqual(page['total'], page['counts']['evidence'] + page['counts']['file'])
+        assets = read_deliverables(self.workspace, kind='asset')
+        self.assertEqual(assets['total'], 1, '压缩保存的原始记录同样可检索')
+        self.assertEqual(assets['items'][0]['record_id'], 'compressed-asset')
+        original = read_deliverables(self.workspace, query='test-attempt')
+        self.assertEqual(original['total'], 1)
+        self.assertEqual(original['items'][0]['record_id'], 'test-attempt')
+        self.assertGreater(read_deliverables(self.workspace)['total'], page['total'])
+
+    def test_tool_execution_reference_is_searchable_as_raw_evidence(self) -> None:
+        journal = ExecutionJournal(self.bb, self.workspace, "run-archive")
+        journal.begin("inv-archive-evidence", "http_probe", "d" * 64, "never",
+                      params={"url": "https://archive.test/?token=hidden"},
+                      scope=ExecutionScope(agent_id="recon", task_id="task-1"))
+        journal.transition("inv-archive-evidence", "succeeded")
+        result = read_deliverables(self.workspace, kind="evidence",
+                                   query="inv-archive-evidence")
+        self.assertEqual(result["total"], 1)
+        item = result["items"][0]
+        self.assertEqual(item["text"], "inv-archive-evidence")
+        self.assertEqual(item["title"], "http_probe · inv-archive-evid")
+        self.assertEqual(item["source"], "recon / task-1")
+        self.assertEqual(item["status"], "succeeded")
+        self.assertNotIn("hidden", json.dumps(result))
+
     def test_file_access_rejects_traversal_and_links(self) -> None:
         secret = self.root / "private.txt"
         secret.write_text("private-marker")
@@ -83,6 +119,9 @@ class SessionArchiveTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["total"], 1)
             self.assertEqual(client.get(prefix + "/deliverables?kind=bad").status_code, 422)
+            grouped = client.get(prefix + "/deliverables?kind=sources")
+            self.assertEqual(grouped.status_code, 200)
+            self.assertEqual({row['kind'] for row in grouped.json()['items']}, {'evidence', 'file'})
             self.assertEqual(client.get(prefix + "/deliverables?offset=-1").status_code, 422)
             self.assertEqual(client.get("/api/sessions/missing/deliverables").status_code, 404)
             response = client.get(prefix + "/artifacts/download", params={"path": "artifacts/证据.txt"})

@@ -152,6 +152,57 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
             audit=SimpleNamespace(log=lambda *a, **k: None), guard=self.guard,
             gateway=object(), agent_models={}, tools=self.registry(mode))
 
+    async def test_specialist_dispatch_runs_script_in_parallel_and_keeps_request_prefix(self):
+        from spiritscout.agents.scan_control import ScannerController
+        from spiritscout.ctf.agents import CTFBaseAgent
+        from spiritscout.gateway.gateway import ChatResponse
+
+        infra = self.infra()
+        control = ScannerController(infra, SimpleNamespace(), mission='分析现场机制', standing_rules='仅测试目标')
+        self.addAsyncCleanup(control.close)
+        entered, release = asyncio.Event(), asyncio.Event()
+        requests = []
+        decisions = iter([
+            {'decision': 'script', 'reason': '已观测接口的控制组实验',
+             'arguments': {'code': 'print("observed")', 'language': 'python', 'action': 'analysis'}},
+            {'decision': 'finish', 'reason': '独立实验结束，观察已交接'},
+        ])
+        async def chat(messages, **kwargs):
+            import copy
+            requests.append(copy.deepcopy(messages))
+            return ChatResponse(json.dumps(next(decisions)), 'fixture', 1, 1, 0, 0)
+        async def execute(name, args, **kwargs):
+            self.assertEqual(name, 'sandbox_exec')
+            self.assertEqual(args['code'], 'print("observed")')
+            entered.set()
+            await release.wait()
+            return ToolResult(tool=name, ok=True, stdout='observed', invocation_id='script-evidence')
+        gateway = SimpleNamespace(chat=chat)
+        infra.tools = SimpleNamespace(call=execute)
+        agent = object.__new__(CTFBaseAgent)
+        agent.ctx = SimpleNamespace(builtin_ctx={'_scan_control': control}, audit=infra.audit)
+        agent.agent_id = 'ctf-web-fixture'
+        with patch('spiritscout.agents.scanner.AgentBoundGateway', return_value=gateway):
+            status = await agent._run_tool_call_inner(None, None, {},
+                {'name': 'scanner_control', 'arguments': {'action': 'status'}})
+            revision = json.loads(status.text)['revision']
+            result = await agent._run_tool_call_inner(None, None, {}, {'name': 'scanner_control',
+                'arguments': {'action': 'dispatch', 'revision': revision, 'reason': '接口现场已有依据',
+                              'target': 'http://fixture.test', 'goal': '独立对照实验',
+                              'tools': ['sandbox_exec'], 'constraints': '仅此目标，不枚举其他接口'}})
+            self.assertTrue(result.ok)
+            await asyncio.wait_for(entered.wait(), 1)
+            self.assertFalse(control.task.done(), '派遣回执不能等待扫描执行结束')
+            release.set()
+            await asyncio.wait_for(control.task, 1)
+        self.assertEqual(requests[1][:len(requests[0])], requests[0], '追加新观察时不改写热前缀')
+        clues = self.bb.query(BlackboardLayer.RECON_CLUE, data_filter=('clue_type', 'scanner_observation'))
+        self.assertEqual(clues[0]['data']['evidence_refs'], ['script-evidence'])
+        self.assertEqual(clues[0]['data']['detail']['summary'], 'observed')
+        denied = await agent._run_tool_call_inner(None, None, {},
+            {'name': 'scanner_control', 'arguments': {'action': 'allow'}})
+        self.assertFalse(denied.ok, '专项角色不得解除主控禁止')
+
     async def test_worker_can_finish_without_scanning_even_when_scanner_is_available(self):
         infra = self.infra()
         with patch.object(NucleiScanner, "preflight", AsyncMock(return_value=ToolResult(tool="preflight", ok=True))), \

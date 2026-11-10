@@ -7,12 +7,274 @@ from __future__ import annotations
 
 import json
 import platform as _platform
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from spiritscout.core.exceptions import VersionConflict
 from spiritscout.core.models import BlackboardLayer
+
+_ASSET_SAMPLE_LIMIT = 1000
+_CLUE_SAMPLE_LIMIT = 500
+_VULN_SAMPLE_LIMIT = 500
+_ENTRYPOINT_TYPES = {"endpoint", "url", "service", "script", "app"}
+_NEGATIVE_STATES = {
+    "blocked", "cancelled", "failed", "false_positive", "inconclusive", "interrupted",
+    "out_of_rules", "refuted", "rejected", "stopped", "timeout",
+}
+
+
+def _ref(layer: BlackboardLayer, row: dict[str, Any]) -> dict[str, Any]:
+    return {"layer": layer.value, "record_id": row["record_id"], "version": row["version"]}
+
+
+def _safe_location(value: Any, *, limit: int = 300, allow_plain: bool = True) -> str:
+    """上下文只保留定位所需的 URL 形态；凭据、片段与查询值不进入摘要。"""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return text[:limit] if allow_plain else ""
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        return text[:limit] if allow_plain else ""
+    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+    if parts.port:
+        host += f":{parts.port}"
+    query = urlencode([(name[:80], "…") for name, _ in parse_qsl(
+        parts.query, keep_blank_values=True)[:30]])
+    return urlunsplit((parts.scheme, host, parts.path, query, ""))[:limit]
+
+
+def _technology_names(data: Any) -> list[str]:
+    if not isinstance(data, dict):
+        return []
+    names = []
+    for key in ("server", "x_powered_by"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            names.append(value.strip()[:160])
+    rows = data.get("technologies")
+    if isinstance(rows, list):
+        for row in rows:
+            value = row.get("name") if isinstance(row, dict) else row
+            if isinstance(value, str) and value.strip():
+                names.append(value.strip()[:160])
+    if isinstance(data.get("fingerprint"), dict):
+        names.extend(_technology_names(data["fingerprint"]))
+    return list(dict.fromkeys(names))
+
+
+def _failure_mode(data: dict[str, Any]) -> str:
+    """负证据只投影固定分类，不把可能含凭据的错误原文灌入模型上下文。"""
+    detail = data.get("detail") if isinstance(data.get("detail"), dict) else {}
+    status = str(data.get("state") or data.get("status") or data.get("execution_status")
+                 or detail.get("state") or detail.get("status") or "").lower()
+    observation = detail if "ok" in detail or "error" in detail else (
+        detail.get("observation") if isinstance(detail.get("observation"), dict) else {})
+    text = " ".join(str(value) for value in (
+        data.get("reason"), data.get("error"), data.get("value"), detail.get("reason"),
+        detail.get("error"), observation.get("error"), observation.get("summary")) if value).lower()
+    if "waf" in text or "firewall" in text or "防火墙" in text:
+        return "waf_or_filter"
+    if any(marker in text for marker in ("403", "forbidden", "unauthor", "denied", "拒绝", "鉴权")):
+        return "access_denied"
+    if "timeout" in text or "timed out" in text or "超时" in text:
+        return "timeout"
+    if "policy" in text or "scope" in text or "授权" in text or "策略" in text:
+        return "policy_or_scope"
+    if status in _NEGATIVE_STATES:
+        return status
+    if observation and (observation.get("ok") is False or observation.get("error")
+                        or observation.get("returncode") not in (None, 0)):
+        return "tool_error"
+    if data.get("clue_type") == "scanner_finding" and data.get("verification_status") == "unverified":
+        return "unverified_scanner_hit"
+    return ""
+
+
+def intelligence_summary(blackboard: Any) -> dict[str, Any]:
+    """统一资产、扫描、JS、负证据和漏洞候选的紧凑观察面。"""
+    assets = blackboard.query(BlackboardLayer.ASSET, limit=_ASSET_SAMPLE_LIMIT + 1)
+    clues = blackboard.query(BlackboardLayer.RECON_CLUE, limit=_CLUE_SAMPLE_LIMIT + 1)
+    vulns = blackboard.query(BlackboardLayer.VULN, limit=_VULN_SAMPLE_LIMIT + 1)
+    asset_rows, clue_rows, vuln_rows = (
+        assets[:_ASSET_SAMPLE_LIMIT], clues[:_CLUE_SAMPLE_LIMIT], vulns[:_VULN_SAMPLE_LIMIT])
+    count = getattr(blackboard, "count", None)
+    asset_total = count(BlackboardLayer.ASSET) if callable(count) else len(assets)
+    clue_total = count(BlackboardLayer.RECON_CLUE) if callable(count) else len(clues)
+    vuln_total = count(BlackboardLayer.VULN) if callable(count) else len(vulns)
+    if not any((asset_total, clue_total, vuln_total)):
+        return {}
+
+    assets_by_type = Counter(str(row["data"].get("asset_type") or "unknown")
+                             for row in asset_rows)
+    entrypoints = []
+    for row in asset_rows:
+        data = row["data"]
+        asset_type = str(data.get("asset_type") or "unknown")
+        if asset_type not in _ENTRYPOINT_TYPES or len(entrypoints) >= 36:
+            continue
+        attrs = data.get("attrs") if isinstance(data.get("attrs"), dict) else {}
+        item: dict[str, Any] = {
+            "blackboard_ref": _ref(BlackboardLayer.ASSET, row),
+            "asset_type": asset_type,
+            "value": _safe_location(data.get("value")),
+        }
+        if asset_type == "endpoint":
+            item.update(
+                method=str(attrs.get("method") or "UNKNOWN").upper()[:16],
+                params=[str(value)[:80] for value in attrs.get("params", [])[:30]
+                        if isinstance(value, str)],
+                sources=[str(value)[:60] for value in attrs.get("sources", [])[:12]
+                         if isinstance(value, str)],
+            )
+        if asset_type == "script":
+            item.update(
+                route_count=int(attrs.get("route_count") or 0),
+                source_map_count=len(attrs.get("source_maps", []))
+                if isinstance(attrs.get("source_maps"), list) else 0,
+                secret_reference_count=len(attrs.get("secrets", []))
+                if isinstance(attrs.get("secrets"), list) else 0,
+            )
+        if data.get("port") is not None:
+            item["port"] = data["port"]
+        if data.get("service"):
+            item["service"] = str(data["service"])[:80]
+        entrypoints.append(item)
+
+    technology_refs: dict[str, list[dict[str, Any]]] = {}
+    for row in asset_rows:
+        for name in _technology_names(row["data"].get("fingerprint")):
+            refs = technology_refs.setdefault(name, [])
+            if len(refs) < 4:
+                refs.append(_ref(BlackboardLayer.ASSET, row))
+    for row in clue_rows:
+        data = row["data"]
+        if data.get("clue_type") != "tech_stack":
+            continue
+        for name in str(data.get("value") or "").split(","):
+            name = name.strip()[:160]
+            if name:
+                refs = technology_refs.setdefault(name, [])
+                if len(refs) < 4:
+                    refs.append(_ref(BlackboardLayer.RECON_CLUE, row))
+
+    clue_types = Counter(str(row["data"].get("clue_type") or "unknown") for row in clue_rows)
+    scanner_samples = []
+    negative_samples = []
+    negative_total = 0
+    for row in clue_rows:
+        data = row["data"]
+        clue_type = str(data.get("clue_type") or "unknown")
+        if clue_type != "user_reply" and len(scanner_samples) < 20:
+            detail = data.get("detail") if isinstance(data.get("detail"), dict) else {}
+            observation = detail.get("observation") if isinstance(detail.get("observation"), dict) else detail
+            scanner_samples.append({
+                "blackboard_ref": _ref(BlackboardLayer.RECON_CLUE, row),
+                "clue_type": clue_type,
+                "scanner": str(data.get("scanner") or observation.get("tool") or row.get("updated_by") or "")[:80],
+                "target": _safe_location(data.get("value"), allow_plain=False),
+                "status": str(data.get("status") or data.get("execution_status")
+                              or data.get("verification_status") or "observed")[:60],
+                **({"name": str(data.get("name"))[:160]} if data.get("name") else {}),
+                **({"severity": str(data.get("severity"))[:30]} if data.get("severity") else {}),
+            })
+        mode = _failure_mode(data)
+        if mode:
+            negative_total += 1
+        if mode and len(negative_samples) < 16:
+            detail = data.get("detail") if isinstance(data.get("detail"), dict) else {}
+            observation = detail.get("observation") if isinstance(detail.get("observation"), dict) else detail
+            negative_samples.append({
+                "blackboard_ref": _ref(BlackboardLayer.RECON_CLUE, row),
+                "clue_type": clue_type,
+                "failure_mode": mode,
+                "tool": str(data.get("scanner") or observation.get("tool") or "")[:80],
+                "target": _safe_location(data.get("value") or
+                    (observation.get("arguments") or {}).get("url")
+                    if isinstance(observation.get("arguments"), dict) else data.get("value"),
+                    allow_plain=False),
+            })
+
+    status_counts = getattr(blackboard, "status_counts", None)
+    vuln_status = (Counter(status_counts(BlackboardLayer.VULN)) if callable(status_counts)
+                   else Counter(str(row["data"].get("status") or "candidate")
+                                for row in vuln_rows))
+    vuln_samples = []
+    for row in vuln_rows[:20]:
+        data = row["data"]
+        verification = data.get("verification") if isinstance(data.get("verification"), dict) else {}
+        vuln_samples.append({
+            "blackboard_ref": _ref(BlackboardLayer.VULN, row),
+            "title": str(data.get("title") or row["record_id"])[:180],
+            "vuln_type": str(data.get("vuln_type") or "unknown")[:80],
+            "target": _safe_location(data.get("endpoint") or data.get("target")),
+            "status": str(data.get("status") or "candidate")[:60],
+            "severity": str(data.get("severity") or "info")[:30],
+            "verification_verdict": str(verification.get("verdict") or "")[:60],
+        })
+
+    summary = {
+        "assets_total": asset_total,
+        "assets_by_type": dict(sorted(assets_by_type.items())),
+        "entrypoints": entrypoints,
+        "technologies": [{"name": name, "source_refs": refs}
+                         for name, refs in list(technology_refs.items())[:24]],
+        "scanner_clues": {"total": clue_total, "by_type": dict(sorted(clue_types.items())),
+                           "samples": scanner_samples},
+        "negative_evidence": {"total_in_clue_window": negative_total,
+                              "samples": negative_samples,
+                              "note": "固定失败分类；完整原文按 blackboard_ref 读取"},
+        "vulnerabilities": {"total": vuln_total, "by_status": dict(sorted(vuln_status.items())),
+                            "samples": vuln_samples},
+        "truncated": {"assets": asset_total > len(asset_rows),
+                      "clues": clue_total > len(clue_rows),
+                      "vulnerabilities": vuln_total > len(vuln_rows)},
+    }
+    try:
+        from spiritscout.resources.session_secrets import redact_known
+
+        return redact_known(blackboard.database_path.parent, summary)
+    except (AttributeError, OSError, ValueError):
+        return summary
+
+
+def _asset_intelligence(assets: list[dict[str, Any]], legacy: list[dict[str, Any]]) -> dict[str, Any]:
+    """旧字段继续投影 JS 子集；新调度统一读取 intelligence_summary。"""
+    scripts = [row for row in assets if row["data"].get("asset_type") == "script"]
+    endpoints = [row for row in assets if row["data"].get("asset_type") == "endpoint"
+                 and ("js_static" in (row["data"].get("attrs") or {}).get("sources", [])
+                      or (row["data"].get("attrs") or {}).get("source") == "js_static")]
+    if scripts or endpoints:
+        return {
+            "scripts_total": len(scripts),
+            "js_endpoints_total": len(endpoints),
+            "scripts": [{"blackboard_ref": _ref(BlackboardLayer.ASSET, row),
+                "url": _safe_location(row["data"].get("value", "")),
+                "route_count": (row["data"].get("attrs") or {}).get("route_count", 0),
+                "secret_count": len((row["data"].get("attrs") or {}).get("secrets", []))}
+                for row in scripts[:12]],
+            "endpoints": [{"blackboard_ref": _ref(BlackboardLayer.ASSET, row),
+                "url": _safe_location(row["data"].get("value", "")),
+                "method": (row["data"].get("attrs") or {}).get("method", "UNKNOWN"),
+                "params": (row["data"].get("attrs") or {}).get("params", [])}
+                for row in endpoints[:20]],
+        }
+    if legacy:
+        return {
+            "legacy_projection": True,
+            "scripts_total": len(legacy),
+            "js_endpoints_total": sum(len(row["data"].get("routes", [])) for row in legacy),
+            "scripts": [{"blackboard_ref": _ref(BlackboardLayer.JS_INTEL, row),
+                "url": _safe_location(row["data"].get("script_url", "")),
+                "route_count": len(row["data"].get("routes", [])),
+                "secret_count": len(row["data"].get("secrets", []))} for row in legacy[:12]],
+        }
+    return {}
 
 
 def authorization(guard: Any) -> dict[str, Any]:
@@ -136,6 +398,15 @@ def snapshot(*, guard: Any = None, env: dict[str, Any] | None = None,
         project = blackboard.read(BlackboardLayer.TOPOLOGY, "project-memory") or {}
         if project.get("description"):
             out["project_rules"] = project["description"]
+        if callable(getattr(blackboard, 'query', None)):
+            summary = intelligence_summary(blackboard)
+            if summary:
+                out["intelligence_summary"] = summary
+            assets = blackboard.query(BlackboardLayer.ASSET, limit=_ASSET_SAMPLE_LIMIT)
+            legacy = blackboard.query(BlackboardLayer.JS_INTEL, limit=100)
+            js_projection = _asset_intelligence(assets, legacy)
+            if js_projection:
+                out["asset_intelligence"] = js_projection
         from spiritscout.blackboard.exchange import fact_index
 
         facts = fact_index(blackboard) if references else []

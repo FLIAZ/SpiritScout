@@ -625,21 +625,9 @@ class MasterPlanning:
     def _situation_digest(self) -> dict[str, Any]:
         """黑板态势摘要（喂 LLM 的观察面；截断采样防爆 token）。"""
         bb = self.ctx.blackboard
-        assets = bb.query(BlackboardLayer.ASSET, limit=500)
-        endpoints = [a["data"].get("value") for a in assets
-                     if a["data"].get("asset_type") == "endpoint"][:15]
-        clues = bb.query(BlackboardLayer.RECON_CLUE, limit=200)
-        by_status: dict[str, int] = {}
-        for rec in bb.query(BlackboardLayer.VULN, limit=200):
-            st = str(rec["data"].get("status", "candidate"))
-            by_status[st] = by_status.get(st, 0) + 1
-        return {
-            "assets_total": len(assets), "endpoints_sample": endpoints,
-            "clues_total": len(clues),
-            "clue_types": sorted({str(c["data"].get("clue_type")) for c in clues}),
-            "vulns_by_status": by_status,
-            "business_context": shared_context(bb),
-        }
+        from spiritscout.gateway.world_state import intelligence_summary
+
+        return {**intelligence_summary(bb), "business_context": shared_context(bb)}
 
     def _engagement_status(self) -> dict[str, Any]:
         """运行中对话通道的实时态势：轮次/节点状态/在途任务/成果计数。

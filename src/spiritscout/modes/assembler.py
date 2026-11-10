@@ -9,6 +9,7 @@ from typing import Any
 
 from spiritscout.agents.business import BusinessContextAgent
 from spiritscout.agents.hostops import HostVulnAgent, PortScanAgent, PostExploitAgent
+from spiritscout.agents.js_reverse import JSReverseAgent
 from spiritscout.agents.recon import ReconAgent
 from spiritscout.agents.sub.base import SubAgent, SubAgentContext
 from spiritscout.agents.webvuln import WebVulnAgent
@@ -324,6 +325,7 @@ class ModeAssembler:
             mode=RunMode.SRC,
             agents={
                 AgentType.BUSINESS_CONTEXT: BusinessContextAgent(self.ctx, **self.kw),
+                AgentType.JS_REVERSE: JSReverseAgent(self.ctx, **self.kw),
                 AgentType.RECON: ReconAgent(self.ctx, **self.kw),
                 AgentType.PORT_SCAN: PortScanAgent(self.ctx, **self.kw),
                 AgentType.WEB_VULN: WebVulnAgent(self.ctx, **self.kw),

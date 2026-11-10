@@ -97,6 +97,35 @@ class ResourceStoreTests(unittest.TestCase):
             post = {**after, "attrs": {"method": "POST"}}
             self.assertNotEqual(store.observe(post, "post"), key)
 
+    def test_script_fragments_and_intelligence_metadata_are_safe_to_share(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ResourceStore(directory)
+            script = {
+                "asset_type": "script",
+                "value": "https://example.test/app.js.map#source-0",
+                "fingerprint": {"sha256": "abc"},
+                "attrs": {
+                    "kind": "source_map_source",
+                    "source": "js_reverse",
+                    "source_map_url": "https://example.test/app.js.map",
+                    "source_index": 0,
+                    "route_count": 2,
+                    "config_keys": ["apiRoot"],
+                    "algorithm_calls": ["crypto.subtle.digest"],
+                    "script_ref": "secret-should-not-be-shared",
+                    "secrets": [{"secret_ref": "secret-should-not-be-shared"}],
+                },
+            }
+            key = store.observe(script, "sess:asset:script@1")
+            row = store.assets(host="example.test")["items"][0]
+            self.assertEqual(row["id"], key)
+            self.assertEqual(row["data"]["value"], script["value"])
+            self.assertEqual(row["data"]["attrs"]["kind"], "source_map_source")
+            self.assertEqual(row["data"]["attrs"]["route_count"], 2)
+            self.assertNotIn("script_ref", row["data"]["attrs"])
+            self.assertNotIn("secrets", row["data"]["attrs"])
+            self.assertNotIn("secret-should-not-be-shared", json.dumps(row))
+
     def test_encryption_versions_and_missing_key_fail_without_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = ResourceStore(directory)

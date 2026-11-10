@@ -1,0 +1,102 @@
+#view-proxy { max-width: 1600px; margin: auto; padding: 28px; }
+#view-proxy [hidden] { display: none !important; }
+.pool-header, .pool-source-header { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.pool-header h2 { margin: 4px 0 6px; font-size: 28px; }
+.pool-header p, .pool-source-header p { color: var(--ink-2); margin: 6px 0; font-size: 13px; }
+.pool-eyebrow { color: var(--accent); font: 11px var(--mono); letter-spacing: .12em; }
+.pool-header-actions, [data-source-actions] { display: flex; gap: 8px; flex-wrap: wrap; }
+#view-proxy [data-pool-message] { min-height: 22px; margin: 12px 0; font-size: 13px; color: var(--ink-2); }
+#view-proxy .is-error { color: var(--bad); }
+.pool-layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); border: 1px solid var(--line); border-radius: 10px; background: var(--surface); min-height: 440px; overflow: hidden; }
+.pool-rail { padding: 18px 12px; border-right: 1px solid var(--line); background: var(--surface-2); min-width: 0; }
+.pool-rail h3 { margin: 0 8px 14px; font-size: 12px; color: var(--ink-2); font-weight: 500; }
+.pool-source { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; width: 100%; border: 1px solid transparent; border-radius: 6px; padding: 11px 10px; gap: 6px; background: transparent; color: var(--ink); cursor: pointer; text-align: left; }
+.pool-source span { overflow-wrap: anywhere; font-size: 13px; }
+.pool-source b { min-width: 24px; text-align: center; font: 12px var(--mono); }
+.pool-source small { grid-column: 1 / -1; color: var(--warn); font-size: 11px; }
+.pool-source.is-active { background: var(--surface); border-color: var(--line); box-shadow: inset 3px 0 var(--accent); }
+.pool-runtime { padding: 14px 8px 0; border-top: 1px solid var(--line); margin-top: 24px; color: var(--ink-2); font-size: 11px; line-height: 1.7; }
+.pool-main { min-width: 0; padding: 20px; }
+.pool-source-header h3 { font-size: 18px; margin: 0; overflow-wrap: anywhere; }
+.pool-quota-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 14px 0 8px; }
+.pool-quota-summary div { min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); }
+.pool-quota-summary span { display: block; margin-bottom: 6px; color: var(--ink-2); font-size: 10px; }
+.pool-quota-summary strong { display: block; font: 12px var(--mono); overflow-wrap: anywhere; }
+.pool-quota-track { height: 5px; overflow: hidden; border-radius: 999px; background: var(--surface-2); }
+.pool-quota-track i { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+.pool-quota-empty { margin: 12px 0 0; color: var(--ink-2); font-size: 11px; }
+.pool-tabs { display: flex; gap: 22px; border-bottom: 1px solid var(--line); margin: 18px 0 16px; }
+.pool-tabs button { background: transparent; color: var(--ink-2); padding: 8px 2px 12px; border: 0; border-bottom: 2px solid transparent; cursor: pointer; font: inherit; font-size: 13px; }
+.pool-tabs button[aria-pressed="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+.pool-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.pool-toolbar input { flex: 1; min-width: 80px; max-width: 380px; }
+.pool-toolbar .selx { width: 150px; flex: 0 0 150px; }
+#view-proxy input, #view-proxy select, .pool-dialog input, .pool-dialog textarea { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; color: var(--ink); padding: 9px 10px; font: inherit; font-size: 13px; min-width: 0; }
+.pool-toolbar span { margin-left: auto; color: var(--ink-2); font: 11px var(--mono); white-space: nowrap; }
+.pool-node-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
+.pool-node { position: relative; min-width: 0; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); }
+.pool-node.is-selected { border-color: var(--accent); box-shadow: inset 3px 0 var(--accent); background: var(--surface-2); }
+.pool-node-select { display: grid; gap: 10px; width: 100%; padding: 14px; color: var(--ink); border: 0; border-radius: inherit; background: transparent; text-align: left; cursor: pointer; }
+.pool-node-top { display: flex; gap: 12px; align-items: flex-start; }
+.pool-node-top strong { flex: 1; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; padding-right: 16px; }
+.pool-hop { flex-shrink: 0; border: 1px solid var(--line); border-radius: 50%; width: 21px; height: 21px; text-align: center; font: 12px/19px var(--mono); color: var(--ink-2); }
+.is-selected .pool-hop { color: var(--accent); border-color: var(--accent); }
+.pool-endpoint { color: var(--ink-2); font: 11px var(--mono); overflow-wrap: anywhere; }
+.pool-node-bottom { display: flex; align-items: center; justify-content: space-between; color: var(--ink-2); font-size: 10px; gap: 8px; }
+.pool-node-bottom b { font: 10px var(--mono); border: 1px solid var(--line); border-radius: 3px; padding: 2px 5px; color: var(--ink); }
+.pool-node-delete { position: absolute; right: 43px; top: 12px; background: transparent; color: var(--ink-2); border: 0; cursor: pointer; padding: 1px 5px; font-size: 16px; }
+.pool-node-delete:hover { color: var(--bad); }
+.pool-benchmark-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 14px; }
+.pool-benchmark-toolbar small { width: 100%; color: var(--ink-2); font-size: 11px; }
+.pool-measurement { margin: 0 14px; padding: 10px 0; border-top: 1px solid var(--line); }
+.pool-measure-values { display: flex; justify-content: space-between; gap: 8px; font: 13px var(--mono); }
+.pool-measure-values strong { font-weight: 600; }
+.pool-measurement small { display: block; margin-top: 5px; font-size: 10px; color: var(--ink-2); }
+.pool-measurement .is-ok { color: var(--ok); }
+.pool-measurement .is-bad { color: var(--bad); }
+.pool-test-actions { display: flex; gap: 6px; margin: 0 14px 12px; }
+.pool-warning { color: var(--warn); background: var(--surface-2); border-left: 3px solid var(--warn); padding: 12px 14px; font-size: 13px; line-height: 1.7; }
+.pool-empty { grid-column: 1 / -1; padding: 42px 20px; text-align: center; color: var(--ink-2); }
+.pool-empty strong { font-size: 15px; color: var(--ink); }
+.pool-empty p { max-width: 440px; margin: 12px auto; font-size: 13px; line-height: 1.7; }
+.pool-notices { margin-top: 22px; padding: 12px; background: var(--surface-2); border-radius: 6px; font-size: 12px; color: var(--ink-2); }
+.pool-notices summary { cursor: pointer; color: var(--warn); }
+.pool-notices p { margin: 10px 0 0; overflow-wrap: anywhere; }
+.pool-chain-tray { position: sticky; bottom: 16px; z-index: 20; margin-top: 16px; padding: 20px; border: 1px solid var(--accent); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow-raise); }
+.pool-chain-tray small { margin-left: 12px; color: var(--ink-2); font-size: 11px; }
+.pool-chain { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 14px 0; font: 12px var(--mono); overflow-wrap: anywhere; }
+.pool-chain button { padding: 7px 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); color: var(--ink); cursor: pointer; font: inherit; overflow-wrap: anywhere; }
+.pool-chain i { color: var(--accent); font-style: normal; }
+#view-proxy [data-plan] { display: flex; gap: 12px; align-items: end; }
+#view-proxy [data-plan] label { display: grid; gap: 6px; font-size: 12px; flex: 1; max-width: 400px; }
+.pool-plan { border: 1px solid var(--line); padding: 18px; border-radius: 7px; margin-bottom: 12px; }
+.pool-plan small { margin-left: 12px; color: var(--ink-2); }
+.pool-dialog { width: min(560px, calc(100vw - 40px)); max-height: calc(100dvh - 40px); overflow-y: auto; padding: 24px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+.pool-dialog::backdrop { background: #0007; }
+.pool-dialog form, .pool-dialog label { display: grid; gap: 10px; }
+.pool-dialog form { gap: 18px; }
+.pool-dialog header { display: flex; align-items: center; justify-content: space-between; }
+.pool-dialog h3 { margin: 0; }
+.pool-dialog label { font-size: 13px; }
+.pool-dialog p { font-size: 12px; color: var(--ink-2); line-height: 1.7; margin: 0; }
+.pool-dialog [data-dialog-message] { color: var(--bad); }
+.pool-dialog textarea { width: 100%; resize: vertical; font-family: var(--mono); box-sizing: border-box; }
+#view-proxy button:focus-visible, .pool-dialog button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+@media (max-width: 760px) {
+  #view-proxy { padding: 16px; }
+  .pool-layout { grid-template-columns: 1fr; }
+  .pool-rail { border-right: 0; border-bottom: 1px solid var(--line); padding: 12px; }
+  .pool-rail h3 { margin-bottom: 8px; }
+  [data-sources] { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pool-source { width: auto; max-width: 100%; padding: 8px; gap: 8px; }
+  .pool-runtime { margin: 10px 0 0; padding: 8px 0 0; }
+  .pool-main { padding: 14px; }
+  .pool-header, .pool-source-header { align-items: flex-start; flex-wrap: wrap; gap: 10px; }
+  .pool-quota-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pool-header h2 { font-size: 24px; }
+  .pool-toolbar { flex-wrap: wrap; }
+  .pool-toolbar span { width: 100%; margin: 0; }
+  .pool-node-grid { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+  #view-proxy [data-plan] { align-items: stretch; flex-direction: column; }
+  .pool-chain-tray small { display: block; margin: 8px 0; }
+}

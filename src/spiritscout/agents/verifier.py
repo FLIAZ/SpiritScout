@@ -328,11 +328,26 @@ class VerificationQueue:
     def _rules(self) -> dict[str, Any]:
         return self.agent.rule_context(self.rule_source())
 
+    @staticmethod
+    def _fingerprint(rules: dict[str, Any]) -> str:
+        """只对用户约束取指纹；资产与漏洞摘要变化不算规则变化。
+
+        世界状态快照会随复测写回的黑板内容变化。若把整份快照计入指纹，
+        同一候选每次复测后都会被判为“规则已变”而重跑，既重复请求也降低
+        缓存命中。这里只保留授权、用户说明和项目规则三类事实。
+        """
+        world = rules.get("world_state") if isinstance(rules.get("world_state"), dict) else {}
+        material = {key: value for key, value in rules.items()
+                    if key not in {"world_state", "answers"}}
+        material["world_state"] = {key: world[key] for key in
+                                   ("authorization", "user_context", "project_rules") if key in world}
+        return hashlib.sha256(encode(material).encode()).hexdigest()
+
     async def drain(self) -> None:
         await asyncio.sleep(0)
         await self.queue.join()
         # 用户补充规则后，旧的收录结论也必须重新核对，不能沿用旧规则。
-        rules_hash = hashlib.sha256(encode(self._rules()).encode()).hexdigest()
+        rules_hash = self._fingerprint(self._rules())
         for rec in self.ctx.blackboard.query(BlackboardLayer.VULN, limit=10000):
             data = rec["data"]
             if (data.get("verification") and data.get("status") != "verifying"
@@ -374,7 +389,7 @@ class VerificationQueue:
             return
         candidate, version = Vulnerability.model_validate(row[0]), row[1]
         rules = self._rules()
-        rules_hash = hashlib.sha256(encode(rules).encode()).hexdigest()
+        rules_hash = self._fingerprint(rules)
         if candidate.status == VulnStatus.ACCEPTED and candidate.verification.get("rules_hash") == rules_hash:
             return
         if candidate.status.value.startswith("rejected") and (
@@ -395,7 +410,7 @@ class VerificationQueue:
             raise
         except Exception as exc:  # noqa: BLE001
             result = {"verdict": "inconclusive", "reason": f"复测失败：{type(exc).__name__}: {exc}"[:500]}
-        if encode(self._rules()) != encode({k: v for k, v in rules.items() if k != "answers"}):
+        if self._fingerprint(self._rules()) != rules_hash:
             result = {"verdict": "inconclusive", "reason": "复测期间用户规则发生变化，需要按新规则复测"}
         candidate.verification = {**result, "rules_hash": rules_hash, "candidate_version": version - 1}
         verdict = result["verdict"]

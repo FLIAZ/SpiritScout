@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from spiritscout.agents.sub.base import SubAgentContext
 from spiritscout.blackboard import Blackboard
 from spiritscout.core.audit import NullAuditLogger
 from spiritscout.core.models import BlackboardLayer, RunMode, Task
@@ -14,6 +15,7 @@ from spiritscout.ctf.agents import CTFBaseAgent
 from spiritscout.ctf.flags import FlagManager
 from spiritscout.tools.invocation import ExecutionScope
 from spiritscout.tools.journal import ExecutionJournal
+from spiritscout.tools.registry import AgentToolView, ToolRegistry
 from spiritscout.tools.spec import ToolResult
 
 
@@ -28,12 +30,12 @@ class NormalAnswerCompletionTests(unittest.IsolatedAsyncioTestCase):
         self.journal = ExecutionJournal(self.bb, self.root, 'run')
         self.journal.begin('observed', 'sandbox_exec', 'digest', 'never', scope=ExecutionScope(task_id='solve'))
         self.journal.transition('observed', 'succeeded', result=ToolResult(tool='sandbox_exec', ok=True, stdout='answer-from-evidence'))
-        ctx = SimpleNamespace(mode=RunMode.CTF, shared_cache=None, search_enabled=False,
+        ctx = SubAgentContext(mode=RunMode.CTF, bus=SimpleNamespace(), convergence=SimpleNamespace(),
             gateway=SimpleNamespace(config=SimpleNamespace(lightweight_local=False)),
             audit=NullAuditLogger(), builtin_ctx={}, blackboard=self.bb, policy=None,
-            tools=SimpleNamespace(journal=self.journal))
-        ctx.for_agent = lambda role: ctx
+            tools=ToolRegistry(SimpleNamespace(), journal=self.journal), journal=self.journal)
         self.agent = CTFBaseAgent(ctx, flag_manager=self.flags)
+        self.assertIsInstance(self.agent.ctx.tools, AgentToolView)
         self.task = Task(task_id='solve', agent_type=self.agent.agent_type, task_type='ctf_solve',
                          target='', payload={'challenge': {'id': 'one'}})
         self.route = SimpleNamespace(name='analysis')

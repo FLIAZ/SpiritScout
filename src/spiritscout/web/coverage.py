@@ -62,7 +62,8 @@ def read_evidence(workspace: Path, ref: str) -> dict:
 
 
 def read_coverage(workspace: Path, *, query: str = '', status: str = '', identity: str = '',
-                  test_type: str = '', offset: int = 0, limit: int = 50) -> dict[str, Any]:
+                  test_type: str = '', offset: int = 0, limit: int = 50,
+                  asset_ref: str = '', include_unattempted: bool = True) -> dict[str, Any]:
     if status and status not in STATUSES:
         raise ValueError('未知覆盖状态')
     empty = {'items': [], 'total': 0, 'counts': {}, 'identities': [], 'test_types': [],
@@ -115,11 +116,14 @@ def read_coverage(workspace: Path, *, query: str = '', status: str = '', identit
                     'status': node_status, 'text': str(data.get('text') or ''), 'reason': str(data.get('reason') or ''),
                     'evidence': sources, 'evidence_missing': sum(not e.get('resolved') for e in sources)})
         for key, row in assets.items():
-            if key not in touched:
+            if include_unattempted and key not in touched:
                 rows.append({'ref': key + '@' + str(row['version']), 'asset_ref': key,
                     'asset': str(row['data'].get('value') or row['data'].get('text') or key),
                     'identity': '', 'test_type': '', 'status': 'untested', 'text': '未见关联探索记录',
                     'reason': '', 'evidence': [], 'evidence_missing': 0})
+        if asset_ref:
+            asset_key = asset_ref.split('@')[0]
+            rows = [row for row in rows if row['asset_ref'].split('@')[0] == asset_key]
         rows.sort(key=lambda row: (row['asset'], row['identity'], row['test_type'], row['ref']))
         counts = dict(Counter(row['status'] for row in rows))
         identities = sorted({row['identity'] for row in rows if row['identity']})

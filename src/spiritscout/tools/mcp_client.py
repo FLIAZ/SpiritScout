@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import ssl
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -13,6 +14,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
@@ -301,32 +303,45 @@ class McpHttpClient(McpClient):
     """Streamable HTTP 传输：POST 到单一端点，应答 JSON 或 SSE 流。"""
 
     def __init__(self, name: str, *, url: str,
-                 headers: dict[str, str] | None = None, timeout: float = 180.0):
+                 headers: dict[str, str] | None = None, timeout: float = 180.0,
+                 proxy_environment: dict[str, str] | None = None):
         super().__init__(name, timeout=timeout)
         self._url = url
         self._headers = dict(headers or {})
+        self._proxy_environment = dict(proxy_environment or {})
 
     def _connect(self) -> Any:
         return streamablehttp_client(
             self._url, headers=self._headers or None,
             timeout=max(self.timeout, 30.0),
-            sse_read_timeout=max(self.timeout, 300.0))
+            sse_read_timeout=max(self.timeout, 300.0),
+            **({'httpx_client_factory': self._http_client} if self._proxy_environment else {}))
+
+    def _http_client(self, **kwargs):
+        env = self._proxy_environment
+        return httpx.AsyncClient(**kwargs, trust_env=False, follow_redirects=True,
+            proxy=env['HTTPS_PROXY'], verify=ssl.create_default_context(cafile=env['SSL_CERT_FILE']))
 
 
 class McpSseClient(McpClient):
     """旧版 SSE 传输：GET 长连接收事件，POST 到消息端点发请求。"""
 
     def __init__(self, name: str, *, url: str,
-                 headers: dict[str, str] | None = None, timeout: float = 180.0):
+                 headers: dict[str, str] | None = None, timeout: float = 180.0,
+                 proxy_environment: dict[str, str] | None = None):
         super().__init__(name, timeout=timeout)
         self._url = url
         self._headers = dict(headers or {})
+        self._proxy_environment = dict(proxy_environment or {})
 
     def _connect(self) -> Any:
         return sse_client(
             self._url, headers=self._headers or None,
             timeout=max(self.timeout, 30.0),
-            sse_read_timeout=max(self.timeout, 300.0))
+            sse_read_timeout=max(self.timeout, 300.0),
+            **({'httpx_client_factory': self._http_client} if self._proxy_environment else {}))
+
+    _http_client = McpHttpClient._http_client
 
 
 def build_client(spec: Any) -> McpClient:
@@ -337,12 +352,14 @@ def build_client(spec: Any) -> McpClient:
         if not spec.url:
             raise McpError(f"MCP[{spec.name}] http 传输缺少 url")
         return McpHttpClient(spec.name, url=spec.url,
-                             headers=dict(spec.headers or {}), timeout=timeout)
+                             headers=dict(spec.headers or {}), timeout=timeout,
+                             proxy_environment=spec.env if spec.env.get('SPIRITSCOUT_EGRESS_SOCKET') else None)
     if transport in ("sse", "sse-legacy"):
         if not spec.url:
             raise McpError(f"MCP[{spec.name}] sse 传输缺少 url")
         return McpSseClient(spec.name, url=spec.url,
-                            headers=dict(spec.headers or {}), timeout=timeout)
+                            headers=dict(spec.headers or {}), timeout=timeout,
+                            proxy_environment=spec.env if spec.env.get('SPIRITSCOUT_EGRESS_SOCKET') else None)
     if not spec.command:
         raise McpError(f"MCP[{spec.name}] stdio 传输缺少 command")
     command = spec.command
@@ -368,8 +385,18 @@ def build_client(spec: Any) -> McpClient:
             from spiritscout.tools.browser_accounts import AccountChromeMcpClient
 
             client_type = AccountChromeMcpClient
+        if env.get('SPIRITSCOUT_EGRESS_SOCKET'):
+            from spiritscout.tools.egress_isolation import isolate_command
+
+            wrapped = isolate_command([_resolve_command(command), *args], env, isolate_pids=False)
+            command, args = wrapped[0], wrapped[1:]
         return client_type(spec.name, command=command, args=args,
                                env=env, timeout=timeout)
+    if env.get('SPIRITSCOUT_EGRESS_SOCKET'):
+        from spiritscout.tools.egress_isolation import isolate_command
+
+        wrapped = isolate_command([_resolve_command(command), *args], env, isolate_pids=False)
+        command, args = wrapped[0], wrapped[1:]
     return McpStdioClient(spec.name, command=command,
                           args=args,
                           env=env, timeout=timeout)

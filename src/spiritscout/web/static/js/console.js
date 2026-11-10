@@ -144,6 +144,7 @@ function ctfTypeHintPayload(mode = $("#c-mode").value) {
   return types.length || note ? {ctf_type_hints: types, ctf_type_note: note} : {};
 }
 $("#c-mode").onchange = () => {
+  if (typeof ProxyPoolPage !== 'undefined') ProxyPoolPage.loadSelector($('#c-mode').value);
   $("#c-ctf-types").hidden = $("#c-mode").value !== "ctf";
   $("#c-multiple-answers-option").hidden = $("#c-mode").value !== "ctf";
   $("#c-mode-hint").textContent = missionModeHints[$("#c-mode").value] || I18n.t("先选择任务类型，再填写目标与要求。");
@@ -159,6 +160,7 @@ document.querySelectorAll('input[name="home-mode"]').forEach(input => {
     $("#c-mode").onchange();
   });
 });
+$("#c-proxy-manage")?.addEventListener("click", () => show("proxy"));
 $("#c-mission").addEventListener("input", homeSync);
 homeSync();
 document.querySelectorAll(".chip-s").forEach(b => b.onclick = () => {
@@ -230,6 +232,7 @@ async function launchMission(payload, files = []) {
     payload = { ...payload, mode };
   }
   if (payload.mode === "ctf") payload = {...ctfTypeHintPayload("ctf"), ...payload};
+  if (payload.mode === 'src' && payload.proxy_plan_id === undefined) payload.proxy_plan_id = $('#c-proxy-plan')?.value || 'direct';
   $("#c-go").disabled = true;
   try {
     if (!payload.project_id) {

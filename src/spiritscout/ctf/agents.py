@@ -23,6 +23,7 @@ from types import SimpleNamespace
 from typing import Any, ClassVar
 
 from spiritscout.agents.ring import attempt_key
+from spiritscout.agents.scan_control import SCHEMA as SCANNER_CONTROL_SCHEMA
 from spiritscout.agents.sub.base import RoutePlan, StepResult, SubAgent
 from spiritscout.blackboard.exchange import GUIDANCE, NAMES, SCHEMAS, execute
 from spiritscout.blackboard.exchange import project_rules as project_rules_fn
@@ -550,6 +551,7 @@ class CTFBaseAgent(SubAgent):
         RESPONSE_SCHEMA,
         *TRAFFIC_SCHEMAS,
         *BACKGROUND_SCHEMAS,
+        SCANNER_CONTROL_SCHEMA,
         *CYBERCHEF_SCHEMAS,
         _fn("steering_feedback", "向灵枢回报本任务指令的处理情况；accepted=说明下一步计划，"
             "completed=给出实际动作与证据，blocked=说明无法执行的事实原因。回执不代替实际操作。",
@@ -719,6 +721,7 @@ class CTFBaseAgent(SubAgent):
             required=["flag"]),
         _fn("spawn",
             "派生一个分支执行者去独立推进一个子问题，其最终结论会回传给你。"
+            "当前分支会等待其收尾；可独立推进的扫描请用 scanner_control，不占用主线等待。"
             "brief 写清：为什么需要这个分支、它专属的任务是什么、解决什么"
             "问题、与当前工作的边界（它不做什么）；expect 写清期望回传的"
             "结论。各司其职：子问题值得独立推进时才派，顺手能做的不要派。",
@@ -734,6 +737,8 @@ class CTFBaseAgent(SubAgent):
 
     def __init__(self, ctx, *, flag_manager: FlagManager | None = None, **kw):
         super().__init__(ctx, **kw)
+        # 运行期会追加记忆工具并修改提交参数；不能污染同方向后续会话的类模板。
+        self.tool_schemas = copy.deepcopy(self.tool_schemas)
         self.flag_manager = flag_manager
         if not search_allowed(self.ctx):
             self.tool_schemas = [schema for schema in self.tool_schemas
@@ -2037,6 +2042,19 @@ class CTFBaseAgent(SubAgent):
                 out = self._tool_finish_challenge(task, args)
             elif name == "submit_flag":
                 out = await self._tool_submit_flag(task, route, state, args)
+            elif name == "scanner_control":
+                control = self.ctx.builtin_ctx.get('_scan_control')
+                if control is None:
+                    out = _ToolOutcome(ok=False, text='本次会话未装配扫描者；不要等待扫描结果。')
+                else:
+                    if args.get('action') == 'status':
+                        result = control.snapshot()
+                    elif args.get('action') in {'dispatch', 'stop'}:
+                        result = await control.apply(args, actor=self.agent_id)
+                    else:
+                        result = {'ok': False, 'error': '专项角色仅可查询、派遣或停止；许可变更交主控处理'}
+                    out = _ToolOutcome(ok=result.get('ok', True),
+                        text=json.dumps(result, ensure_ascii=False), note='并行扫描控制回执')
             elif name == "spawn":
                 out = await self._tool_spawn(task, route, state, args)
             elif name == "probe_paths":
@@ -2056,16 +2074,14 @@ class CTFBaseAgent(SubAgent):
                                {"tool": name, "error": str(exc)[:200]})
         return out
 
-    # ------------------------------------------------------------ 知识库 / 路径探测 / MCP
+    def _evidence_journal(self):
+        """执行证据台账：上下文注入优先，工具注册表作兼容回退。"""
+        journal = getattr(self.ctx, 'journal', None)
+        if journal is not None:
+            return journal
+        return getattr(getattr(self.ctx, 'tools', None), 'journal', None)
 
-    _PROBE_PATHS: ClassVar[tuple[str, ...]] = (
-        "/robots.txt", "/sitemap.xml", "/.git/HEAD", "/.svn/entries", "/.env",
-        "/.env.bak", "/config.php.bak", "/backup.zip", "/www.zip", "/web.rar",
-        "/backup.tar.gz", "/index.php.bak", "/.DS_Store", "/composer.json",
-        "/package.json", "/phpinfo.php", "/info.php", "/test.php", "/debug",
-        "/console", "/actuator", "/swagger", "/api-docs", "/.well-known/",
-        "/server-status", "/flag.txt", "/flag", "/readme.txt", "/README.md",
-    )
+    # ------------------------------------------------------------ 知识库 / 路径探测 / MCP
 
     async def _tool_probe_paths(self, task: Task, route, state,
                                 args: dict[str, Any]) -> _ToolOutcome:
@@ -2074,9 +2090,14 @@ class CTFBaseAgent(SubAgent):
         base = str(ch.get("url") or task.target or "").rstrip("/")
         if not base.startswith(("http://", "https://")):
             return _ToolOutcome(ok=False, text="probe_paths 需要题面有 HTTP 入口。")
-        raw = args.get("paths") if isinstance(args.get("paths"), list) else []
-        paths = [str(p) for p in raw if str(p).startswith("/")] \
-            or list(self._PROBE_PATHS)
+        raw = args.get("paths")
+        reason = args.get('reason')
+        if not isinstance(reason, str) or not reason.strip():
+            return _ToolOutcome(ok=False, text='批量探测需要 reason：说明已有现场依据、信息缺口和预期可区分的结果；未发送请求。')
+        if (not isinstance(raw, list) or not raw
+                or any(not isinstance(p, str) or not p.startswith('/') or p.startswith('//') for p in raw)):
+            return _ToolOutcome(ok=False, text='需要提供由当前现场证据推导的 paths；未发送探测请求。')
+        paths = list(dict.fromkeys(raw))
         paths = paths[:40]
         hits: list[str] = []
         failed = 0
@@ -2096,7 +2117,7 @@ class CTFBaseAgent(SubAgent):
         if not hits:
             return _ToolOutcome(ok=True, value=0.05,
                                 note=f"敏感路径探测 {len(paths)} 条未命中",
-                                text=(f"探测了 {len(paths)} 条常见敏感路径"
+                                text=(f"探测了 {len(paths)} 条指定路径"
                                       f"（{failed} 条请求失败），其余 404——清单之外，"
                                       "回到页面功能本身找线索。"))
         body = "命中:\n" + "\n".join(hits[:20]) + f"\n（共 {len(hits)}/{len(paths)} 命中）"
@@ -2207,7 +2228,7 @@ class CTFBaseAgent(SubAgent):
                 return _ToolOutcome(ok=False, text=error)
             refs = list(dict.fromkeys(refs + review['validation_evidence_refs']))
             scope = current_execution_scope.get() or ExecutionScope()
-            evidence = check_evidence(blackboard, getattr(getattr(self.ctx, 'tools', None), 'journal', None),
+            evidence = check_evidence(blackboard, self._evidence_journal(),
                                       task, refs, environment_id=scope.environment_id)
             if not evidence['ok']:
                 return _ToolOutcome(ok=False, text='答案尚未登记；证据缺口：' + json.dumps(evidence['issues'], ensure_ascii=False),
@@ -2259,7 +2280,7 @@ class CTFBaseAgent(SubAgent):
                     continue
                 error = review_error(candidate.answer_review)
                 evidence = check_evidence(getattr(self.ctx, 'blackboard', None),
-                    getattr(getattr(self.ctx, 'tools', None), 'journal', None), task, candidate.evidence_refs,
+                    self._evidence_journal(), task, candidate.evidence_refs,
                     environment_id=(current_execution_scope.get() or ExecutionScope()).environment_id)
                 if error or not evidence['ok']:
                     return _ToolOutcome(ok=False, text='完成前需重新核对已登记答案的证据：'
@@ -2653,7 +2674,8 @@ class CTFBaseAgent(SubAgent):
         if full:
             if full.startswith(("http://", "https://")) and len(full) <= 400:
                 url = full
-        elif path.startswith("/") and "://" not in path and len(path) <= 300 and base:
+        elif path.startswith("/") and len(path) <= 300 and base:
+            # 直接追加站内路径，不作 URL 跳转解析；查询值中的协议不能改变目标主机。
             url = base + path
         if not url:
             return None
@@ -2716,15 +2738,21 @@ class CTFBaseAgent(SubAgent):
             request["data"] = data
         res = await self.ctx.tools.call("http_probe", request, **{**self._tool_ctx(task), "_fresh": refresh})
         if not res.ok:
+            reason = res.failure_reason()
+            failure = res.parsed.get('http_failure') or {}
             if self.ctx.ring is not None:
                 self.ctx.ring.record_attempt(
                     akey, agent_id=self._ring_actor(route),
                     agent_name=self._ring_name(route), action="http_request",
-                    outcome=0.0, note=str(res.error)[:120])
+                    outcome=0.0, note=reason[:120])
             state["observations"].append(
-                {"action": desc, "result": f"请求失败: {str(res.error)[:100]}"})
+                {"action": desc, "result": f"请求失败: {reason[:300]}",
+                 **({'http_failure': failure} if failure else {})})
             return _ToolOutcome(ok=False, note=f"{desc} → 请求失败", text=(
-                f"请求失败（{desc}）：{str(res.error)[:300]}"))
+                f"执行记录 {res.invocation_id}\n请求失败（{desc}）：{reason[:2000]}"
+                + ('\n传输状态：' + json.dumps(failure, ensure_ascii=False) if failure else '')),
+                metadata={'invocation_id': res.invocation_id,
+                          **({'http_failure': failure} if failure else {})})
         status = res.parsed.get("status_code", 0)
         obs = _http_observation(desc, res, url, [])
         state["observations"].append(obs)
@@ -3118,7 +3146,17 @@ class CTFBaseAgent(SubAgent):
             "工作方式：工具就是你的手——需要看什么就用工具去拿，不要凭空猜测"
             "页面内容或响应。拿到页面先读懂它：可见文案、注释、表单与链接是"
             "出题人放在现场的第一手情报，往往比直接上手打接口更能说明这道题"
-            "要什么。每一轮可以调用一个或多个工具：互不依赖的请求放在"
+            "要什么。现场分析优先：从实际功能、源码、流量、返回值和题目约束推导机制；"
+            "区分已证实的事实与猜测，选择能区分关键假设的最小实验，结果不符就修正假设。"
+            "通用漏洞清单、常见密钥和隐藏路径字典不能代替对当前机制的分析。"
+            "枚举仅在现场已支持该方向且候选空间有依据时使用；没有新信息时回到尚未解释的现场证据，"
+            "不要不断换字典、堆参数或扩大扫描来维持进度。只把实际执行过的条件计入验证覆盖，"
+            "不能把少量失败外推为整个机制无效。错误响应明确指出的前置条件、源码中的实际取值和调用方式，"
+            "应与已发请求逐项核对；尚未验证的现场条件不能用通用漏洞猜测替代。"
+            "传输超时与业务拒绝是不同证据：按 http_failure 的阶段和 request_state 判断。"
+            "连通性丢失时核对目标实例、代理和自己仍在运行的扫描，不用不断更换 payload 解释连接故障；"
+            "请求结果未知的写操作先核对状态再决定重试，不能把超时当成未执行或漏洞假设被否定。"
+            "每一轮可以调用一个或多个工具：互不依赖的请求放在"
             "同一轮并发发出，省时间。\n"
             "进展沟通：每段子任务开始、完成重要验证、遇到阻碍或调整方向时，必须在调用工具的同一条回复正文中，"
             "用一到三句简短自然语言告诉用户刚确认了什么、接下来准备验证什么及原因。"
@@ -3151,8 +3189,13 @@ class CTFBaseAgent(SubAgent):
             "提问：遇到授权范围外的目标或需要用户拍板的分叉，用 ask_user 向"
             "用户提问——问题与选项用你自己的话写清楚；用户同意的目标会被"
             "加入本会话范围，之后可正常测试。\n"
+            "并行扫描：有证据支持且能独立推进的扫描缺口，用 scanner_control 的 status 获取状态与 revision，"
+            "再 dispatch 给扫描者，交接具体目标、已有证据、待区分假设和停止条件；"
+            "可选 sandbox_exec 执行脚本化探测。派遣回执立即返回，观察进入共享黑板；"
+            "主线继续读懂业务和验证关键假设，不重复探测或轮询等待，也不把盲目枚举搬给扫描者。"
+            "未装配扫描者时可用 shell_start/shell_watch 后台工作，依赖结果时才等待。\n"
             "团队扩展：把任务拆成多个可独立验证的子问题——用 spawn 派生"
-            "分支执行者并行推进，brief 写清「为什么需要它、它专属的任务、"
+            "分支执行者核查，当前分支等待其结论，仅在确实依赖该结论时使用。brief 写清「为什么需要它、它专属的任务、"
             "解决什么问题、与当前工作的边界」；其结论会回传给你。各司其职："
             "每个分支只做分内之事，顺手能做的不要派。\n"
             "收尾：判定拿到 Flag 时先用 submit_flag 提交（写明依据），拿到平台"
@@ -3164,9 +3207,8 @@ class CTFBaseAgent(SubAgent):
             "换了头、换了时机就是不同的请求，可以再试）；结果里已经有答案就不要"
             "重复验证；连续多轮没有新发现时，主动换思路或直接给出结论，不要"
             "原地打转；简单题简单做——用最少步骤验证最直接的线索。省回合就是省"
-            "时间：能放到同一个脚本/同一轮里一次做完的探查（连读多个页面、连试"
-            "多个入口、批量看响应），不要拆成多轮一次做一件——每多一轮就多付"
-            "一次完整的思考时间。"
+            "时间：已有依据且互不依赖的取证可放在同一轮；前一步结果会决定下一步时，"
+            "先分析结果再选择实验，不为凑批量而加入猜测的入口或参数。"
             "编码串、数组和脚本中的长常量应直接从原始响应或落盘文件解析，不要手工抄写；"
             "提取结果访问失败时先核对原文、提取值和实际请求是否一致，再否定这条线索。"
         )
@@ -3526,9 +3568,11 @@ class CTFWebAgent(CTFBaseAgent):
         *CTFBaseAgent.tool_schemas,
         _fn("probe_paths",
             "仅在入口页面、技术栈或题面给出相应线索后，批量验证少量敏感路径；"
-            "优先传自定义 paths，不把默认清单当作理解业务的替代品。",
-            {"paths": {"type": "array", "items": {"type": "string"},
-                       "description": "由现场证据推导的路径列表（以 / 开头）"}}),
+            "必须明确传入由现场证据推导的 paths，不提供默认字典。",
+            {"paths": {"type": "array", "minItems": 1, "items": {"type": "string"},
+                       "description": "由现场证据推导的路径列表（以 / 开头）"},
+             "reason": {"type": "string", "description": "现场依据、待解决的信息缺口、探测结果如何区分当前假设；通用字典不是现场依据"}},
+            required=["paths", "reason"]),
     ]
 
 

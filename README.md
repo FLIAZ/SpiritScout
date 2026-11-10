@@ -8,7 +8,7 @@
 
 **简体中文 · [English](README_EN.md)**
 
-[![Version](https://img.shields.io/badge/version-v0.21.0-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11--3.14-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.21.1-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11--3.14-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
 
 [界面预览](#界面预览) · [快速开始](#快速开始) · [能力与模式](#能力与模式) · [架构](#架构) · [部署指南](docs/部署与配置.md) · [参与贡献](CONTRIBUTING.md)
 
@@ -79,6 +79,20 @@
 <td width="33%" align="center" valign="top">
 <a href="docs/images/screenshots/ctf-writeup.png"><img src="docs/images/screenshots/ctf-writeup.png" alt="CTF 报告" width="100%"></a><br>
 <b>CTF 报告</b>
+</td>
+</tr>
+<tr>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/background-tasks.png"><img src="docs/images/screenshots/background-tasks.png" alt="后台任务" width="100%"></a><br>
+<b>后台任务</b>
+</td>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/deliverables.png"><img src="docs/images/screenshots/deliverables.png" alt="档案与文件" width="100%"></a><br>
+<b>档案与文件</b>
+</td>
+<td width="33%" align="center" valign="top">
+<a href="docs/images/screenshots/proxy-pool.png"><img src="docs/images/screenshots/proxy-pool.png" alt="代理池" width="100%"></a><br>
+<b>代理池</b>
 </td>
 </tr>
 </table>
@@ -318,7 +332,7 @@ CTF/智能体模式使用会话独立的无头浏览器，SRC 可连接已有浏
 
 智能体模式默认保留未完成题的运行现场；暂缓派工、取消在途工作与释放实例分别由模型明确决策，不按固定耗时强制切题。
 
-当前代码版本 **v0.21.0**。版本唯一来源、递增规则和历史版本说明见 [版本管理](CONTRIBUTING.md#版本管理)。
+当前代码版本 **v0.21.1**。版本唯一来源、递增规则和历史版本说明见 [版本管理](CONTRIBUTING.md#版本管理)。
 
 贡献时按 [Agent 工作约定](AGENTS.md) 执行：同期功能共用一个版本，调整版本号和推送远端须先取得用户明确同意。
 

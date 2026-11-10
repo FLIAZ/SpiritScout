@@ -88,12 +88,21 @@ class BusinessContextAgent(SubAgent):
                     "params": {"type": "object"},
                     "refresh": {"type": "boolean", "description": "需要新鲜响应时设 true，绕过共享记录"},
                     "headers": {"type": "object"},
+                    "secret_headers": {"type": "object", "additionalProperties": {"oneOf": [
+                        {"type": "string"}, {"type": "object", "properties": {"secret_ref": {"type": "string"},
+                        "prefix": {"type": "string"}}, "required": ["secret_ref"], "additionalProperties": False}]},
+                        "description": "Header 名到会话 secret_ref 的映射，执行边界解析，禁止明文"},
+                    "secret_cookies": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "secret_params": {"type": "object", "additionalProperties": {"type": "string"}},
                 }, "required": ["url"]}}},
         ]
         schemas.extend(SCHEMAS)
         from spiritscout.tools.http_responses import SCHEMA as RESPONSE_SCHEMA
 
         schemas.append(RESPONSE_SCHEMA)
+        from spiritscout.tools.js_intel import SCHEMA as JS_READ_SCHEMA
+
+        schemas.append(JS_READ_SCHEMA)
         schemas.append(CVE_SCHEMA)
         from spiritscout.tools.cyberchef import SCHEMAS as CYBERCHEF_SCHEMAS
 

@@ -40,6 +40,7 @@ from spiritscout.tools.spec import (
     ToolResult,
     ToolSpec,
 )
+from spiritscout.traffic.proxy import EgressUnavailable
 
 if False:  # TYPE_CHECKING 等价：避免运行时环（policy.engine 依赖 tools.spec）
     from spiritscout.policy.engine import PolicyEngine
@@ -186,6 +187,12 @@ class ToolRegistry:
             if self.journal is not None:
                 self.journal.transition(invocation_id, result.execution_status,
                                         effect=result.effect_status, result=result)
+            return result
+        except EgressUnavailable as exc:
+            result = ToolResult(tool=name, ok=False, returncode=-3, error=str(exc), invocation_id=invocation_id,
+                                execution_status='failed', effect_status='none')
+            if self.journal is not None and registered:
+                self.journal.transition(invocation_id, 'failed', effect='none', result=result)
             return result
         except (Exception, asyncio.CancelledError) as exc:
             if self.journal is not None and registered:

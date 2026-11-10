@@ -457,5 +457,62 @@ const TopologyLayout = (() => {
     return {x,y,width:pad*2+(columns.length || 1)*(nodeWidth+colGap)-colGap,
       height:Math.max(height,...ids.map(id=>y.get(id)+(heights.get(id) || 120)+pad)),depth};
   }
-  return {layers, positions, project, compact, activity, dual, board,reasoning,reasoningVisible,reasoningLayout};
+  function assetTree(assets, query='') {
+    const roots=new Map(), entries=new Map(), hosts=new Map();
+    const make=(id,title)=>({id,title,records:[],children:new Map()});
+    for(const asset of assets.nodes) {
+      let data={};try{const parsed=JSON.parse(asset.body || '{}');if(parsed && typeof parsed==='object')data=parsed;}catch{}
+      const value=data.value || data.url || asset.title || '';
+      let url;try{url=new URL(value);}catch{}
+      if(url && ['http:','https:'].includes(url.protocol)) {
+        const origin=url.origin;
+        if(!roots.has(origin)) {
+          const root=make(origin,origin);roots.set(origin,root);
+          if(!hosts.has(url.hostname))hosts.set(url.hostname,[]);
+          hosts.get(url.hostname).push(root);
+        }
+        let parent=roots.get(origin),path='';
+        const segments=url.pathname.split('/').filter(Boolean);
+        for(const segment of segments) {
+          path+='/'+segment;
+          if(!parent.children.has(path))parent.children.set(path,make(origin+path,segment));
+          parent=parent.children.get(path);
+        }
+        if(url.search || url.hash) {
+          const key=url.pathname+url.search+url.hash;
+          if(!parent.children.has(key))parent.children.set(key,make(origin+key,url.search+url.hash));
+          parent=parent.children.get(key);
+        }
+        parent.records.push(asset);entries.set(asset.id,parent);
+      } else {
+        const entry=make(asset.id,value);entry.records.push(asset);
+        roots.set(asset.id,entry);entries.set(asset.id,entry);
+      }
+    }
+    for(const asset of assets.nodes) {
+      if(!['domain','ip'].includes(asset.node_type))continue;
+      const parent=entries.get(asset.id),children=hosts.get(String(parent?.title || '').toLocaleLowerCase());
+      if(!parent || !children)continue;
+      for(const child of children)if(child!==parent && roots.has(child.id)) {
+        parent.children.set(child.id,child);roots.delete(child.id);
+      }
+    }
+    // 非 URL 资产使用已记录的父子关系；URL 目录只是展示分组，不写回事实图。
+    for(const edge of assets.edges) {
+      if(!['contains','parent','asset_parent','hosts'].includes(edge.kind))continue;
+      const parent=entries.get(edge.source),child=entries.get(edge.target);
+      if(!parent || !child || parent===child || !roots.has(child.id))continue;
+      const pending=[child],seen=new Set();let cycle=false;
+      while(pending.length){const node=pending.pop();if(node===parent){cycle=true;break;}if(seen.has(node))continue;seen.add(node);pending.push(...node.children.values());}
+      if(!cycle){parent.children.set(child.id,child);roots.delete(child.id);}
+    }
+    const needle=query.toLocaleLowerCase();
+    function project(node, inherited=false) {
+      const matched=inherited || `${node.title} ${node.id} ${node.records.map(r=>r.node_type).join(' ')}`.toLocaleLowerCase().includes(needle);
+      const children=[...node.children.values()].sort((a,b)=>a.title.localeCompare(b.title)).map(n=>project(n,matched)).filter(Boolean);
+      return matched || children.length ? {...node,children} : null;
+    }
+    return [...roots.values()].sort((a,b)=>a.title.localeCompare(b.title)).map(n=>project(n)).filter(Boolean);
+  }
+  return {layers, positions, project, compact, activity, dual, board,reasoning,reasoningVisible,reasoningLayout,assetTree};
 })();

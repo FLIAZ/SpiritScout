@@ -16,6 +16,11 @@ from spiritscout.core.models import AgentType, BlackboardLayer
 
 
 class ReconClueLayerAccessTests(unittest.TestCase):
+    def test_js_reverse_writes_unified_assets_but_not_legacy_js_intel(self) -> None:
+        self.assertTrue(can_write(AgentType.JS_REVERSE, BlackboardLayer.ASSET))
+        self.assertTrue(can_write(AgentType.JS_REVERSE, BlackboardLayer.TOPOLOGY))
+        self.assertFalse(can_write(AgentType.JS_REVERSE, BlackboardLayer.JS_INTEL))
+
     def test_port_scan_and_host_vuln_may_write_recon_clue(self) -> None:
         self.assertTrue(can_write(AgentType.PORT_SCAN, BlackboardLayer.RECON_CLUE))
         self.assertTrue(can_write(AgentType.HOST_VULN, BlackboardLayer.RECON_CLUE))

@@ -1611,6 +1611,23 @@ class SessionManager:
             # 建工作区之前拒绝：不存在半成品目录
             raise SpiritScoutError(f"项目不存在: {project_id}")
         session_id = f"sess-auto-{automation_id}" if automation_id else f"sess-{uuid.uuid4().hex[:8]}"
+        proxy_plan_id = str(payload.get('proxy_plan_id') or 'direct')
+        egress_source = ''
+        if payload.get('side_agent'):
+            parent_id = str((payload.get('side_context') or {}).get('parent_session_id') or '')
+            parent = self.get(parent_id)
+            if parent and (parent.request.get('proxy_binding') or {}).get('id') == proxy_plan_id:
+                egress_source = parent_id
+        if proxy_plan_id != 'direct':
+            from spiritscout.resources.proxy_pool import ProxyPool
+
+            if plan.authorization.mode != RunMode.SRC:
+                raise SpiritScoutError('目标代理方案目前用于 SRC 会话')
+            try:
+                if not egress_source:
+                    ProxyPool(store).snapshot(proxy_plan_id)
+            except ValueError as exc:
+                raise SpiritScoutError(str(exc)) from None
         session = Session(
             session_id=session_id,
             mode=str(payload["mode"]), target=plan.target,
@@ -1637,6 +1654,11 @@ class SessionManager:
 
         try:
             # 成员行无论是否加入项目都写：空串 = 明确未分类（启动对账事实源）
+            if proxy_plan_id != 'direct':
+                from spiritscout.traffic.egress import bind
+
+                session.request['proxy_binding'] = bind(store, session_id, proxy_plan_id, source_session=egress_source)
+                self._persist(session)
             store.set_session_project(session.session_id, session.project_id)
             if payload.get('browser_account_ids'):
                 from spiritscout.resources.browser_accounts import BrowserAccounts
@@ -2107,8 +2129,18 @@ class SessionManager:
 
         if session._model_entries is None:
             session._model_entries = models
-        with bind_session_model(lambda: session.model, lambda: session._model_entries):
-            await self._run_turns(session, cfg, plan, no_llm, models, resume)
+        from spiritscout.traffic.egress import session_egress
+
+        try:
+            with bind_session_model(lambda: session.model, lambda: session._model_entries):
+                async with session_egress(self._resources(), session):
+                    await self._run_turns(session, cfg, plan, no_llm, models, resume)
+        except Exception as exc:
+            session.status = session.phase = session.resume_prev_status if resume and session.resume_prev_status else 'failed'
+            prefix = '续传未完成' if resume and session.resume_prev_status else '会话出口或运行失败'
+            session.error = f'{prefix}：{type(exc).__name__}: {exc}'[:500]
+            session.finished_at = time.time()
+            self._persist(session)
 
     async def _run_turns(self, session: Session, cfg: SystemConfig,
                          plan: LaunchPlan, no_llm: bool,
@@ -2680,6 +2712,9 @@ class SessionManager:
             print(f"[spiritscout] 删除会话成员行失败（{session_id}）: {exc}",
                   file=sys.stderr)
         shutil.rmtree(session.workspace, ignore_errors=True)
+        from spiritscout.traffic.proxy import _REQUIRED
+
+        _REQUIRED.discard(str(session.workspace.resolve()))
         if cancelled:
             raise asyncio.CancelledError
         return session

@@ -168,11 +168,13 @@ const ExperiencePage = (() => {
     box.innerHTML = rows.map(h => {
       const [text, cls] = label[h.result] || [h.result || I18n.t("未知"), ""];
       const sid = String(h.session_id || "");
-      const known = sid.startsWith("sess-") && (S.sessions || []).some(s => s.session_id === sid);
+      const session = (S.sessions || []).find(s => s.session_id === sid);
+      const known = sid.startsWith("sess-") && !!session;
+      const title = h.session_title || session?.title || sid;
       return `<article class="exp-hist-row ${cls}">
         <header>
           <span class="exp-hist-badge">${esc(text)}</span>
-          ${known ? `<button class="exp-source" data-open-session="${esc(sid)}">${esc(sid)}</button>` : `<span class="muted mono">${esc(sid)}</span>`}
+          ${known ? `<button class="exp-source" data-open-session="${esc(sid)}" title="${esc(sid)}">${esc(title)}</button>` : `<span class="muted" title="${esc(sid)}">${esc(title)}</span>`}
           <small>${esc((h.ts || "").replace("T", " ").slice(0, 19))}</small>
         </header>
         <p>${esc(h.outcome || "")}${h.insights ? I18n.t` · 新增 ${h.insights} 条` : ""}${h.duplicates ? I18n.t` · 跳过重复 ${Number(h.duplicates)} 条` : ""}${h.error || h.reason ? ` · ${esc(h.error || h.reason)}` : ""}</p>
