@@ -91,14 +91,16 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
             allow.set()
             self.assertTrue((await task).ok)
 
-    async def test_ctf_sensitive_action_never_asks_user(self):
-        approval = AsyncMock(return_value=False)
-        with patch("spiritscout.tools.scanner.sandbox_exec", side_effect=self.fake_scan):
-            result = await self.registry(RunMode.CTF, approval).call("nuclei_scan",
-                {"targets": ["http://fixture.test"], "template_ids": ["fixture"], "action": "brute_force"},
-                **self.ctx)
-        self.assertTrue(result.ok)
-        approval.assert_not_awaited()
+    async def test_ctf_and_competition_sensitive_actions_never_ask_user(self):
+        for mode in (RunMode.CTF, RunMode.COMPETITION):
+            with self.subTest(mode=mode):
+                approval = AsyncMock(return_value=False)
+                with patch("spiritscout.tools.scanner.sandbox_exec", side_effect=self.fake_scan):
+                    result = await self.registry(mode, approval).call("nuclei_scan",
+                        {"targets": ["http://fixture.test"], "template_ids": ["fixture"], "action": "brute_force"},
+                        **self.ctx)
+                self.assertTrue(result.ok)
+                approval.assert_not_awaited()
 
     async def test_failure_keeps_partial_findings_and_failure_status(self):
         async def partial(command, **ctx):
@@ -297,46 +299,48 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
     async def test_runtime_waits_for_master_dispatch_and_cleans_up_on_return(self):
         from spiritscout.runtime import _run_master
 
-        infra = self.infra()
-        infra.gateway = SimpleNamespace(usage_report=lambda: {})
-        infra.knowledge = None
-        infra.ring = None
-        infra.questions = None
-        infra.convergence = None
-        infra.bus = None
-        infra.policy = PolicyEngine(RunMode.CTF, self.guard)
-        infra.tools.journal = None
-        infra.cfg.blackboard.sqlite_path = str(self.root / "bb.db")
-        assembly = SimpleNamespace(notes=[], tactic_map=None, plan_provider=None, agents={})
-        started = asyncio.Event()
-        async def slow(**ctx):
-            started.set()
-            await asyncio.Event().wait()
-        async def master_run(**kwargs):
-            control = master_context.extra['scan_controller']
-            self.assertIsNone(control.task)
-            self.assertFalse(started.is_set())
-            await control.apply({'action': 'dispatch', 'revision': control.revision,
-                'reason': '按用户授权核对环境', 'target': 'http://fixture.test',
-                'goal': '核对环境', 'tools': ['nuclei_scan']}, actor='master')
-            await asyncio.wait_for(started.wait(), 1)
-            return {"rounds_executed": 1}
-        def master(context):
-            nonlocal master_context
-            master_context = context
-            return SimpleNamespace(ctx=context, run=master_run)
-        master_context = None
-        verifier = SimpleNamespace(start=lambda: None, drain=AsyncMock(), stats=lambda: {}, close=AsyncMock())
-        with patch("spiritscout.runtime.MasterAgent", side_effect=master), \
-             patch("spiritscout.runtime._sub_ctx", return_value=None), \
-             patch("spiritscout.agents.verifier.VerificationQueue", return_value=verifier), \
-             patch.object(NucleiScanner, "preflight", side_effect=slow):
-            summary = await asyncio.wait_for(_run_master(infra, assembly, "target",
-                enable_llm_planning=True), 2)
-        self.assertEqual(summary["rounds_executed"], 1)
-        self.assertEqual(self.bb.read(BlackboardLayer.TASK_STATE, 'scanner-control')['status'], 'closed')
-        self.assertTrue(any(row['data']['status'] == 'cancelled'
-                            for row in self.bb.query(BlackboardLayer.TASK_STATE)))
+        for mode in (RunMode.CTF, RunMode.COMPETITION):
+            with self.subTest(mode=mode):
+                infra = self.infra(mode)
+                infra.gateway = SimpleNamespace(usage_report=lambda: {})
+                infra.knowledge = None
+                infra.ring = None
+                infra.questions = None
+                infra.convergence = None
+                infra.bus = None
+                infra.policy = PolicyEngine(mode, self.guard)
+                infra.tools.journal = None
+                infra.cfg.blackboard.sqlite_path = str(self.root / "bb.db")
+                assembly = SimpleNamespace(notes=[], tactic_map=None, plan_provider=None, agents={})
+                started = asyncio.Event()
+                async def slow(**ctx):
+                    started.set()
+                    await asyncio.Event().wait()
+                async def master_run(**kwargs):
+                    control = master_context.extra['scan_controller']
+                    self.assertIsNone(control.task)
+                    self.assertFalse(started.is_set())
+                    await control.apply({'action': 'dispatch', 'revision': control.revision,
+                        'reason': '按用户授权核对环境', 'target': 'http://fixture.test',
+                        'goal': '核对环境', 'tools': ['nuclei_scan']}, actor='master')
+                    await asyncio.wait_for(started.wait(), 1)
+                    return {"rounds_executed": 1}
+                def master(context):
+                    nonlocal master_context
+                    master_context = context
+                    return SimpleNamespace(ctx=context, run=master_run)
+                master_context = None
+                verifier = SimpleNamespace(start=lambda: None, drain=AsyncMock(), stats=lambda: {}, close=AsyncMock())
+                with patch("spiritscout.runtime.MasterAgent", side_effect=master), \
+                     patch("spiritscout.runtime._sub_ctx", return_value=None), \
+                     patch("spiritscout.agents.verifier.VerificationQueue", return_value=verifier), \
+                     patch.object(NucleiScanner, "preflight", side_effect=slow):
+                    summary = await asyncio.wait_for(_run_master(infra, assembly, "target",
+                        enable_llm_planning=True), 2)
+                self.assertEqual(summary["rounds_executed"], 1)
+                self.assertEqual(self.bb.read(BlackboardLayer.TASK_STATE, 'scanner-control')['status'], 'closed')
+                self.assertTrue(any(row['data']['status'] == 'cancelled'
+                                    for row in self.bb.query(BlackboardLayer.TASK_STATE)))
 
     async def test_start_is_concurrent_and_close_cancels_waiting_worker(self):
         infra = self.infra()
@@ -357,7 +361,7 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         infra.cfg.gateway.lightweight_local = True
         self.assertIsNone(start_scanner(infra, None, "target", mission="", standing_rules=""))
         infra.cfg.gateway.lightweight_local = False
-        infra.authorization.mode = RunMode.COMPETITION
+        infra.authorization.mode = RunMode.AWDP
         self.assertIsNone(start_scanner(infra, None, "target", mission="", standing_rules=""))
         infra.authorization.mode = RunMode.SRC
         infra.cfg.scanner.enabled = False

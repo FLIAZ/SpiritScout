@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import copy
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -11,7 +14,7 @@ from spiritscout.agents.master.agent import MasterAgent, MasterContext, MasterSt
 from spiritscout.agents.master.contracts import MasterContext as SharedContext
 from spiritscout.agents.master.contracts import MasterState as SharedState
 from spiritscout.core.audit import NullAuditLogger
-from spiritscout.core.models import AgentType
+from spiritscout.core.models import AgentType, RunMode
 from spiritscout.gateway.gateway import ChatResponse
 
 
@@ -79,6 +82,42 @@ async def capture(cls: type[MasterAgent]) -> list[dict]:
 
 
 class MasterModuleContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ctf_opening_dispatch_is_a_single_low_effort_plan_with_inline_rules(self):
+        from spiritscout.agents.master.dag import TaskDAG
+        from spiritscout.blackboard import Blackboard
+        from spiritscout.core.models import BlackboardLayer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            blackboard = Blackboard(Path(tmp) / 'bb.db')
+            self.addCleanup(blackboard.close)
+            rules = '只测试本题目标，保留全部原始记录。'
+            blackboard.write(BlackboardLayer.TARGET_AUTH, 'user-context',
+                             {'mission': '核实入口', 'standing_rules': rules}, updated_by='user')
+            for mode, round_no, expected in ((RunMode.CTF, 0, 'low'), (RunMode.AWDP, 0, 'low'),
+                                             (RunMode.CTF, 1, 'max'), (RunMode.SRC, 0, 'max')):
+                with self.subTest(mode=mode, round_no=round_no):
+                    master = object.__new__(MasterAgent)
+                    master.agent_id = 'master-opening'
+                    master.ctx = SimpleNamespace(
+                        audit=NullAuditLogger(), blackboard=blackboard, policy=SimpleNamespace(mode=mode),
+                        agents={AgentType.CTF_WEB: object()},
+                        tactic_map={'CTF-WEB': (AgentType.CTF_WEB, 'ctf_solve')},
+                        extra={'competition_context': {'challenges': [{'id': 'one'}]}},
+                        gateway=SimpleNamespace(chat=AsyncMock(return_value=ChatResponse(
+                            content='{"dag_nodes":[{"tactic":"CTF-WEB","title":"核实入口并取得答案","challenge_id":"one"}]}',
+                            model='fixture', prompt_tokens=1, completion_tokens=1, cost_usd=0, latency_ms=0))))
+                    master._system_prompt = lambda: '规划夹具'
+                    master._situation_digest = lambda: {}
+                    result = await master._llm_plan({'target': 'https://fixture.test', 'round_no': round_no,
+                                                     'dag': TaskDAG().to_dict(), 'round_views': []})
+                    self.assertIsNotNone(result)
+                    self.assertEqual(result['dag_nodes'][0]['title'], '核实入口并取得答案')
+                    master.ctx.gateway.chat.assert_awaited_once()
+                    self.assertEqual(master.ctx.gateway.chat.call_args.kwargs['reasoning_effort'], expected)
+                    sent = json.dumps(master.ctx.gateway.chat.call_args.args[0], ensure_ascii=False)
+                    self.assertIn(rules, sent)
+                    self.assertIn('blackboard_ref', sent)
+
     def test_original_imports_keep_same_context_and_state(self) -> None:
         self.assertIs(MasterContext, SharedContext)
         self.assertIs(MasterState, SharedState)

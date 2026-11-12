@@ -490,7 +490,9 @@ class SingleContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('review.validation_evidence_refs', str(sent))
         self.assertIn('record_answer', str(sent))
         self.assertIn('STOP_REPEATING_THIS_FAILURE', sent[-1]['content'])
-        self.assertIn('有新进展需要公开说明时，正文可使用一个 JSON 对象', sent[-2]['content'])
+        from spiritscout.gateway.progress import FORMAT_GUIDANCE
+
+        self.assertEqual(sent[-2]['content'], FORMAT_GUIDANCE)
         self.assertLessEqual(estimate_input_tokens(sent, self.agent._model_tool_schemas()), 10650)
         self.assertEqual(state['messages'], original)
 

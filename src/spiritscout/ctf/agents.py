@@ -37,6 +37,7 @@ from spiritscout.gateway.context import (
     append_instruction_events,
     estimate_input_tokens,
 )
+from spiritscout.gateway.progress import PublicProgressEmitter as _DeltaEmitter
 from spiritscout.resources.runtime import (
     SKILL_GUIDANCE,
     SKILL_NAMES,
@@ -365,6 +366,19 @@ def _http_observation(desc: str, res: Any, url: str,
     picked = {k: headers[k][:300] for k in _OBS_HEADERS if k in headers}
     if picked:
         obs["headers"] = picked
+    if parsed.get("redirects"):
+        # 中转跳的原始响应头（尤其 302 + Set-Cookie）必须回传给模型，
+        # 否则登录/提交后的会话证据只能靠猜 Cookie 值补。
+        obs["redirects"] = [{
+            "status": int(hop.get("status") or 0),
+            "url": str(hop.get("url") or "")[:300],
+            "location": str(hop.get("location") or "")[:300],
+            **({"set_cookie": str(hop["set_cookie"])[:300]}
+               if hop.get("set_cookie") else {}),
+        } for hop in (parsed["redirects"] or [])[:8]]
+    if parsed.get("evidence_files"):
+        obs["evidence_files"] = {str(k): str(v)[:300]
+                                 for k, v in (parsed["evidence_files"] or {}).items()}
     body = res.stdout or ""
     ctype = headers.get("content-type", "")    # 脚本/样式/JSON 文本不走 HTML 摘要（否则会被当作标签剥离只剩碎片）
     scripty = any(k in ctype.lower() for k in
@@ -440,62 +454,6 @@ def _fn(name: str, description: str, properties: dict[str, Any],
                        **({"required": required} if required else {})}}}
 
 
-class _DeltaEmitter:
-    """模型流式增量 → 审计事件（节流合并，SSE 原样转播给前端轨迹）。
-
-    增量只服务观感：合并窗口内的碎片拼成一条事件，避免逐 token 刷屏。
-    """
-
-    def __init__(self, audit: Any, agent_id: str, *, route: str,
-                 challenge: str, turn: int = 0, interval: float = 0.25):
-        self.audit = audit
-        self.agent_id = agent_id
-        self.route = route
-        self.challenge = challenge
-        self.turn = turn
-        self.interval = interval
-        self._buf: list[str] = []
-        self._kind = ""
-        self.has_public_text = False
-        self._last = time.monotonic()
-
-    def __call__(self, kind: str, text: str) -> None:
-        if kind == "text" and text:
-            self.has_public_text = True
-        if kind == "reset":
-            self.has_public_text = False
-            self._buf.clear()
-            self._kind = ""
-            self._emit("reset", "")
-            return
-        if kind == "tool_call":
-            return          # 参数碎片不转播；整轮结束后统一发 tool_call 事件
-        if kind != self._kind:
-            self.flush()
-            self._kind = kind
-        self._buf.append(text)
-        if sum(map(len, self._buf)) >= 240 or \
-                time.monotonic() - self._last >= self.interval:
-            self.flush()
-
-    def flush(self) -> None:
-        if not self._buf:
-            return
-        text = "".join(self._buf)
-        self._buf.clear()
-        self._last = time.monotonic()
-        if text.strip():
-            for start in range(0, len(text), 4000):
-                self._emit(self._kind or "text", text[start:start + 4000])
-
-    def _emit(self, kind: str, text: str) -> None:
-        scope = current_execution_scope.get() or ExecutionScope()
-        self.audit.log("agent.delta", self.agent_id, {
-            "task_id": scope.task_id, "route_id": scope.route_id,
-            "route": self.route, "challenge": self.challenge,
-            "turn": self.turn, "kind": kind, "text": text})
-
-
 def _obs_text(obs: dict[str, Any]) -> str:
     """结构化观察 → 回灌模型的工具结果文本。"""
     lines = [f"{obs.get('action', '')} → {obs.get('status', 0)}"]
@@ -512,11 +470,21 @@ def _obs_text(obs: dict[str, Any]) -> str:
             lines.append("源码文件（沙箱只读，可直接解析常量）: " + str(obs["body_path"]))
         if obs.get("text_decode_lossy"):
             lines.append("文本解码存在替换字符；原始字节保存在同目录 body.bin，可按实际编码重新解析。")
+    if obs.get("redirects"):
+        lines.append("跳转链原始响应头（含 Set-Cookie，会话凭据以此为准）:")
+        for hop in obs["redirects"]:
+            line = f"- {hop.get('status')} {hop.get('url')} → {hop.get('location')}"
+            if hop.get("set_cookie"):
+                line += f"；Set-Cookie: {hop['set_cookie']}"
+            lines.append(line)
     if obs.get("scope_note"):
         lines.append(str(obs["scope_note"]))
     if obs.get("headers"):
         lines.append("响应头: " + json.dumps(
             obs["headers"], ensure_ascii=False)[:600])
+    if obs.get("body_path"):
+        lines.append("同目录原始证据可直接用 shell 读取: request.http（本次实际发送的完整请求，"
+                     "含工具会话携带的 Cookie）/ metadata.json / body.bin。")
     if obs.get("excerpt"):
         lines.append("正文:\n" + str(obs["excerpt"]))
     if obs.get("flags"):
@@ -795,9 +763,9 @@ class CTFBaseAgent(SubAgent):
                  "offset": {"type": "integer"}, "length": {"type": "integer"}}))
         if not self._is_lightweight():
             from spiritscout.ctf.answer_evidence import REVIEW_SCHEMA
-            from spiritscout.ctf.evidence_memory import SCHEMA as MEMORY_SCHEMA
+            from spiritscout.ctf.evidence_memory import normal_schema
 
-            self.tool_schemas.append(copy.deepcopy(MEMORY_SCHEMA))
+            self.tool_schemas.append(normal_schema())
             self.tool_schemas.append(_fn("history_read", "读取当前路线原始历史。find 返回精确命中总数、位置和附近原文，避免逐次查找确认数量；"
                 "view=content 可直接引用工具输出原文，默认 message 为完整消息 JSON。",
                 {"message_index": {"type": "integer"}, "offset": {"type": "integer"},
@@ -817,6 +785,10 @@ class CTFBaseAgent(SubAgent):
         from spiritscout.tools.images import SCHEMA as IMAGE_SCHEMA
 
         self.tool_schemas = [*self.tool_schemas, copy.deepcopy(IMAGE_SCHEMA)]
+        if not self._is_lightweight():
+            from spiritscout.gateway.progress import DISCOVERY_SCHEMA
+
+            self.tool_schemas.append(copy.deepcopy(DISCOVERY_SCHEMA))
 
     @staticmethod
     def _mcp_tool_schema(prefix: str, entry: dict[str, Any]) -> dict[str, Any]:
@@ -1016,12 +988,39 @@ class CTFBaseAgent(SubAgent):
         from spiritscout.gateway.progress import ensure_exploration_progress
 
         ensure_exploration_progress(state)
+        if not self._is_lightweight():
+            from spiritscout.gateway.context import ensure_execution_data_guidance
+            from spiritscout.gateway.progress import ensure_discovery_reporting
+
+            ensure_discovery_reporting(state)
+            ensure_execution_data_guidance(state, self.ctx.gateway)
+            if getattr(self.ctx, 'mode', None) == RunMode.COMPETITION:
+                from spiritscout.blackboard.exchange import ensure_memory_contract
+
+                ensure_memory_contract(state)
 
     def _model_response_received(self, task: Task, route, state: dict[str, Any]) -> None:
         """当前请求成功返回后，由执行者确认本轮携带的用户消息。"""
 
     def _record_public_progress(self, task: Task, route, state: dict[str, Any], detail: dict[str, Any] | None) -> None:
-        """执行者可保存模型明确声明的公开探索关系，不从自然语言推断。"""
+        """普通与轻量执行者保存同一公开探索协议，不从自然语言推断。"""
+        if detail and detail.get('discovery_key') and not self._is_lightweight():
+            state['discovery_reported_keys'] = list(dict.fromkeys([
+                *state.get('discovery_reported_keys', []), detail['discovery_key']]))
+        if not detail or not detail.get('exploration') or self.ctx.blackboard is None:
+            return
+        milestone = detail['exploration'].get('milestone')
+        if milestone and not self._is_lightweight():
+            state['discovery_reported_keys'] = list(dict.fromkeys([
+                *state.get('discovery_reported_keys', []), 'public:' + milestone['title']]))
+        from spiritscout.ctf.light_exploration import record_progress
+
+        result = record_progress(self.ctx.blackboard, state, detail, actor=self.agent_id,
+            agent_type=self.agent_type, source={'task_id': task.task_id, 'route_id': route.route_id,
+                                               'route': route.name, 'challenge': self.challenge_id(task)})
+        if not result['ok']:
+            self.ctx.audit.log('solver.exploration_rejected', self.agent_id, {
+                'task_id': task.task_id, 'route_id': route.route_id, 'error': result['error']})
 
     def _light_model_messages(self, task: Task, route, state: dict[str, Any]) -> list[dict[str, Any]]:
         from spiritscout.gateway.light_context import project_context
@@ -1075,7 +1074,7 @@ class CTFBaseAgent(SubAgent):
         state["messages"].append({"role": "user", "_light_kind": "recovery", "content": (
             "上一回合没有携带工具调用。需要继续调查时，从可用工具中自主选择下一步并实际调用；"
             + completion + "无法继续时用 finish_challenge(complete=false) 说明缺口。"
-            "本次通过原生 tool_calls 输出实际动作；正文可以为空，不再单独重复 progress/exploration JSON。")})
+            "本次通过原生 tool_calls 输出实际动作；需要改变探索层级时，正文用自然语言，并在正文后附固定 exploration 数据。")})
         try:
             rec = await self.ctx.gateway.chat(
                 self._light_model_messages(task, route, state), task_type="execution",
@@ -1531,7 +1530,8 @@ class CTFBaseAgent(SubAgent):
             state["messages"], initialized=not include_initial_system)
         directives = self._active_steering(task, route)
         emitter = _DeltaEmitter(self.ctx.audit, self.agent_id, route=route.name,
-                                challenge=self.challenge_id(task), turn=turn)
+                                challenge=self.challenge_id(task), turn=turn,
+                                inline_discovery=not self._is_lightweight())
         self.ctx.audit.log("agent.turn", self.agent_id, {
             "task_id": task.task_id, "route_id": route.route_id,
             "route": route.name, "challenge": self.challenge_id(task),
@@ -1560,11 +1560,35 @@ class CTFBaseAgent(SubAgent):
             if self._is_lightweight():
                 messages = self._light_model_messages(task, route, state)
             else:
+                from spiritscout.agents.profiles import EVIDENCE_FIRST_GUIDANCE
                 from spiritscout.gateway.normal_context import project
+                from spiritscout.gateway.progress import (
+                    EXPLORATION_PROGRESS_GUIDANCE,
+                    native_discovery_reminder,
+                )
 
-                view = project(state, self._model_tool_schemas(), budget, force=compact_request is not None)
-                before_compaction = view['previous_tokens']
-                messages = view['messages']
+                # 硬规则每轮随提醒重述：长系统提示里远处的约束在连续工具循环中
+                # 容易被忽略，登录/302/扫描场景必须每轮可见。
+                reminder = {'role': 'user',
+                            'content': EVIDENCE_FIRST_GUIDANCE + '\n' + native_discovery_reminder(state)}
+                if directives:
+                    reminder['content'] += ('\n当前未完成任务指令（用户最新要求与授权优先，已完成内容不重做）：'
+                                            + json.dumps(directives, ensure_ascii=False))
+                has_contract = any(
+                    m.get('role') == 'user' and EXPLORATION_PROGRESS_GUIDANCE in str(m.get('content') or '')
+                    for m in state['messages'])
+                sent_contract = not has_contract
+                if sent_contract:
+                    # 仅旧检查点或投影恰好裁掉首条契约时补一次完整契约。
+                    reminder['content'] = EXPLORATION_PROGRESS_GUIDANCE + '\n' + reminder['content']
+                reserve = estimate_input_tokens([reminder])
+                view = project(state, self._model_tool_schemas(),
+                               max(1, budget - reserve) if budget is not None else None,
+                               force=compact_request is not None)
+                before_compaction = view['previous_tokens'] + reserve
+                messages = [*view['messages'], reminder]
+                if sent_contract:
+                    reminder['_context_contract'] = True
                 if view['new_archived_turns']:
                     self.ctx.audit.log('context.projected', self.agent_id, {
                         'task_id': task.task_id, 'route_id': route.route_id, 'mode': 'normal',
@@ -1583,7 +1607,7 @@ class CTFBaseAgent(SubAgent):
                 preserve_tool_order=bool(state.get("shared_prefix", False)
                     or (self._is_lightweight() and getattr(self.flag_manager, 'fix_mode', False))),
                 preserve_context=True,
-                on_delta=emitter if getattr(self, "public_body", False) and self._is_lightweight() else
+                on_delta=emitter if not self._is_lightweight() or getattr(self, "public_body", False) else
                 (lambda kind, text: emitter(kind, text) if kind != "text" else None)
                 if getattr(self.flag_manager, "local_only", False) else emitter,
                 reasoning_effort=self.task_effort(task))
@@ -1608,6 +1632,8 @@ class CTFBaseAgent(SubAgent):
             return StepResult(ok=True, value=boot_value,
                               note=self._merge_note(boot_note, note))
         emitter.flush()
+        if not self._is_lightweight():
+            state['messages'].append({**reminder, '_progress_reminder': True})
         state["llm_failures"] = 0
         state["system_initialized"] = True
         self._model_response_received(task, route, state)
@@ -1622,7 +1648,7 @@ class CTFBaseAgent(SubAgent):
 
         from spiritscout.gateway.progress import publish_progress
 
-        public_body = getattr(self, "public_body", False) and self._is_lightweight()
+        public_body = not self._is_lightweight() or getattr(self, "public_body", False)
         progress = None
         if public_body:
             # 流式正文服务实时展示；完整事件仍须持久化，供探索图和刷新后回放。
@@ -1862,10 +1888,24 @@ class CTFBaseAgent(SubAgent):
                 ok=False,
                 text=f"工具 {name} 不在 {self.agent_type.value} 的工具目录内。",
             )
+        if name == "report_discovery" and not self._is_lightweight():
+            from spiritscout.gateway.progress import publish_discovery
+
+            try:
+                result = publish_discovery(self.ctx.audit, self.agent_id, args,
+                    task_id=task.task_id, route_id=route.route_id, turn=state.get('turn', 0))
+            except ValueError as exc:
+                return _ToolOutcome(ok=False, text=str(exc))
+            state['discovery_reported_keys'] = list(dict.fromkeys([
+                *state.get('discovery_reported_keys', []), result['key']]))
+            return _ToolOutcome(ok=True, text=json.dumps(result, ensure_ascii=False, separators=(',', ':')))
         if name == "evidence_memory" and not self._is_lightweight():
             from spiritscout.ctf.evidence_memory import execute as memory_execute
 
-            result = memory_execute(state, args)
+            scope = current_execution_scope.get() or ExecutionScope()
+            result = memory_execute(state, args, recorded_in={
+                'task_id': scope.task_id, 'route_id': scope.route_id,
+                'environment_id': scope.environment_id, 'identity_id': scope.identity_id})
             return _ToolOutcome(ok=result['ok'], text=json.dumps(result, ensure_ascii=False, separators=(',', ':')),
                 metadata={'memory_revision': result['revision']} if result['ok'] else {})
         if name == "history_read":
@@ -1928,6 +1968,7 @@ class CTFBaseAgent(SubAgent):
         if name in NAMES:
             result = execute(self.ctx.blackboard, name, args, actor=self.agent_id,
                              agent_type=self.agent_type,
+                             memory_enabled=not self._is_lightweight() and getattr(self.ctx, 'mode', None) == RunMode.COMPETITION,
                              source={"task_id": task.task_id, "route_id": route.route_id,
                                      "route": route.name, "challenge": self.challenge_id(task)})
             return _ToolOutcome(ok=result["ok"], text=json.dumps(result, ensure_ascii=False, separators=(',', ':')))
@@ -2824,7 +2865,7 @@ class CTFBaseAgent(SubAgent):
              "timeout": timeout, "log_name": f"output_{route.name}",
              "action": action},
             **self._tool_ctx(task))
-        if not res.ok and not (res.stdout or res.stderr):
+        if self._is_lightweight() and not res.ok and not (res.stdout or res.stderr):
             state["observations"].append(
                 {"action": desc, "result": f"执行失败: {str(res.error)[:100]}"})
             return _ToolOutcome(ok=False, note=f"{desc} → 执行失败", text=(
@@ -2843,9 +2884,13 @@ class CTFBaseAgent(SubAgent):
         pipeline_partial = self._is_lightweight() and bool(res.parsed.get("pipeline_partial"))
         status = (f"超时终止（{timeout:.0f}s）" if res.timed_out
                   else "上游 SIGPIPE（141），管道末端成功；已有部分输出，完整性需核对" if pipeline_partial
+                  else f"工具返回失败（退出码 {rc}）" if not self._is_lightweight() and not res.ok
                   else f"退出码 {rc}")
         # 督导需要看到实际响应；进程成功不代表假设成立或取得有效线索。
-        evidence = _head_tail((res.stderr if rc != 0 and res.stderr else res.stdout or res.stderr or "无输出").strip(), 160)
+        diagnostic = (res.stderr if rc != 0 and res.stderr else
+                      res.error if not self._is_lightweight() and not res.ok and res.error else
+                      res.stdout or res.stderr or "无输出")
+        evidence = _head_tail(diagnostic.strip(), 160)
         state["observations"].append(
             {"action": desc,
              "result": f"{status}；{evidence}"})
@@ -2882,10 +2927,19 @@ class CTFBaseAgent(SubAgent):
                          "——需要细节时在沙箱里按需读取")
             if res.parsed.get("previous_output_file"):
                 lines.append(f"上一代输出: {res.parsed['previous_output_file']}")
+        if res.error and not self._is_lightweight():
+            lines.append("执行诊断：\n" + _head_tail(str(res.error), 1200))
         if res.timed_out:
-            lines.append("提示：超时通常意味着脚本在等待输入或死循环——"
-                         "交互式脚本请改为非交互（预置输入/设置超时）。")
+            if self._is_lightweight():
+                lines.append("提示：超时通常意味着脚本在等待输入或死循环——"
+                             "交互式脚本请改为非交互（预置输入/设置超时）。")
+            else:
+                lines.append("本次只确认到达时限仍未完成，原因未定；不能据此认定目标或环境故障。"
+                             "按需核对脚本最后完成阶段、回调/响应匹配及原始异常，再选择区分原因的最小检查。")
         metadata = {"invocation_id": res.invocation_id, "output_file": out_file}
+        if not self._is_lightweight() and (not res.ok or rc != 0 or res.timed_out):
+            metadata['failure_evidence'] = {'exit_code': rc, 'timed_out': res.timed_out,
+                                            'attribution': 'undetermined'}
         if self._is_lightweight():
             metadata.update(output_rotated=bool(res.parsed.get('output_rotated')),
                             previous_output_file=res.parsed.get('previous_output_file', ''),
@@ -3097,7 +3151,7 @@ class CTFBaseAgent(SubAgent):
         config = getattr(getattr(self.ctx, "gateway", None), "config", None)
         if (getattr(config, "lightweight_local", False)
                 and getattr(self.ctx, "mode", None) in (RunMode.CTF, RunMode.AWDP)):
-            from spiritscout.agents.profiles import get_profile
+            from spiritscout.agents.profiles import EVIDENCE_FIRST_GUIDANCE, get_profile
 
             profile = get_profile(self.agent_type)
             prompt = (f"职责：{profile.duty}。\n专业思维：{profile.mindset}\n"
@@ -3109,6 +3163,8 @@ class CTFBaseAgent(SubAgent):
                 "区分已观测事实、待验证假设与缺口，结论附可复现依据。"
                 "\n用工具取得原始证据，按照本次目标自主选择方法。工具调用时用一到三句说明进展，"
                 "不复述全部历史或长篇内部分析；长响应落盘后按需读取，代码和数据交给工具计算，不手抄常量。"
+                "连续无新信息时换假设或换证据，不把枚举当进展；命令成功不等于解题推进。"
+                + EVIDENCE_FIRST_GUIDANCE +
                 "用户原始目标与最新答复优先于历史自动指令。灵枢指令中的技术推测也须核对实际记录；"
                 "已经完成或过期的动作通过 steering_feedback 回报证据与原因，不为了旧指令重复执行。"
                 "不做同伴已覆盖的重复工作。"
@@ -3211,6 +3267,8 @@ class CTFBaseAgent(SubAgent):
             "先分析结果再选择实验，不为凑批量而加入猜测的入口或参数。"
             "编码串、数组和脚本中的长常量应直接从原始响应或落盘文件解析，不要手工抄写；"
             "提取结果访问失败时先核对原文、提取值和实际请求是否一致，再否定这条线索。"
+            "复用记录与新的执行应如实区分，结论保留原始来源。"
+
         )
         if shared_prefix:
             from spiritscout.agents.profiles import agent_prompt_parts

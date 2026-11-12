@@ -47,22 +47,46 @@ class _Stages:
                     elif not row['pending_calls'] and row['status'] in {'running', 'waiting'}:
                         row['status'] = 'done'
             return
+        if kind == 'agent.discovery':
+            from spiritscout.gateway.progress import public_exploration
+
+            semantic = public_exploration({'intent': d.get('intent'), 'attempt': d.get('intent'),
+                'milestone': {key: d.get(key) for key in
+                    ('kind', 'title', 'basis', 'importance', 'confidence', 'evidence_refs')}})
+            if not semantic or 'milestone' not in semantic or not isinstance(d.get('key'), str):
+                return
+            key = json.dumps(['discovery', actor, task, route, d['key']], ensure_ascii=False, separators=(',', ':'))
+            old = self.rows.get(key, {})
+            self.rows[key] = {'id': '__process_stage:' + key, 'kind': 'discovery',
+                'discovery_key': key, 'actor': actor, 'task_id': task, 'route_id': route,
+                'turn': old.get('turn', turn or 0), 'updated_turn': turn or 0,
+                'title': d['title'], 'body': d['basis'], 'exploration': semantic,
+                'status': 'done', 'sequence': old.get('sequence', event.get('seq', 0)),
+                'tool_call_ids': [], 'pending_calls': []}
+            if len(self.rows) > _LIMIT:
+                self.rows.popitem(last=False)
+                self.has_more = True
+            return
         # 无回合号时只接受明确的 step_id，不能根据时间猜归属。
         step = turn if type(turn) is int and turn > 0 else d.get('step_id')
         if not step:
             return
         key = json.dumps([actor, task, route, step], ensure_ascii=False, separators=(',', ':'))
         if kind == 'agent.progress':
-            text = d.get('text')
-            if not isinstance(text, str) or not text.strip():
+            from spiritscout.gateway.progress import (
+                parse_public_progress,
+                public_exploration,
+            )
+
+            parsed = parse_public_progress(d.get('text') or '')
+            text = parsed['text']
+            if not text.strip():
                 return
             for row in self.rows.values():
                 if (row['actor'], row['task_id'], row['route_id']) == (actor, task, route) and row['status'] == 'running' and row['id'] != '__process_stage:' + key:
                     row['status'] = 'waiting' if row.get('pending_calls') else 'done'
             old = self.rows.get(key, {})
-            from spiritscout.gateway.progress import public_exploration
-
-            semantic = public_exploration(d.get('exploration'))
+            semantic = public_exploration(d.get('exploration')) or parsed.get('exploration')
             self.rows[key] = {**old, **({'exploration': semantic} if semantic else {}), 'id': '__process_stage:' + key, 'kind': 'milestone',
                               'actor': actor, 'task_id': task, 'route_id': route, 'turn': turn or 0,
                               'step_id': d.get('step_id', ''), 'title': text.strip().split('\n')[0][:100],

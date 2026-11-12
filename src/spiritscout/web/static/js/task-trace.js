@@ -36,7 +36,18 @@ const TaskTrace = (() => {
     return candidates.length === 1 ? candidates[0][0] : keyOf(actor, "");
   }
   function reduce(store, e, eventId = null) {
+    if(e.type==='agent.progress') {
+      const parsed=parsePublicProgress(e.detail?.text);
+      e={...e,detail:{...e.detail,text:parsed.text,...(!e.detail?.exploration && parsed.exploration ? {exploration:parsed.exploration} : {})}};
+    }
     const identity = e.detail || {};
+    if(!worker(e.actor) && /^task\.(cancelled|failed|pruned)$/.test(e.type) && identity.task_id) {
+      // 主控发布的任务生命周期同样作用于实际执行者，不能留下“执行中”的旧卡片。
+      let changed=null;
+      for(const task of store.tasks.values())if(task.id===identity.task_id)
+        changed=reduce(store,{...e,actor:task.actor},eventId) || changed;
+      return changed;
+    }
     if(e.type === "system.lifecycle" && identity.action === "single_executor_start" &&
         ["ctf","awdp"].includes(identity.mode) && identity.agent_id) {
       store.singleActors.set(identity.agent_id,{hints:[]});
@@ -118,7 +129,7 @@ const TaskTrace = (() => {
       task.completedTexts.add(JSON.stringify([route,step.turn]));
     const previousDeltaText=e.type === "agent.delta" ? task.texts.get(stem) || "" : "";
     const nextDeltaText=previousDeltaText+(d.text || "");
-    const structuredDelta=/^\s*\{|^\s*```(?:json)?(?:\s|$)/i.test(nextDeltaText);
+    const structuredDelta=/^\s*[\[{]|^\s*```/m.test(nextDeltaText);
     const deltaPublicText=structuredDelta ? commentaryText(nextDeltaText) : commentaryText(d.text);
     const angle=e.type === "agent.turn" && typeof d.angle === "string" ? d.angle.trim() : "";
     const publicText=e.type === "agent.delta" && !["reasoning","tool_call","reset"].includes(d.kind)
@@ -141,7 +152,8 @@ const TaskTrace = (() => {
         const adopt=owner && !owner.intent;
         const same=owner && owner.key===activeIntentKey && owner.epoch===timelineEpoch &&
           ((!semantic && !angle) || owner.intent===intent || !owner.texts.size);
-        const streamedOwner=e.type==='agent.progress' && d.streamed && owner && step?.intentKey===owner.key;
+        const streamedOwner=e.type==='agent.progress' && d.streamed && owner && step?.intentKey===owner.key
+          && (!owner.declaredIntent || !semantic || owner.declaredIntent===semantic);
         if(adopt || same || streamedOwner) {
           segment=owner;
           if(semantic || !segment.intent) segment.intent=intent;
@@ -154,7 +166,17 @@ const TaskTrace = (() => {
             intent,epoch:timelineEpoch,event:e,startId:eventId,endId:eventId,texts:new Map(),toolKeys:new Set(),records:new Map(),
             status:"running",progress:"",title:angle,version:0};
           task.segments.set(segmentKey,segment);
+          if(semantic && owner && d.streamed && step) {
+            // 元数据在正文流结束后才到：仅迁移本回合，保留原意图已有的正文和调用。
+            for(const [key,value] of step.texts)if(owner.texts.has(key)) {
+              segment.texts.set(key,value);owner.texts.delete(key);
+            }
+            for(const [key,tool] of task.tools)if(tool.stepKey===step.key && owner.toolKeys.has(key)) {
+              owner.toolKeys.delete(key);segment.toolKeys.add(key);tool.intentKey=segment.key;
+            }
+          }
         }
+        if(semantic)segment.declaredIntent=semantic;
         task.activeIntents.set(route,segment);
         task.currentSegmentKey=segment.key;
         activeIntentKey=segment.key;
@@ -205,6 +227,12 @@ const TaskTrace = (() => {
     if (e.type === "agent.progress") {
       if(step && d.exploration)step.exploration=d.exploration;
       const text=commentaryText(d.text);
+      if(d.streamed && text && step?.texts.has(stem) && commentaryText(step.texts.get(stem))!==text) {
+        // 历史分页可能从 JSON 中段开始；完整持久正文到达后撤掉残片，不能并排显示。
+        task.texts.set(stem,text);step.texts.set(stem,text);
+        for(const item of task.segments.values())item.texts.delete(stem);
+        segment?.texts.set(stem,text);
+      }
       const alreadyStreamed=d.streamed && step && [...step.texts.values()].some(raw=>commentaryText(raw)===text);
       if(text && !alreadyStreamed) {
         const publicKey=`progress:${d.call_id || e.seq || e.ts || task.version}`;
@@ -314,20 +342,70 @@ const TaskTrace = (() => {
     }
     return task;
   }
-  // 自然语言进展直接可读；结构化执行决策只展示显式面向用户的说明字段。
-  function commentaryText(raw) {
-    let text=String(raw || "").trim();
-    if (/^\[/.test(text)) return "";
-    const structured=/^\{/.test(text) || /^```(?:json)?(?:\s|$)/i.test(text);
-    if(structured) {
-      try {
-        const data=JSON.parse(text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));
-        text=[...new Set([data.progress, data.commentary].filter(v=>typeof v === "string" && v.trim())
-          .map(v=>v.trim()))].join("\n\n");
-      } catch { return ""; } // JSON 尚未完整时不把半截协议刷成进度。
+  // 正文与展示标注分开解析；括号/引号按 JSON 语法配对，不靠正则截取对象。
+  function parsePublicProgress(raw) {
+    const source=String(raw || "").trim(),prose=[],bodies=[];
+    let cursor=0,exploration=null;
+    const protocol=new Set(['progress','commentary','exploration','discovery','analysis','actions','steps',
+      'tool_calls','skill_requests','decision','verdict','dag_nodes','local_tool','web_search']);
+    function decode(start) {
+      while(/\s/.test(source[start] || '') && start<source.length)start++;
+      const stack=[];let quoted=false,escaped=false;
+      for(let i=start;i<source.length;i++) {
+        const c=source[i];
+        if(quoted) {if(escaped)escaped=false;else if(c.charCodeAt(0)===92)escaped=true;else if(c==='"')quoted=false;continue;}
+        if(c==='"')quoted=true;
+        else if(c==='{' || c==='[')stack.push(c);
+        else if(c==='}' || c===']') {
+          if(!stack.length)return null;
+          stack.pop();
+          if(!stack.length) {try{return {data:JSON.parse(source.slice(start,i+1)),end:i+1};}catch{return null;}}
+        }
+      }
+      return null;
     }
-    return text;
+    function semantic(value,milestone) {
+      if(!value || Array.isArray(value) || typeof value!=='object' ||
+          ['intent','attempt'].some(k=>typeof value[k]!=='string' || !value[k].trim() || value[k].length>100))return null;
+      const result={intent:value.intent.trim(),attempt:value.attempt.trim()};
+      for(const [key,limit] of [['from',100],['reason',400]])if(typeof value[key]==='string' && value[key].trim())result[key]=value[key].trim().slice(0,limit);
+      if(['running','blocked','supported','refuted','exhausted','closed'].includes(value.state))result.state=value.state;
+      const m=value.milestone ?? milestone;
+      if(m && ['discovery','breakthrough','turning_point'].includes(m.kind) &&
+          ['title','basis'].every(k=>typeof m[k]==='string' && m[k].trim())) {
+        result.milestone={kind:m.kind,title:m.title.trim().slice(0,100),basis:m.basis.trim().slice(0,600)};
+        if(typeof m.next==='string')result.milestone.next=m.next.trim().slice(0,400);
+        if(Array.isArray(m.evidence_refs))result.milestone.evidence_refs=[...new Set(m.evidence_refs.slice(0,20).filter(r=>typeof r==='string' && r.trim()).map(r=>r.trim().slice(0,300)))];
+      }
+      return result;
+    }
+    const markers=/^[ \t]*(?:```[^\n]*|[\{\[])/gm;
+    for(const marker of source.matchAll(markers)) {
+      const start=marker.index;if(start<cursor)continue;
+      const token=marker[0].trimStart(),fenced=token.startsWith('```');
+      let end=source.length,valueStart=start+marker[0].length-1;
+      if(fenced) {
+        const lineEnd=source.indexOf('\n',start),close=lineEnd>=0 ? /^[ \t]*```[ \t]*(?:\n|$)/m.exec(source.slice(lineEnd+1)) : null;
+        end=close ? lineEnd+1+close.index+close[0].length : source.length;
+        if(!['','json'].includes(token.slice(3).trim().toLowerCase())) {prose.push(source.slice(cursor,end));cursor=end;continue;}
+        valueStart=lineEnd>=0 ? lineEnd+1 : source.length;
+      }
+      const parsed=decode(valueStart);
+      if(!parsed) {prose.push(source.slice(cursor,start));cursor=end;continue;}
+      if(!fenced)end=parsed.end;
+      const data=parsed.data,isObject=data && !Array.isArray(data) && typeof data==='object';
+      const isProtocol=isObject && Object.keys(data).some(k=>protocol.has(k));
+      if(!isProtocol && (prose.length || source.slice(0,start).trim())) {prose.push(source.slice(cursor,end));cursor=end;continue;}
+      prose.push(source.slice(cursor,start));cursor=end;
+      if(!isObject)continue;
+      for(const key of ['progress','commentary'])if(typeof data[key]==='string' && data[key].trim())bodies.push(data[key].trim());
+      exploration=semantic(data.exploration,data.milestone) || exploration;
+    }
+    prose.push(source.slice(cursor));
+    const text=prose.join('').trim() || [...new Set(bodies)].join('\n\n');
+    return {text,...(exploration ? {exploration} : {})};
   }
+  const commentaryText=raw=>parsePublicProgress(raw).text;
   function updatesOf(task) {
     const seen=new Set(), updates=[];
     for(const [key,raw] of task.texts) {
@@ -618,5 +696,5 @@ const TaskTrace = (() => {
     for(const key of dirty) {const task=store.tasks.get(key);if(task) render(task);}
     dirty.clear();
   }
-  return {push,reset,flush,create,reduce,summaryOf,resolve,updatesOf,commentaryText,narrativeOf,skillsOf,stepTitle,stageSummary,liveSummary,progressSnapshot,routeSnapshot,actorLabel};
+  return {push,reset,flush,create,reduce,summaryOf,resolve,updatesOf,commentaryText,parsePublicProgress,narrativeOf,skillsOf,stepTitle,stageSummary,liveSummary,progressSnapshot,routeSnapshot,actorLabel};
 })();

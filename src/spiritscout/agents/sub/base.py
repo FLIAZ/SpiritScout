@@ -734,10 +734,6 @@ class SubAgent(abc.ABC):
                 resp = await chat_decision(
                     self.ctx.gateway,
                     decision_messages(self._system_prompt() + f"\nROLE: {role}" + search_contract + local_contract
-                                      + "\n保持原 JSON 决策格式；发现新证据、遇到阻碍或改变方向时，"
-                                      "必须在本次决策的 progress 字符串中用一到三句向用户说明正在验证什么、"
-                                      "已确认的情况、当前阻碍和下一步验证目标；没有新结论时明确仍在验证，"
-                                      "无需复述工具原始响应或内部推理。"
                                       + ("\n" + _ASK_CHANNEL_NOTE if _allow_ask else ""),
                                       {**user_obj, **({"search_observations": observations} if observations else {}),
                                        **({"local_observations": local_observations} if local_observations else {})},

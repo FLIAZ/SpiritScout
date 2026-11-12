@@ -1,7 +1,7 @@
 /* 资产是独立资料图；会话画布只展示公开目标、意图与事实的探索关系。 */
 const SessionTopology = (() => {
   const W=232;
-  const kinds={origin:[I18n.t('起点'),'flag'],goal:[I18n.t('目标'),'target'],intent:[I18n.t('意图'),'compass'],attempt:[I18n.t('尝试'),'flask'],discovery:[I18n.t('新发现'),'bulb'],breakthrough:[I18n.t('重大突破'),'target'],turning_point:[I18n.t('方向转变'),'compass'],fact:[I18n.t('事实'),'flask'],vulnerability:[I18n.t('漏洞候选'),'bug'],hint:[I18n.t('提示'),'bulb']};
+  const kinds={origin:[I18n.t('入口'),'flag'],goal:[I18n.t('目标'),'target'],intent:[I18n.t('意图'),'compass'],discovery:[I18n.t('重大发现'),'bulb'],breakthrough:[I18n.t('关键突破'),'target'],turning_point:[I18n.t('方向转变'),'compass'],fact:[I18n.t('结果'),'flask'],vulnerability:[I18n.t('漏洞候选'),'bug'],hint:[I18n.t('发现线索'),'bulb']};
   const edgeMeta={tries:[I18n.t('验证方法'),'chain'],redirects:[I18n.t('转向'),'chain'],scope:[I18n.t('目标'),'spawn'],spawns:[I18n.t('派生'),'spawn'],stage:[I18n.t('展开'),'chain'],advance:[I18n.t('推进'),'chain'],derives:[I18n.t('意图链'),'chain'],produces:[I18n.t('产出'),'yield'],task_output:[I18n.t('任务产出'),'yield'],evidence:[I18n.t('依据'),'proof'],dependency:[I18n.t('目标依赖'),'chain'],hint:[I18n.t('提示'),'chain']};
   const statuses={open:I18n.t('待探索'),pending:I18n.t('待执行'),created:I18n.t('已创建'),queued:I18n.t('待执行'),running:I18n.t('执行中'),active:I18n.t('执行中'),waiting:I18n.t('等待中'),blocked:I18n.t('受阻'),supported:I18n.t('有支持'),refuted:I18n.t('已反驳'),exhausted:I18n.t('已走不通'),closed:I18n.t('已结束'),done:I18n.t('已完成'),completed:I18n.t('已完成'),failed:I18n.t('失败'),cancelled:I18n.t('已撤销'),pruned:I18n.t('已暂缓'),stopped:I18n.t('已停止'),interrupted:I18n.t('已中断'),candidate:I18n.t('候选'),accepted:I18n.t('已收录')};
   const evidence={unverified:I18n.t('待核实'),observed:I18n.t('已观察'),supported:I18n.t('有依据'),independently_verified:I18n.t('独立复测通过'),conflicting:I18n.t('有冲突'),expired:I18n.t('已过期')};
@@ -16,9 +16,10 @@ const SessionTopology = (() => {
     return I18n.html`<aside class="topo-detail rg-detail" id="${assets ? 'asset' : 'topo'}-detail" hidden aria-label="节点详情"><div class="td-head"><b class="td-title" id="${assets ? 'ad' : 'td'}-title"></b><button class="td-close" aria-label="关闭详情">×</button></div><div class="td-body"></div></aside>`;
   }
   function status(node) {
+    if(node.node_type==='milestone' && node.confidence)return {hypothesis:I18n.t('推测'),observed:I18n.t('已观察'),verified:I18n.t('Agent 自评已验证')}[node.confidence];
     if(['fact','vulnerability'].includes(node.view_kind))return evidence[node.evidence_state] || statuses[node.status] || I18n.t('待核实');
     if(node.view_kind==='hint')return I18n.t('参考线索');
-    if(node.node_type==='milestone')return I18n.t('公开进展');
+    if(node.node_type==='milestone')return I18n.t('进展');
     return statuses[node.state || node.status] || I18n.t('待探索');
   }
   function relatedEdges() {return [...(model?.edges || []),...(model?.links || [])];}
@@ -53,8 +54,12 @@ const SessionTopology = (() => {
     scale=Math.max(readable ? .68 : .04,scale);
     viewport={scale,x:(canvas.clientWidth-area.width*scale)/2-area.left*scale,y:top-area.top*scale};
     if(readable && (area.width*scale>canvas.clientWidth-64 || area.height*scale>canvas.clientHeight-top-bottom)) {
-      viewport.x=24-(layout.x.get('__process_origin') || 0)*scale;
-      viewport.y=(canvas.clientHeight+top-bottom)/2-((layout.y.get('__process_origin') || 0)+(layout.heights.get('__process_origin') || 116)/2)*scale;
+      const anchor=visible.nodes.filter(n=>n.node_type==='milestone').sort((a,b)=>(b.sequence || 0)-(a.sequence || 0))[0]
+        || visible.nodes.find(n=>n.view_kind==='attempt') || visible.nodes.find(n=>n.view_kind==='intent')
+        || visible.nodes.find(n=>n.view_kind==='origin');
+      const id=anchor?.id || '__process_origin';
+      viewport.x=canvas.clientWidth-24-((layout.x.get(id) || 0)+W)*scale;
+      viewport.y=(canvas.clientHeight+top-bottom)/2-((layout.y.get(id) || 0)+(layout.heights.get(id) || 116)/2)*scale;
     }
     apply();
   }
@@ -73,7 +78,8 @@ const SessionTopology = (() => {
       const back=x2<x1,bend=Math.max(36,Math.abs(x2-x1)*.48);
       const transition=edge.kind==='redirects' && layout.x.get(edge.source)===layout.x.get(edge.target);
       const path=transition ? `M${x1},${y1} C${x1+64},${y1} ${x1+64},${y2} ${x1},${y2}` : back ? `M${x1},${y1} C${x1+72},${y1-100} ${x2-72},${y2-100} ${x2},${y2}` : `M${x1},${y1} C${x1+bend},${y1} ${x2-bend},${y2} ${x2},${y2}`;
-      return `<g class="rg-edge ${meta[1]} ${back || ['task_output','advance'].includes(edge.kind) ? 'is-context' : ''}" data-source="${esc(edge.source)}" data-target="${esc(edge.target)}"><path d="${path}" marker-end="url(#rg-arrow-${meta[1]})"/><text x="${transition ? x1+42 : (x1+x2)/2}" y="${(y1+y2)/2-7}" text-anchor="middle">${meta[0]}</text><title>${esc(edge.detail || `${byId.get(edge.source)?.title} → ${byId.get(edge.target)?.title}`)}</title></g>`;
+      const ownership=['scope','spawns'].includes(edge.kind);
+      return `<g class="rg-edge ${meta[1]} ${back || ownership || edge.kind==='task_output' ? 'is-context' : ''} ${ownership ? 'is-ownership' : ''}" data-source="${esc(edge.source)}" data-target="${esc(edge.target)}"><path d="${path}" marker-end="url(#rg-arrow-${meta[1]})"/><text x="${transition ? x1+42 : (x1+x2)/2}" y="${(y1+y2)/2-7}" text-anchor="middle">${meta[0]}</text><title>${esc(edge.detail || `${byId.get(edge.source)?.title} → ${byId.get(edge.target)?.title}`)}</title></g>`;
     }).join('');
   }
   function miniViewport() {
@@ -130,12 +136,12 @@ const SessionTopology = (() => {
     const canvas=document.querySelector('#topo .rg-canvas');if(!canvas?.clientWidth || !model)return;
     visible=TopologyLayout.reasoningVisible(model,ui.collapsed,ui.query,ui.state);
     const oldOrigin=layout?.x.has('__process_origin') ? {x:layout.x.get('__process_origin'),y:layout.y.get('__process_origin')} : null;
-    canvas.innerHTML=I18n.html`<div class="rg-legend"><div>${Object.entries(kinds).filter(([key])=>!['breakthrough','turning_point'].includes(key)).map(([key,[label,glyph]])=>`<span><i class="rg-icon ${key}">${icon(glyph)}</i>${key==='discovery' ? I18n.t('关键进展') : label}</span>`).join('')}</div><div class="rg-edge-legend">${[['spawn',I18n.t('派生')],['chain',I18n.t('意图链')],['yield',I18n.t('产出')],['proof',I18n.t('依据')]].map(([key,label])=>`<span><i class="${key}"></i>${label}</span>`).join('')}</div></div>
+    canvas.innerHTML=I18n.html`<div class="rg-legend"><div>${Object.entries(kinds).map(([key,[label,glyph]])=>`<span><i class="rg-icon ${key}">${icon(glyph)}</i>${key==='discovery' ? I18n.t('关键进展') : label}</span>`).join('')}</div><div class="rg-edge-legend">${[['spawn',I18n.t('派生')],['chain',I18n.t('意图链')],['yield',I18n.t('产出')],['proof',I18n.t('依据')]].map(([key,label])=>`<span><i class="${key}"></i>${label}</span>`).join('')}</div></div>
       ${visible.nodes.length ? I18n.html`<div class="rg-stage">${visible.nodes.map(node=>{
         const [baseLabel,glyph]=kinds[node.view_kind] || kinds.intent,label=baseLabel,children=model.edges.filter(e=>e.source===node.id).length;
         const assets=model.links.filter(e=>e.target===node.id || e.source===node.id).length;
-        const state=node.state || node.status || node.evidence_state || '';
-        return `<article class="rg-node ${node.view_kind}" data-node="${esc(node.id)}" data-state="${esc(state)}" role="button" tabindex="0" aria-label="${esc(label+'：'+node.title)}"><header><span><i class="rg-icon ${node.view_kind}">${icon(glyph)}</i><b>${label}</b></span>${node.node_type==='hypothesis' ? I18n.html('<em>假设</em>') : ''}${children ? I18n.html`<button class="rg-collapse" data-collapse="${esc(node.id)}" aria-label="${ui.collapsed.has(node.id) ? I18n.t('展开') : I18n.t('收起')}${esc(node.title)}的分支" aria-expanded="${!ui.collapsed.has(node.id)}">${ui.collapsed.has(node.id) ? '+' : '−'}</button>` : ''}</header><p class="rg-node-title" title="${esc(node.title)}">${esc(node.title)}</p>${node.node_type==='milestone' ? `<p class="rg-basis" title="${esc(node.reason)}">${esc(node.reason)}</p>` : ''}<footer><span class="rg-status" data-status="${esc(state)}"><i></i>${esc(status(node))}</span><small>${node.view_kind==='attempt' || node.node_type==='milestone' ? I18n.t`${node.progress?.length || 0} 条执行记录` : assets ? I18n.t`${assets} 条资产关联` : node.record_id ? '#'+esc(node.record_id.slice(-6)) : node.view_kind==='origin' ? I18n.t('会话入口') : I18n.t('任务记录')}</small></footer></article>`;
+        const state=node.confidence || node.state || node.status || node.evidence_state || '';
+        return `<article class="rg-node ${node.view_kind}" data-node="${esc(node.id)}" data-state="${esc(state)}" role="button" tabindex="0" aria-label="${esc(label+'：'+node.title)}"><header><span><i class="rg-icon ${node.view_kind}">${icon(glyph)}</i><b>${label}</b></span>${node.node_type==='hypothesis' ? I18n.html('<em>假设</em>') : ''}${children ? I18n.html`<button class="rg-collapse" data-collapse="${esc(node.id)}" aria-label="${ui.collapsed.has(node.id) ? I18n.t('展开') : I18n.t('收起')}${esc(node.title)}的分支" aria-expanded="${!ui.collapsed.has(node.id)}">${ui.collapsed.has(node.id) ? '+' : '−'}</button>` : ''}</header><p class="rg-node-title" title="${esc(node.title)}">${esc(node.title)}</p>${Number.isInteger(node.importance) ? `<p class="rg-importance">${esc(I18n.t('重要性'))} <b>${node.importance}/5</b></p>` : ''}${node.node_type==='milestone' ? `<p class="rg-basis" title="${esc(node.reason)}">${esc(node.reason)}</p>` : ''}<footer><span class="rg-status" data-status="${esc(state)}"><i></i>${esc(status(node))}</span><small>${node.view_kind==='attempt' || node.node_type==='milestone' ? I18n.t`${node.progress?.length || 0} 条执行记录` : assets ? I18n.t`${assets} 条资产关联` : node.record_id ? '#'+esc(node.record_id.slice(-6)) : node.view_kind==='origin' ? I18n.t('会话入口') : I18n.t('任务记录')}</small></footer></article>`;
       }).join('')}<svg class="rg-edges" aria-label="探索关系"></svg></div>` : I18n.html('<div class="rg-empty">没有匹配的节点，可清除筛选查看完整探索链路。</div>')}
       <div class="rg-tools"><button data-rg-zoom="1.2" aria-label="放大">＋</button><button data-rg-zoom="0.833333" aria-label="缩小">−</button><button data-rg-fit aria-label="适应画布">⤢</button><button data-rg-reset aria-label="重新布局">↻</button><span data-rg-scale></span></div>
       ${visible.nodes.length>1 ? I18n.html('<button class="rg-minimap" aria-label="图形导航，点击移动视野"></button>') : ''}`;
@@ -178,25 +184,25 @@ const SessionTopology = (() => {
 
   function render(state,progress=[],assets=false) {
     if(session!==S.cur){session=S.cur;viewport=null;layout=null;ui.query='';ui.state='';ui.collapsed.clear();ui.manual.clear();ui.assetQuery='';ui.assetPage=0;ui.assetCollapsed.clear();}
-    model=TopologyLayout.reasoning(state,progress);S.topoGraph=model;S.topoProcess=new Map(model.records.map(n=>[n.id,n]));
+    model=TopologyLayout.reasoningSummary(TopologyLayout.reasoning(state,progress));S.topoGraph=model;S.topoProcess=new Map(model.records.map(n=>[n.id,n]));
     const panel=document.querySelector(assets ? '#asset-library' : '#topo');if(!panel)return;
     const same=panel.dataset.scrollSession===S.cur,previous=same?panel.querySelector('.topo-detail'):null,detailId=previous && !previous.hidden ? previous._curId : null,scroll=previous?.scrollTop || 0;
     const original=!!previous?.querySelector('.topo-original[open]'),activity=same?panel.querySelector('.rg-activity'):null;
     const activityPositions=activity?[activity,activity.querySelector('.topo-live')].filter(Boolean).map(el=>[el,el.scrollTop,el.scrollLeft]):[];
     const list=same?panel.querySelector('.rg-asset-results'):null,listTop=list?.scrollTop || 0,listLeft=list?.scrollLeft || 0,tableLeft=list?.querySelector('.rg-asset-table')?.scrollLeft || 0;
-    const signature=JSON.stringify([S.cur,model.nodes.map(n=>[n.id,n.title,n.description,n.state,n.status,n.reason,n.next,n.evidence_refs,n.evidence_state,n.progress?.slice(-20)]),model.edges,model.assets,model.links,model.references,model.has_more,model.missing_intents,assets]);
+    const stages=state.topology?.public_stages?.items || [];
+    const signature=JSON.stringify([S.cur,model.nodes.map(n=>[n.id,n.title,n.description,n.state,n.status,n.reason,n.next,n.evidence_refs,n.importance,n.confidence,n.evidence_state,n.progress?.slice(-20)]),model.edges,model.assets,model.links,model.references,model.has_more,stages.map(s=>[s.id,s.sequence,s.status]),assets]);
     if(panel.dataset.graphSignature===signature && panel.children.length)return;
     const active=document.activeElement,search=panel.contains(active) && active.matches('input[type="search"]'),caret=search ? active.selectionStart : null;
     panel.dataset.graphSignature=signature;
     panel.dataset.scrollSession=S.cur;
     if(assets) {
-      panel.className='asset-library';panel.innerHTML=I18n.html`<header class="rg-asset-head"><div><h3>资产与情报</h3><p>脚本、静态接口、source map 与其他入口统一保存；关系和探索假设通过引用关联。</p></div><label>查找资产<input type="search" data-asset-search placeholder="搜索域名、接口、脚本或资产类型" value="${esc(ui.assetQuery)}"></label></header><div class="rg-asset-results"></div>${detailMarkup(true)}`;
+      panel.className='asset-library';panel.innerHTML=I18n.html`<header class="rg-asset-head"><div><h3>资产与情报</h3></div><label>查找资产<input type="search" data-asset-search placeholder="搜索域名、接口、脚本或资产类型" value="${esc(ui.assetQuery)}"></label></header><div class="rg-asset-results"></div>${detailMarkup(true)}`;
       assetRows();panel.querySelector('[data-asset-search]').oninput=event=>{ui.assetQuery=event.target.value;ui.assetPage=0;assetRows();};
       const restored=panel.querySelector('.rg-asset-results');restored.scrollTop=listTop;restored.scrollLeft=listLeft;
       const table=restored.querySelector('.rg-asset-table');if(table)table.scrollLeft=tableLeft;
     } else {
-      const attempts=model.nodes.filter(n=>n.view_kind==='attempt').length;
-      panel.className='card topo reasoning-topology';panel.innerHTML=I18n.html`<header class="rg-header"><div><b>探索链路</b><span>${model.nodes.filter(n=>n.view_kind==='goal').length} 个目标 · ${model.nodes.filter(n=>n.view_kind==='intent').length} 个意图 · ${attempts} 次尝试 · ${model.nodes.filter(n=>n.node_type==='milestone').length} 项关键进展 · ${model.nodes.filter(n=>['fact','vulnerability'].includes(n.view_kind)).length} 条事实</span></div><div class="rg-header-actions"><input data-rg-search type="search" aria-label="搜索探索节点" placeholder="搜索探索节点" value="${esc(ui.query)}"><select data-rg-state aria-label="筛选探索状态"><option value="">全部状态</option>${['open','running','blocked','done','refuted','exhausted'].map(key=>`<option value="${key}" ${ui.state===key ? 'selected' : ''}>${statuses[key]}</option>`).join('')}</select><button data-rg-references>资料与规则 ${model.references.length}</button><button data-rg-assets>资产 ${model.assets.nodes.length} ↗</button></div></header>${model.missing_intents ? I18n.html('<p class="rg-coverage" role="status">本会话未记录意图层级，当前展示目标与事实；公开进展和执行记录仍可展开查看。</p>') : ''}<div class="rg-canvas" tabindex="0" aria-label="探索链路画布，方向键平移，Home适应画布"></div><details class="rg-activity"><summary>执行记录与公开进展${model.has_more ? I18n.t(' · 部分历史记录未载入') : ''}</summary><section id="topo-live" class="topo-live"></section></details>${detailMarkup()}`;
+      panel.className='card topo reasoning-topology';panel.innerHTML=I18n.html`<header class="rg-header"><div><b>探索链路</b><span>${model.nodes.filter(n=>n.view_kind==='goal').length} 个目标 · ${model.nodes.filter(n=>n.view_kind==='intent').length} 个意图 · ${model.nodes.filter(n=>n.node_type==='milestone').length} 项关键进展 · ${model.nodes.filter(n=>['fact','vulnerability'].includes(n.view_kind)).length} 条事实</span></div><div class="rg-header-actions"><input data-rg-search type="search" aria-label="搜索探索节点" placeholder="搜索探索节点" value="${esc(ui.query)}"><select data-rg-state aria-label="筛选探索状态"><option value="">全部状态</option>${['open','running','blocked','done','refuted','exhausted'].map(key=>`<option value="${key}" ${ui.state===key ? 'selected' : ''}>${statuses[key]}</option>`).join('')}</select><button data-rg-references>资料与规则 ${model.references.length}</button><button data-rg-assets>资产 ${model.assets.nodes.length} ↗</button></div></header><div class="rg-canvas" tabindex="0" aria-label="探索链路画布，方向键平移，Home适应画布"></div><details class="rg-activity"><summary>执行记录${model.has_more ? I18n.t(' · 部分历史记录未载入') : ''}</summary><section id="topo-live" class="topo-live"></section></details>${detailMarkup()}`;
       panel.querySelector('[data-rg-search]').oninput=event=>{ui.query=event.target.value;paint();};
       panel.querySelector('[data-rg-state]').onchange=event=>{ui.state=event.target.value;paint();};
       panel.querySelector('[data-rg-references]').onclick=()=>showNodeDetail('__process_references');
@@ -205,6 +211,12 @@ const SessionTopology = (() => {
         panel.querySelector('.rg-activity').replaceWith(activity);
         activityPositions.forEach(([el,top,left])=>{el.scrollTop=top;el.scrollLeft=left;});
       }
+      const unclassified=(state.topology?.public_stages?.items || []).filter(row=>row.body).length;
+      if(unclassified && !model.nodes.some(node=>node.node_type==='milestone')) {
+        const notice=document.createElement('p');notice.className='rg-progress-notice';
+        notice.textContent=I18n.t`已有 ${unclassified} 轮执行记录，关键发现尚未登记。可展开下方执行记录查看过程。`;
+        panel.querySelector('.rg-header').after(notice);
+      }
       paint();observer?.disconnect();if(typeof ResizeObserver!=='undefined'){observer=new ResizeObserver(()=>{if(S.tab==='topo' && panel.clientWidth){paint();}});observer.observe(panel.querySelector('.rg-canvas'));}
     }
     if(detailId && S.topoProcess.has(detailId)){showNodeDetail(detailId);const restored=detailPanel();if(original && restored.querySelector('.topo-original'))restored.querySelector('.topo-original').open=true;restored.scrollTop=scroll;}
@@ -212,7 +224,7 @@ const SessionTopology = (() => {
   }
   function projectionDetail(record) {
     const related=model.edges.filter(e=>e.source===record.id || e.target===record.id);
-    return I18n.html`<div class="td-agent">${esc(record.actor || (record.view_kind==='origin' ? I18n.t('会话任务') : I18n.t('已保存的任务规划')))}</div><p class="td-note topo-fact-text">${esc(record.title)}</p>${record.reason ? `<p class="td-note">${record.node_type==='milestone' ? I18n.html('<b>观察与判断依据</b><br>') : ''}${esc(record.reason)}</p>` : ''}${record.next ? I18n.html`<p class="td-note"><b>接下来验证</b><br>${esc(record.next)}</p>` : ''}${record.method_title && record.node_type==='milestone' ? I18n.html`<p class="td-note"><b>验证方法</b><br>${esc(record.method_title)}</p>` : ''}${record.evidence_refs?.length ? I18n.html`<div class="topo-related"><b>证据引用</b>${record.evidence_refs.map(ref=>{const raw=String(ref),version=raw.match(/@(\d+)$/),id=raw.replace(/@\d+$/,'');const target=model.records.find(r=>(r.id===id || r.id==='__process_bb:'+id) && (!version || String(r.version)===version[1]));return target ? `<button data-topo-record="${esc(target.id)}">${esc(target.title)}</button>` : `<p class="td-note">${esc(ref)}</p>`;}).join('')}</div>` : ''}${record.description ? `<p class="td-note">${esc(record.description)}</p>` : ''}<div class="topo-related"><b>探索关系</b>${related.map(e=>`<button data-topo-record="${esc(e.source===record.id ? e.target : e.source)}">${esc((edgeMeta[e.kind] || [I18n.t('关联')])[0])} · ${esc(S.topoProcess.get(e.source===record.id ? e.target : e.source)?.title || '')}</button>`).join('') || I18n.html('<p class="td-note">尚无明确关联记录。</p>')}</div>${record.progress?.length ? I18n.html`<details class="topo-original"><summary>本阶段的公开说明与执行 · ${record.progress.length} 条</summary>${record.progress.map(p=>`<div class="td-note">${p.body || p.title ? `<p>${esc(p.body || p.title)}</p>` : ''}${(p.tools || []).map(t=>`<p><b>${esc(t.name)}</b> · ${esc(statuses[t.status] || t.status)}${t.note ? ` · ${esc(t.note)}` : ''}</p>`).join('')}</div>`).join('')}</details>` : ''}`;
+    return I18n.html`<div class="td-agent">${esc(record.actor || (record.view_kind==='origin' ? I18n.t('会话任务') : I18n.t('已保存的任务规划')))}</div><p class="td-note topo-fact-text">${esc(record.title)}</p>${Number.isInteger(record.importance) ? I18n.html`<p class="td-note">Agent 自评重要性：${record.importance}/5 · ${status(record)}</p>` : ''}${record.reason ? `<p class="td-note">${record.node_type==='milestone' ? I18n.html('<b>观察与判断依据</b><br>') : ''}${esc(record.reason)}</p>` : ''}${record.next ? I18n.html`<p class="td-note"><b>接下来验证</b><br>${esc(record.next)}</p>` : ''}${record.method_title && record.node_type==='milestone' ? I18n.html`<p class="td-note"><b>验证方法</b><br>${esc(record.method_title)}</p>` : ''}${record.evidence_refs?.length ? I18n.html`<div class="topo-related"><b>证据引用</b>${record.evidence_refs.map(ref=>{const raw=String(ref),version=raw.match(/@(\d+)$/),id=raw.replace(/@\d+$/,'');const target=model.records.find(r=>(r.id===id || r.id==='__process_bb:'+id) && (!version || String(r.version)===version[1]));return target ? `<button data-topo-record="${esc(target.id)}">${esc(target.title)}</button>` : `<p class="td-note">${esc(ref)}</p>`;}).join('')}</div>` : ''}${record.description ? `<p class="td-note">${esc(record.description)}</p>` : ''}<div class="topo-related"><b>探索关系</b>${related.map(e=>`<button data-topo-record="${esc(e.source===record.id ? e.target : e.source)}">${esc((edgeMeta[e.kind] || [I18n.t('关联')])[0])} · ${esc(S.topoProcess.get(e.source===record.id ? e.target : e.source)?.title || '')}</button>`).join('') || I18n.html('<p class="td-note">尚无明确关联记录。</p>')}</div>${record.progress?.length ? I18n.html`<details class="topo-original"><summary>执行记录 · ${record.progress.length} 条</summary>${record.progress.map(p=>`<div class="td-note">${p.body || p.title ? `<p>${esc(p.body || p.title)}</p>` : ''}${(p.tools || []).map(t=>`<p><b>${esc(t.name)}</b> · ${esc(statuses[t.status] || t.status)}${t.note ? ` · ${esc(t.note)}` : ''}</p>`).join('')}</div>`).join('')}</details>` : ''}`;
   }
   return {render,focus,detailPanel,projectionDetail,openAssets};
 })();

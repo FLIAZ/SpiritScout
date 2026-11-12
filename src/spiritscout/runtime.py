@@ -969,7 +969,7 @@ async def _run_master(
 
     scanner = None
     if (enable_llm_planning and infra.cfg.scanner.enabled and not infra.cfg.gateway.lightweight_local
-            and infra.authorization.mode in (RunMode.SRC, RunMode.CTF)):
+            and infra.authorization.mode in (RunMode.SRC, RunMode.CTF, RunMode.COMPETITION)):
         scanner = ScannerController(infra, assembly, mission=mission,
             standing_rules=standing_rules, dialogue_history=dialogue_history)
         master.ctx.extra['scan_controller'] = scanner

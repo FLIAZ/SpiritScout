@@ -14,6 +14,10 @@ vm.runInContext(
   fs.readFileSync(path.join(__dirname, "../src/spiritscout/web/static/js/markdown.js"), "utf8"),
   context);
 
+vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/spiritscout/web/static/js/task-trace.js"), "utf8"), context);
+
+vm.runInContext("TaskTrace.push = () => false", context); // 单独验证旧轨迹视图，解析器仍用真实实现。
+
 const ACTOR = "business-context-d6ca02073cf8";
 const mkSay = () => {
   const el = { kind: "say", textContent: "", innerHTML: "", dataset: {} };
@@ -85,3 +89,12 @@ push("agent.delta", { kind: "text", text: "失败前流入的正文" });
 push("model.failed", { call_id: "call-3", error: "超时" });
 assert.equal(say()[2].classList.contains("md"), true, "失败的调用也要定格已流入正文");
 console.log("trace stream markdown: model call boundaries finalize streamed text into rendered markdown passed");
+
+// 混合正文和分片标注在流式阶段与 Markdown 收尾都不能泄漏协议。
+push("agent.delta", {kind:"text", text:'已观察到登录表单。\n\n{"pro'});
+assert.equal(say().at(-1).textContent.trim(), '已观察到登录表单。');
+push("agent.delta", {kind:"text", text:'gress":"继续验证","exploration":{"intent":"核实入口","attempt":"读取表单"}}'});
+push("model.call", {call_id:"mixed"});
+assert.ok(!say().at(-1).innerHTML.includes('exploration'));
+assert.ok(!say().at(-1).innerHTML.includes('progress'));
+assert.ok(say().at(-1).innerHTML.includes('已观察到登录表单'));

@@ -1,14 +1,131 @@
 """公开进展复用现有模型正文，不暴露推理或执行协议。"""
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
 from unittest.mock import Mock
 
-from spiritscout.gateway.progress import publish_progress
+from spiritscout.gateway.progress import parse_public_progress, publish_progress
 from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
 
 
 class AgentProgressTests(unittest.TestCase):
+    def test_inline_discovery_json_is_hidden_across_each_possible_stream_boundary(self):
+        from spiritscout.core.audit import NullAuditLogger
+        from spiritscout.gateway.progress import PublicProgressEmitter
+
+        value = {'key': 'service', 'intent': '核对服务', 'title': '发现输入条件',
+                 'basis': '原始响应', 'importance': 3, 'confidence': 'observed',
+                 'kind': 'discovery', 'evidence_refs': ['exec-one']}
+        raw = '已确认服务入口。\n' + json.dumps({'discovery': value}, ensure_ascii=False)
+        for split in range(1, len(raw)):
+            audit = NullAuditLogger()
+            emitter = PublicProgressEmitter(audit, 'cloud', task_id='t', inline_discovery=True)
+            for chunk in (raw[:split], raw[split:]):
+                emitter('text', chunk)
+                emitter.flush()
+            text = ''.join(r['detail']['text'] for r in audit.records)
+            self.assertEqual(text, '已确认服务入口。', f'分块位置 {split}')
+        result = publish_progress(audit, 'cloud', json.dumps({'discovery': value}), task_id='t')
+        self.assertEqual(result['discovery_key'], 'service')
+
+    def test_scored_discovery_only_publishes_sanitized_display_metadata(self):
+        from spiritscout.gateway.progress import publish_discovery
+
+        audit = Mock()
+        value = {'key': 'identity', 'intent': '确认身份来源', 'title': '身份来自会话对象',
+                 'basis': '响应对照显示身份随会话对象变化', 'importance': 4, 'confidence': 'observed',
+                 'kind': 'discovery', 'evidence_refs': ['exec-one'], 'analysis': '私有推理'}
+        result = publish_discovery(audit, 'ctf', value, task_id='t', route_id='r', turn=6)
+        self.assertTrue(result['ok'])
+        self.assertEqual(audit.log.call_args.args[0], 'agent.discovery')
+        detail = audit.log.call_args.args[2]
+        self.assertEqual(detail['importance'], 4)
+        self.assertEqual(detail['confidence'], 'observed')
+        self.assertNotIn('analysis', detail)
+        for changes in ({'importance': True}, {'importance': 6}, {'evidence_refs': []}, {'key': ''}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                publish_discovery(audit, 'ctf', {**value, **changes}, task_id='t')
+        self.assertTrue(publish_discovery(audit, 'ctf', {**value, 'importance': 0,
+                        'confidence': 'hypothesis', 'evidence_refs': []}, task_id='t')['ok'])
+
+    def test_json_decision_can_report_discovery_without_an_extra_model_round(self):
+        audit = Mock()
+        discovery = {'key': 'service', 'intent': '核对服务', 'title': '响应存在版本线索',
+                     'basis': '实际响应头与页面提供了对应线索', 'importance': 3, 'confidence': 'observed',
+                     'kind': 'discovery', 'evidence_refs': ['exec-one'], 'private': '内部数据'}
+        publish_progress(audit, 'scanner', json.dumps({'progress': '继续核实服务',
+                         'decision': 'wait', 'discovery': discovery}), task_id='scan', turn=3)
+        events = {call.args[0]: call.args[2] for call in audit.log.call_args_list}
+        self.assertEqual(events['agent.discovery']['importance'], 3)
+        self.assertEqual(events['agent.progress']['text'], '继续核实服务')
+        self.assertNotIn('private', events['agent.discovery'])
+        self.assertNotIn('decision', events['agent.progress'])
+        audit.reset_mock()
+        publish_progress(audit, 'unscoped', json.dumps({'discovery': discovery}))
+        self.assertEqual(audit.log.call_args.args[0], 'agent.discovery_rejected')
+
+    def test_discovery_reporting_appends_one_short_contract_without_changing_cached_prefix(self):
+        import copy
+
+        from spiritscout.gateway.progress import (
+            INLINE_DISCOVERY_GUIDANCE,
+            ensure_discovery_reporting,
+            native_discovery_reminder,
+        )
+
+        state = {'messages': [{'role': 'system', 'content': '稳定系统提示'},
+                              {'role': 'user', 'content': '原始题目'},
+                              {'role': 'assistant', 'content': '已有发现'}]}
+        prefix = copy.deepcopy(state['messages'])
+        ensure_discovery_reporting(state)
+        first = copy.deepcopy(state['messages'])
+        for _ in range(4):
+            ensure_discovery_reporting(state)
+        self.assertEqual(state['messages'], first)
+        self.assertEqual(state['messages'][:-1], prefix)
+        self.assertEqual(state['messages'][-1]['content'], INLINE_DISCOVERY_GUIDANCE)
+        old = {'messages': [*prefix, {'role': 'user', 'content': '旧版登记工具契约'}],
+               'discovery_reporting_v1': True, 'discovery_reporting_v2': True,
+               'observations': [{'result': '已有原始观察'}]}
+        before = copy.deepcopy(old['messages'])
+        ensure_discovery_reporting(old)
+        self.assertEqual(old['messages'][:-1], before)
+        self.assertTrue(old['discovery_reporting_v3'])
+        reminder = native_discovery_reminder(old)
+        old['discovery_reported_keys'] = ['stable-key']
+        self.assertEqual(native_discovery_reminder(old), reminder)
+        self.assertLess(len(reminder), 100)
+        from spiritscout.gateway.context import estimate_input_tokens
+        self.assertLess(estimate_input_tokens([{'role': 'user', 'content': INLINE_DISCOVERY_GUIDANCE}]), 650)
+
+    def test_public_formats_match_browser_fixtures_and_persist_explicit_semantics(self):
+        cases = json.loads((Path(__file__).parent / 'fixtures/public_progress.json').read_text())
+        for case in cases:
+            with self.subTest(case=case['name']):
+                expected = {key: case[key] for key in ('text', 'exploration') if key in case}
+                self.assertEqual(parse_public_progress(case['content']), expected)
+                audit = Mock()
+                result = publish_progress(audit, 'worker', case['content'], task_id='t', turn=1)
+                if case['text']:
+                    self.assertEqual(result['text'], case['text'])
+                    self.assertEqual(result.get('exploration'), case.get('exploration'))
+                else:
+                    audit.log.assert_not_called()
+
+    def test_exploration_contract_is_short_enough_to_keep_attention_on_the_task(self) -> None:
+        from spiritscout.gateway.progress import (
+            EXPLORATION_PROGRESS_GUIDANCE,
+            FORMAT_GUIDANCE,
+        )
+
+        self.assertLess(len(EXPLORATION_PROGRESS_GUIDANCE), 520)
+        self.assertLess(len(FORMAT_GUIDANCE), 90)
+        self.assertIn('JSON 只供建图', EXPLORATION_PROGRESS_GUIDANCE)
+        self.assertIn('不能代替正文', EXPLORATION_PROGRESS_GUIDANCE)
+        self.assertIn('JSON 不进入用户正文', FORMAT_GUIDANCE)
+
     def test_structured_decision_only_publishes_public_progress_with_task_scope(self) -> None:
         audit = Mock()
         token = current_execution_scope.set(ExecutionScope(

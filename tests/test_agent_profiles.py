@@ -25,6 +25,7 @@ class AgentProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(get_profile(AgentType.PORT_SCAN).status, "available")
         self.assertTrue(get_profile(AgentType.HOST_VULN).configurable)
         self.assertTrue(get_profile(AgentType.POST_EXPLOIT).configurable)
+        self.assertIn("competition", get_profile(AgentType.SCANNER).modes)
 
     async def test_runtime_tool_view_denies_cross_role_tool(self) -> None:
         registry = ToolRegistry(_Executor())

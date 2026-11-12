@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from test_single_executor import context
 
 from spiritscout.core.models import RunMode, Task
+from spiritscout.ctf.agents import CTFBaseAgent
 from spiritscout.ctf.evidence_review import observe, review_row
 from spiritscout.ctf.flags import FlagManager
 from spiritscout.ctf.single import SingleCTFAgent
@@ -87,3 +88,52 @@ class SandboxOutputEvidenceTests(unittest.IsolatedAsyncioTestCase):
             result = await self.run_code(code)
             self.assertTrue(result.ok)
             self.assertEqual(result.metadata['observation']['partial'], partial)
+
+
+@unittest.skipUnless(sandbox_available(), '需要现有 Linux/bwrap')
+class CloudFailureEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        self.root = Path(self.folder.name)
+        ctx = context(RunMode.CTF, light=False)
+        ctx.builtin_ctx = {'workspace_root': self.folder.name, '_run_mode': RunMode.CTF,
+                           '_lightweight_local': False}
+        ctx.tools = ToolRegistry(None)
+        ctx.tools.register_builtin('sandbox_exec', sandbox_exec, ToolSpec(
+            name='sandbox_exec', kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY))
+        self.agent = CTFBaseAgent(ctx)
+        self.task = Task(task_id='failure', agent_type=self.agent.agent_type, task_type='ctf_solve',
+                         target='', payload={'challenge': {'id': 'failure'}})
+
+    async def run_code(self, code, timeout=3):
+        return await self.agent._tool_sandbox(self.task, SimpleNamespace(name='failure'),
+            {'observations': [], 'messages': []}, 'python',
+            {'code': code, 'action': 'analysis', 'timeout': timeout})
+
+    async def test_unresolved_callback_keeps_stage_log_and_traceback_without_environment_verdict(self):
+        result = await self.run_code(
+            'import asyncio\n'
+            'async def main():\n'
+            '    pending = asyncio.get_running_loop().create_future()\n'
+            '    print("phase=response_match; sent_id=1; received=1; pending_ids=[1]", flush=True)\n'
+            '    await asyncio.wait_for(pending, 0.02)\n'
+            'asyncio.run(main())\n')
+        self.assertFalse(result.ok)
+        self.assertIn('pending_ids=[1]', result.text)
+        self.assertIn('TimeoutError', result.text)
+        self.assertEqual(result.metadata['failure_evidence'],
+                         {'exit_code': 1, 'timed_out': False, 'attribution': 'undetermined'})
+        full = Path(result.metadata['output_file']).read_text()
+        self.assertIn('phase=response_match', full)
+        self.assertIn('await asyncio.wait_for', full)
+        self.assertIn('TimeoutError', full)
+
+    async def test_actual_process_timeout_with_no_output_keeps_log_and_neutral_diagnosis(self):
+        result = await self.run_code('import time; time.sleep(5)', timeout=0.2)
+        self.assertFalse(result.ok)
+        self.assertTrue(result.metadata['failure_evidence']['timed_out'])
+        self.assertEqual(result.metadata['failure_evidence']['attribution'], 'undetermined')
+        self.assertTrue(Path(result.metadata['output_file']).is_file())
+        self.assertIn('原因未定', result.text)
+        self.assertNotIn('超时通常意味着', result.text)

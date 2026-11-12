@@ -15,17 +15,62 @@ from spiritscout.agents.sub.base import RoutePlan
 from spiritscout.blackboard import Blackboard
 from spiritscout.core.audit import AuditLogger
 from spiritscout.core.models import BlackboardLayer, RunMode, Task
+from spiritscout.ctf.agents import CTFBaseAgent, _ToolOutcome
 from spiritscout.ctf.flags import FlagManager
-from spiritscout.ctf.light_exploration import FORMAT_GUIDANCE, record_progress
+from spiritscout.ctf.light_exploration import record_progress
 from spiritscout.ctf.single import SingleCTFAgent
 from spiritscout.gateway.context import estimate_input_tokens
-from spiritscout.gateway.progress import EXPLORATION_PROGRESS_GUIDANCE
+from spiritscout.gateway.progress import EXPLORATION_PROGRESS_GUIDANCE, FORMAT_GUIDANCE
 from spiritscout.tools.journal import ExecutionJournal
 from spiritscout.web.exploration_stages import read_public_stages
 from spiritscout.web.process_graph import project_blackboard
 
 
 class LightExplorationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cloud_inline_discovery_shares_action_round_without_reporting_tool_or_retry(self):
+        self.agent.ctx.gateway.config.lightweight_local = False
+        agent = CTFBaseAgent(self.agent.ctx, flag_manager=FlagManager(local_only=True))
+        state = agent._inv_state(self.task, self.route)
+        agent._seed_messages(self.task, self.route, self.plan, state)
+        state['system_initialized'] = True
+        original_messages = copy.deepcopy(state['messages'])
+        stable_tools = copy.deepcopy(agent._model_tool_schemas())
+        discovery = {'key': 'response', 'intent': '核对响应差异', 'title': '响应包含新的输入条件',
+                     'basis': '原始响应显示限制，下一步据此选择对照输入', 'importance': 3,
+                     'confidence': 'observed', 'kind': 'discovery', 'evidence_refs': ['previous-execution']}
+        bodies = ['已确认输入条件，继续执行对照。\n' + json.dumps({'discovery': discovery}, ensure_ascii=False),
+                  '继续核实。\n' + json.dumps({'discovery': {**discovery, 'importance': 'invalid'}}, ensure_ascii=False)]
+        agent._run_tool_call_inner = AsyncMock(return_value=_ToolOutcome(ok=True, text='实际执行输出'))
+
+        async def chat(messages, **kwargs):
+            self.assertEqual(kwargs['tools'], stable_tools)
+            content = bodies[state['turn'] - 1]
+            for piece in (content[:20], content[20:65], content[65:]):
+                kwargs['on_delta']('text', piece)
+                kwargs['on_delta'].flush()
+            return SimpleNamespace(content=content, tool_calls=[{
+                'id': f"action-{state['turn']}", 'name': 'shell', 'arguments': {'command': 'fixture'}}])
+
+        agent.ctx.gateway.chat = AsyncMock(side_effect=chat)
+        for _ in bodies:
+            await agent.execute_step(self.task, self.route, self.plan, {'action': 'investigate'})
+        self.assertEqual(agent.ctx.gateway.chat.await_count, 2, '展示元数据无效也不增加修复调用')
+        self.assertEqual(agent._run_tool_call_inner.await_count, 2)
+        self.assertTrue(all(c.args[-1]['name'] == 'shell' for c in agent._run_tool_call_inner.await_args_list))
+        self.assertEqual(state['messages'][:len(original_messages)], original_messages)
+        self.assertEqual([m['content'] for m in state['messages'] if m['role'] == 'assistant'][-2:], bodies)
+        self.assertIn('response', state['discovery_reported_keys'])
+        discoveries = [r for r in read_public_stages(self.root / 'audit.jsonl')['items'] if r['kind'] == 'discovery']
+        self.assertEqual(len(discoveries), 1)
+        self.assertEqual(discoveries[0]['exploration']['milestone']['title'], discovery['title'])
+        from spiritscout.core.audit import read_record
+
+        events = [read_record(line) for line in (self.root / 'audit.jsonl').read_text().splitlines()]
+        streamed = ''.join(e['detail']['text'] for e in events if e['type'] == 'agent.delta'
+                           and e['detail'].get('kind') == 'text')
+        self.assertNotIn('discovery', streamed)
+        self.assertIn('继续执行对照', streamed)
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -45,6 +90,78 @@ class LightExplorationTests(unittest.IsolatedAsyncioTestCase):
         self.state = self.agent._inv_state(self.task, self.route)
         self.agent._seed_messages(self.task, self.route, self.plan, self.state)
         self.state['system_initialized'] = True
+        self.assertNotIn('report_discovery', {s['function']['name'] for s in self.agent.tool_schemas})
+        self.assertNotIn('discovery_reporting_v1', self.state)
+        self.assertNotIn('discovery_reporting_v3', self.state)
+        self.assertNotIn('execution_data_guidance_v1', self.state)
+        self.assertNotIn('failure_attribution_guidance_v1', self.state)
+
+    async def test_normal_local_answer_streams_scene_and_persists_milestones_without_extra_calls(self):
+        await self._assert_normal_public_progress()
+
+    async def test_awdp_native_progress_uses_same_scene_and_milestone_contract(self):
+        self.agent.ctx.mode = RunMode.AWDP
+        await self._assert_normal_public_progress()
+
+    async def test_competition_native_progress_uses_same_scene_and_milestone_contract(self):
+        self.agent.ctx.mode = RunMode.COMPETITION
+        await self._assert_normal_public_progress()
+
+    async def _assert_normal_public_progress(self):
+        self.agent.ctx.gateway.config.lightweight_local = False
+        agent = CTFBaseAgent(self.agent.ctx, flag_manager=FlagManager(local_only=True))
+        state = agent._inv_state(self.task, self.route)
+        agent._seed_messages(self.task, self.route, self.plan, state)
+        state['system_initialized'] = True
+        agent._run_tool_call_inner = AsyncMock(return_value=_ToolOutcome(ok=True, text='fixture observation'))
+        statements = [
+            {'progress': '这是给定站点的 Web 题，先读取题面并确认入口。', 'exploration': {
+                'intent': '理解题目入口', 'attempt': '读取题面', 'state': 'running'}},
+            {'progress': '响应暴露了输入条件，下一步用对照核实。', 'exploration': {
+                'intent': '理解题目入口', 'attempt': '读取题面', 'state': 'supported', 'milestone': {
+                    'kind': 'discovery', 'title': '响应显示输入条件', 'basis': '题面响应包含明确输入限制',
+                    'next': '用边界输入对照核实'}}}]
+
+        from spiritscout.agents.profiles import EVIDENCE_FIRST_GUIDANCE
+
+        stable_tools = copy.deepcopy(agent._model_tool_schemas())
+        async def chat(messages, **kwargs):
+            from spiritscout.gateway.progress import native_discovery_reminder
+
+            self.assertEqual(messages[-1]['content'], EVIDENCE_FIRST_GUIDANCE + '\n' + native_discovery_reminder(state))
+            self.assertEqual(kwargs['tools'], stable_tools)
+            from spiritscout.gateway.context import (
+                EXECUTION_DATA_GUIDANCE,
+                FAILURE_ATTRIBUTION_GUIDANCE,
+            )
+
+            self.assertEqual(sum(m.get('content') == EXECUTION_DATA_GUIDANCE for m in messages), 1)
+            self.assertEqual(sum(m.get('content') == FAILURE_ATTRIBUTION_GUIDANCE for m in messages), 1)
+            self.assertEqual(sum(m.get('_progress_reminder', False) for m in state['messages']), state['turn'] - 1)
+            value = json.dumps(statements[state['turn'] - 1], ensure_ascii=False)
+            kwargs['on_delta']('text', value)
+            return SimpleNamespace(content=value, tool_calls=[{
+                'id': f"check-{state['turn']}", 'name': 'shell', 'arguments': {'command': 'fixture'}}])
+
+        agent.ctx.gateway.chat = AsyncMock(side_effect=chat)
+        for _ in statements:
+            result = await agent.execute_step(self.task, self.route, self.plan, {'action': 'investigate'})
+            self.assertTrue(result.ok)
+        self.assertEqual(agent.ctx.gateway.chat.await_count, 2)
+        stages = read_public_stages(self.root / 'audit.jsonl')['items']
+        self.assertIn('Web 题', stages[0]['body'])
+        self.assertEqual(stages[1]['exploration']['milestone']['title'], '响应显示输入条件')
+        rows = self.bb.query(BlackboardLayer.TOPOLOGY, data_filter=('kind', 'exploration'))
+        self.assertEqual(len(rows), 2)
+        attempt = next(row['data'] for row in rows if row['data']['node_type'] == 'attempt')
+        self.assertEqual(attempt['state'], 'supported')
+        self.assertEqual(attempt['public_milestone']['next'], '用边界输入对照核实')
+        from spiritscout.core.audit import read_record
+
+        events = [read_record(line) for line in (self.root / 'audit.jsonl').read_text().splitlines()]
+        self.assertTrue(any(e['type'] == 'agent.delta' and e['detail'].get('kind') == 'text' for e in events))
+        progress = [e['detail'] for e in events if e['type'] == 'agent.progress']
+        self.assertTrue(all(p['streamed'] for p in progress))
 
     async def test_prose_recovery_does_not_append_display_format_after_action_instruction(self):
         self.agent._ensure_progress_guidance(self.state)

@@ -80,15 +80,30 @@ $("#s-tabs").addEventListener("keydown", event => {
 
 let stateRequestVersion = 0;
 let stateLoadingSession = null, stateQueued = false, stateRefreshTimer = null;
+let stateRefreshSession = null, stateLastSession = null, stateLastRefresh = 0;
 function scheduleStateRefresh() {
-  if (document.visibilityState === "hidden") return;
-  if (stateRefreshTimer) return;
-  stateRefreshTimer = setTimeout(() => { stateRefreshTimer = null; refreshState(); }, 120);
+  if (!S.cur || document.visibilityState === "hidden") return;
+  const sessionId = S.cur;
+  if (stateLoadingSession === sessionId) { stateQueued = true; return; }
+  if (stateRefreshTimer !== null) {
+    if (stateRefreshSession === sessionId) return;
+    clearTimeout(stateRefreshTimer);
+  }
+  // 短突发合并，连续工具事件最多约每 750ms 拉取一次；不拖延到流结束。
+  const elapsed = stateLastSession === sessionId ? Date.now() - stateLastRefresh : Infinity;
+  stateRefreshSession = sessionId;
+  stateRefreshTimer = setTimeout(() => {
+    stateRefreshTimer = null; stateRefreshSession = null;
+    if (S.cur === sessionId && document.visibilityState !== "hidden") refreshState();
+  }, Math.max(200, 750 - elapsed));
 }
 async function refreshState() {
   if (!S.cur) return;
   if (stateLoadingSession === S.cur) { stateQueued = true; return; }
   const sessionId = S.cur, version = ++stateRequestVersion;
+  if (stateRefreshTimer !== null) { clearTimeout(stateRefreshTimer); stateRefreshTimer = null; }
+  stateRefreshSession = null; stateQueued = false;
+  stateLastSession = sessionId; stateLastRefresh = Date.now();
   stateLoadingSession = sessionId;
   S.polling?.stateRequested();
   try {
@@ -1050,7 +1065,8 @@ function tracePush(e, {observe = true, eventId = null} = {}) {
         flow.insertAdjacentHTML("beforeend", '<div class="tl-say"></div>');
         el = flow.lastElementChild;
       }
-      el.textContent += text;
+      el._publicRaw = (el._publicRaw || '') + text;
+      el.textContent = TaskTrace.commentaryText(el._publicRaw);
       traceScroll();
       break;
     }
@@ -1353,7 +1369,7 @@ function startStreams(rebuild = true) {
         received = lid;
       }
       SessionHistory.enqueue(e, lid, sessionId);
-      if (/task\.|decision\.|vuln\.|flag\.|platform\.|system\.|model\.call/.test(e.type || "")) scheduleStateRefresh();
+      if (/^(?:agent\.(?:discovery|progress|tool_result)|task\.|decision\.|vuln\.|flag\.|platform\.|system\.|model\.call)/.test(e.type || "")) scheduleStateRefresh();
     } catch {}
   });
   es.addEventListener("done", async () => {

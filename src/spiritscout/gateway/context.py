@@ -8,6 +8,43 @@ import math
 from typing import Any
 
 from spiritscout.core.models import BlackboardLayer
+from spiritscout.ctf.evidence_memory import NORMAL_GUIDANCE as EVIDENCE_REUSE_GUIDANCE
+
+# 执行规范与现场数据分开；云端旧会话只追加一次，不重写 system 或历史前缀。
+EXECUTION_DATA_GUIDANCE = (
+    '精确数据规范：Token/JWT/Cookie/密钥/编码串、URL/端口/路径/ID、Flag/哈希/偏移/长度及响应字段，'
+    '从原始文件、结构化工具结果或实际变量直接读取、解析并传递，不凭记忆重构或手抄长串；'
+    '保留大小写、编码和字节，秘密优先用受限引用。函数/参数/字段以已读源码或本机帮助为准，'
+    '参数报错先核对实际用法再修正。已有完整原文或可靠变量直接复用，不为确认副本重复读取；'
+    '来源截断、有歧义或现场变化才回读。摘要和自己的旧分析不是原始证据；读取失败保留未知，'
+    '不猜补缺失值。二进制保留原字节，以hex/Base64/转义形式查看，不用ignore/replace掩盖解码失败。'
+    '提交答案前核对原始来源与完整性。'
+)
+
+
+FAILURE_ATTRIBUTION_GUIDANCE = (
+    '错误归因：区分失败事实、原因假设和已验证结论，证据不足标原因未定。自写脚本出错先沿完整异常链定位首个偏离，'
+    '核对输入、本机接口及脚本逻辑；异步/CDP按需记录连接、发送、接收、响应ID匹配、解析阶段，'
+    '超时报最后完成阶段与待匹配ID，不打印凭据；检查回调是否注册、是否处理了返回值。'
+    '超时或连接失败本身不能证明目标/环境故障。重启服务、换环境或重建会话前先做能区分原因的最小检查；'
+    '脚本缺陷足以解释失败时先修脚本。有证据支持环境异常时按事实处理，不机械重跑全部检查。'
+    '重试说明对应的修正或条件变化；只延长等待、换文件名或复述旧推测不算已修复。'
+)
+
+
+def ensure_execution_data_guidance(state: dict[str, Any], gateway: Any) -> None:
+    """云端执行契约按独立版本追加；轻量模式保持原请求。"""
+    if getattr(getattr(gateway, 'config', None), 'lightweight_local', False):
+        return
+    for version, guidance in (('execution_data_guidance_v1', EXECUTION_DATA_GUIDANCE),
+                              ('failure_attribution_guidance_v1', FAILURE_ATTRIBUTION_GUIDANCE),
+                              ('evidence_reuse_guidance_v1', EVIDENCE_REUSE_GUIDANCE)):
+        if state.get(version):
+            continue
+        messages = state.setdefault('messages', [])
+        if not any(message.get('content') == guidance for message in messages):
+            messages.append({'role': 'user', 'content': guidance, '_context_contract': True})
+        state[version] = True
 
 
 def estimate_input_tokens(messages: list[dict[str, Any]],
@@ -39,7 +76,7 @@ _PROTECTED = {"constraints", "task_intent", "用户答复", "scope", "rules", "m
               "available_skills", "skill_context", "skill_observations",
               "authorization", "testing_rules", "user_replies",
               "competition_context", "platform_facts", "灵枢当前指令",
-              "active_tasks", "steering_status", "competition_status", "user_type_hints"}
+              "active_tasks", "steering_status", "competition_status", "user_type_hints", "exploration_display"}
 
 
 def compact_json(payload: dict[str, Any], max_chars: int = 8000) -> str:
@@ -209,6 +246,10 @@ def compact_history(messages: list[dict[str, Any]], max_chars: int = 48000) -> N
         if i < 2 or i >= len(messages) - 2 or i in recent_users:
             continue
         content = message.get("content")
+        if message.get('_progress_reminder'):
+            # 框架展示提醒不是用户声明；完整契约已单独保留，旧提醒可缩短。
+            message['content'] = '公开探索展示约定已在前文提供。'
+            continue
         if (message.get("_context_contract") or message.get("role") not in {"assistant", "tool"}
                 or not isinstance(content, str) or len(content) < 800):
             continue
@@ -321,6 +362,7 @@ class DecisionMemory:
         self.skills: dict[str, Any] = {}
         self.blackboard: Any = None
         self.agent_type: Any = None
+        self.shared_memory_enabled = False
         self.manual_compaction_id = ""
         self.pending_compaction: dict[str, Any] | None = None
 
@@ -501,6 +543,7 @@ def decision_memory(owner: Any, key: str) -> DecisionMemory:
         memory = DecisionMemory()
         memory.blackboard = getattr(getattr(owner, "ctx", None), "blackboard", None)
         memory.agent_type = getattr(owner, "agent_type", None)
+        memory.shared_memory_enabled = getattr(getattr(owner, 'ctx', None), 'mode', None) == 'competition'
         if callable(getattr(journal, "latest_checkpoint", None)):
             # 会话数据库隔离会话；类型隔离 Agent，key 已含任务/路线/阶段。
             checkpoint_key = f"{type(owner).__name__}:{key}"

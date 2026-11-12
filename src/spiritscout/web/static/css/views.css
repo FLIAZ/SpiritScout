@@ -1652,6 +1652,7 @@ main:has(> #view-session:not([hidden])) { min-height: 0; height: 100%; padding: 
 .rg-edges { position:absolute; left:0; top:0; z-index:1; overflow:visible; pointer-events:none; }
 .rg-edge { --edge:var(--rg-violet); opacity:.65; }.rg-edge.spawn { --edge:var(--rg-green); }.rg-edge.chain { --edge:#6366f1; }.rg-edge.yield { --edge:var(--rg-amber); }.rg-edge.proof { --edge:#ef4444; }
 .rg-edge > path { fill:none; stroke:var(--edge); stroke-width:1.7px; }.rg-edge.is-context > path { stroke-dasharray:5 4; }
+.rg-edge.is-ownership { opacity:.18; }
 .rg-edge > text { fill:var(--edge); font-size:10px; stroke:var(--rg-canvas); stroke-width:5px; paint-order:stroke; stroke-linejoin:round; }
 .rg-edge.is-highlighted { opacity:1; }.rg-edge.is-highlighted > path { stroke-width:2.4px; }
 .rg-arrow.spawn { fill:var(--rg-green); }.rg-arrow.chain { fill:#6366f1; }.rg-arrow.yield { fill:var(--rg-amber); }.rg-arrow.proof { fill:#ef4444; }
@@ -1839,3 +1840,11 @@ main:has(> #view-session:not([hidden])) { min-height: 0; height: 100%; padding: 
 .rg-asset-record { font-size:11px; text-align:left; white-space:nowrap; }
 .rg-asset-record:hover,.rg-asset-record.is-selected { color:var(--accent-ink); text-decoration:underline; }
 .rg-asset-tree button:focus-visible { outline:2px solid var(--accent-ink); outline-offset:2px; }
+
+.rg-importance { display: flex; align-items: center; gap: 7px; margin: 8px 0 0; color: var(--ink-2); font-size: 11px; }
+.rg-importance b { padding: 2px 7px; border-radius: 5px; background: var(--accent-soft); color: var(--accent-ink); font: 600 11px var(--mono); }
+.rg-status[data-status="hypothesis"] { color: var(--warn); background: var(--warn-soft); }
+.rg-status[data-status="observed"] { color: var(--ink-2); background: var(--surface-2); }
+.rg-status[data-status="verified"] { color: var(--ok); background: var(--ok-soft); }
+
+.rg-progress-notice { margin: 0; padding: 10px 16px; border-bottom: 1px solid var(--line); color: var(--ink-2); background: var(--surface-2); font-size: 12px; line-height: 1.6; }

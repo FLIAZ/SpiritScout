@@ -3,6 +3,8 @@ const assert=require("node:assert/strict"), fs=require("node:fs"), vm=require("n
 const context=vm.createContext(require('./helpers/i18n').context({SessionObserver:{toolName:n=>n || "工具",cleanText:v=>String(v),resultSummary:d=>d.note || d.error || "返回结果"}}));
 vm.runInContext(fs.readFileSync(path.join(__dirname,"../src/spiritscout/web/static/js/task-trace.js"),"utf8"),context);
 const api=vm.runInContext("TaskTrace",context), store=api.create();
+assert.equal(api.commentaryText('已确认输入条件。\n'+JSON.stringify({discovery:{key:'input',title:'发现'}})),
+  '已确认输入条件。','内联发现元数据不进入聊天正文');
 // 轻量流式公开说明仍落持久进展事件；语义补入同一消息，不重复正文。
 const streamedStore=api.create(), streamedScope={task_id:'single-stream',route_id:'single-r',turn:1};
 const streamedContent=JSON.stringify({progress:'这条路径已被现场否定。',exploration:{intent:'核对输入约束',attempt:'空输入对照',state:'refuted'}});
@@ -220,3 +222,48 @@ assert.equal(liveTask.waitingReason,'');
 change('agent.delta',{task_id:'live',route_id:'r2',turn:1,kind:'reasoning',text:'内部推理不可作为公开进展'});
 assert.doesNotMatch(api.liveSummary(liveTask),/内部推理/);
 console.log('live progress: durable narratives, tool isolation, parallel stages, user handoff and reasoning exclusion passed');
+
+// 服务端与浏览器共用同一组协议样例；分片中也不能闪现元数据。
+for(const fixture of JSON.parse(fs.readFileSync(path.join(__dirname,'fixtures/public_progress.json'),'utf8'))) {
+  const actual=JSON.parse(JSON.stringify(api.parsePublicProgress(fixture.content)));
+  const expected={text:fixture.text,...(fixture.exploration ? {exploration:fixture.exploration} : {})};
+  assert.deepEqual(actual,expected,fixture.name);
+}
+const mixedStore=api.create(),mixedScope={task_id:'mixed',route_id:'mixed-r',turn:1};
+const mixed='已观察到登录表单。\n\n'+JSON.stringify({progress:'开始核实登录边界',exploration:{intent:'核实登录边界',attempt:'对照两个响应',state:'running'}});
+for(let i=1;i<=mixed.length;i++) {
+  const prefix=mixed.slice(0,i),visible=api.commentaryText(prefix);
+  assert.ok(!visible.includes('"progress"') && !visible.includes('"exploration"'),`metadata leaked at ${i}`);
+}
+let mixedTask;
+for(const text of [mixed.slice(0,19),mixed.slice(19,40),mixed.slice(40)])
+  mixedTask=api.reduce(mixedStore,{actor:'web-mixed',type:'agent.delta',detail:{...mixedScope,kind:'text',text}});
+api.reduce(mixedStore,{actor:'web-mixed',type:'agent.progress',seq:10,detail:{...mixedScope,text:mixed,streamed:true}});
+assert.equal([...mixedTask.steps.values()][0].exploration.intent,'核实登录边界');
+assert.equal(api.updatesOf(mixedTask).length,1,'持久进展与已流式正文去重');
+assert.equal(api.updatesOf(mixedTask)[0].text,'已观察到登录表单。');
+console.log('mixed progress: shared parser fixtures, partial protocol suppression, metadata recovery and narrative dedup passed');
+
+const intentStore=api.create();let intentSeq=20;
+const intentEvent=(type,detail,actor='web-switch')=>api.reduce(intentStore,{type,actor,seq:++intentSeq,detail:{task_id:'switch',route_id:'r',...detail}});
+intentEvent('agent.turn',{turn:1});
+intentEvent('agent.delta',{turn:1,kind:'text',text:'先核实入口。'});
+intentEvent('agent.progress',{turn:1,streamed:true,text:'先核实入口。',exploration:{intent:'核实入口',attempt:'读取页面'}});
+intentEvent('agent.turn',{turn:2});
+const switched=intentEvent('agent.delta',{turn:2,kind:'text',text:'已找到认证差异，转向身份校验。'});
+intentEvent('agent.progress',{turn:2,streamed:true,text:'已找到认证差异，转向身份校验。',exploration:{intent:'核实身份',attempt:'对照身份'}});
+const messages=[...switched.segments.values()].filter(s=>s.texts.size);
+assert.equal(messages.length,2,'显式新意图不能被 streamed 标记并回旧卡');
+assert.equal([...messages[0].texts.values()].map(api.commentaryText).join(''),'先核实入口。');
+assert.equal([...messages[1].texts.values()].map(api.commentaryText).join(''),'已找到认证差异，转向身份校验。');
+intentEvent('task.cancelled',{task_id:'switch'},'master-controller');
+assert.equal(switched.status,'cancelled','主控的真实任务撤销事件结束执行者卡片');
+assert.equal([...switched.steps.values()].at(-1).status,'cancelled');
+assert.ok([...switched.steps.values()].every(s=>!['running','waiting'].includes(s.status)));
+
+const fragmentStore=api.create(),fragmentScope={task_id:'fragment',route_id:'r',turn:5};
+let fragment=api.reduce(fragmentStore,{actor:'web-fragment',type:'agent.delta',detail:{...fragmentScope,kind:'text',text:'AF 提示","next":"PRIVATE_PROTOCOL_TAIL"}}'}});
+api.reduce(fragmentStore,{actor:'web-fragment',type:'agent.progress',seq:50,detail:{...fragmentScope,streamed:true,text:'完整公开观察。\n'+JSON.stringify({progress:'观察摘要',exploration:{intent:'核实条件',attempt:'响应对照'}})}});
+assert.deepEqual(Array.from(api.updatesOf(fragment),n=>n.text),['完整公开观察。'],'完整持久正文替换分页边界的协议残片');
+assert.ok([...fragment.segments.values()].every(s=>![...s.texts.values()].some(raw=>raw.includes('PRIVATE_PROTOCOL_TAIL'))));
+console.log('intent lifecycle: streamed intent changes, master cancellation and partial-page reconciliation passed');

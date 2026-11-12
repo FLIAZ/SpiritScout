@@ -167,3 +167,24 @@ input:checked ~ .mode-check { border: 4px solid var(--accent); background: var(-
 
 #view-home .project-picker { display: inline-flex; align-items: center; gap: 2px; min-width: 0; }
 #view-home .project-picker > svg { width: 17px; height: 17px; flex: none; color: var(--ink-2); }
+
+/* CTF 题面与解题设置组成同一张资料卡，输入尺寸独立于任务正文。 */
+#view-home .ctf-challenge { margin: 0 24px 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); overflow: hidden; }
+#view-home .ctf-challenge[hidden] { display: none; }
+#view-home .ctf-challenge-head { display: flex; align-items: center; gap: 12px; padding: 17px 18px; border-bottom: 1px solid var(--line); }
+#view-home .ctf-challenge-mark { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; background: var(--accent-soft); color: var(--accent-ink); flex: none; }
+#view-home .ctf-challenge-mark svg { width: 22px; height: 22px; }
+#view-home .ctf-challenge-head h2 { margin: 0; color: var(--ink); font-size: 14px; font-weight: 650; }
+#view-home .ctf-challenge-head p { margin: 4px 0 0; color: var(--ink-2); font-size: 11px; line-height: 1.6; }
+#view-home .ctf-challenge-badge { margin-left: auto; padding: 3px 8px; border: 1px solid var(--line); border-radius: 20px; color: var(--ink-2); font-size: 10px; white-space: nowrap; }
+#view-home .ctf-challenge-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 16px; padding: 18px; }
+#view-home .ctf-challenge-field { display: grid; align-content: start; gap: 8px; min-width: 0; margin: 0; }
+#view-home .ctf-challenge-field > span { color: var(--ink); font-size: 12px; font-weight: 550; }
+#view-home .ctf-challenge-field small { margin-left: 5px; color: var(--ink-3); font: 10px var(--mono); font-weight: 400; }
+#view-home .ctf-challenge-field input, #view-home .ctf-challenge-field textarea { box-sizing: border-box; width: 100%; min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--home-panel); color: var(--ink); font: inherit; font-size: 12px; line-height: 1.75; }
+#view-home .ctf-challenge-field textarea { min-height: 126px; max-height: 300px; resize: vertical; }
+#view-home .ctf-challenge-field input:focus-visible, #view-home .ctf-challenge-field textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-color: var(--accent); }
+#view-home .ctf-challenge .answer-option { margin: 0; padding: 14px 18px; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; }
+#view-home .ctf-challenge .answer-option-copy small { display: block; margin-top: 4px; color: var(--ink-2); font-size: 11px; line-height: 1.6; }
+#view-home .ctf-challenge .answer-option-icon { width: 30px; height: 30px; }
+#view-home:has(#c-mode option[value="ctf"]:checked) #c-mission { min-height: 100px; }

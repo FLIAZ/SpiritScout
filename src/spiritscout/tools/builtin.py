@@ -270,6 +270,9 @@ async def http_probe(
         current_data = data
         current_params = params
         redirect_chain: list[str] = []
+        # 中转跳的响应头单独留存：登录/提交后常由 302 + Set-Cookie 下发会话，
+        # 只回传最终响应会让模型看不到这段关键证据。
+        redirect_hops: list[dict[str, Any]] = []
         import ssl
 
         from spiritscout.traffic.proxy import tool_environment
@@ -306,6 +309,15 @@ async def http_probe(
                         duration_ms=(time.perf_counter() - started) * 1000)
                 next_url = urljoin(str(resp.url), location)
                 redirect_chain.append(next_url)
+                redirect_hops.append({
+                    "status": resp.status_code,
+                    "url": str(resp.url),
+                    "location": next_url,
+                    "set_cookie": resp.headers.get("set-cookie", ""),
+                    "headers": {str(k).lower(): str(v) for k, v in resp.headers.items()
+                                if str(k).lower() in ("set-cookie", "location",
+                                                      "www-authenticate")},
+                })
                 old = urlparse(current_url)
                 new = urlparse(next_url)
                 if (old.scheme, old.hostname, old.port) != (new.scheme, new.hostname, new.port):
@@ -371,6 +383,7 @@ async def http_probe(
         "fingerprint": fingerprint,
         "final_url": final_url,
         "redirect_chain": redirect_chain,
+        "redirects": redirect_hops,
         "download_complete": not body_truncated,
         "response_is_partial": final_status == 206,
         "text_decode_lossy": text_decode_lossy,

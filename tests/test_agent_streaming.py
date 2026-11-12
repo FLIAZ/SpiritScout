@@ -93,6 +93,16 @@ class AgentStreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(deltas[-1]["text"], "结果")
         self.assertTrue(all(len(r["text"]) <= 4000 for r in deltas))
 
+    def test_stream_emits_only_natural_language_when_exploration_json_is_mixed(self) -> None:
+        audit = NullAuditLogger()
+        sink = AuditStream(audit, "agent", {"call_id": "call"})
+        sink("text", '已观察到登录表单。\n\n{"exploration":{"intent":"核实登录边界",')
+        sink("text", '"attempt":"对照两个响应","state":"running"}}')
+        sink.flush()
+        text = "".join(r["detail"]["text"] for r in audit.records
+                       if r["type"] == "agent.delta" and r["detail"]["kind"] == "text")
+        self.assertEqual(text, "已观察到登录表单。")
+
     def test_local_display_stream_preserves_large_chunks_and_retry_reset(self) -> None:
         audit = NullAuditLogger()
         scope = ExecutionScope(agent_id="local-display", task_id="display-task", route_id="display-route")

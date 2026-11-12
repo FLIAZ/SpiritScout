@@ -21,6 +21,133 @@ from spiritscout.gateway.context import (
 
 
 class CacheEfficiencyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_one_shot_cloud_decision_receives_data_rules_without_mutating_input(self):
+        from spiritscout.gateway.context import EXECUTION_DATA_GUIDANCE
+        from spiritscout.gateway.gateway import _chat_decision_once
+
+        gateway = SimpleNamespace(config=SimpleNamespace(lightweight_local=False),
+            chat=AsyncMock(return_value=SimpleNamespace(content='{"done":true}', finish_reason='stop', reasoning='')))
+        source = decision_messages('稳定系统', {'target': 'fixture'})
+        prefix = copy.deepcopy(source)
+        await _chat_decision_once(gateway, source, response_format='json')
+        sent = gateway.chat.call_args.args[0]
+        self.assertEqual(sent[:-1], prefix)
+        self.assertEqual(json.loads(sent[-1]['content'])['execution_data_rules'], EXECUTION_DATA_GUIDANCE)
+        self.assertEqual(source, prefix)
+        gateway.config.lightweight_local = True
+        await _chat_decision_once(gateway, source, response_format='json')
+        self.assertEqual(gateway.chat.call_args.args[0], prefix)
+
+    def test_native_data_contract_is_short_once_only_and_leaves_lightweight_unchanged(self):
+        from spiritscout.gateway.context import (
+            EVIDENCE_REUSE_GUIDANCE,
+            EXECUTION_DATA_GUIDANCE,
+            FAILURE_ATTRIBUTION_GUIDANCE,
+            ensure_execution_data_guidance,
+        )
+
+        original = [{'role': 'system', 'content': '稳定系统'},
+                    {'role': 'user', 'content': '原始任务'},
+                    {'role': 'assistant', 'content': '已有结果'}]
+        state = {'messages': copy.deepcopy(original)}
+        gateway = SimpleNamespace(config=SimpleNamespace(lightweight_local=False))
+        for _ in range(4):
+            ensure_execution_data_guidance(state, gateway)
+        self.assertEqual(state['messages'][:-3], original)
+        self.assertEqual([m['content'] for m in state['messages'][-3:]],
+                         [EXECUTION_DATA_GUIDANCE, FAILURE_ATTRIBUTION_GUIDANCE, EVIDENCE_REUSE_GUIDANCE])
+        self.assertTrue(all(m['_context_contract'] for m in state['messages'][-3:]))
+        self.assertLess(len(FAILURE_ATTRIBUTION_GUIDANCE), 350)
+        self.assertLess(len(EXECUTION_DATA_GUIDANCE), 360)
+        local = {'messages': copy.deepcopy(original)}
+        ensure_execution_data_guidance(local, SimpleNamespace(config=SimpleNamespace(lightweight_local=True)))
+        self.assertEqual(local, {'messages': original})
+
+    async def test_cloud_data_contract_migrates_as_one_patch_without_replacing_cached_prefix(self):
+        from spiritscout.gateway.context import (
+            EVIDENCE_REUSE_GUIDANCE,
+            EXECUTION_DATA_GUIDANCE,
+            FAILURE_ATTRIBUTION_GUIDANCE,
+        )
+        from spiritscout.gateway.gateway import _chat_decision_once
+
+        memory = DecisionMemory()
+        original = decision_messages('稳定系统', {'mission': '完整任务', 'observations': {'status': 200}})
+        memory.prepare(original)
+        memory.commit('{"decision":"continue"}')
+        prefix = copy.deepcopy(memory.messages)
+        gateway = SimpleNamespace(config=SimpleNamespace(lightweight_local=False),
+            chat=AsyncMock(return_value=SimpleNamespace(content='{"decision":"continue"}',
+                                                       finish_reason='stop', reasoning='')))
+        source = copy.deepcopy(original)
+        await _chat_decision_once(gateway, original, memory=memory, response_format='json')
+        first = gateway.chat.call_args.args[0]
+        self.assertEqual(first[:len(prefix)], prefix)
+        self.assertCountEqual(json.loads(first[-1]['content'])['patch'], [
+            {'op': 'add', 'path': '/execution_data_rules', 'value': EXECUTION_DATA_GUIDANCE},
+            {'op': 'add', 'path': '/failure_attribution_rules', 'value': FAILURE_ATTRIBUTION_GUIDANCE},
+            {'op': 'add', 'path': '/evidence_reuse_rules', 'value': EVIDENCE_REUSE_GUIDANCE}])
+        continued = decision_messages('稳定系统', {'mission': '完整任务', 'observations': {'status': 403}})
+        await _chat_decision_once(gateway, continued, memory=memory, response_format='json')
+        second = gateway.chat.call_args.args[0]
+        self.assertEqual(second[:len(first)], first)
+        self.assertEqual(json.loads(second[-1]['content'])['patch'], [
+            {'op': 'replace', 'path': '/observations/status', 'value': 403}])
+        self.assertEqual(original, source)
+        self.assertEqual(sum(EXECUTION_DATA_GUIDANCE in m['content'] for m in second), 1)
+        self.assertEqual(sum(FAILURE_ATTRIBUTION_GUIDANCE in m['content'] for m in second), 1)
+        self.assertEqual(gateway.chat.await_count, 2)
+
+    async def test_failure_guidance_upgrades_existing_data_contract_without_rebuilding_history(self):
+        from spiritscout.gateway.context import (
+            EVIDENCE_REUSE_GUIDANCE,
+            EXECUTION_DATA_GUIDANCE,
+            FAILURE_ATTRIBUTION_GUIDANCE,
+            ensure_execution_data_guidance,
+        )
+        from spiritscout.gateway.gateway import _chat_decision_once
+
+        gateway = SimpleNamespace(config=SimpleNamespace(lightweight_local=False),
+            chat=AsyncMock(return_value=SimpleNamespace(content='{"decision":"continue"}',
+                                                       finish_reason='stop', reasoning='')))
+        state = {'messages': [{'role': 'system', 'content': '缓存系统'},
+                              {'role': 'user', 'content': EXECUTION_DATA_GUIDANCE, '_context_contract': True}],
+                 'execution_data_guidance_v1': True}
+        prefix = copy.deepcopy(state['messages'])
+        ensure_execution_data_guidance(state, gateway)
+        self.assertEqual(state['messages'][:-2], prefix)
+        self.assertEqual(state['messages'][-2]['content'], FAILURE_ATTRIBUTION_GUIDANCE)
+        self.assertEqual(state['messages'][-1]['content'], EVIDENCE_REUSE_GUIDANCE)
+        once = copy.deepcopy(state)
+        ensure_execution_data_guidance(state, gateway)
+        self.assertEqual(state, once)
+
+        memory = DecisionMemory()
+        source = decision_messages('缓存系统', {'mission': '当前任务', 'execution_data_rules': EXECUTION_DATA_GUIDANCE})
+        memory.prepare(source)
+        memory.commit('{"decision":"continue"}')
+        committed = copy.deepcopy(memory.messages)
+        await _chat_decision_once(gateway, source, memory=memory, response_format='json')
+        sent = gateway.chat.call_args.args[0]
+        self.assertEqual(sent[:len(committed)], committed)
+        self.assertCountEqual(json.loads(sent[-1]['content'])['patch'], [
+            {'op': 'add', 'path': '/failure_attribution_rules', 'value': FAILURE_ATTRIBUTION_GUIDANCE},
+            {'op': 'add', 'path': '/evidence_reuse_rules', 'value': EVIDENCE_REUSE_GUIDANCE}])
+        self.assertEqual(gateway.chat.await_count, 1)
+
+    async def test_lightweight_decisions_do_not_receive_data_contract(self):
+        from spiritscout.gateway.gateway import _chat_decision_once
+
+        memory = DecisionMemory()
+        gateway = SimpleNamespace(config=SimpleNamespace(lightweight_local=True),
+            chat=AsyncMock(return_value=SimpleNamespace(content='{"decision":"continue"}',
+                                                       finish_reason='stop', reasoning='')))
+        original = decision_messages('原契约', {'observations': '原始现场'})
+        await _chat_decision_once(gateway, original, memory=memory, response_format='json')
+        self.assertEqual(memory.snapshot, {'observations': '原始现场'})
+        self.assertNotIn('execution_data_rules', str(gateway.chat.call_args))
+        self.assertNotIn('failure_attribution_rules', str(gateway.chat.call_args))
+
     async def test_decision_json_miss_is_audited_not_silent(self) -> None:
         """决策通道 JSON 缺席要留痕：规则回退从静默降级变成可观测事件。"""
         from spiritscout.gateway.gateway import chat_decision

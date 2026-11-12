@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock
 from spiritscout.agents.master.agent import MasterAgent
 from spiritscout.agents.ring import RingLedger
 from spiritscout.agents.sub.base import RoutePlan
-from spiritscout.core.models import AgentType, Task
+from spiritscout.core.models import AgentType, RunMode, Task
 from spiritscout.ctf.agents import CTFBaseAgent, _ToolOutcome
 from spiritscout.gateway.context import compact_json
 
@@ -70,6 +70,39 @@ class SteeringRoutingTests(unittest.TestCase):
 
 
 class SteeringExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_all_modes_keep_complete_public_exploration_contract_under_context_pressure(self):
+        from spiritscout.gateway.progress import EXPLORATION_PROGRESS_GUIDANCE
+        from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
+
+        for mode in (RunMode.SRC, RunMode.CTF, RunMode.AWDP, RunMode.COMPETITION):
+            with self.subTest(mode=mode):
+                agent, _, task, route, _ = self._solver()
+                agent.ctx.mode = mode
+                agent.enable_llm_planning = True
+                agent._system_prompt = Mock(return_value='系统约束')
+                agent._world_state = Mock(return_value={})
+                agent.ctx.blackboard = None
+                decision = {'progress': '目前仅有站点地址，先核实实际入口和题面。',
+                            'exploration': {'intent': '理解目标场景', 'attempt': '读取入口', 'state': 'running'}}
+                agent.ctx.gateway.chat.return_value = SimpleNamespace(
+                    content=json.dumps(decision, ensure_ascii=False), tool_calls=[], finish_reason='stop')
+                token = current_execution_scope.set(ExecutionScope(task_id=task.task_id,
+                    route_id=route.route_id, turn=1))
+                try:
+                    result = await agent._llm_chat_json(role='verify',
+                        user_obj={'observations': '旧观察' * 5000}, task=task,
+                        max_user_chars=300, _allow_ask=False)
+                finally:
+                    current_execution_scope.reset(token)
+                self.assertEqual(result, decision)
+                agent.ctx.gateway.chat.assert_awaited_once()
+                sent = agent.ctx.gateway.chat.call_args.args[0]
+                payload = json.loads(next(m['content'] for m in sent if m['role'] == 'user'))['snapshot']
+                self.assertEqual(payload['exploration_display'], EXPLORATION_PROGRESS_GUIDANCE)
+                progress = next(c.args[2] for c in agent.ctx.audit.log.call_args_list if c.args[0] == 'agent.progress')
+                self.assertEqual(progress['task_id'], task.task_id)
+                self.assertEqual(progress['exploration']['intent'], '理解目标场景')
+
     async def test_stateless_decisions_do_not_consume_another_tasks_instruction(self) -> None:
         agent, state, task, route, plan = self._solver()
         agent.enable_llm_planning = True
