@@ -164,6 +164,14 @@ jobs:
           assert manifest['architecture'] == os.environ['ARCH']
           assert manifest['development_build'] is False
           PY
+      - name: Package third-party license notices
+        working-directory: dist/linux
+        run: |
+          while IFS= read -r -d '' directory; do
+            archive="${directory#./}.tar.gz"
+            tar -czf "$archive" "${directory#./}"
+            rm -rf "$directory"
+          done < <(find . -maxdepth 1 -type d -name '*-licenses' -print0)
       - uses: actions/upload-artifact@v4
         with:
           name: spiritscout-release-linux-${{ matrix.arch }}
@@ -205,7 +213,12 @@ jobs:
           TAG: ${{ needs.prepare.outputs.tag }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          gh release create "$TAG" dist/release/* \
+          mapfile -d '' assets < <(find dist/release -maxdepth 1 -type f -print0 | sort -z)
+          if ((${#assets[@]} == 0)); then
+            echo '没有可发布的文件。' >&2
+            exit 1
+          fi
+          gh release create "$TAG" "${assets[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "SpiritScout v$VERSION" \
