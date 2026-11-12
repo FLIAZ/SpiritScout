@@ -1,0 +1,212 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Require main branch
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo '正式发布只能从 main 分支触发。' >&2
+          exit 1
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: version
+        name: Read source version
+        shell: python
+        run: |
+          import ast
+          import os
+          import re
+          from pathlib import Path
+
+          tree = ast.parse(Path('src/spiritscout/__init__.py').read_text(encoding='utf-8'))
+          version = next(
+              ast.literal_eval(node.value)
+              for node in tree.body
+              if isinstance(node, ast.Assign)
+              and any(isinstance(target, ast.Name) and target.id == '__version__'
+                      for target in node.targets)
+          )
+          if not re.fullmatch(r'\d+\.\d+\.\d+', version):
+              raise SystemExit(f'版本号不符合正式发布格式：{version}')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f'version={version}\n')
+              output.write(f'tag=v{version}\n')
+      - name: Refuse an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "标签 $TAG 已存在，不会覆盖。" >&2
+            exit 1
+          fi
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，不会覆盖。" >&2
+            exit 1
+          fi
+
+  windows:
+    name: Windows x86_64
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      PYTHON_DOTENV_DISABLED: '1'
+      LITELLM_LOCAL_MODEL_COST_MAP: 'True'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.11'
+          enable-cache: true
+      - name: Build executable
+        shell: pwsh
+        run: ./scripts/build-exe.ps1
+      - name: Verify first startup
+        shell: pwsh
+        run: |
+          $env:SPIRITSCOUT_DATA_HOME = Join-Path $env:RUNNER_TEMP 'spiritscout-smoke'
+          New-Item -ItemType Directory -Force $env:SPIRITSCOUT_DATA_HOME | Out-Null
+          $app = Start-Process -FilePath (Resolve-Path dist/SpiritScout.exe) -ArgumentList '--host','127.0.0.1','--port','18001' -PassThru
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              if ($app.HasExited) { throw 'Executable exited before readiness' }
+              try {
+                $response = Invoke-WebRequest http://127.0.0.1:18001/login -TimeoutSec 2
+                if ($response.StatusCode -eq 200) { $ready = $true; break }
+              } catch { Start-Sleep -Seconds 1 }
+            }
+            if (-not $ready) { throw 'Login page did not become ready' }
+            if (-not (Test-Path "$env:SPIRITSCOUT_DATA_HOME/configs/models.yaml")) { throw 'Missing initial model registry' }
+          } finally {
+            if (-not $app.HasExited) { Stop-Process -Id $app.Id -Force }
+          }
+      - name: Package executable
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          $archive = "dist/SpiritScout-v$env:VERSION-windows-x86_64.zip"
+          Compress-Archive -Path dist/SpiritScout.exe,LICENSE -DestinationPath $archive
+          $name = Split-Path $archive -Leaf
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name" | Set-Content dist/SHA256SUMS-windows-x86_64 -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spiritscout-release-windows-x86_64
+          path: |
+            dist/SpiritScout-v${{ needs.prepare.outputs.version }}-windows-x86_64.zip
+            dist/SHA256SUMS-windows-x86_64
+          if-no-files-found: error
+          retention-days: 1
+
+  linux:
+    name: Linux ${{ matrix.arch }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: native/traffic-proxy/go.mod
+      - name: Install package tools
+        run: sudo apt-get update && sudo apt-get install -y rpm zstd desktop-file-utils squashfs-tools
+      - name: Build release packages
+        run: python scripts/build-linux-packages.py --arch '${{ matrix.arch }}' --release
+      - name: Verify checksums and release metadata
+        working-directory: dist/linux
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          sha256sum -c "SHA256SUMS-$ARCH"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = json.loads(Path(f"manifest-{os.environ['ARCH']}.json").read_text())
+          assert manifest['version'] == os.environ['VERSION']
+          assert manifest['architecture'] == os.environ['ARCH']
+          assert manifest['development_build'] is False
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spiritscout-release-linux-${{ matrix.arch }}
+          path: |
+            dist/linux/spiritscout-linux-*
+            dist/linux/spiritscout-traffic-proxy-linux-*
+            dist/linux/*.AppImage
+            dist/linux/*.deb
+            dist/linux/*.rpm
+            dist/linux/*.pkg.tar.zst
+            dist/linux/manifest-*.json
+            dist/linux/SHA256SUMS-*
+            dist/linux/build-requirements-*.txt
+            dist/linux/appimage-tools-*.json
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish GitHub Release
+    needs: [prepare, windows, linux]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: spiritscout-release-*
+          path: dist/release
+          merge-multiple: true
+      - name: Verify artifacts and create aggregate checksum
+        working-directory: dist/release
+        run: |
+          for sums in SHA256SUMS-*; do sha256sum -c "$sums"; done
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' \
+            | sort | xargs sha256sum > SHA256SUMS
+      - name: Create tag and GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          gh release create "$TAG" dist/release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "SpiritScout v$VERSION" \
+            --generate-notes

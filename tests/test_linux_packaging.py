@@ -92,6 +92,20 @@ class PackagingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 build.elf_arch(path)
 
+    def test_release_manifest_is_not_marked_as_development(self):
+        with tempfile.TemporaryDirectory() as temp:
+            product = Path(temp) / "artifact.bin"
+            product.write_bytes(b"release fixture")
+            development = build.build_manifest([product], "x86_64", "1.2.3")
+            release = build.build_manifest(
+                [product], "x86_64", "1.2.3", release=True
+            )
+            self.assertTrue(development["development_build"])
+            self.assertFalse(release["development_build"])
+            self.assertEqual(release["version"], "1.2.3")
+            self.assertEqual(release["files"][0]["name"], "artifact.bin")
+            self.assertEqual(len(release["files"][0]["sha256"]), 64)
+
     def test_frozen_runtime_uses_user_directory_and_preserves_config(self):
         cwd = Path.cwd()
         self.addCleanup(os.chdir, cwd)
