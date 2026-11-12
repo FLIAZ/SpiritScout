@@ -49,23 +49,26 @@ NORMAL_GUIDANCE = (
     '脚本可提供目标证据，但需指向实际响应/文件及原文，origin_assessment 只是模型判断。'
     '笔记和历史摘要用于定位、复用，不作为新的独立证据。'
 )
-NORMAL_SCHEMA = copy.deepcopy(SCHEMA)
-NORMAL_SCHEMA['function']['description'] += (
-    '长期结论按稳定 id 更新；scope/conditions 限定适用范围，revalidate_when 记录重试依据。'
-    '来源判断 origin_assessment 不等于运行时认证，工具成功不证明输出来自目标。')
-_normal_item = NORMAL_SCHEMA['function']['parameters']['properties']['upsert']['items']['properties']
-for _field, _description in {
-    'scope': '适用的任务、目标实例、身份或环境；未知时明确说明',
-    'conditions': '支持本结论的已测试输入与条件，排除结论不得超出这些条件',
-    'revalidate_when': '可重新检验的条件变化、新证据或尚未覆盖的区分性检查',
-}.items():
-    _normal_item[_field] = {'type': 'string', 'maxLength': 600, 'description': _description}
-_normal_source = _normal_item['sources']['items']['properties']
-_normal_source['origin_assessment'] = {'type': 'string', 'enum': [
-    'target_response', 'user_material', 'generated', 'mixed', 'unknown'],
-    'description': '你对引用内容来源的判断，不是运行时认证；执行输出默认 unknown'}
-_normal_source['origin_basis'] = {'type': 'string', 'maxLength': 600,
-    'description': '来源判断依据，目标响应须说明实际响应/文件位置与生成数据的区别'}
+def normal_schema() -> dict[str, Any]:
+    """从当前模块的基础契约派生云端版本，保留历史评估快照隔离。"""
+    schema = copy.deepcopy(SCHEMA)
+    item = schema['function']['parameters']['properties']['upsert']['items']['properties']
+    for field, description in {
+        'scope': '适用的任务、目标实例、身份或环境；未知时明确说明',
+        'conditions': '支持本结论的已测试输入与条件，排除结论不得超出这些条件',
+        'revalidate_when': '可重新检验的条件变化、新证据或尚未覆盖的区分性检查',
+    }.items():
+        item[field] = {'type': 'string', 'maxLength': 600, 'description': description}
+    source = item['sources']['items']['properties']
+    source['origin_assessment'] = {'type': 'string', 'enum': [
+        'target_response', 'user_material', 'generated', 'mixed', 'unknown'],
+        'description': '你对引用内容来源的判断，不是运行时认证；执行输出默认 unknown'}
+    source['origin_basis'] = {'type': 'string', 'maxLength': 600,
+        'description': '来源判断依据，目标响应须说明实际响应/文件位置与生成数据的区别'}
+    return schema
+
+
+NORMAL_SCHEMA = normal_schema()
 
 
 def source_digest(message: dict[str, Any]) -> str:

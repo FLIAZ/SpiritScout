@@ -72,7 +72,7 @@ class EvidenceMemoryTests(unittest.TestCase):
         self.assertEqual(snapshot(self.state)['revision'], 0)
 
     def test_lightweight_schema_and_storage_do_not_gain_cloud_fields(self):
-        from spiritscout.ctf.evidence_memory import NORMAL_SCHEMA, SCHEMA
+        from spiritscout.ctf.evidence_memory import NORMAL_SCHEMA, SCHEMA, normal_schema
         from spiritscout.ctf.light_memory import MEMORY_SCHEMA
 
         for schema in (SCHEMA, MEMORY_SCHEMA):
@@ -80,6 +80,12 @@ class EvidenceMemoryTests(unittest.TestCase):
             self.assertNotIn('scope', fields)
             self.assertNotIn('origin_assessment', fields['sources']['items']['properties'])
         self.assertIn('scope', NORMAL_SCHEMA['function']['parameters']['properties']['upsert']['items']['properties'])
+        original = SCHEMA['function']['description']
+        try:
+            SCHEMA['function']['description'] = 'snapshot-specific'
+            self.assertEqual(normal_schema()['function']['description'], 'snapshot-specific')
+        finally:
+            SCHEMA['function']['description'] = original
         self.state['messages'][3]['_light_observation'] = {'tool': 'python', 'ok': True}
         result = execute(self.state, self.args, memory_key='light_evidence_memory',
                          observation_key='_light_observation')

@@ -763,9 +763,9 @@ class CTFBaseAgent(SubAgent):
                  "offset": {"type": "integer"}, "length": {"type": "integer"}}))
         if not self._is_lightweight():
             from spiritscout.ctf.answer_evidence import REVIEW_SCHEMA
-            from spiritscout.ctf.evidence_memory import NORMAL_SCHEMA as MEMORY_SCHEMA
+            from spiritscout.ctf.evidence_memory import normal_schema
 
-            self.tool_schemas.append(copy.deepcopy(MEMORY_SCHEMA))
+            self.tool_schemas.append(normal_schema())
             self.tool_schemas.append(_fn("history_read", "读取当前路线原始历史。find 返回精确命中总数、位置和附近原文，避免逐次查找确认数量；"
                 "view=content 可直接引用工具输出原文，默认 message 为完整消息 JSON。",
                 {"message_index": {"type": "integer"}, "offset": {"type": "integer"},
