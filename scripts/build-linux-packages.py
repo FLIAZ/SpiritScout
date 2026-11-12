@@ -39,6 +39,23 @@ def version():
     raise ValueError("找不到唯一版本来源")
 
 
+def build_manifest(products, arch, ver, *, release=False):
+    return {
+        "version": ver,
+        "architecture": arch,
+        "minimum_glibc": "2.31",
+        "development_build": not release,
+        "files": [
+            {
+                "name": path.name,
+                "size": path.stat().st_size,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+            for path in products
+        ],
+    }
+
+
 def elf_arch(path):
     with Path(path).open("rb") as binary:
         header = binary.read(20)
@@ -431,6 +448,11 @@ def main():
     parser.add_argument("--binary", type=Path, help="使用已经构建且架构匹配的 ELF")
     parser.add_argument("--output", type=Path, default=ROOT / "dist/linux")
     parser.add_argument(
+        "--release",
+        action="store_true",
+        help="标记为正式发行产物；默认仍是开发构建",
+    )
+    parser.add_argument(
         "--formats",
         nargs="+",
         choices=["deb", "rpm", "arch", "appimage"],
@@ -520,20 +542,7 @@ def main():
                     tools / "appimage-tools.json",
                     output / f"appimage-tools-{args.arch}.json",
                 )
-        manifest = {
-            "version": ver,
-            "architecture": args.arch,
-            "minimum_glibc": "2.31",
-            "development_build": True,
-            "files": [
-                {
-                    "name": p.name,
-                    "size": p.stat().st_size,
-                    "sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
-                }
-                for p in products
-            ],
-        }
+        manifest = build_manifest(products, args.arch, ver, release=args.release)
         write(
             output / f"manifest-{args.arch}.json",
             json.dumps(manifest, ensure_ascii=False, indent=2),
