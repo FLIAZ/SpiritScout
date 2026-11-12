@@ -1,0 +1,104 @@
+[
+  {
+    "name": "plain",
+    "content": "先读取题面，核实实际入口。",
+    "text": "先读取题面，核实实际入口。"
+  },
+  {
+    "name": "json-only",
+    "content": "{\"progress\": \"先读取题面。\", \"exploration\": {\"intent\": \"核实登录边界\", \"attempt\": \"对照两个响应\", \"state\": \"running\"}}",
+    "text": "先读取题面。",
+    "exploration": {
+      "intent": "核实登录边界",
+      "attempt": "对照两个响应",
+      "state": "running"
+    }
+  },
+  {
+    "name": "mixed",
+    "content": "已观察到登录表单。\n\n{\"progress\": \"开始核实登录边界\", \"exploration\": {\"intent\": \"核实登录边界\", \"attempt\": \"对照两个响应\", \"state\": \"running\"}}",
+    "text": "已观察到登录表单。",
+    "exploration": {
+      "intent": "核实登录边界",
+      "attempt": "对照两个响应",
+      "state": "running"
+    }
+  },
+  {
+    "name": "fenced-mixed",
+    "content": "已观察到登录表单。\n\n```json\n{\"exploration\": {\"intent\": \"核实登录边界\", \"attempt\": \"对照两个响应\", \"state\": \"running\"}}\n```",
+    "text": "已观察到登录表单。",
+    "exploration": {
+      "intent": "核实登录边界",
+      "attempt": "对照两个响应",
+      "state": "running"
+    }
+  },
+  {
+    "name": "top-level-milestone",
+    "content": "响应出现差异，准备核实原因。\n{\"progress\": \"发现响应差异\", \"exploration\": {\"intent\": \"核实登录边界\", \"attempt\": \"对照两个响应\", \"state\": \"running\"}, \"milestone\": {\"kind\": \"discovery\", \"title\": \"返回内容出现差异\", \"basis\": \"同一路径返回不同状态\", \"next\": \"核对差异的原因\"}}",
+    "text": "响应出现差异，准备核实原因。",
+    "exploration": {
+      "intent": "核实登录边界",
+      "attempt": "对照两个响应",
+      "state": "running",
+      "milestone": {
+        "kind": "discovery",
+        "title": "返回内容出现差异",
+        "basis": "同一路径返回不同状态",
+        "next": "核对差异的原因"
+      }
+    }
+  },
+  {
+    "name": "braces-and-escapes",
+    "content": "开始对照。\n{\"progress\": \"响应包含 \\\\\\\"{value}\\\\\\\"\", \"exploration\": {\"intent\": \"核实登录边界\", \"attempt\": \"对照两个响应\", \"state\": \"running\", \"reason\": \"路径 C:\\\\sample\\\\file，值为 {x}\"}}",
+    "text": "开始对照。",
+    "exploration": {
+      "intent": "核实登录边界",
+      "attempt": "对照两个响应",
+      "state": "running",
+      "reason": "路径 C:\\sample\\file，值为 {x}"
+    }
+  },
+  {
+    "name": "private-decision",
+    "content": "{\"analysis\": \"PRIVATE_REASON\", \"actions\": [{\"command\": \"PRIVATE_COMMAND\"}]}",
+    "text": ""
+  },
+  {
+    "name": "mixed-private-decision",
+    "content": "公开进展。\n{\"analysis\": \"PRIVATE_REASON\", \"actions\": []}",
+    "text": "公开进展。"
+  },
+  {
+    "name": "partial",
+    "content": "公开进展。\n\n{\"progress\":\"未完成",
+    "text": "公开进展。"
+  },
+  {
+    "name": "partial-fence",
+    "content": "公开进展。\n```json\n{\"progress\":\"未完成",
+    "text": "公开进展。"
+  },
+  {
+    "name": "code-example",
+    "content": "代码示例：\n```python\n{\"progress\": \"只是示例数据\"}\n```",
+    "text": "代码示例：\n```python\n{\"progress\": \"只是示例数据\"}\n```"
+  },
+  {
+    "name": "data-example",
+    "content": "响应数据：\n{\"status\":\"denied\"}",
+    "text": "响应数据：\n{\"status\":\"denied\"}"
+  },
+  {
+    "name": "invalid-semantic",
+    "content": "继续核对。\n{\"progress\":\"验证中\",\"exploration\":{\"intent\":\"缺少方法\"}}",
+    "text": "继续核对。"
+  },
+  {
+    "name": "two-public-fields",
+    "content": "{\"progress\":\" 一致说明 \",\"commentary\":\"一致说明\"}",
+    "text": "一致说明"
+  }
+]

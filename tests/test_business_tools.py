@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -13,6 +14,48 @@ from spiritscout.tools.spec import ToolResult
 
 
 class BusinessToolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exploration_streams_public_scene_with_semantics_on_existing_tool_turn(self):
+        from spiritscout.agents.sub.base import RoutePlan
+        from spiritscout.gateway.progress import (
+            EXPLORATION_PROGRESS_GUIDANCE,
+            FORMAT_GUIDANCE,
+        )
+
+        self.agent.ctx.ring = None
+        self.agent.ctx.blackboard = None
+        self.agent.ctx.audit = Mock()
+        self.agent._world_state = lambda: {}
+        self.agent._system_prompt = lambda: '业务走访夹具'
+        self.agent._explore_brief = lambda task: '核实用户给定站点的实际业务场景'
+        self.agent._tool_schemas = lambda **kwargs: []
+        self.agent._run_tool_call = AsyncMock(return_value='页面观察')
+        text = json.dumps({'progress': '当前仅有站点地址，先读取页面确认业务场景。',
+                          'exploration': {'intent': '理解实际业务', 'attempt': '读取页面', 'state': 'running'}},
+                          ensure_ascii=False)
+
+        async def chat(messages, **kwargs):
+            self.assertEqual(messages[-1]['content'], FORMAT_GUIDANCE)
+            self.assertIn(EXPLORATION_PROGRESS_GUIDANCE, [m.get('content') for m in messages])
+            kwargs['on_delta']('text', text)
+            return SimpleNamespace(content=text, tool_calls=[{'id': 'read', 'name': 'http_probe', 'arguments': {}}])
+
+        self.agent.ctx.gateway = SimpleNamespace(chat=AsyncMock(side_effect=chat))
+        route = SimpleNamespace(name='explore', route_id='business-route')
+        result = await self.agent._explore_turn(self.task, route, RoutePlan(name='explore', strategy='', steps=[]))
+        self.assertTrue(result.ok)
+        self.agent.ctx.gateway.chat.assert_awaited_once()
+        first = self.agent.ctx.gateway.chat.call_args.args[0]
+        await self.agent._explore_turn(self.task, route, RoutePlan(name='explore', strategy='', steps=[]))
+        second = self.agent.ctx.gateway.chat.call_args.args[0]
+        self.assertEqual(second[:len(first)], first)
+        self.assertEqual(self.agent.ctx.gateway.chat.await_count, 2)
+        events = [(c.args[0], c.args[2]) for c in self.agent.ctx.audit.log.call_args_list]
+        progress = next(d for kind, d in events if kind == 'agent.progress')
+        self.assertEqual(progress['exploration']['intent'], '理解实际业务')
+        self.assertTrue(progress['streamed'])
+        self.assertTrue(any(kind == 'agent.delta' and d['task_id'] == self.task.task_id
+                            and d['route_id'] == route.route_id for kind, d in events))
+
     def setUp(self) -> None:
         self.agent = object.__new__(BusinessContextAgent)
         self.agent.agent_id = "business-test"

@@ -19,7 +19,7 @@ GUIDANCE = ('较早的完整工具往返可能显示为带原始消息编号的�
 
 def observe(state: dict[str, Any], call: dict[str, Any], outcome: Any) -> None:
     messages = state.get('messages') or []
-    if not messages or outcome.stop or call.get('name') in {'history_read', 'record_answer', 'finish_challenge'}:
+    if not messages or outcome.stop or call.get('name') in {'history_read', 'record_answer', 'finish_challenge', 'report_discovery'}:
         return
     metadata = outcome.metadata or {}
     if call.get('name') == 'evidence_memory':
@@ -29,6 +29,8 @@ def observe(state: dict[str, Any], call: dict[str, Any], outcome: Any) -> None:
     row = {'tool': call.get('name'), 'ok': outcome.ok, 'invocation_id': metadata.get('invocation_id', ''),
            'output_file': metadata.get('output_file', ''), 'message_index': len(messages) - 1,
            'source_sha256': source_digest(messages[-1])}
+    if metadata.get('failure_evidence'):
+        row['failure_evidence'] = copy.deepcopy(metadata['failure_evidence'])
     args = call.get('arguments') or {}
     if isinstance(args, dict) and args.get('action') in (None, 'analysis'):
         # 仅比较相同请求的完整返回；不因为预览相同就声称原始响应相同。
@@ -60,6 +62,9 @@ def _groups(messages: list[dict[str, Any]]) -> list[tuple[int, int]]:
             found.append(messages[end].get('tool_call_id'))
             end += 1
         if None not in ids and len(ids) == len(calls) and len(found) == len(ids) and set(found) == ids:
+            # 展示提醒是框架消息，随前一完整工具组归档；用户原话不并入。
+            while end < len(messages) and messages[end].get('_progress_reminder'):
+                end += 1
             result.append((start, end))
     return result
 
@@ -69,6 +74,8 @@ def _summary(messages: list[dict[str, Any]], start: int, end: int) -> dict[str, 
     calls = {c['id']: c.get('function', {}).get('name', '') for c in messages[start].get('tool_calls', [])}
     for index in range(start + 1, end):
         message = messages[index]
+        if message.get('_progress_reminder'):
+            continue
         content = str(message.get('content') or '')
         rows.append({'message_index': index, 'tool': calls.get(message.get('tool_call_id')),
             **message.get('_normal_observation', {}),
@@ -80,9 +87,37 @@ def _summary(messages: list[dict[str, Any]], start: int, end: int) -> dict[str, 
         ensure_ascii=False, separators=(',', ':'))}
 
 
+def _refresh_memory_sources(state: dict[str, Any], memory: dict[str, Any]) -> None:
+    """来源状态变化只追加差量；已经发送的工具结果不再重写。"""
+    revision = memory['revision']
+    previous = state.get('normal_memory_source_view')
+    if previous is None or previous['revision'] != revision:
+        delivered = next((m for m in reversed(state['messages'])
+                          if m.get('_normal_memory_revision') == revision), None)
+        if delivered is None:
+            return
+        try:
+            baseline = json.loads(delivered['content'])['items']
+        except (ValueError, KeyError, TypeError):
+            baseline = []
+        previous = {'revision': revision, 'statuses': {
+            item['id']: [s.get('status', 'matched') for s in item['sources']] for item in baseline}}
+    statuses = {item['id']: [s['status'] for s in item['sources']] for item in memory['items']}
+    updates = [{'id': item['id'], 'source_status': item['source_status'],
+                'sources': [{'message_index': s['message_index'], 'status': s['status']} for s in item['sources']]}
+               for item in memory['items'] if statuses[item['id']] != previous['statuses'].get(item['id'])]
+    if updates:
+        state['messages'].append({'role': 'user', '_context_contract': True,
+            'content': '证据笔记来源状态增量（框架通知，非新证据；覆盖同修订的旧来源状态）：' + json.dumps(
+                {'revision': revision, 'updates': updates}, ensure_ascii=False, separators=(',', ':'))})
+    state['normal_memory_source_view'] = {'revision': revision, 'statuses': statuses}
+
+
 def project(state: dict[str, Any], tools: list[dict[str, Any]], budget: int | None = None,
             *, force: bool = False) -> dict[str, Any]:
     """先无损表示重复行，窗口压力下才归档；未知容量使用 48K 整理参考值。"""
+    memory = snapshot(state)
+    _refresh_memory_sources(state, memory)
     original = state['messages']
     groups = _groups(original)
     if state.get('normal_context_policy') != 2:
@@ -99,7 +134,6 @@ def project(state: dict[str, Any], tools: list[dict[str, Any]], budget: int | No
             fingerprints[key] = hashlib.sha256(json.dumps(original[int(key):valid[key]], ensure_ascii=False,
                 sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         return fingerprints[key]
-    memory = snapshot(state)
     current_memory_index = next((i for i in range(len(original) - 1, -1, -1)
         if original[i].get('_normal_memory_revision') == memory['revision']), None)
     pinned = {str(start) for start, end in groups
@@ -122,11 +156,7 @@ def project(state: dict[str, Any], tools: list[dict[str, Any]], budget: int | No
                 index = item['end']
             else:
                 message = original[index]
-                if index == current_memory_index:
-                    # 仅来源版本变化时更新发送视图；原始记录保持不变，旧结论明确失效。
-                    message = {**message, 'content': json.dumps({'ok': True, **memory},
-                        ensure_ascii=False, separators=(',', ':'))}
-                elif index in encoded:
+                if index in encoded:
                     message = {**message, 'content': encoded[index]}
                 result.append(message)
                 index += 1

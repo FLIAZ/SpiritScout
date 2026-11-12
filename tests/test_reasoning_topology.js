@@ -39,8 +39,9 @@ const legacy=layout.reasoning({session:{title:'历史会话'},topology:{dag_node
 assert.equal(legacy.nodes.filter(n=>n.view_kind==='goal').length,2);
 assert.equal(legacy.nodes.filter(n=>n.view_kind==='intent' && n.node_type!=='stage').length,2);
 assert.equal(legacy.nodes.filter(n=>n.node_type==='stage').length,0,'execution rounds cannot become canvas nodes');
-assert.ok(!legacy.edges.some(e=>e.kind==='advance'),'chronology alone cannot assert an intention change');
-assert.equal(legacy.nodes.find(n=>n.id==='__process_intent:t2').progress.length,2);
+assert.ok(!legacy.nodes.some(n=>n.view_kind==='observation'),'public thinking summaries never become graph nodes');
+assert.ok(!legacy.edges.some(e=>e.kind==='redirects' || e.kind==='tries'),'chronology alone cannot assert an intention change');
+assert.equal(legacy.nodes.find(n=>n.id==='__process_intent:t2').progress.length,2,'public progress remains available in execution details');
 assert.ok(legacy.edges.some(e=>e.source==='__process_goal:entry' && e.target==='__process_goal:auth' && e.kind==='dependency'));
 assert.ok(legacy.edges.some(e=>e.source==='__process_intent:t2' && e.target==='output' && e.kind==='task_output'));
 assert.equal(legacy.nodes.find(n=>n.id==='output').evidence_state,'unverified');
@@ -175,7 +176,7 @@ for(const example of gapCases) {
   assert.ok([...result.x.values(),...result.y.values()].every(Number.isFinite),'all node coordinates must be finite');
   assert.ok(result.width<=example.nodes.length*332+328,'missing semantic levels must not create empty visual columns');
 }
-assert.equal(legacy.missing_intents,true,'missing public labels are explained instead of inventing semantic nodes');
+assert.equal(legacy.missing_intents,true,'unlabelled summaries cannot supply exploration semantics');
 assert.equal(hierarchy.missing_intents,false);
 console.log('reasoning topology: missing levels and filtered leaf-only graphs retain finite, compact coordinates');
 
@@ -264,3 +265,100 @@ console.log('asset tree: origins, paths, query variants, script values, parent r
 
 const withDomain=layout.assetTree({nodes:[...assetRecords,{id:'domain',node_type:'domain',title:'fixture.test',body:'null'}],edges:[]});
 assert.equal(withDomain.find(n=>n.id==='domain').children[0].id,'https://fixture.test','domain parent owns its URL path tree');
+
+const stoppedState=JSON.parse(JSON.stringify(state));
+stoppedState.session.status='stopped';
+stoppedState.topology.dag_nodes=[{node_id:'still-running',title:'旧目标',status:'running',task_ids:['task']}];
+const stoppedGraph=layout.reasoning(stoppedState,[{id:'last',task_id:'task',route_id:'r',turn:1,status:'running',
+  exploration:{intent:'核实范围',attempt:'对照请求',state:'running'},body:'正在核对'}]);
+assert.ok(!stoppedGraph.nodes.some(n=>['running','waiting','active','dispatched'].includes(n.state || n.status)),
+  '会话停止后不能由旧 DAG 快照继续显示执行中');
+assert.equal(stoppedGraph.nodes.find(n=>n.id==='fact').evidence_state,'observed','停止不改变已有证据状态');
+
+const transitionNodes=[
+ {id:'q1',view_kind:'intent',title:'问题一',task_id:'t',route_id:'r'},
+ {id:'a1',view_kind:'attempt',intent_title:'问题一',task_id:'t',route_id:'r'},
+ {id:'q2',view_kind:'intent',title:'问题二',task_id:'t',route_id:'r'},
+ {id:'a2',view_kind:'attempt',intent_title:'问题二',task_id:'t',route_id:'r'}];
+const transitionEdges=[{source:'q1',target:'a1',kind:'tries'},{source:'a1',target:'a2',kind:'redirects'},
+ {source:'q2',target:'a2',kind:'tries'}];
+const transitionBefore=JSON.stringify(transitionEdges);
+const transitionLayout=layout.reasoningLayout(transitionNodes,transitionEdges,new Map(transitionNodes.map(n=>[n.id,120])));
+assert.ok(transitionLayout.x.get('q2')>transitionLayout.x.get('a1'),'显式转向后的新意图在此前尝试之后展开');
+assert.ok(transitionLayout.x.get('a2')>transitionLayout.x.get('q2'));
+assert.equal(JSON.stringify(transitionEdges),transitionBefore,'布局不增加证据关系');
+
+// 画布只投影有结果的关键意图；执行层仍保留完整详情和精确产出归属。
+const summarized=layout.reasoningSummary(graph);
+assert.deepEqual(Array.from(summarized.nodes,n=>n.id),['__process_origin','goal','hypothesis','fact','orphan']);
+assert.ok(summarized.edges.some(e=>e.source==='hypothesis' && e.target==='fact' && e.kind==='produces'));
+assert.ok(!summarized.edges.some(e=>e.target==='orphan'),'summary cannot invent result ownership');
+assert.ok(summarized.records.some(n=>n.id==='attempt'),'hidden attempts remain available as detail records');
+assert.equal(JSON.stringify(state),original);
+const summaryReplay=layout.reasoningSummary(replay);
+assert.equal(summaryReplay.nodes.filter(n=>n.view_kind==='intent').length,1,'parallel intention without a result stays off the canvas');
+assert.ok(!summaryReplay.nodes.some(n=>n.view_kind==='attempt'));
+const summaryLegacy=layout.reasoningSummary(legacy);
+assert.equal(summaryLegacy.nodes.filter(n=>n.view_kind==='intent').length,1,'empty legacy tasks do not become intentions');
+assert.ok(!summaryLegacy.nodes.some(n=>String(n.title).includes('公开说明')));
+const summarySignificant=layout.reasoningSummary(significant);
+assert.equal(summarySignificant.nodes.filter(n=>n.node_type==='milestone').length,2);
+assert.equal(summarySignificant.nodes.filter(n=>n.view_kind==='intent').length,1);
+assert.ok(summarySignificant.edges.filter(e=>e.kind==='produces' && summarySignificant.nodes.find(n=>n.id===e.target)?.node_type==='milestone')
+  .every(e=>summarySignificant.nodes.find(n=>n.id===e.source)?.view_kind==='intent'),'milestones are results of their declared intention');
+const summaryNewQuestion=layout.reasoningSummary(newQuestion);
+assert.equal(summaryNewQuestion.nodes.filter(n=>n.view_kind==='intent').length,1,'a later breakthrough does not promote an earlier ordinary intention');
+assert.ok(summaryNewQuestion.edges.every(e=>summaryNewQuestion.nodes.some(n=>n.id===e.source) && summaryNewQuestion.nodes.some(n=>n.id===e.target)));
+assert.equal(layout.reasoningSummary(sameNames).nodes.length,1,'thinking intentions without facts or milestones leave only the entry');
+console.log('reasoning summary: result-backed intentions, hidden thinking and attempts, milestone ownership and preserved details passed');
+
+const summaryPhases=summarySignificant.nodes.filter(n=>n.node_type==='milestone');
+assert.ok(summarySignificant.edges.some(e=>e.source===summaryPhases[0].id && e.target===summaryPhases[1].id && e.kind==='advance'),
+  'key discoveries retain their declared progression instead of becoming disconnected results');
+const savedMilestoneState={topology:{process:{nodes:[
+ {id:'saved-question',kind:'exploration',node_type:'hypothesis',title:'核实入口'},
+ {id:'saved-attempt',kind:'exploration',node_type:'attempt',title:'请求对照',body:JSON.stringify({public_milestone:{kind:'discovery',title:'入口接受有效会话',basis:'有效会话响应为200，匿名响应为401'}})},
+ {id:'saved-clue',kind:'finding',layer:'recon_clue',title:'入口存在会话校验',evidence_refs:['execution:one']}
+],edges:[{source:'saved-question',target:'saved-attempt',kind:'derives'}]}}};
+const savedBefore=JSON.stringify(savedMilestoneState),savedSummary=layout.reasoningSummary(layout.reasoning(savedMilestoneState));
+assert.equal(savedSummary.nodes.find(n=>n.id==='saved-attempt').title,'入口接受有效会话');
+assert.equal(savedSummary.nodes.find(n=>n.id==='saved-attempt').node_type,'milestone');
+assert.ok(savedSummary.nodes.some(n=>n.id==='saved-question'));
+assert.ok(savedSummary.nodes.some(n=>n.id==='saved-clue'),'recorded clues remain visible as useful intermediate information');
+assert.equal(savedSummary.records.find(n=>n.id==='saved-attempt').title,'入口接受有效会话');
+assert.equal(JSON.stringify(savedMilestoneState),savedBefore,'display promotion never changes internal blackboard records');
+const orderedSummary=layout.reasoningSummary(layout.reasoning({topology:{public_stages:{items:[
+ {task_id:'t',route_id:'r',turn:1,exploration:{intent:'确认身份来源',attempt:'请求对照',milestone:{kind:'discovery',title:'身份来自客户端数据',basis:'响应给出身份数据'}}},
+ {task_id:'t',route_id:'r',turn:2,exploration:{intent:'核实入口限制',attempt:'验证权限',milestone:{kind:'breakthrough',title:'受限入口可访问',basis:'实际响应已进入目标页面'}}}
+]}}}));
+const firstResult=orderedSummary.nodes.find(n=>n.title==='身份来自客户端数据'),nextQuestion=orderedSummary.nodes.find(n=>n.title==='核实入口限制');
+assert.ok(orderedSummary.edges.some(e=>e.source===firstResult.id && e.target===nextQuestion.id && e.kind==='advance'));
+const orderedPlacement=layout.reasoningLayout(orderedSummary.nodes,orderedSummary.edges,new Map(orderedSummary.nodes.map(n=>[n.id,140])));
+assert.ok(orderedPlacement.x.get(nextQuestion.id)>orderedPlacement.x.get(firstResult.id));
+console.log('reasoning summary: intermediate clues, persisted milestones and declared progress survive display projection');
+
+const savedWithPublic=JSON.parse(savedBefore);
+savedWithPublic.topology.public_stages={items:[{task_id:'t',route_id:'r',turn:1,
+ exploration:{intent:'核实入口',attempt:'请求对照',milestone:{kind:'discovery',title:'入口接受有效会话',basis:'有效会话响应为200，匿名响应为401'}}}]};
+for(const node of savedWithPublic.topology.process.nodes)Object.assign(node,{task_id:'t',route_id:'r'});
+assert.equal(layout.reasoningSummary(layout.reasoning(savedWithPublic)).nodes.filter(n=>n.node_type==='milestone').length,1,
+ 'persisted and public copies of the same discovery share one card');
+
+// 原生发现与同轮公开正文分别归属；不依赖易漏写的正文尾部 JSON。
+const nativeStage={id:'native',discovery_key:'stable-identity',kind:'discovery',task_id:'t',route_id:'r',turn:3,sequence:7,
+ exploration:{intent:'确认身份来源',attempt:'确认身份来源',milestone:{kind:'discovery',title:'身份取自会话对象',basis:'对照响应不同',importance:4,confidence:'observed',evidence_refs:['exec-one']}}};
+const nativeState={topology:{public_stages:{items:[{task_id:'t',route_id:'r',turn:3,body:'普通执行说明'},nativeStage]}}};
+const nativeGraph=layout.reasoningSummary(layout.reasoning(nativeState));
+const nativeResult=nativeGraph.nodes.find(n=>n.node_type==='milestone');
+assert.ok(nativeResult,'same-turn prose cannot hide a native discovery');
+assert.equal(nativeResult.importance,4);assert.equal(nativeResult.confidence,'observed');
+assert.equal(nativeResult.method_title,'','reporting an intention cannot invent a verification method');
+const revisedState=JSON.parse(JSON.stringify(nativeState));
+revisedState.topology.public_stages.items[1].updated_turn=8;
+Object.assign(revisedState.topology.public_stages.items[1].exploration.milestone,{importance:0,confidence:'hypothesis',basis:'发现反证，需要重新核对'});
+const revisedGraph=layout.reasoningSummary(layout.reasoning(revisedState));
+assert.equal(revisedGraph.nodes.filter(n=>n.node_type==='milestone').length,1);
+assert.equal(revisedGraph.nodes.find(n=>n.node_type==='milestone').id,nativeResult.id);
+assert.equal(revisedGraph.nodes.find(n=>n.node_type==='milestone').importance,0,'importance is not a hard visibility threshold');
+assert.ok(!revisedGraph.nodes.some(n=>n.evidence_state==='independently_verified'),'self-rating cannot claim independent verification');
+console.log('native discovery reports: no prose markup required, stable revisions, self-rating and confidence stay separate');

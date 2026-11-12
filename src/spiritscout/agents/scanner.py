@@ -32,7 +32,7 @@ PROMPT = """你是「探微」，负责独立扫描，与主控和专项角色�
 没有固定扫描步骤，不默认全模板扫描。新用户规则优先；不得重复没有新增价值的扫描。
 扫描服务于现场假设，不替代机制分析：派遣的证据和具体信息缺口不足以支持枚举时交回主线，
 不要自行拼通用密钥、路径或参数字典。根据实际响应修正假设，已有反证时不要机械扩大候选。
-先消费黑板里的版本、服务、端点和指纹等真实观察，按当前信息缺口选择补充探测。
+黑板中的版本、服务、端点和指纹可作为已有观察；读取和探测方式由你按任务自行决定。
 信息是否足够由你判断，不要求所有环境字段齐全。其他角色仍在收集关键环境信息时可 wait，
 收到新事实再决定，不反复空查、不为了等版本号阻塞其他角色。
 Nuclei 仅使用已安装的本地模板，OAST 外部回连、自动更新、代码和浏览器模板未启用。
@@ -66,7 +66,7 @@ def start_scanner(infra, assembly, target: str, *, mission: str,
     """工作器底层入口；正式会话由 ScannerController 显式派遣，启动本身不代表获准扫描。"""
     config = getattr(infra.cfg, "scanner", None)
     if (not enabled or config is None or not config.enabled or infra.cfg.gateway.lightweight_local
-            or infra.authorization.mode not in (RunMode.SRC, RunMode.CTF)):
+            or infra.authorization.mode not in (RunMode.SRC, RunMode.CTF, RunMode.COMPETITION)):
         return None
     return asyncio.create_task(_run(infra, assembly, target, mission=mission,
         standing_rules=standing_rules, dialogue_history=dialogue_history), name="scanner")
@@ -122,6 +122,10 @@ async def _run(infra, assembly, target, *, mission, standing_rules, dialogue_his
         bound_model = infra.agent_models.get("scanner", "")
         gateway = AgentBoundGateway(infra.gateway, bound_model, prefer_session=not bool(bound_model))
         memory = DecisionMemory()
+        if infra.authorization.mode == RunMode.COMPETITION:
+            memory.blackboard = infra.blackboard
+            memory.agent_type = AgentType.SCANNER
+            memory.shared_memory_enabled = True
         turn = 0
         while True:
             if infra.pause_gate is not None:
@@ -144,7 +148,11 @@ async def _run(infra, assembly, target, *, mission, standing_rules, dialogue_his
             response = await chat_decision(gateway,
                 decision_messages(PROMPT + '\n' + EXPLORATION_PROGRESS_GUIDANCE
                     + '\n主控派遣约束优先：仅围绕 master_delegation 的目标、goal、constraints 工作；'
-                      '只使用派遣 tools 内的探测工具。缺少所需能力或范围不明时交回主控，不自行扩展。',
+                      '只使用派遣 tools 内的探测工具。缺少所需能力或范围不明时交回主控，不自行扩展。'
+                      '仅关键发现/反证/转向时，在本轮JSON附discovery对象：'
+                      'key（稳定标识）、intent、title、basis（依据及重要性理由）、importance（0–5整数）、'
+                      'confidence（hypothesis/observed/verified）、kind（discovery/breakthrough/turning_point）、'
+                      'evidence_refs（实际证据引用）。同一发现沿用key更新；自评不等于独立验证，普通执行不填。',
                     context, max_chars=24000),
                 response_format="json", audit=infra.audit, actor="scanner", memory=memory)
             decision = extract_json(response.content)

@@ -14,11 +14,136 @@ from spiritscout.core.models import AgentType, RunMode, Task
 from spiritscout.ctf.agents import (
     CTFBaseAgent,
     _challenge_instance_blocker,
+    _http_observation,
     _model_messages,
+    _obs_text,
 )
 from spiritscout.ctf.flags import FlagManager, SubmitResult
 from spiritscout.runtime import _write_competition_summary
 from spiritscout.tools.spec import ToolResult
+
+
+class DiscoveryReportingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_competition_native_shared_memory_uses_append_only_contract_and_existing_tool(self):
+        from spiritscout.blackboard import Blackboard
+        from spiritscout.blackboard.exchange import SCHEMAS
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bb = Blackboard(Path(tmp) / 'bb.db')
+            self.addCleanup(bb.close)
+            agent = object.__new__(CTFBaseAgent)
+            agent.agent_id, agent.agent_type = 'native', AgentType.CTF_WEB
+            agent.ctx = SimpleNamespace(mode=RunMode.COMPETITION, blackboard=bb,
+                gateway=SimpleNamespace(config=SimpleNamespace(lightweight_local=False)))
+            agent.tool_schemas = SCHEMAS
+            original_tools = json.dumps(agent.tool_schemas, sort_keys=True)
+            state = {'messages': [{'role': 'system', 'content': '固定前缀'}]}
+            agent._ensure_progress_guidance(state)
+            first = json.loads(json.dumps(state))
+            agent._ensure_progress_guidance(state)
+            self.assertEqual(state, first)
+            self.assertEqual(state['messages'][0]['content'], '固定前缀')
+            self.assertTrue(state['shared_memory_contract_v1'])
+            self.assertEqual(json.dumps(agent.tool_schemas, sort_keys=True), original_tools)
+            task = Task(task_id='t', agent_type=AgentType.CTF_WEB, task_type='ctf_solve', target='fixture')
+            result = await agent._run_tool_call_inner(task, SimpleNamespace(route_id='r', name='route'), state,
+                {'name': 'blackboard_write', 'arguments': {
+                    'memory_id': 'mechanism', 'base_version': 0, 'claim_kind': 'rejected',
+                    'text': '输入 C 在条件 A 下未产生变化', 'scope': '实例 A', 'conditions': '输入 C',
+                    'revalidate_when': '条件或输入依据变化', 'evidence_refs': ['execution']}})
+            self.assertTrue(result.ok, result.text)
+            agent.ctx.mode = RunMode.CTF
+            agent.ctx.gateway.config.lightweight_local = True
+            local = {'messages': [{'role': 'system', 'content': '固定前缀'}]}
+            agent._ensure_progress_guidance(local)
+            self.assertNotIn('shared_memory_contract_v1', local)
+            self.assertNotIn('execution_data_guidance_v1', local)
+
+    async def test_native_report_records_display_without_gateway_or_blackboard_calls(self):
+        from spiritscout.gateway.progress import DISCOVERY_SCHEMA
+
+        for mode in (RunMode.CTF, RunMode.COMPETITION):
+            with self.subTest(mode=mode):
+                agent = object.__new__(CTFBaseAgent)
+                gateway = SimpleNamespace(chat=AsyncMock())
+                blackboard = Mock()
+                agent.ctx = SimpleNamespace(audit=Mock(), gateway=gateway, mode=mode, blackboard=blackboard)
+                agent.agent_id = 'ctf-web-test'
+                agent.tool_schemas = [DISCOVERY_SCHEMA]
+                task = Task(task_id='t', agent_type=AgentType.CTF_WEB, task_type='ctf_solve', target='fixture')
+                route = SimpleNamespace(route_id='r')
+                args = {'key': 'identity', 'intent': '确认身份来源', 'title': '身份取自会话对象',
+                        'basis': '实际响应的对照结果', 'importance': 4, 'confidence': 'observed',
+                        'kind': 'discovery', 'evidence_refs': ['exec-one']}
+                outcome = await agent._run_tool_call_inner(task, route, {'turn': 5},
+                    {'name': 'report_discovery', 'arguments': args})
+                self.assertTrue(outcome.ok)
+                self.assertEqual(agent.ctx.audit.log.call_args.args[0], 'agent.discovery')
+                self.assertEqual(agent.ctx.audit.log.call_args.args[2]['task_id'], 't')
+                gateway.chat.assert_not_awaited()
+                blackboard.write.assert_not_called()
+                self.assertFalse(outcome.stop)
+                self.assertNotIn('invocation_id', outcome.metadata)
+
+
+class FailureAttributionTests(unittest.IsolatedAsyncioTestCase):
+    async def run_result(self, result, *, light=False):
+        agent = object.__new__(CTFBaseAgent)
+        agent.ctx = SimpleNamespace(mode=RunMode.CTF, gateway=SimpleNamespace(
+            config=SimpleNamespace(lightweight_local=light)), tools=SimpleNamespace(call=AsyncMock(return_value=result)))
+        agent._tool_ctx = lambda task: {}
+        state = {'observations': [], 'messages': []}
+        outcome = await agent._tool_sandbox(None, SimpleNamespace(name='fixture'), state, 'python',
+            {'code': 'fixture()', 'action': 'analysis', 'timeout': 1})
+        agent.ctx.tools.call.assert_awaited_once()
+        return outcome, state
+
+    async def test_script_and_environment_failures_keep_facts_without_backend_root_cause(self):
+        cases = [
+            ('callback', ToolResult(tool='sandbox_exec', ok=False, returncode=-9, timed_out=True,
+                stdout='phase=response_match; connected=true; sent_id=1; received=1; pending_ids=[1]',
+                error='执行超时（1s），进程已终止'), 'pending_ids=[1]'),
+            ('api', ToolResult(tool='sandbox_exec', ok=True, returncode=1,
+                stderr='Traceback (most recent call last):\n' + '  caller frame\n' * 150
+                    + "TypeError: connect() got an unexpected keyword argument 'extra_headers'"), 'extra_headers'),
+            ('refused', ToolResult(tool='sandbox_exec', ok=True, returncode=1,
+                stderr='ConnectionRefusedError: [Errno 111] Connection refused'), 'ConnectionRefusedError'),
+            ('exited', ToolResult(tool='sandbox_exec', ok=True, returncode=7,
+                stdout='fixture service exited with code 7'), 'exited with code 7'),
+        ]
+        for name, result, diagnostic in cases:
+            with self.subTest(name=name):
+                result.invocation_id = 'inv-fixture'
+                result.parsed = {'output_file': '/fixture/output.log', 'workdir': '/fixture/work'}
+                outcome, _ = await self.run_result(result)
+                self.assertFalse(outcome.ok)
+                self.assertIn(diagnostic, outcome.text)
+                self.assertEqual(outcome.metadata['failure_evidence'], {
+                    'exit_code': result.returncode, 'timed_out': result.timed_out, 'attribution': 'undetermined'})
+                self.assertEqual(outcome.metadata['invocation_id'], 'inv-fixture')
+                self.assertEqual(outcome.metadata['output_file'], '/fixture/output.log')
+                self.assertNotIn('超时通常意味着', outcome.text)
+
+    async def test_cloud_no_output_failure_keeps_execution_reference_and_error(self):
+        result = ToolResult(tool='sandbox_exec', ok=False, returncode=-9, timed_out=True,
+            error='fixture process did not finish', invocation_id='inv-timeout',
+            parsed={'output_file': '/fixture/empty.log'})
+        outcome, state = await self.run_result(result)
+        self.assertIn('fixture process did not finish', outcome.text)
+        self.assertIn('原因未定', outcome.text)
+        self.assertEqual(outcome.metadata['invocation_id'], 'inv-timeout')
+        self.assertEqual(outcome.metadata['output_file'], '/fixture/empty.log')
+        self.assertIn('fixture process did not finish', state['observations'][0]['result'])
+
+    async def test_lightweight_failure_response_is_unchanged(self):
+        outcome, _ = await self.run_result(ToolResult(tool='sandbox_exec', ok=False,
+            returncode=-9, timed_out=True, error='fixture process did not finish'), light=True)
+        self.assertEqual(outcome.text, 'python: fixture() 执行失败：fixture process did not finish')
+        self.assertEqual(outcome.metadata, {})
+        timed_out, _ = await self.run_result(ToolResult(tool='sandbox_exec', ok=False, returncode=-9,
+            stdout='waiting', timed_out=True), light=True)
+        self.assertIn('超时通常意味着', timed_out.text)
+        self.assertNotIn('failure_evidence', timed_out.metadata)
 
 
 class HTTPAddressResolutionTests(unittest.TestCase):
@@ -1191,6 +1316,37 @@ class EvidenceDrivenPathTests(unittest.IsolatedAsyncioTestCase):
             'paths': ['/api/config', '/api/config'], 'reason': '前端引用该配置接口，对比真实配置与页面默认值'})
         self.assertTrue(result.ok)
         agent.ctx.tools.call.assert_awaited_once_with('http_probe', {'url': 'http://fixture.test/api/config'})
+
+
+class RedirectEvidenceVisibilityTests(unittest.TestCase):
+    """登录/提交后的 302 + Set-Cookie 与原始 request.http 必须回传给模型。"""
+
+    def test_http_observation_keeps_redirect_headers(self) -> None:
+        res = SimpleNamespace(stdout="", parsed={
+            "status_code": 403,
+            "headers": {"server": "Apache"},
+            "redirects": [{"status": 302, "url": "http://fixture.test/",
+                           "location": "http://fixture.test/",
+                           "set_cookie": "identification=abc; Path=/"}],
+            "body_ref": "b" * 32, "body_path": "/tmp/body.txt", "body_chars": 1,
+            "download_complete": True,
+        })
+        obs = _http_observation("POST", res, "http://fixture.test/", [])
+        self.assertEqual(obs["redirects"][0]["set_cookie"], "identification=abc; Path=/")
+
+    def test_obs_text_surfaces_redirect_set_cookie_and_raw_request_files(self) -> None:
+        text = _obs_text({
+            "action": "POST", "status": 403, "body_ref": "a" * 32,
+            "body_path": "/tmp/session/http-responses/ref/body.txt",
+            "headers": {"server": "Apache"},
+            "redirects": [{"status": 302, "url": "http://fixture.test/",
+                           "location": "http://fixture.test/",
+                           "set_cookie": "identification=abc; Path=/"}],
+            "excerpt": "body",
+        })
+        self.assertIn("302", text)
+        self.assertIn("identification=abc", text)
+        self.assertIn("request.http", text)
 
 
 if __name__ == "__main__":

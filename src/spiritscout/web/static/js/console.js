@@ -127,9 +127,20 @@ const autogrow = (el, min, max) => {
   el.style.height = "auto";
   el.style.height = Math.min(max, Math.max(min, el.scrollHeight)) + "px";
 };
+const ctfChallengeFields = {name: "#c-ctf-name", description: "#c-ctf-description", hint: "#c-ctf-hint", address: "#c-ctf-address"};
+function ctfChallengeDraft() {
+  if ($("#c-mode").value !== "ctf") return null;
+  return Object.fromEntries(Object.entries(ctfChallengeFields).map(([key, selector]) => [key, $(selector).value.trim()]));
+}
+function ctfChallengeText(draft) {
+  if (!draft) return "";
+  return [["name", I18n.t("题目名称")], ["description", I18n.t("题目描述")],
+    ["hint", I18n.t("题目提示")], ["address", I18n.t("题目地址")]]
+    .filter(([key]) => draft[key]).map(([key, label]) => `${label}：\n${draft[key]}`).join("\n\n");
+}
 const homeSync = () => {
-  $("#c-go").classList.toggle("ready", !!$("#c-mission").value.trim() && !!$("#c-mode").value);
-  autogrow($("#c-mission"), 160, 360);
+  $("#c-go").classList.toggle("ready", (!!$("#c-mission").value.trim() || !!ctfChallengeText(ctfChallengeDraft())) && !!$("#c-mode").value);
+  autogrow($("#c-mission"), $("#c-mode").value === "ctf" ? 100 : 160, 360);
 };
 const missionModeHints = {
   src: I18n.t("评估已授权的网站或资产，验证漏洞并生成报告。"),
@@ -145,6 +156,8 @@ function ctfTypeHintPayload(mode = $("#c-mode").value) {
 }
 $("#c-mode").onchange = () => {
   if (typeof ProxyPoolPage !== 'undefined') ProxyPoolPage.loadSelector($('#c-mode').value);
+  $("#c-ctf-challenge").hidden = $("#c-mode").value !== "ctf";
+  $("#c-mission").placeholder = $("#c-mode").value === "ctf" ? I18n.t("补充解题要求（选填），也可以在下方直接填写题目资料…") : I18n.t("输入目标地址、授权范围、题目描述或测试要求…");
   $("#c-ctf-types").hidden = $("#c-mode").value !== "ctf";
   $("#c-multiple-answers-option").hidden = $("#c-mode").value !== "ctf";
   $("#c-mode-hint").textContent = missionModeHints[$("#c-mode").value] || I18n.t("先选择任务类型，再填写目标与要求。");
@@ -162,6 +175,7 @@ document.querySelectorAll('input[name="home-mode"]').forEach(input => {
 });
 $("#c-proxy-manage")?.addEventListener("click", () => show("proxy"));
 $("#c-mission").addEventListener("input", homeSync);
+Object.values(ctfChallengeFields).forEach(selector => $(selector).addEventListener("input", homeSync));
 homeSync();
 document.querySelectorAll(".chip-s").forEach(b => b.onclick = () => {
   if (b.dataset.mode) { $("#c-mode").value = b.dataset.mode; $("#c-mode").onchange(); }
@@ -175,9 +189,13 @@ $("#c-go").onclick = async () => {
   const mission = $("#c-mission").value.trim();
   if (typeof ComposerCommands !== "undefined" && ComposerCommands.parse(mission) &&
       await ComposerCommands.execute(mission, [...S.homeFiles], "home")) return;
-  if (!mission) { toast(I18n.t("先用自然语言描述任务——目标与要求写清楚即可"), true); return; }
-  await launchMission({ mission:typeof ComposerCommands !== "undefined" ? ComposerCommands.messageText(mission) : mission,
-    multiple_answers: $("#c-mode").value === "ctf" && $("#c-multiple-answers").checked }, [...S.homeFiles]);
+  const challengeDraft = ctfChallengeDraft();
+  const challengeText = ctfChallengeText(challengeDraft);
+  if (!mission && !challengeText) { toast(I18n.t("先用自然语言描述任务——目标与要求写清楚即可"), true); return; }
+  const extra = typeof ComposerCommands !== "undefined" ? ComposerCommands.messageText(mission) : mission;
+  await launchMission({ mission:[challengeText, extra].filter(Boolean).join("\n\n"),
+    ...(challengeDraft?.name ? {title:challengeDraft.name} : {}),
+    multiple_answers: $("#c-mode").value === "ctf" && $("#c-multiple-answers").checked }, [...S.homeFiles], challengeDraft);
 };
 $("#c-mission").addEventListener("keydown", ev => {
   if (typeof ComposerCommands !== "undefined" && ComposerCommands.keydown(ev, "home")) return;
@@ -218,7 +236,7 @@ async function stageFiles(files) {
   return ids;
 }
 
-async function launchMission(payload, files = []) {
+async function launchMission(payload, files = [], challengeDraft = null) {
   if (typeof ComposerDrop !== "undefined" && ComposerDrop.pending("home")) {
     toast(I18n.t("正在读取附件，请稍后下达任务"), true); return;
   }
@@ -245,6 +263,11 @@ async function launchMission(payload, files = []) {
     const s = await api("/api/sessions", { method: "POST", body: JSON.stringify(payload) });
     toast(files.length ? I18n.t("任务已下达，附件已交给灵枢") : I18n.t("任务已下达，灵枢开始规划"));
     $("#c-mission").value = "";
+    if (challengeDraft) {
+      for (const [key, selector] of Object.entries(ctfChallengeFields)) {
+        if ($(selector).value.trim() === challengeDraft[key]) $(selector).value = "";
+      }
+    }
     if (payload.mode === "ctf") {
       const current = ctfTypeHintPayload("ctf");
       if (JSON.stringify(current.ctf_type_hints || []) === JSON.stringify(payload.ctf_type_hints || []) &&
@@ -254,6 +277,7 @@ async function launchMission(payload, files = []) {
       }
     }
     if (files.length) { S.homeFiles = []; renderFileChips("#home-files", S.homeFiles); }
+    homeSync();
     // 先进会话页：列表刷新是附带动作，不该挡在进场前面（服务器侧若正被
     // 长任务占住，await 列表会把进页一起压住）
     openSession(s.session_id);

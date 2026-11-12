@@ -38,6 +38,35 @@ SCHEMA = {'type': 'function', 'function': {
     }, 'required': ['action']},
 }}
 
+# 轻量模式复用旧契约；云端扩展不改变本地小模型的工具声明。
+NORMAL_GUIDANCE = (
+    '长期任务在重要发现、反证或条件变化时，在可用的 evidence_memory 或共享事实中更新稳定 id 的事实/假设/排除路径，'
+    '记录 scope（任务/目标实例/身份）、conditions（已测试输入与条件）、revalidate_when（何种新证据值得重试）；'
+    '后续规划先复用仍适用的结论，重试已排除路径须说明条件变化或新的区分性检查。'
+    '无需每轮登记，不为记笔记重做测试。工具执行成功只证明执行结果，不证明输出来自目标。'
+    '发现新字符串先查首次来源，区分目标原始响应、用户资料、自生成候选/测试产物及混合输出；'
+    '自己的候选、回显或旧总结不能自动成为站点线索。来源不明保持 unknown；'
+    '脚本可提供目标证据，但需指向实际响应/文件及原文，origin_assessment 只是模型判断。'
+    '笔记和历史摘要用于定位、复用，不作为新的独立证据。'
+)
+NORMAL_SCHEMA = copy.deepcopy(SCHEMA)
+NORMAL_SCHEMA['function']['description'] += (
+    '长期结论按稳定 id 更新；scope/conditions 限定适用范围，revalidate_when 记录重试依据。'
+    '来源判断 origin_assessment 不等于运行时认证，工具成功不证明输出来自目标。')
+_normal_item = NORMAL_SCHEMA['function']['parameters']['properties']['upsert']['items']['properties']
+for _field, _description in {
+    'scope': '适用的任务、目标实例、身份或环境；未知时明确说明',
+    'conditions': '支持本结论的已测试输入与条件，排除结论不得超出这些条件',
+    'revalidate_when': '可重新检验的条件变化、新证据或尚未覆盖的区分性检查',
+}.items():
+    _normal_item[_field] = {'type': 'string', 'maxLength': 600, 'description': _description}
+_normal_source = _normal_item['sources']['items']['properties']
+_normal_source['origin_assessment'] = {'type': 'string', 'enum': [
+    'target_response', 'user_material', 'generated', 'mixed', 'unknown'],
+    'description': '你对引用内容来源的判断，不是运行时认证；执行输出默认 unknown'}
+_normal_source['origin_basis'] = {'type': 'string', 'maxLength': 600,
+    'description': '来源判断依据，目标响应须说明实际响应/文件位置与生成数据的区别'}
+
 
 def source_digest(message: dict[str, Any]) -> str:
     raw = {k: v for k, v in message.items() if not k.startswith('_')}
@@ -59,7 +88,8 @@ def snapshot(state: dict[str, Any], *, memory_key: str = 'normal_evidence_memory
 
 
 def execute(state: dict[str, Any], args: dict[str, Any], *, memory_key: str = 'normal_evidence_memory',
-            observation_key: str = '_normal_observation', max_chars: int = 24000) -> dict[str, Any]:
+            observation_key: str = '_normal_observation', max_chars: int = 24000,
+            recorded_in: dict[str, str] | None = None) -> dict[str, Any]:
     """同步原子更新；同一回合并发调用也不能用旧修订覆盖新笔记。"""
     current = state.get(memory_key) or {'revision': 0, 'items': []}
     def fail(error: str, **details: Any) -> dict[str, Any]:
@@ -88,6 +118,16 @@ def execute(state: dict[str, Any], args: dict[str, Any], *, memory_key: str = 'n
                 or not isinstance(text, str) or not 1 <= len(text.strip()) <= 1000):
             return fail('需要唯一 id、有效 kind 和 1–1000 字的 text；同一 id 不能同时删除和更新')
         seen.add(key)
+        normal = memory_key == 'normal_evidence_memory'
+        qualifiers = {}
+        if normal:
+            for field in ('scope', 'conditions', 'revalidate_when'):
+                value = item.get(field, '')
+                if not isinstance(value, str) or len(value) > 600:
+                    return fail(f'{field} 需要不超过 600 字的字符串')
+                qualifiers[field] = value
+            if recorded_in is not None:
+                qualifiers['recorded_in'] = dict(recorded_in)
         sources = item.get('sources', [])
         if (not isinstance(sources, list) or len(sources) > 4
                 or kind in ('fact', 'rejected') and not sources):
@@ -103,7 +143,8 @@ def execute(state: dict[str, Any], args: dict[str, Any], *, memory_key: str = 'n
             message = messages[index]
             observation = message.get(observation_key) or {}
             if (message.get('role') != 'tool' or not observation
-                    or observation.get('tool') in {'evidence_memory', 'note', 'blackboard_write'}):
+                    or observation.get('tool') in {'evidence_memory', 'note', 'blackboard_write'}
+                    or normal and observation.get('tool') in {'blackboard_read', 'graph_read', 'report_discovery'}):
                 return fail('只能引用当前路线的原始工具观察，不能引用助手或笔记')
             if kind == 'fact' and not observation.get('ok'):
                 return fail('失败的工具观察可用于假设或排除路径，不能标作成功事实')
@@ -140,9 +181,20 @@ def execute(state: dict[str, Any], args: dict[str, Any], *, memory_key: str = 'n
                 return fail('expected_sha256 须为 64 位小写十六进制；未知时省略或留空，不能猜指纹')
             if expected not in (None, '', digest):
                 return fail('来源版本已经变化，请重新读取后判断')
-            checked.append({'message_index': index, 'sha256': digest, 'quote': quote,
-                            'invocation_id': observation.get('invocation_id', '')})
-        items[key] = {'id': key, 'kind': kind, 'text': text, 'sources': checked}
+            reference = {'message_index': index, 'sha256': digest, 'quote': quote,
+                         'invocation_id': observation.get('invocation_id', '')}
+            if normal:
+                origin = source.get('origin_assessment', 'unknown')
+                basis = source.get('origin_basis', '')
+                if (origin not in ('target_response', 'user_material', 'generated', 'mixed', 'unknown')
+                        or not isinstance(basis, str) or len(basis) > 600):
+                    return fail('需要有效 origin_assessment 与不超过 600 字的 origin_basis')
+                if origin in ('target_response', 'user_material') and not basis.strip():
+                    return fail('目标响应/用户资料的来源判断需要 origin_basis；不能仅凭工具成功推断来源')
+                reference.update(origin_assessment=origin, origin_basis=basis,
+                                 runtime_source='tool_output', tool=observation.get('tool', ''))
+            checked.append(reference)
+        items[key] = {'id': key, 'kind': kind, 'text': text, 'sources': checked, **qualifiers}
     updated = list(items.values())
     if len(updated) > 24 or len(json.dumps(updated, ensure_ascii=False)) > max_chars:
         return fail('笔记容量不足；请由你合并或删除不再需要的条目，不会自动丢弃证据')

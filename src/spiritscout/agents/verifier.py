@@ -24,6 +24,12 @@ from spiritscout.core.models import (
 from spiritscout.gateway import world_state
 from spiritscout.gateway.backends import extract_json
 from spiritscout.gateway.context import compact_history
+from spiritscout.gateway.progress import (
+    FORMAT_GUIDANCE,
+    PublicProgressEmitter,
+    ensure_exploration_progress,
+    publish_progress,
+)
 from spiritscout.resources.runtime import (
     SKILL_GUIDANCE,
     SKILL_NAMES,
@@ -54,7 +60,7 @@ confirmed 必须有独立实际复现、不同执行的对照、明确危害及�
 超时、被拦截、审批拒绝、规则不足或无法排除假设都用 inconclusive。未复测和不符合规则的结果绝不收录。
 quote 只能是工具返回 result 字段中的连续原文子串，不要加 result 字段名、引号包装、URL 或括号说明。解释全部放在 reason。若返回 result 为 public-home，quote 就写 public-home。
 输出简洁，引用实际执行 ID，不复述整份背景。无需每轮咨询其他智能体。
-编码解码和哈希使用 CyberChef 工具，不凭心算补写变量名；先查询操作参数，后续按原字节复用 output_file。
+编码解码和哈希可使用本地工具或脚本，遵循实际参数契约，结果与来源保持可核对。
 CyberChef 是本地数据转换，不能作为新的独立复测或对照；危害引用仍须来自独立取得的目标响应。
 """
 
@@ -112,12 +118,15 @@ class VerifierAgent:
                 "parameters": schema.get("inputSchema", {"type": "object"})}})
         if runtime_for(self.ctx) is not None:
             schemas.extend(SKILL_SCHEMAS)
-        return schemas + [s for s in SCHEMAS if s["function"]["name"] in {"blackboard_read", "graph_read"}]
+        shared = [s for s in SCHEMAS if s["function"]["name"] in {"blackboard_read", "graph_read"}]
+        return schemas + shared
 
     def rule_context(self, rules: dict[str, Any]) -> dict[str, Any]:
         """完整用户事实同时用于模型决策与引用核对，不把候选/工具正文当规则。"""
         return {**rules, "world_state": world_state.snapshot(
-            guard=self.ctx.policy.guard, blackboard=self.ctx.blackboard)}
+            guard=self.ctx.policy.guard, blackboard=self.ctx.blackboard,
+            references=(getattr(self.ctx, 'mode', None) == 'competition'
+                and not getattr(getattr(self.ctx.gateway, 'config', None), 'lightweight_local', False)))}
 
     async def review(self, candidate: Vulnerability, rules: dict[str, Any]) -> dict[str, Any]:
         previous = self.rule_context(rules)["world_state"]
@@ -125,6 +134,15 @@ class VerifierAgent:
                     {"role": "user", "content": encode(project_rules(getattr(self.ctx, "blackboard", None), {
                         "world_state": previous, "candidate": candidate.model_dump(mode="json"),
                         "user_rules": {key: value for key, value in rules.items() if key != "world_state"}}))}]
+        ensure_exploration_progress({'messages': messages})
+        from spiritscout.gateway.context import ensure_execution_data_guidance
+
+        ensure_execution_data_guidance({'messages': messages}, self.ctx.gateway)
+        if (getattr(self.ctx, 'mode', None) == 'competition'
+                and not getattr(getattr(self.ctx.gateway, 'config', None), 'lightweight_local', False)):
+            from spiritscout.blackboard.exchange import ensure_memory_contract
+
+            ensure_memory_contract({'messages': messages}, readonly=True)
         skill_state: dict[str, Any] = {}
         executions: dict[str, dict[str, Any]] = {}
         turn = 0
@@ -139,8 +157,18 @@ class VerifierAgent:
             previous = current
             append_catalog(runtime_for(self.ctx), skill_state, messages)
             compact_history(messages)
-            response = await self.ctx.gateway.chat([{k:v for k,v in m.items() if not k.startswith("_")} for m in messages], task_type="verification",
-                                                   tools=self.schemas(), tool_choice="auto")
+            emitter = PublicProgressEmitter(self.ctx.audit, self.agent_id, turn=turn,
+                task_id=f"verify-{candidate.vuln_id}")
+            try:
+                response = await self.ctx.gateway.chat(
+                    [*[{k:v for k,v in m.items() if not k.startswith("_")} for m in messages],
+                     {'role': 'user', 'content': FORMAT_GUIDANCE}], task_type="verification",
+                    tools=self.schemas(), tool_choice="auto", on_delta=emitter)
+            finally:
+                emitter.flush()
+            publish_progress(self.ctx.audit, self.agent_id, response.content or '',
+                task_id=f"verify-{candidate.vuln_id}", turn=turn, streamed=emitter.has_public_text)
+            messages.append({'role': 'user', 'content': FORMAT_GUIDANCE, '_progress_reminder': True})
             calls = response.tool_calls or []
             assistant = {"role": "assistant", "content": response.content or ""}
             if not calls:
@@ -149,7 +177,8 @@ class VerifierAgent:
                 "name": call["name"], "arguments": call.get("raw") or encode(call.get("arguments", {}))}}
                 for call in calls]
             messages.append(assistant)
-            self.ctx.audit.log("agent.tool_call", self.agent_id, {"calls": calls, "vuln_id": candidate.vuln_id})
+            self.ctx.audit.log("agent.tool_call", self.agent_id, {"calls": calls, "vuln_id": candidate.vuln_id,
+                "task_id": f"verify-{candidate.vuln_id}", "turn": turn})
             for call in calls:
                 name, args = call["name"], call.get("arguments") or {}
                 tool_ok = False
@@ -165,7 +194,10 @@ class VerifierAgent:
                         "available_executions": [{"execution_id": key, "ok": value["ok"],
                             "result": value["text"][:800]} for key, value in executions.items()]})
                 elif name in {"blackboard_read", "graph_read"}:
-                    result = execute(self.ctx.blackboard, name, args, actor=self.agent_id)
+                    result = execute(self.ctx.blackboard, name, args, actor=self.agent_id,
+                        agent_type=AgentType.VERIFIER,
+                        memory_enabled=(getattr(self.ctx, 'mode', None) == 'competition'
+                            and not getattr(getattr(self.ctx.gateway, 'config', None), 'lightweight_local', False)))
                     tool_ok, text = result["ok"], encode(result)
                 elif name in SKILL_NAMES:
                     result = native_skill_result(self.ctx, name, args, skill_state, messages,

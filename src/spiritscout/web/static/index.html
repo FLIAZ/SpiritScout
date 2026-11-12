@@ -12,7 +12,7 @@
 <link rel="stylesheet" href="/static/css/base.css?v=20261108-sidebar">
 <link rel="stylesheet" href="/static/css/updates.css?v=20261106-guides">
 <link rel="stylesheet" href="/static/css/dashboard.css?v=20261107-layout-spacing">
-<link rel="stylesheet" href="/static/css/views.css?v=20261108-sidebar">
+<link rel="stylesheet" href="/static/css/views.css?v=20261111-public-progress">
 <link rel="stylesheet" href="/static/css/composer-commands.css?v=20261107-commands">
 <link rel="stylesheet" href="/static/css/deliverables.css?v=20261110-asset-workspace">
 <link rel="stylesheet" href="/static/css/resources.css?v=20261107-layout-spacing">
@@ -105,6 +105,21 @@
           <details class="inline-help"><summary title="任务提示" aria-label="任务提示"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10h.01"/></svg></summary><p id="c-mode-hint">选择模式后填写目标与任务要求。</p></details>
         </div>
         <textarea id="c-mission" aria-describedby="c-mode-hint" placeholder="输入目标地址、授权范围、题目描述或测试要求…"></textarea>
+        <section id="c-ctf-challenge" class="ctf-challenge" hidden aria-labelledby="ctf-challenge-title">
+          <header class="ctf-challenge-head"><span class="ctf-challenge-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4m0 1c5-5 9 5 14 0v10c-5 5-9-5-14 0"/></svg></span><div><h2 id="ctf-challenge-title">题目资料</h2><p>按题面填写，留空的部分交给 Agent 探索。</p></div><span class="ctf-challenge-badge">选填</span></header>
+          <div class="ctf-challenge-grid">
+            <label class="ctf-challenge-field" for="c-ctf-name"><span>题目名称</span><input id="c-ctf-name" type="text" maxlength="80" placeholder="例如：登录迷局"></label>
+            <label class="ctf-challenge-field" for="c-ctf-address"><span>题目地址</span><input id="c-ctf-address" type="text" maxlength="2000" spellcheck="false" placeholder="URL、主机与端口或连接指令"></label>
+            <label class="ctf-challenge-field ctf-challenge-description" for="c-ctf-description"><span>题目描述</span><textarea id="c-ctf-description" rows="4" maxlength="16000" placeholder="粘贴题目原文、背景与解题要求…"></textarea></label>
+            <label class="ctf-challenge-field ctf-challenge-hint" for="c-ctf-hint"><span>题目提示 <small>Hint</small></span><textarea id="c-ctf-hint" rows="4" maxlength="8000" placeholder="赛方给出的提示或补充线索…"></textarea></label>
+          </div>
+          <label id="c-multiple-answers-option" class="answer-option" title="解出全部答案后结束；默认取得一个答案即完成">
+            <input type="checkbox" id="c-multiple-answers" aria-labelledby="answer-option-title" aria-describedby="answer-option-hint">
+            <span class="answer-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="12" height="14" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-2M8 12h4m-4 4h4"/></svg></span>
+            <span class="answer-option-copy"><span class="answer-option-heading"><strong id="answer-option-title">多答案题目</strong></span><small id="answer-option-hint">开启后解出全部答案再结束；默认取得一个答案即完成。</small></span>
+            <span class="answer-option-switch" aria-hidden="true"></span>
+          </label>
+        </section>
         <section id="c-proxy-option" class="composer-route" hidden aria-labelledby="c-proxy-title">
           <span class="composer-route-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="16" r="3"/><circle cx="25" cy="16" r="3"/><path d="M10 16h10m-3-4 4 4-4 4"/></svg></span>
           <span class="composer-route-copy"><strong id="c-proxy-title">会话出口</strong><small>启动后锁定当前方案，订阅更新不会改变运行中的任务。</small></span>
@@ -129,12 +144,6 @@
           <label class="ctf-type-extra" for="c-ctf-type-note">补充题型（选填）</label>
           <input id="c-ctf-type-note" type="text" maxlength="2000" placeholder="其他题型或方向…">
         </fieldset>
-        <label id="c-multiple-answers-option" class="answer-option" title="解出全部答案后结束；默认取得一个答案即完成" hidden>
-          <input type="checkbox" id="c-multiple-answers" aria-labelledby="answer-option-title" aria-describedby="answer-option-hint">
-          <span class="answer-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="12" height="14" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-2M8 12h4m-4 4h4"/></svg></span>
-          <span class="answer-option-copy"><span class="answer-option-heading"><strong id="answer-option-title">多答案题目</strong></span><small id="answer-option-hint" class="sr-only">开启后解出全部答案再结束；默认取得一个答案即完成。</small></span>
-          <span class="answer-option-switch" aria-hidden="true"></span>
-        </label>
         <div class="comp-files" id="home-files"></div>
         <div class="bar">
           <div class="bar-left">
@@ -552,13 +561,13 @@
 <script defer src="/static/js/updates.js?v=20261107-en"></script>
 <script defer src="/static/js/files.js?v=20261107-en"></script>
 <script defer src="/static/js/agent-side-chat.js?v=20261107-en"></script>
-<script defer src="/static/js/agent-workbench.js?v=20261107-en"></script>
 <script defer src="/static/js/experience.js?v=20261107-en"></script>
 <script defer src="/static/js/projects.js?v=20261107-en"></script>
 <script defer src="/static/js/session-history.js?v=20261107-en"></script>
-<script defer src="/static/js/topology.js?v=20261107-exploration"></script>
-<script defer src="/static/js/dual-topology.js?v=20261110-asset-workspace"></script>
-<script defer src="/static/js/task-trace.js?v=20261107-exploration"></script>
+<script defer src="/static/js/topology.js?v=20261111-public-progress"></script>
+<script defer src="/static/js/dual-topology.js?v=20261111-public-progress"></script>
+<script defer src="/static/js/task-trace.js?v=20261111-public-progress"></script>
+<script defer src="/static/js/agent-workbench.js?v=20261111-public-progress"></script>
 <script defer src="/static/js/dashboard.js?v=20261107-en"></script>
 <script defer src="/static/js/storage.js?v=20261107-en"></script>
 <script defer src="/static/js/vulnerability-details.js?v=20261107-en"></script>
@@ -568,7 +577,7 @@
 <script defer src="/static/js/traffic.js?v=20261107-en"></script>
 <script defer src="/static/js/background-tasks.js?v=20261110-console"></script>
 <script defer src="/static/js/js-intel.js?v=20261110-assets"></script>
-<script defer src="/static/js/views.js?v=20261110-asset-workspace"></script>
+<script defer src="/static/js/views.js?v=20261111-public-progress"></script>
 <script defer src="/static/js/provider-accounts.js?v=20261107-en"></script>
 <script defer src="/static/js/models.js?v=20261108-modules"></script>
 <script defer src="/static/js/agent-roster.js?v=20261108-modules"></script>

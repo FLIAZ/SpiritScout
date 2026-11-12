@@ -15,7 +15,12 @@ from spiritscout.core.ids import new_id
 from spiritscout.core.models import AgentType, Asset, BlackboardLayer, Task
 from spiritscout.gateway.backends import extract_json
 from spiritscout.gateway.context import append_instruction_events, compact_history
-from spiritscout.gateway.progress import NATIVE_PROGRESS_GUIDANCE, publish_progress
+from spiritscout.gateway.progress import (
+    FORMAT_GUIDANCE,
+    PublicProgressEmitter,
+    ensure_exploration_progress,
+    publish_progress,
+)
 from spiritscout.resources.runtime import (
     SKILL_GUIDANCE,
     SKILL_NAMES,
@@ -164,7 +169,8 @@ class BusinessContextAgent(SubAgent):
         payload: dict[str, Any] = {
             "target": task.target,
             "world_state": snapshot(guard=guard, blackboard=self.ctx.blackboard, env=environment(
-                workspace=workspace, artifacts=artifacts)),
+                workspace=workspace, artifacts=artifacts), references=(getattr(self.ctx, 'mode', None) == 'competition'
+                    and not getattr(getattr(self.ctx.gateway, 'config', None), 'lightweight_local', False))),
             "交付要求": (
                 "以真实用户视角走访该目标的业务流程。渲染后的页面、网络请求"
                 "（XHR/fetch）都是证据；把实际观测到的接口交易用 record_endpoint "
@@ -200,7 +206,7 @@ class BusinessContextAgent(SubAgent):
             st["world_state"] = current_world
             st["messages"] = [
                 {"role": "system",
-                 "content": self._system_prompt() + NATIVE_PROGRESS_GUIDANCE + "\nROLE: business_explorer" + ("\n" + SKILL_GUIDANCE if runtime_for(self.ctx) else "")},
+                 "content": self._system_prompt() + "\nROLE: business_explorer" + ("\n" + SKILL_GUIDANCE if runtime_for(self.ctx) else "")},
                 {"role": "user", "content": self._explore_brief(task)},
             ]
         else:
@@ -208,6 +214,15 @@ class BusinessContextAgent(SubAgent):
             if fragment:
                 st["messages"].append({"role": "user", "content": fragment})
             st["world_state"] = current_world
+        ensure_exploration_progress(st)
+        from spiritscout.gateway.context import ensure_execution_data_guidance
+
+        ensure_execution_data_guidance(st, self.ctx.gateway)
+        if (getattr(self.ctx, 'mode', None) == 'competition'
+                and not getattr(getattr(self.ctx.gateway, 'config', None), 'lightweight_local', False)):
+            from spiritscout.blackboard.exchange import ensure_memory_contract
+
+            ensure_memory_contract(st)
         steering = (self.ctx.ring.steerings_for(self.agent_type.value, task_id=task.task_id)
                     if self.ctx.ring is not None else [])
         append_instruction_events(st, steering, consumer_key=f"{task.task_id}|{route.route_id}")
@@ -239,21 +254,28 @@ class BusinessContextAgent(SubAgent):
         self.ctx.audit.log("agent.turn", self.agent_id, {
             "turn": st["turn"], "task_id": task.task_id,
             "route_id": route.route_id, "route": getattr(route, "name", plan.name)})
+        emitter = PublicProgressEmitter(self.ctx.audit, self.agent_id,
+            route=getattr(route, "name", plan.name), turn=st['turn'],
+            task_id=task.task_id, route_id=route.route_id)
         try:
             resp = await self.ctx.gateway.chat(
-                messages, task_type="execution",
+                [*messages, {'role': 'user', 'content': FORMAT_GUIDANCE}], task_type="execution",
                 timeout_seconds=self._TOOL_TIMEOUT,
                 tools=self._tool_schemas(deferred=True), tool_choice="auto",
-                preserve_context=True,
+                preserve_context=True, on_delta=emitter,
                 reasoning_effort=self.task_effort(task))
         except Exception as exc:  # noqa: BLE001 —— 决策不可用如实报给路线
+            emitter.flush()
             self.ctx.audit.log("llm.step_fallback", self.agent_id, {
                 "role": "business_explorer", "error": str(exc)[:200]})
             return StepResult(ok=False, note=f"走访决策不可用: {exc}")
 
+        emitter.flush()
+        st['messages'].append({'role': 'user', 'content': FORMAT_GUIDANCE, '_progress_reminder': True})
         # assistant 消息（含工具调用）回灌，保持多轮协议完整
         publish_progress(self.ctx.audit, self.agent_id, resp.content or "",
-                         task_id=task.task_id, route_id=route.route_id, turn=st["turn"])
+                         task_id=task.task_id, route_id=route.route_id, turn=st["turn"],
+                         streamed=emitter.has_public_text)
         st["messages"].append({
             "role": "assistant",
             "content": resp.content or "",
@@ -320,7 +342,9 @@ class BusinessContextAgent(SubAgent):
                 ok, text = False, f"工具参数解析失败: {call['parse_error']}。请修正 JSON 后重新调用。"
             elif name in NAMES:
                 result = execute(self.ctx.blackboard, name, args, actor=self.agent_id,
-                                 agent_type=self.agent_type, source=event_scope)
+                                 agent_type=self.agent_type, source=event_scope,
+                                 memory_enabled=(getattr(self.ctx, 'mode', None) == 'competition'
+                                     and not getattr(getattr(self.ctx.gateway, 'config', None), 'lightweight_local', False)))
                 ok, text = result["ok"], json.dumps(result, ensure_ascii=False, separators=(',', ':'))
             elif name in SKILL_NAMES:
                 st = self._explore.setdefault(task.task_id, {"messages": [], "concluded": False, "pages": [], "turn": 0})

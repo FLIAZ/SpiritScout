@@ -33,6 +33,10 @@ class AuditStream:
         self.last = time.monotonic()
         if text:
             self.emitted = True
+        if self.kind == "text":
+            from spiritscout.gateway.progress import parse_public_progress
+
+            text = parse_public_progress(text).get("text", "")
         for start in range(0, len(text), 4000):
             self.audit.log("agent.delta", self.actor, {
                 "call_id": self.call["call_id"], "route": self.call.get("route_id", ""),

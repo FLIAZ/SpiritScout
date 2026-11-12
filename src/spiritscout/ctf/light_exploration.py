@@ -1,4 +1,4 @@
-"""轻量执行者复用普通探索协议：公开声明落黑板，下一回合读取当前状态。"""
+"""CTF 执行者的公开探索落盘与上下文回读，不从正文推断因果。"""
 from __future__ import annotations
 
 from typing import Any
@@ -8,22 +8,8 @@ from spiritscout.core.models import AgentType, BlackboardLayer
 from spiritscout.gateway.progress import public_exploration
 
 GUIDANCE = (
-    '公开探索声明会写入黑板，当前意图、尝试、阻塞/排除原因和关键发现会在后续回合回读。'
-    '用稳定标题更新同一问题和方法，不把重复执行说成新发现。'
-    '其他分支用 tool_lookup/tool_invoke 调用 graph_read 查询；exploration_write 可修订探索节点，'
-    'blackboard_write 发布有原始证据引用的事实，用 exploration_refs 关联当前尝试。'
-    '探索状态和模型笔记都不是独立验证。'
-)
-
-FORMAT_GUIDANCE = (
-    '有新进展需要公开说明时，正文可使用一个 JSON 对象：'
-    '{"progress":"简短公开进展","exploration":{"intent":"要确认的问题","attempt":"验证方法","state":"running"}}。'
-    '同一问题和方法沿用当前黑板标题与状态，不把已反驳或走不通的尝试默认改回 running。'
-    'state 按证据选择 running/blocked/supported/refuted/exhausted/closed；'
-    '修订旧尝试时用原 intent/attempt 标题并写明 reason，转向时 from 填原尝试标题。'
-    '有实际新发现才按已有约定补 milestone，普通翻页、读取和重试不建里程碑。'
-    '这个对象只用于展示，不能代替本轮实际动作；需要继续时同时通过原生 tool_calls 调用工具，'
-    '没有新进展可省略正文。不把工具调用或内部推理写入这个公开对象。'
+    '探索节点记录当前意图、尝试及其阻塞、排除或关键发现，后续回合会回读。'
+    '其他分支可调用 graph_read 查询；exploration_write 修订节点，blackboard_write 发布可引用事实。'
 )
 
 
@@ -54,7 +40,7 @@ def refresh_context(bb: Any, state: dict[str, Any]) -> None:
         rows.append(value)
     state['light_exploration'] = {'active_attempt': state.get('light_active_attempt', ''),
         'nodes': rows, 'partial': True, 'known_nodes': len(refs),
-        'notice': '模型公开声明的探索状态；不是事实验证。其他分支与完整原因用 graph_read/blackboard_read 查询。'}
+        'notice': '其他分支与完整原因可用 graph_read/blackboard_read 查询。'}
 
 
 def record_progress(bb: Any, state: dict[str, Any], detail: dict[str, Any], *, actor: str,

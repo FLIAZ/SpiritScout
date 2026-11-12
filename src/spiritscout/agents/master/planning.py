@@ -438,9 +438,12 @@ class MasterPlanning:
                 "这些是方向提示，不是题型定论、解题步骤或角色/工具限制；IoT、AI安全等可由现有专项协作，"
                 "证据不符时可跨题型调整、增派，未选择的方向仍然可用。"
             ) if ctf_directions else ""
+            # 首次派工只选可执行方向；深入验证留给执行者，不在取证前展开解题。
             # 只调整调用强度，不替模型选择题目、战术或判定停滞。
             competition_opening = (state["round_no"] == 0 and not dag.all_nodes()
-                                   and bool(self.ctx.extra.get("mode_prompt"))
+                                   and (bool(self.ctx.extra.get("mode_prompt"))
+                                        or getattr(getattr(self.ctx, "policy", None), "mode", None)
+                                        in (RunMode.CTF, RunMode.AWDP))
                                    and bool((self.ctx.extra.get("competition_context")
                                              or {}).get("challenges")))
             resp = await chat_decision(
@@ -970,7 +973,7 @@ class MasterPlanning:
             f"用户任务意图（合约范围与目标由用户口述如下，你据此自行决策"
             f"并下发任务给子 Agent）：\n「{mission}」\n"
             if mission else "")
-        rules_block = "用户既定规则保存在黑板，按规则引用读取原文后决策。\n" if self._rules() else ""
+        rules_block = "用户既定规则以规则对象为准：inline_content 已是完整原文时直接遵守；原文缺失或版本变化时再按引用读取。\n" if self._rules() else ""
         exp_block = self._recent_experience()
         exp_block = (f"实战经验（前几次会话积累的参考事实与信号，非步骤；"
                      f"采纳自行判断）：\n{exp_block}\n"
@@ -988,7 +991,7 @@ class MasterPlanning:
             # SRC 会话沿用完整提示，不受轻量部署影响。
             return (agent_system_prompt(AgentType.MASTER, allow_search=search_allowed(self.ctx))
                     + mode_block + "\n实际可用角色：" + (roster or "无")
-                    + "\n依据当前任务、用户原话、授权和现场证据自主规划；规则与原文按黑板引用读取。"
+                    + "\n依据当前任务、用户原话、授权和现场证据自主规划。"
                     "只派必要工作，优先复用已有证据，避免重复判读和重复执行。"
                     "任务、依赖和后续取舍由你判断，不按固定解法或回合数收尾。"
                     "结果未验证不能称为成功；返回当前调用约定的完整 JSON，不复述整个历史。")

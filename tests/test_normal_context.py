@@ -19,6 +19,45 @@ def history(count=10):
 
 
 class NormalContextTests(unittest.TestCase):
+    def test_discovery_report_cannot_become_a_new_execution_observation(self):
+        state = {'messages': [{'role': 'tool', 'content': '{"ok":true}', 'tool_call_id': 'report'}]}
+        before = copy.deepcopy(state)
+        observe(state, {'name': 'report_discovery'}, SimpleNamespace(ok=True, stop=False, metadata={}))
+        self.assertEqual(state, before)
+
+    def test_failure_facts_and_log_reference_survive_archiving_without_rewriting_history(self):
+        messages = history()
+        state = {'messages': messages[:4]}
+        facts = {'exit_code': -9, 'timed_out': True, 'attribution': 'undetermined'}
+        outcome = SimpleNamespace(ok=False, stop=False, text='phase=response_match; pending_ids=[1]',
+            metadata={'invocation_id': 'inv-failed', 'output_file': '/fixture/output.log',
+                      'failure_evidence': facts})
+        observe(state, {'name': 'python', 'arguments': {'code': 'fixture()'}}, outcome)
+        state['messages'].extend(messages[4:])
+        original = copy.deepcopy(state['messages'])
+        result = project(state, [], 16000)
+        archived = next(m['content'] for m in result['messages'] if m.get('content', '').startswith('历史工具往返摘要'))
+        self.assertIn('inv-failed', archived)
+        self.assertIn('/fixture/output.log', archived)
+        self.assertIn('undetermined', archived)
+        self.assertIn('timed_out', archived)
+        self.assertEqual(state['messages'], original)
+        self.assertEqual(facts, {'exit_code': -9, 'timed_out': True, 'attribution': 'undetermined'})
+
+    def test_display_reminders_archive_with_tools_without_changing_user_statements(self):
+        messages = history()
+        for index in range(len(messages) - 1, 1, -2):
+            messages.insert(index + 1, {'role': 'user', '_progress_reminder': True,
+                                       'content': '公开探索格式提醒' * 100})
+        original = copy.deepcopy(messages)
+        result = project({'messages': messages}, [], 16000)
+        self.assertGreater(result['archived_turns'], 0)
+        self.assertEqual(messages, original)
+        self.assertIn(original[1], result['messages'])
+        reminders = [m for m in result['messages'] if m.get('content') == '公开探索格式提醒' * 100]
+        self.assertLess(len(reminders), 10)
+        self.assertGreaterEqual(len(reminders), 4)
+
     def test_archive_preserves_raw_user_contract_and_recent_pairs(self):
         original = history()
         original.insert(8, {'role': 'user', 'content': '新要求，保留所有字节'})

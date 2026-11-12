@@ -26,6 +26,27 @@ class PublicStagesTests(unittest.TestCase):
             stream.write(json.dumps({'seq': self.seq, 'type': event_type, 'actor': 'web',
                                      'detail': {'task_id': 't', 'route_id': 'r', **detail}}) + '\n')
 
+    def test_native_discoveries_need_no_body_markup_and_updates_keep_stable_identity(self):
+        value = {'key': 'identity', 'intent': '确认身份来源', 'title': '身份来自会话对象',
+                 'basis': '响应对照显示身份随会话对象变化', 'importance': 4, 'confidence': 'observed',
+                 'kind': 'discovery', 'evidence_refs': ['exec-one']}
+        self.add('agent.progress', turn=1, text='普通执行说明，不作为发现')
+        self.add('agent.discovery', turn=1, **value)
+        first = read_public_stages(self.path)
+        discovery = next(r for r in first['items'] if r['kind'] == 'discovery')
+        self.assertEqual(discovery['exploration']['milestone']['importance'], 4)
+        self.add('agent.discovery', turn=4, **{**value, 'importance': 2, 'basis': '新的对照降低了重要性'})
+        after = read_public_stages(self.path)
+        updated = [r for r in after['items'] if r['kind'] == 'discovery']
+        self.assertEqual(len(updated), 1)
+        self.assertEqual(updated[0]['id'], discovery['id'])
+        self.assertEqual(updated[0]['sequence'], discovery['sequence'])
+        self.assertEqual(updated[0]['turn'], 1)
+        self.assertEqual(updated[0]['updated_turn'], 4)
+        self.assertEqual(updated[0]['exploration']['milestone']['importance'], 2)
+        self.add('agent.discovery', turn=4, route_id='parallel', **value)
+        self.assertEqual(sum(r['kind'] == 'discovery' for r in read_public_stages(self.path)['items']), 2)
+
     def test_public_stages_keep_scope_and_output_provenance(self):
         self.add('agent.delta', turn=1, kind='reasoning', text='不可放入图的内部推理')
         self.add('agent.progress', turn=1, text='先验证入口')
@@ -40,6 +61,17 @@ class PublicStagesTests(unittest.TestCase):
         self.assertNotIn('内部推理', str(page))
         self.assertNotIn('参数原文', str(page))
         self.assertFalse(page['has_more'])
+
+    def test_mixed_historical_progress_recovers_declared_nodes_without_rewriting_audit(self):
+        semantic = {'intent': '核实访问边界', 'attempt': '账号对照', 'state': 'supported'}
+        milestone = {'kind': 'discovery', 'title': '两次响应不同', 'basis': '相同入口返回不同记录'}
+        self.add('agent.progress', turn=1, text='已观察到响应差异。\n\n' + json.dumps({
+            'progress': '发现响应差异', 'exploration': semantic, 'milestone': milestone}))
+        original = self.path.read_bytes()
+        row = read_public_stages(self.path)['items'][0]
+        self.assertEqual(row['body'], '已观察到响应差异。')
+        self.assertEqual(row['exploration'], {**semantic, 'milestone': milestone})
+        self.assertEqual(self.path.read_bytes(), original)
 
     def test_incremental_reads_partial_lines_and_replacement(self):
         self.add('agent.progress', turn=1, text='第一步')
@@ -114,13 +146,15 @@ class PublicStagesTests(unittest.TestCase):
         self.add('agent.progress', turn=1, text='正在核对入口')
         page = read_public_stages(self.path)
         annotation = {'version': 1, 'source_digest': public_digest(page['items']), 'groups': [
-            {'task_id': 't', 'route_id': 'r', 'turns': [1], 'intent': '定位入口', 'attempt': '核对公开线索'}]}
+            {'task_id': 't', 'route_id': 'r', 'turns': [1], 'intent': '定位入口', 'attempt': '核对公开线索',
+             'milestone': {'kind': 'discovery', 'title': '发现登录入口', 'basis': '公开记录返回登录表单'}}]}
         sidecar = self.path.with_name('topology-intents.json')
         sidecar.write_text(json.dumps(annotation))
         before = self.path.read_bytes()
         row = read_public_stages(self.path)['items'][0]
         self.assertEqual(row['exploration']['attempt'], '核对公开线索')
         self.assertEqual(row['semantic_origin'], 'reviewed_public_progress')
+        self.assertEqual(row['exploration']['milestone']['title'], '发现登录入口')
         self.assertEqual(self.path.read_bytes(), before)
         self.add('agent.progress', turn=2, text='原文新增后需要重新核对归类')
         self.assertNotIn('exploration', read_public_stages(self.path)['items'][0])

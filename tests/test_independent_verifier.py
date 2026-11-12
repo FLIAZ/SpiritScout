@@ -52,6 +52,39 @@ class Fixture(BaseHTTPRequestHandler):
 
 
 class VerifierTests(unittest.IsolatedAsyncioTestCase):
+    async def test_verification_preserves_public_scene_and_exploration_without_extra_decision(self):
+        from spiritscout.gateway.progress import (
+            EXPLORATION_PROGRESS_GUIDANCE,
+            FORMAT_GUIDANCE,
+        )
+
+        async def stream(messages, **kwargs):
+            self.assertEqual(messages[-1]['content'], FORMAT_GUIDANCE)
+            self.assertIn(EXPLORATION_PROGRESS_GUIDANCE, [m.get('content') for m in messages])
+            response = await self.reply(messages, **kwargs)
+            if response.tool_calls:
+                response.content = json.dumps({
+                    'progress': '当前是待核实的越权候选，先独立读取对照与疑似入口。',
+                    'exploration': {'intent': '核实候选危害', 'attempt': '独立请求对照', 'state': 'running'}},
+                    ensure_ascii=False)
+                kwargs['on_delta']('text', response.content)
+            return response
+
+        self.gateway.chat.side_effect = stream
+        result = await VerifierAgent(self.ctx).review(self.candidate(), dict(self.rules))
+        self.assertEqual(result['verdict'], 'confirmed')
+        self.assertEqual(self.gateway.chat.await_count, 2)
+        first, second = [call.args[0] for call in self.gateway.chat.call_args_list]
+        self.assertEqual(second[:len(first)], first)
+        self.assertEqual(Fixture.hits, ['/', '/record/2'])
+        progress = [e['detail'] for e in self.audit.records if e['type'] == 'agent.progress']
+        self.assertEqual(len(progress), 1)
+        self.assertEqual(progress[0]['exploration']['intent'], '核实候选危害')
+        self.assertEqual((progress[0]['task_id'], progress[0]['turn']), ('verify-candidate', 1))
+        self.assertTrue(progress[0]['streamed'])
+        self.assertTrue(any(e['type'] == 'agent.delta' and e['detail']['task_id'] == 'verify-candidate'
+                            and e['detail']['turn'] == 1 for e in self.audit.records))
+
     async def test_scanner_candidate_enters_existing_queue_and_retains_source_evidence(self):
         from spiritscout.tools.scan_evidence import submit_candidate
         self.ctx.builtin_ctx['workspace_root'] = self.tmp.name
@@ -180,7 +213,8 @@ class VerifierTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.bb.read(BlackboardLayer(ref["layer"]), ref["record_id"])["content"], project_rule)
                 world_state.record_user_statement(self.bb, second)
                 return await original(messages, **kwargs)
-            fragment = messages[-1]["content"]
+            fragment = next(m["content"] for m in reversed(messages)
+                            if str(m.get("content", "")).startswith("<world_state"))
             update = json.loads(fragment.split("\n", 1)[1].rsplit("\n", 1)[0])
             ref = update["user_context"]["blackboard_ref"]
             self.assertEqual(self.bb.read(BlackboardLayer(ref["layer"]), ref["record_id"])["statements"], [first, second])

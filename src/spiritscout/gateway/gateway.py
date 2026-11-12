@@ -73,6 +73,7 @@ async def chat_decision(
         NAMES,
         SCHEMAS,
         execute,
+        memory_contract,
         project_rules,
     )
     from spiritscout.resources.runtime import (
@@ -89,6 +90,8 @@ async def chat_decision(
         return await _chat_decision_once(gateway, messages, audit=audit, actor=actor,
                                          memory=memory, **kwargs)
     memory = memory if memory is not None else DecisionMemory()
+    shared_memory = (getattr(memory, 'shared_memory_enabled', False)
+                     and not getattr(getattr(gateway, 'config', None), 'lightweight_local', False))
     original = copy.deepcopy(messages)
     schemas = (SKILL_SCHEMAS if runtime else []) + (SCHEMAS if bb is not None else [])
     if getattr(memory.agent_type, "value", "") == "report":
@@ -116,6 +119,10 @@ async def chat_decision(
             await runtime.pause_gate.wait()
         prepared = copy.deepcopy(original)
         payload = {"skill_context": memory.skills.get("context", {})}
+        if shared_memory:
+            # 扩展契约作为增量现场字段，不替换已缓存的 system 工具契约。
+            payload['shared_memory_contract'] = memory_contract(
+                readonly=getattr(memory.agent_type, 'value', '') in ('report', 'verifier'))
         if runtime:
             payload["available_skills"] = runtime.discovery()
         if observations:
@@ -146,7 +153,7 @@ async def chat_decision(
                     step_id=scope.step_id or memory.checkpoint_key, tool_call_id=call_id, tool_name=name))
                 try:
                     result = execute(bb, name, arguments, actor=actor,
-                                     agent_type=memory.agent_type, source=detail)
+                                     agent_type=memory.agent_type, source=detail, memory_enabled=shared_memory)
                 finally:
                     current_execution_scope.reset(token)
                 observations.append({"name": name, **result})
@@ -177,6 +184,18 @@ async def _chat_decision_once(
     思考型模型可能把输出额度耗在思考上，正文为空或只剩半截 JSON——解析
     失败会被上层当成决策缺席走规则回退，一次重试远比误判便宜。重试失败
     沿用原响应交由上层解析兜底，不掩盖原始结果。"""
+    if not getattr(getattr(gateway, 'config', None), 'lightweight_local', False):
+        from spiritscout.gateway.context import (
+            EVIDENCE_REUSE_GUIDANCE,
+            EXECUTION_DATA_GUIDANCE,
+            FAILURE_ATTRIBUTION_GUIDANCE,
+        )
+
+        # 约束随 snapshot 首次发送，已有检查点只追加 add 补丁；不改 system/旧前缀。
+        messages = [*messages, {'role': 'user', 'content': json.dumps(
+            {'execution_data_rules': EXECUTION_DATA_GUIDANCE,
+             'failure_attribution_rules': FAILURE_ATTRIBUTION_GUIDANCE,
+             'evidence_reuse_rules': EVIDENCE_REUSE_GUIDANCE}, ensure_ascii=False)}]
     if memory is not None:
         budget_for = getattr(gateway, "context_budget", None)
         budget = budget_for(**kwargs) if callable(budget_for) else None

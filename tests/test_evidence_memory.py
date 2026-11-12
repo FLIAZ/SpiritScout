@@ -11,6 +11,82 @@ from tests.test_normal_context import history
 
 
 class EvidenceMemoryTests(unittest.TestCase):
+    def test_conditioned_rejection_survives_archive_and_can_be_revised_for_new_scope(self):
+        item = self.args['upsert'][0]
+        item.update(kind='rejected', text='该输入未产生预期输出', scope='实例 A / 身份 1',
+                    conditions='输入 X；响应版本 7', revalidate_when='实例、身份、版本变化或出现新的区分性输入')
+        self.assertTrue(self.remember()['ok'])
+        self.state['messages'].extend(history(30)[4:])
+        view = project(self.state, [], 9000)['messages']
+        self.assertIn('实例 A / 身份 1', str(view))
+        self.assertIn('新的区分性输入', str(view))
+        self.args['base_revision'] = 1
+        item.update(kind='hypothesis', scope='实例 B / 身份 2', text='条件变化，需重新检验')
+        result = execute(self.state, self.args)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['revision'], 2)
+        self.assertEqual(len(result['items']), 1)
+
+    def test_execution_success_never_certifies_target_origin_and_mixed_output_is_supported(self):
+        source = self.args['upsert'][0]['sources'][0]
+        # 字符串确实出现在执行结果，但默认不推断它来自目标。
+        result = execute(self.state, self.args)
+        saved = result['items'][0]['sources'][0]
+        self.assertEqual(saved['runtime_source'], 'tool_output')
+        self.assertEqual(saved['origin_assessment'], 'unknown')
+        self.args['base_revision'] = 1
+        source['origin_assessment'] = 'generated'
+        self.assertTrue(execute(self.state, self.args)['ok'])
+        self.args['base_revision'] = 2
+        source['origin_assessment'] = 'target_response'
+        self.assertFalse(execute(self.state, self.args)['ok'])
+        source.update(origin_assessment='mixed', origin_basis='脚本输出同时包含候选输入和实际响应')
+        result = execute(self.state, self.args)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['items'][0]['sources'][0]['origin_assessment'], 'mixed')
+        self.args['base_revision'] = 3
+        source.update(origin_assessment='target_response', origin_basis='引用来自已保存响应文件的正文片段')
+        result = execute(self.state, self.args)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['items'][0]['sources'][0]['runtime_source'], 'tool_output')
+
+    def test_source_status_refresh_appends_once_and_survives_checkpoint(self):
+        self.remember()
+        first = project(self.state, [], 1000000)['messages']
+        # 原始来源不可变指纹用于检测变化；刷新不能重写旧笔记。
+        self.state['messages'][3]['content'] += '\nnew source version'
+        second = project(self.state, [], 1000000)['messages']
+        self.assertEqual(first[4:], second[4:-1])
+        self.assertIn('stale', second[-1]['content'])
+        restored = json.loads(json.dumps(self.state))
+        self.assertEqual(second, project(restored, [], 1000000)['messages'])
+        self.state['messages'][3]['content'] = self.state['messages'][3]['content'].removesuffix('\nnew source version')
+        third = project(self.state, [], 1000000)['messages']
+        self.assertEqual(second[4:], third[4:-1])
+        self.assertIn('matched', third[-1]['content'])
+
+    def test_shared_notes_cannot_launder_generated_data_into_independent_evidence(self):
+        self.state['messages'][3]['_normal_observation']['tool'] = 'blackboard_read'
+        result = execute(self.state, self.args)
+        self.assertFalse(result['ok'])
+        self.assertEqual(snapshot(self.state)['revision'], 0)
+
+    def test_lightweight_schema_and_storage_do_not_gain_cloud_fields(self):
+        from spiritscout.ctf.evidence_memory import NORMAL_SCHEMA, SCHEMA
+        from spiritscout.ctf.light_memory import MEMORY_SCHEMA
+
+        for schema in (SCHEMA, MEMORY_SCHEMA):
+            fields = schema['function']['parameters']['properties']['upsert']['items']['properties']
+            self.assertNotIn('scope', fields)
+            self.assertNotIn('origin_assessment', fields['sources']['items']['properties'])
+        self.assertIn('scope', NORMAL_SCHEMA['function']['parameters']['properties']['upsert']['items']['properties'])
+        self.state['messages'][3]['_light_observation'] = {'tool': 'python', 'ok': True}
+        result = execute(self.state, self.args, memory_key='light_evidence_memory',
+                         observation_key='_light_observation')
+        self.assertTrue(result['ok'])
+        self.assertNotIn('scope', result['items'][0])
+        self.assertNotIn('origin_assessment', result['items'][0]['sources'][0])
+
     def setUp(self):
         self.state = {'messages': history()[:4]}
         self.state['messages'][-1]['content'] = 'prefix\n' + 'x' * 9000 + '\n关键中间证据: generation=7\n' + 'z' * 9000
@@ -25,7 +101,7 @@ class EvidenceMemoryTests(unittest.TestCase):
         self.state['messages'].extend([
             {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 'memory', 'function': {
                 'name': 'evidence_memory', 'arguments': json.dumps(self.args)}}]},
-            {'role': 'tool', 'tool_call_id': 'memory', 'content': json.dumps(result)}])
+            {'role': 'tool', 'tool_call_id': 'memory', 'content': json.dumps(result, ensure_ascii=False)}])
         observe(self.state, {'name': 'evidence_memory'}, SimpleNamespace(ok=True, stop=False,
             metadata={'memory_revision': result['revision']}))
         return result
@@ -76,7 +152,9 @@ class EvidenceMemoryTests(unittest.TestCase):
         result = project(self.state, [], 9000)
         self.assertEqual(snapshot(self.state)['items'][0]['source_status'], 'stale')
         memory = next(m for m in result['messages'] if m.get('tool_call_id') == 'memory')
-        self.assertEqual(json.loads(memory['content'])['items'][0]['source_status'], 'stale')
+        self.assertEqual(json.loads(memory['content'])['items'][0]['source_status'], 'matched')
+        self.assertIn('stale', result['messages'][-1]['content'])
+        self.assertEqual(result['messages'], project(self.state, [], 9000)['messages'])
         self.assertIn('replacement observation', str(result['messages']))
 
     def test_empty_optional_digest_and_unchanged_update_do_not_create_false_conflicts(self):

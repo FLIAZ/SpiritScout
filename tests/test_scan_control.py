@@ -48,6 +48,45 @@ class ScanControlTests(unittest.IsolatedAsyncioTestCase):
             nuclei.assert_not_awaited()
             msf.assert_not_awaited()
 
+    async def test_stopping_background_scan_does_not_interrupt_other_work(self):
+        scan_entered, other_entered = asyncio.Event(), asyncio.Event()
+        other_can_finish, other_finished = asyncio.Event(), asyncio.Event()
+
+        async def scan():
+            scan_entered.set()
+            await asyncio.Event().wait()
+
+        async def other_work():
+            other_entered.set()
+            await other_can_finish.wait()
+            other_finished.set()
+
+        async def worker(*args, **kwargs):
+            await self.control.run_tool('nuclei_scan', scan)
+
+        other = asyncio.create_task(other_work())
+        try:
+            await asyncio.wait_for(other_entered.wait(), 1)
+            with patch('spiritscout.agents.scanner._run', side_effect=worker):
+                result = await asyncio.wait_for(self.control.apply(self.command(), actor='master'), 1)
+                self.assertTrue(result['ok'])
+                await asyncio.wait_for(scan_entered.wait(), 1)
+                scan_task = self.control.task
+                self.assertFalse(scan_task.done())
+                self.assertFalse(other.done())
+                stopped = await asyncio.wait_for(self.control.apply(self.command('stop'), actor='master'), 1)
+                self.assertTrue(stopped['ok'])
+                self.assertTrue(scan_task.cancelled())
+                self.assertEqual(self.control.calls, set())
+                self.assertFalse(other.done(), '停止扫描只能撤回扫描自己的任务')
+                other_can_finish.set()
+                await asyncio.wait_for(other_finished.wait(), 1)
+                await other
+        finally:
+            if not other.done():
+                other.cancel()
+            await asyncio.gather(other, return_exceptions=True)
+
     async def test_dispatch_is_parallel_and_pause_resume_preserves_assignment(self):
         entered = asyncio.Event()
         assignments = []

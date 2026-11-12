@@ -24,15 +24,17 @@ const AgentWorkbench = (() => {
     }
     const taskId=d.task_id || agent.taskId;
     const toolKey=id=>d.task_id ? `${d.task_id}:${d.route_id || d.route || ""}:${id}` : id;
-    const append = (kind, text, key = "") => {
-      if (!text) return;
+    const append = (kind, text, key = "", raw = null) => {
+      if (!text && raw == null) return;
       let block = key && agent.blocks.find(b => b.key === key);
       if (!block) {
         block = {id:++agent.sequence, kind, text:"", key, ts:event.ts, route:d.route || d.route_id || "", taskId};
         agent.blocks.push(block);
       }
-      const joined = block.text + String(text);
-      block.clipped = block.clipped || joined.length > limit;
+      const source = raw == null ? String(text || "") : block.raw + String(raw);
+      const joined = raw == null ? block.text + String(text) : TaskTrace.commentaryText(source);
+      block.raw = raw == null ? source : source.slice(-limit);
+      block.clipped = block.clipped || source.length > limit;
       block.text = joined.slice(-limit);
       if (agent.blocks.length > 80) agent.blocks.shift();
     };
@@ -49,7 +51,9 @@ const AgentWorkbench = (() => {
       if (d.kind === "reset") {
         agent.blocks = agent.blocks.filter(b => !b.key.startsWith(stem+":"));
       } else if (d.kind !== "tool_call") {
-        append(d.kind === "reasoning" ? "分析" : "输出", d.text, `${stem}:${d.kind || "text"}`);
+        const raw=String(d.text || "");
+        append(d.kind === "reasoning" ? "分析" : "输出", raw,
+          `${stem}:${d.kind || "text"}`, d.kind === "reasoning" ? null : raw);
       }
     }
     if (type === "agent.tool_call") {
@@ -135,7 +139,7 @@ const AgentWorkbench = (() => {
     const oldScroll=pane.scrollTop, stick=pane.scrollHeight-pane.scrollTop-pane.clientHeight<40;
     pane.dataset.signature=bodySignature;pane.dataset.actor=selected.actor;pane.dataset.task=store.task;
     const blocks=selected.blocks.filter(b=>!store.task || b.taskId===store.task);
-    const blockHtml=b=>`<article data-aw-entry="block:${b.id}" class="aw-entry ${b.kind === "错误" ? "bad" : ""}"><header><b>${esc(I18n.t(b.kind))}</b><time>${esc(evElapsed(b.ts))}</time>${b.taskId ? `<small>${esc(b.taskId)}</small>` : ""}${b.route ? `<small>${esc(b.route)}</small>` : ""}</header><div class="md aw-markdown">${mdRender(b.text)}</div>${b.clipped ? I18n.html('<small>此块仅展示最近 24,000 字，完整记录可通过「导出审计」下载。</small>') : ""}</article>`;
+    const blockHtml=b=>`<article data-aw-entry="block:${b.id}" class="aw-entry ${b.kind === "错误" ? "bad" : ""}"><header><b>${esc(I18n.t(b.kind))}</b><time>${esc(evElapsed(b.ts))}</time>${b.taskId ? `<small>${esc(b.taskId)}</small>` : ""}${b.route ? `<small>${esc(b.route)}</small>` : ""}</header><div class="md aw-markdown">${mdRender(['输出','进展','结论'].includes(b.kind) ? TaskTrace.commentaryText(b.text) : b.text)}</div>${b.clipped ? I18n.html('<small>此块仅展示最近 24,000 字，完整记录可通过「导出审计」下载。</small>') : ""}</article>`;
     pane.innerHTML=I18n.html`<div class="aw-columns"><section><h4>实时分析与输出</h4>${blocks.filter(b=>["分析","输出"].includes(b.kind)).map(blockHtml).join("") || I18n.html('<p class="aw-empty">尚未收到模型输出。旧记录或未返回流式文本的端点可能没有分析正文。</p>')}</section><section><h4>执行反馈与产出</h4>${blocks.filter(b=>!["分析","输出"].includes(b.kind)).map(blockHtml).join("")}${[...selected.tools.entries()].filter(([,t])=>!store.task || t.taskId===store.task).map(([id,t])=>`<article data-aw-entry="tool:${esc(String(id))}" class="aw-entry ${t.status === "失败" ? "bad" : ""}"><header><b>${esc(SessionObserver.toolName(t.name))}</b><span>${esc(I18n.t(t.status))}</span></header><div class="md aw-markdown">${mdRender(t.text)}</div>${t.images?.length && typeof FileCards!=="undefined" ? `<div class="tl-images">${t.images.map(image=>FileCards.imageCard(image)).join("")}</div>` : ""}${t.raw && t.raw !== t.text ? I18n.html`<details data-aw-tool="${esc(String(id))}"><summary>展开工具反馈（最多 24,000 字）</summary><pre>${esc(t.raw)}</pre></details>` : ""}</article>`).join("") || I18n.html('<p class="aw-empty">等待工具反馈与结论</p>')}</section></div>`;
     if(same) for(const el of pane.querySelectorAll("details")) if(opened.has(el.dataset.awTool)) el.open=true;
     pane.querySelectorAll('[data-aw-entry]').forEach(el=>{

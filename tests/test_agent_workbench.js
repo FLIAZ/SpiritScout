@@ -1,6 +1,7 @@
 "use strict";
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
 const context=vm.createContext(require('./helpers/i18n').context({SessionObserver:{resultSummary:d=>d.result||d.error||'',cleanText:v=>String(v||'')}}));
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../src/spiritscout/web/static/js/task-trace.js'),'utf8'),context);
 vm.runInContext(fs.readFileSync(path.join(__dirname,'../src/spiritscout/web/static/js/agent-workbench.js'),'utf8'),context);
 const api=vm.runInContext('AgentWorkbench',context),store=api.create();
 const push=(actor,type,detail)=>api.reduce(store,{actor,type,detail,ts:'2026-10-17T00:00:00Z'});
@@ -45,6 +46,16 @@ assert.equal(active.status,'模型生成中');assert.equal(active.tools.size,2);
 assert.equal(active.tools.get('t2:r2:same').status,'执行中');
 assert.equal(active.tasks.get('t1').status,'已完成');
 console.log('workbench task isolation passed');
+// 固定 exploration 是建图元数据，自然语言才是工作台正文；分片 JSON 不得闪烁或残留。
+const protocol=api.create();
+const send=(type,detail)=>api.reduce(protocol,{actor:'ctf-web-protocol',type,detail,ts:'now'});
+send('agent.turn',{task_id:'p',route_id:'r',turn:1});
+const content='已确认入口需要先取得会话。\n'+JSON.stringify({exploration:{intent:'确认会话来源',attempt:'对照 Cookie 变化',state:'running'}});
+let cursor=0;
+for(const size of [2,7,11,content.length]) {send('agent.delta',{task_id:'p',route_id:'r',turn:1,kind:'text',text:content.slice(cursor,size)});cursor=size;}
+const protocolAgent=protocol.agents.get('ctf-web-protocol');
+assert.ok(protocolAgent.blocks.every(b=>!b.text.includes('"exploration"') && !b.text.includes('"intent"')),'protocol metadata never appears as user-facing text');
+assert.ok(protocolAgent.blocks.some(b=>b.text.includes('已确认入口需要先取得会话。')),'natural-language observation remains visible');
 feed('agent.delta',{task_id:'t1',route_id:'r1',route:'same-route',turn:1,kind:'reasoning',text:'任务一'});
 feed('agent.delta',{task_id:'t2',route_id:'r2',route:'same-route',turn:1,kind:'reasoning',text:'任务二'});
 assert.equal(active.blocks.filter(b=>b.taskId==='t1').at(-1).text,'任务一');

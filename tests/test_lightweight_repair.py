@@ -338,7 +338,12 @@ class PublicBodyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(progress[0]["text"], text)
         self.assertTrue(progress[0]["streamed"])
 
-    async def test_normal_local_answer_stream_policy_remains_unchanged(self):
+    async def test_normal_local_answer_streams_and_persists_public_body(self):
         events = await self.exercise(public=True, light=False)
-        self.assertFalse(any(event[0] == "agent.delta" and event[2].get("kind") == "text" for event in events))
-        self.assertTrue(any(event[0] == "agent.progress" for event in events))
+        text = "".join(event[2].get("text", "") for event in events
+                       if event[0] == "agent.delta" and event[2].get("kind") == "text")
+        self.assertEqual(text, "已确认文件格式。下一步需要核对输入逻辑。")
+        progress = [event[2] for event in events if event[0] == "agent.progress"]
+        self.assertEqual(len(progress), 1)
+        self.assertEqual(progress[0]["text"], text)
+        self.assertTrue(progress[0]["streamed"])

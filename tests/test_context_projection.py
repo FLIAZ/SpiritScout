@@ -35,6 +35,34 @@ class ContextProjectionTests(unittest.TestCase):
         payload = {"constraints": "不得丢弃" * 1000}
         self.assertEqual(json.loads(compact_json(payload, max_chars=100)), payload)
 
+    def test_public_exploration_contract_survives_long_observations(self) -> None:
+        from spiritscout.gateway.progress import EXPLORATION_PROGRESS_GUIDANCE
+
+        payload = {'exploration_display': EXPLORATION_PROGRESS_GUIDANCE,
+                   'observations': '已获取的旧观察' * 5000}
+        result = json.loads(compact_json(payload, max_chars=300))
+        self.assertEqual(result['exploration_display'], EXPLORATION_PROGRESS_GUIDANCE)
+        self.assertLess(len(result['observations']), len(payload['observations']))
+
+    def test_only_framework_display_reminders_shorten_when_native_history_is_large(self) -> None:
+        from spiritscout.gateway.progress import (
+            EXPLORATION_PROGRESS_GUIDANCE,
+            FORMAT_GUIDANCE,
+        )
+
+        original_user = '保留用户原话' * 1000
+        messages = [{'role': 'system', 'content': '系统约定'},
+                    {'role': 'user', 'content': original_user},
+                    {'role': 'user', 'content': EXPLORATION_PROGRESS_GUIDANCE, '_context_contract': True}]
+        for _ in range(5):
+            messages.extend([{'role': 'user', 'content': FORMAT_GUIDANCE, '_progress_reminder': True},
+                             {'role': 'assistant', 'content': '公开进展'}])
+        compact_history(messages, max_chars=1000)
+        self.assertEqual(messages[1]['content'], original_user)
+        self.assertEqual(messages[2]['content'], EXPLORATION_PROGRESS_GUIDANCE)
+        self.assertLess(len(messages[3]['content']), len(FORMAT_GUIDANCE))
+        self.assertEqual(messages[-2]['content'], FORMAT_GUIDANCE)
+
     def test_competition_tasks_and_platform_receipts_survive_soft_budget(self) -> None:
         """规划器必须拿到完整题目 ID 与已完成预检，不能裁成单字符。"""
         protected = {

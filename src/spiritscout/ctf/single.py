@@ -25,12 +25,9 @@ from spiritscout.ctf.binary_tools import SCHEMA as BINARY_SCHEMA
 from spiritscout.ctf.binary_tools import inspect as inspect_binary
 from spiritscout.ctf.evidence_review import observe, result_reference, review_row
 from spiritscout.ctf.light_exploration import (
-    FORMAT_GUIDANCE,
-    record_progress,
     refresh_context,
     remember_ref,
 )
-from spiritscout.ctf.light_exploration import GUIDANCE as EXPLORATION_GUIDANCE
 from spiritscout.ctf.light_memory import (
     HISTORY_SCHEMA,
     MEMORY_GUIDANCE,
@@ -52,6 +49,7 @@ from spiritscout.ctf.tool_help import GUIDANCE as TOOL_HELP_GUIDANCE
 from spiritscout.ctf.tool_help import SCHEMA as TOOL_HELP_SCHEMA
 from spiritscout.ctf.tool_help import lookup as lookup_external_help
 from spiritscout.gateway.light_context import ContextWindowError, project_context
+from spiritscout.gateway.progress import FORMAT_GUIDANCE
 from spiritscout.gateway.world_state import (
     record_user_statement,
     render,
@@ -248,15 +246,6 @@ class SingleCTFAgent(CTFBaseAgent):
         # 与普通模式共用公开意图、尝试和里程碑契约；不另起绘图模型。
         super()._ensure_progress_guidance(state)
 
-    def _record_public_progress(self, task, route, state, detail):
-        if detail and detail.get('exploration') and self.ctx.blackboard is not None:
-            result = record_progress(self.ctx.blackboard, state, detail, actor=self.agent_id,
-                agent_type=self.agent_type, source={'task_id': task.task_id, 'route_id': route.route_id,
-                                                   'route': route.name, 'challenge': self.challenge_id(task)})
-            if not result['ok']:
-                self.ctx.audit.log('solver.exploration_rejected', self.agent_id, {
-                    'task_id': task.task_id, 'route_id': route.route_id, 'error': result['error']})
-
     def _direction_hints(self, task):
         hints = self.challenge_of(task).get("user_type_hints") or {}
         values = hints.get("types", []) if isinstance(hints, dict) else hints
@@ -275,6 +264,8 @@ class SingleCTFAgent(CTFBaseAgent):
                           steps=[{"action": "investigate"}])]
 
     def _solver_system_prompt(self, **kwargs):
+        from spiritscout.agents.profiles import EVIDENCE_FIRST_GUIDANCE
+
         prompt = (
             "你是本题唯一的持久执行者，直接完成用户目标，不派遣其他 Agent。题型不是固定流程，方法由你判断。\n"
             "以最新 world_state 的用户原话、授权、规则和环境为准：更新字段覆盖旧值，未更新字段沿用。"
@@ -283,7 +274,9 @@ class SingleCTFAgent(CTFBaseAgent):
             "每回合用一到三句指出已有证据支持什么、尚缺哪个验证，随后实际调用工具。"
             "沿用已经获取的源码和失败回执推进：提出可被实际结果否定的假设、做最小对照、据结果修正。"
             "若已有原文足以分析，直接推导或执行验证；需要再读时说明缺少的具体内容或变化的条件。"
-            "报错后定位该错误，不重新从确认附件开始；尚未执行的计划不能写成已完成。\n"
+            "报错后定位该错误，不重新从确认附件开始；尚未执行的计划不能写成已完成。"
+            "公开说明用自然语言，区分实际观察、推测与未知。\n"
+            + EVIDENCE_FIRST_GUIDANCE + "\n"
             "常用工具直接调用；其他工具用 tool_lookup(name) 查完整契约，再 tool_invoke(name, arguments)；"
             "view_image 可直接看附件或截图的视觉内容，路径和文件元数据不等于已看图；"
             "像素统计、解码或隐写计算按实际需要使用 Python。"
@@ -301,7 +294,7 @@ class SingleCTFAgent(CTFBaseAgent):
             "自写简化示例仅证明局部假设。"
             "依赖缺失时标明未覆盖范围，不能把自写替代实现当作原题通过。\n"
             "归档索引用 history_read 回读原始消息，摘要不是完整证据；保留原始数据，长输出落盘按需读取。"
-            "不手抄常量或凭摘要补代码。" + MEMORY_GUIDANCE + EXPLORATION_GUIDANCE
+            "不手抄常量或凭摘要补代码。" + MEMORY_GUIDANCE
             + "CTF 按 record_answer 契约登记已验证的最终答案；"
             "仅用户要求修补时交付补丁。以题面加载器和验收条件复核落盘产物，"
             "中间值、口头推测和登记成功都不等于平台判对。无法继续时明确缺口，不冒充完成。")
@@ -813,11 +806,6 @@ class SingleCTFAgent(CTFBaseAgent):
                 and TOOL_HELP_GUIDANCE not in str(state['messages'][0].get('content') or '')):
             state = {**state, 'messages': [{**state['messages'][0], 'content':
                 str(state['messages'][0].get('content') or '') + '\n' + TOOL_HELP_GUIDANCE}, *state['messages'][1:]]}
-        if (state['messages'] and state['messages'][0].get('role') == 'system'
-                and str(state['messages'][0].get('content') or '').startswith('你是本题唯一的持久执行者')
-                and EXPLORATION_GUIDANCE not in state['messages'][0]['content']):
-            state = {**state, 'messages': [{**state['messages'][0], 'content':
-                state['messages'][0]['content'] + '\n' + EXPLORATION_GUIDANCE}, *state['messages'][1:]]}
         if memory := memory_message(state):
             state = {**state, 'messages': [*state['messages'], memory]}
         environment = self._task_execution_environment(task)
@@ -841,8 +829,8 @@ class SingleCTFAgent(CTFBaseAgent):
         if recovery := loop_recovery_message(state):
             state = {**state, 'messages': [*state['messages'], recovery]}
             action_recovery = True
-        # 小模型长历史容易沿用旧纯文本输出；发送视图末尾重申同一契约，不累积到原始历史。
-        # 恢复动作时不在最后重新要求进度 JSON，否则会覆盖工具调用纠正、形成空转。
+        # 完整契约已随首条任务或旧检查点迁移注入；每轮只在发送视图末尾放短提醒。
+        # 恢复动作时不重申，避免覆盖工具调用纠正。
         if state.get("exploration_display_v2") and not action_recovery:
             state = {**state, "messages": [*state["messages"], {"role": "user",
                 "_light_kind": "progress_format", "_context_contract": True, "content": FORMAT_GUIDANCE}]}

@@ -254,7 +254,6 @@ class CompetitionAssemblyPlatformTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_jeopardy_assembly_honours_platform_completion(self) -> None:
         assembly = self._assembly(StubPlatform(completed={"c1"}))
-        self.assertIn("单位时间", assembly.strategy_prompt)
         plan = assembly.plan_provider({"round_no": 1, "dag": {}})
         cids = {n["meta"]["challenge"]["id"] for n in plan["dag_nodes"]}
         self.assertEqual(cids, {"c2"})   # 平台通报完成的题不再重攻

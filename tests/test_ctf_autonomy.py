@@ -20,6 +20,21 @@ from spiritscout.runtime import run_ctf_engagement
 
 
 class CTFAutonomyTests(unittest.IsolatedAsyncioTestCase):
+    def test_role_display_workflow_is_not_injected_as_model_instructions(self) -> None:
+        from dataclasses import replace
+
+        from spiritscout.agents.profiles import PROFILES, agent_prompt_parts
+
+        for profile in PROFILES:
+            with self.subTest(role=profile.key):
+                display = replace(profile, workflow=('DISPLAY_STEP_FIRST', 'DISPLAY_STEP_SECOND'))
+                with patch('spiritscout.agents.profiles.get_profile', return_value=display):
+                    common, role = agent_prompt_parts(profile.key)
+                self.assertIn(profile.duty, role)
+                for step in display.workflow:
+                    self.assertNotIn(step, common + role)
+                self.assertEqual(display.public_view()['workflow'], list(display.workflow))
+
     async def test_report_is_delivered_without_waiting_for_experience_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
