@@ -458,8 +458,43 @@ class VerificationQueue:
         else:
             candidate.false_positive_reason = result.get("reason")
         self.save(key, candidate, version)
+        self._settle_hypothesis(candidate, verdict, result)
         self.ctx.audit.log("verification.result", "verifier", {"vuln_id": key, "title": candidate.title,
                             "status": candidate.status.value, **candidate.verification})
+
+    def _settle_hypothesis(self, candidate: Vulnerability, verdict: str,
+                           result: dict[str, Any]) -> None:
+        from spiritscout.blackboard.hypotheses import merge_versioned_refs
+
+        refs = merge_versioned_refs(
+            candidate.hypothesis_refs, [candidate.hypothesis_ref],
+            [str(item.get("hypothesis_ref") or "").strip()
+             for item in [*candidate.evidence, *candidate.scanner_evidence]
+             if isinstance(item, dict) and item.get("hypothesis_ref")],
+            limit=20,
+        )
+        if not refs or verdict not in {"confirmed", "false_positive"}:
+            return
+        from spiritscout.blackboard.hypotheses import transition
+
+        state = "supported" if verdict == "confirmed" else "refuted"
+        outcome = "independently_confirmed" if verdict == "confirmed" else "independently_refuted"
+        evidence_refs = [str(item.get("execution_id"))[:200]
+                         for item in [*result.get("evidence", []), *result.get("controls", [])]
+                         if isinstance(item, dict) and item.get("execution_id")]
+        for ref in refs:
+            try:
+                transition(
+                    self.ctx.blackboard, ref, state=state,
+                    reason=str(result.get("reason") or "独立复核完成")[:500],
+                    task_id=f"verify-{candidate.vuln_id}", evidence_refs=evidence_refs,
+                    outcome=outcome, actor="verifier", agent_type=AgentType.VERIFIER,
+                )
+            except (ValueError, VersionConflict) as exc:
+                self.ctx.audit.log("hypothesis.transition_failed", "verifier", {
+                    "vuln_id": candidate.vuln_id, "hypothesis_ref": ref,
+                    "error": str(exc)[:300],
+                })
 
     def save(self, key: str, vuln: Vulnerability, version: int) -> int:
         return self.ctx.blackboard.write(BlackboardLayer.VULN, key, vuln.model_dump(mode="json"),

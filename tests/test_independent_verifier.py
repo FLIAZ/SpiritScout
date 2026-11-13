@@ -17,6 +17,8 @@ from spiritscout.agents.report.agent import ReportAgent
 from spiritscout.agents.sub.base import SubAgentContext
 from spiritscout.agents.verifier import VerificationQueue, VerifierAgent
 from spiritscout.blackboard import Blackboard, ConvergenceEngine
+from spiritscout.blackboard.hypotheses import resolve as resolve_hypothesis
+from spiritscout.blackboard.hypotheses import transition, upsert
 from spiritscout.core.audit import NullAuditLogger
 from spiritscout.core.models import (
     AgentType,
@@ -89,9 +91,20 @@ class VerifierTests(unittest.IsolatedAsyncioTestCase):
         from spiritscout.tools.scan_evidence import submit_candidate
         self.ctx.builtin_ctx['workspace_root'] = self.tmp.name
 
+        hypothesis_ref = upsert(
+            self.bb, claim='接口可能允许跨对象读取', subject=self.url + '/record/2',
+            test_type='idor', technical_basis={'template_ids': ['fixture-idor']},
+            actor='scanner', agent_type=AgentType.SCANNER,
+        )['hypothesis_ref']
+        transition(
+            self.bb, hypothesis_ref, state='supported', reason='扫描模板命中待复核',
+            task_id='scan-fixture', outcome='supporting_signal',
+            actor='scanner', agent_type=AgentType.SCANNER,
+        )
         self.bb.write(BlackboardLayer.RECON_CLUE, 'scan-fixture', {
             'clue_type': 'scanner_finding', 'scanner': 'nuclei', 'value': self.url + '/record/2',
-            'template_id': 'fixture-idor', 'severity': 'high', 'scan_evidence': {
+            'template_id': 'fixture-idor', 'severity': 'high', 'hypothesis_ref': hypothesis_ref,
+            'scan_evidence': {
                 'vulnerability_ids': ['CVE-fixture-only'], 'files': {}, 'missing': ['poc']}},
             agent_type=AgentType.SCANNER, updated_by='scanner')
         queue = VerificationQueue(self.ctx, lambda: dict(self.rules))
@@ -103,6 +116,7 @@ class VerifierTests(unittest.IsolatedAsyncioTestCase):
             pending = self.bb.read(BlackboardLayer.VULN, out['vuln_id'])
             self.assertEqual(pending['status'], 'candidate')
             self.assertFalse(pending['poc_verified'])
+            self.assertEqual(pending['hypothesis_ref'].split('@')[0], hypothesis_ref.split('@')[0])
             await queue.drain()
             confirmed = self.bb.read(BlackboardLayer.VULN, out['vuln_id'])
             self.assertEqual(confirmed['status'], 'accepted')
@@ -112,6 +126,9 @@ class VerifierTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(b'GET / HTTP/1.1', (Path(self.tmp.name)/execution_files['request']).read_bytes())
             self.assertEqual((Path(self.tmp.name)/execution_files['response_body']).read_bytes(),b'public-home')
             self.assertEqual(confirmed['vulnerability_ids'], ['CVE-fixture-only'])
+            hypothesis = resolve_hypothesis(self.bb, hypothesis_ref)[1]
+            self.assertEqual(hypothesis['state'], 'supported')
+            self.assertEqual(hypothesis['attempts'][-1]['outcome'], 'independently_confirmed')
             self.assertEqual(len(Fixture.hits), 2, '复测使用两个真实独立 HTTP 请求')
             duplicate = submit_candidate(self.bb, Path(self.tmp.name), {'finding_id': 'scan-fixture',
                 'title': '扫描疑似越权', 'vuln_type': 'idor', 'reason': '同一命中再次交接'})
@@ -290,12 +307,24 @@ class VerifierTests(unittest.IsolatedAsyncioTestCase):
         queue = VerificationQueue(self.ctx, lambda: dict(self.rules))
         queue.start()
         try:
-            v = self.candidate()
+            hypothesis_ref = upsert(
+                self.bb, claim='接口可能允许跨对象读取', subject=self.url + '/record/2',
+                test_type='idor', actor='web-vuln', agent_type=AgentType.WEB_VULN,
+            )['hypothesis_ref']
+            transition(
+                self.bb, hypothesis_ref, state='supported', reason='专项角色观察到支持信号',
+                task_id='web-candidate', outcome='supporting_signal',
+                actor='web-vuln', agent_type=AgentType.WEB_VULN,
+            )
+            v = self.candidate().model_copy(update={'hypothesis_ref': hypothesis_ref})
             self.bb.write(BlackboardLayer.VULN, v.vuln_id, v.model_dump(mode="json"), agent_type=AgentType.WEB_VULN)
             await asyncio.wait_for(queue.drain(), 5)
             found = self.bb.read(BlackboardLayer.VULN, v.vuln_id)
             self.assertEqual(found["status"], "rejected_false_positive")
             self.assertFalse(found["poc_verified"])
+            hypothesis = resolve_hypothesis(self.bb, hypothesis_ref)[1]
+            self.assertEqual(hypothesis['state'], 'refuted')
+            self.assertEqual(hypothesis['attempts'][-1]['outcome'], 'independently_refuted')
             self.assertEqual(ReportAgent(self.bb).collect()["pool"], [])
             store = ResourceStore(Path(self.tmp.name) / "assets")
             store.observe(record_asset("vuln", {**found, "status": "accepted"}), "previous", 1)
@@ -388,7 +417,7 @@ class VerifierTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bb.read(BlackboardLayer.VULN, v.vuln_id)["status"], "inconclusive")
         self.assertFalse(ReportAgent(self.bb).collect()["pool"])
 
-    def test_first_page_and_paginated_api_preserve_verification_rule(self) -> None:
+    def test_first_page_and_paginated_api_preserve_verification_rule_and_hypotheses(self) -> None:
         from fastapi.testclient import TestClient
 
         from spiritscout.config.settings import SystemConfig, WorkspaceConfig
@@ -398,7 +427,10 @@ class VerifierTests(unittest.IsolatedAsyncioTestCase):
         root = Path(self.tmp.name)
         app = create_app(SystemConfig(workspace=WorkspaceConfig(root=str(root)),
             models_config_path=str(root / "models.yaml"), agent_models_path=str(root / "agents.yaml")), [])
-        v = self.candidate()
+        primary = "topology:hypothesis-primary@3"
+        related = "topology:hypothesis-related@2"
+        v = self.candidate().model_copy(update={
+            "hypothesis_ref": primary, "hypothesis_refs": [primary, related]})
         v.verification = {"verdict": "inconclusive", "reason": "等待对照", "rule_quote": RULE}
         self.bb.write(BlackboardLayer.VULN, v.vuln_id, v.model_dump(mode="json"))
         app.state.manager._sessions["fixture"] = Session(session_id="fixture", mode="src",
@@ -408,6 +440,10 @@ class VerifierTests(unittest.IsolatedAsyncioTestCase):
             page = client.get("/api/sessions/fixture/vulnerabilities").json()
         self.assertEqual(state["vulns"]["items"][0]["verification"]["rule_quote"], RULE)
         self.assertEqual(page["items"][0]["verification"]["rule_quote"], RULE)
+        self.assertEqual(state["vulns"]["items"][0]["hypothesis_ref"], primary)
+        self.assertEqual(state["vulns"]["items"][0]["hypothesis_refs"], [primary, related])
+        self.assertEqual(page["items"][0]["hypothesis_ref"], primary)
+        self.assertEqual(page["items"][0]["hypothesis_refs"], [primary, related])
 
     def test_fabricated_evidence_or_rule_cannot_confirm(self) -> None:
         raw = {"verdict": "confirmed", "harm": "claimed", "rule_quote": RULE,

@@ -134,7 +134,7 @@ def business_digest(context: dict[str, Any], *, version: int | None = None) -> d
     if not context:
         return {}
     keys = ("coverage", "ready_for_testing", "target", "observed_pages", "observed_endpoints",
-            "recorded_transactions", "har_transactions")
+            "recorded_transactions", "har_transactions", "surface_assessment")
     out = {key: context[key] for key in keys if key in context}
     out["record_id"] = "business-context"
     if version is not None:

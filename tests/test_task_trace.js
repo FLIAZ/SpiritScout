@@ -114,6 +114,14 @@ assert.match(api.summaryOf(first),/尚不能认定存在越权/);
 assert.equal(api.commentaryText('{"progress":"尚未完成'),"","不展示半截结构化决策");
 assert.equal(api.commentaryText('{"progress":"已确认入口，准备验证访问条件。","analysis":"内部决策","actions":[{"command":"pwd"}]}'),"已确认入口，准备验证访问条件。" );
 assert.equal(api.commentaryText('{"actions":[{"command":"pwd"}]}'),"","没有公开说明时不拿执行协议凑进度");
+assert.equal(api.commentaryText('\",\"/_nuxt/builds/latest.json\"],\"rationale\":\"内部路径决策\"}'),"",
+  "旧审计中缺少 JSON 首帧的中段不能显示为正文");
+assert.equal(api.commentaryText('\":\"asset-one\",\"version\":1,\"offset\":0,\"limit\":12000}},{\"name\"'),"",
+  "旧工具协议残片不能显示为正文");
+explain("model.started",{task_id:"n",route_id:"r",call_id:"machine",cache_scope:"payload_planner"});
+explain("agent.delta",{task_id:"n",route_id:"r",call_id:"machine",kind:"text",text:'{"payloads":[{"payload":"GET /private"}]}' });
+assert.equal(api.updatesOf(first).some(item=>item.text.includes('/private')),false,
+  "旧 JSON 决策调用按 cache_scope 整体隐藏");
 explain("agent.delta",{task_id:"n",route_id:"r",turn:3,kind:"text",text:'{"progress":"这一段需要重试"}'});
 assert.equal(api.updatesOf(first).length,3);
 explain("agent.delta",{task_id:"n",route_id:"r",turn:3,kind:"reset"});

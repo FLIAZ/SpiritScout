@@ -86,10 +86,15 @@ def submit_candidate(blackboard, workspace: Path, arguments: dict[str, Any]) -> 
         vuln_type=kind[:100], target=row["value"], endpoint=endpoint,
         severity=Severity(arguments.get("severity", row.get("severity", "info"))),
         confidence=0.5, found_by="scanner", vulnerability_ids=evidence.get("vulnerability_ids", []),
+        hypothesis_ref=str(row.get("hypothesis_ref") or "")[:200],
+        hypothesis_refs=([str(row.get("hypothesis_ref"))[:200]]
+                         if row.get("hypothesis_ref") else []),
         scanner_evidence=[{"finding_id": finding_id, "scanner": row.get("scanner"),
-            "template_id": row.get("template_id"), "module": row.get("module"), **evidence}],
+            "template_id": row.get("template_id"), "module": row.get("module"),
+            "hypothesis_ref": str(row.get("hypothesis_ref") or "")[:200], **evidence}],
         evidence=[{"kind": "scanner_candidate", "finding_id": finding_id, "reason": reason[:4000],
                    "evidence_refs": [f"recon_clue:{finding_id}"],
+                   "hypothesis_ref": str(row.get("hypothesis_ref") or "")[:200],
                    "invocation_id": row.get("invocation_id", ""), "files": evidence.get("files", {})}])
     # PoC 原文通过文件引用完整交付，不将大文件灌入每次规划上下文。
     existing = blackboard.find_by_dedup_key(BlackboardLayer.VULN, candidate.dedup_key())

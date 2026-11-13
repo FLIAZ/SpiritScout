@@ -18,6 +18,7 @@ SCHEMA = {'type': 'function', 'function': {
         'action': {'type': 'string', 'enum': ['status', 'dispatch', 'stop']},
         'revision': {'type': 'integer'}, 'reason': {'type': 'string'},
         'target': {'type': 'string'}, 'goal': {'type': 'string'},
+        'hypothesis_ref': {'type': 'string', 'description': '定向验证所依据的当前会话漏洞假设引用；Nuclei 必填'},
         'tools': {'type': 'array', 'items': {'type': 'string', 'enum': list(TOOLS)}},
         'constraints': {'type': 'string', 'description': '授权边界、已有证据、不要重复的测试、预期可区分结果'},
     }, 'required': ['action']}}}
@@ -26,16 +27,20 @@ GUIDANCE = (
     '扫描者「探微」由你管理，待命不代表获准扫描。结合用户原话和最新规则判断是否允许扫描；'
     '禁止扫描、仅被动分析或范围不明时不要派遣。需要扫描时在既有决策 JSON 中增加 '
     'scan_control:{"action":"dispatch","revision":scanner.revision,"reason":"依据用户规则的派遣理由",'
-    '"target":"本次授权目标","goal":"具体信息收集目标","tools":["nuclei_scan"],'
+    '"target":"本次授权目标","goal":"具体信息收集目标","hypothesis_ref":"world_state 中的活动假设引用",'
+    '"tools":["nuclei_scan"],'
     '"constraints":"目标边界、禁止动作等限制"}，按需选择 nuclei_scan/metasploit_scan/http_probe。'
     '派遣后与其他任务并行，不要重复创建扫描 DAG 节点。工具部署状态见 scanner，未预检不等于可用。'
+    'nuclei_scan 不是固定阶段：只有已有技术栈、CVE 情报或具体漏洞假设，且定向模板能验证该假设时才派遣；'
+    '资产发现完成本身不能自动触发 Nuclei，也不要用全模板扫描代替分析。'
     'scan_control 的 action 还支持 pause/resume/stop/forbid/allow；每次必须携带最新 revision 和 reason。'
     'pause 撤回在途扫描并保留证据，resume 让扫描者基于原任务与现有证据重新判断，不自动重放工具；'
     'stop 撤回本次派遣；forbid 禁止扫描工具，直到依据用户后续明确许可执行 allow，之后仍须重新 dispatch。'
     '不允许扫描时应明确 forbid，不能仅在回复里说停止。新用户消息会先挂起扫描，必须重新判断：'
     '普通提问且原许可仍有效可 resume，限制变化用 dispatch 更新任务，明确禁止用 forbid。'
     '工具操作仍沿用现有审批，不因派遣而扩围或豁免危险动作审批。'
-    '遗漏 scan_control 不会自动启动或恢复扫描；控制回执以 scanner.last_result 为准，不声称未执行的操作成功。'
+    '除显式通配符 SRC 会话首轮自动派发只读 asset_discover 外，遗漏 scan_control 不会自动启动或恢复扫描；'
+    '控制回执以 scanner.last_result 为准，不声称未执行的操作成功。'
 )
 
 
@@ -107,6 +112,7 @@ class ScannerController:
         async with self.lock:
             action = command.get('action') if isinstance(command, dict) else None
             error = ''
+            normalized_hypothesis_ref = ''
             if not isinstance(command, dict) or action not in {'dispatch', 'pause', 'resume', 'stop', 'forbid', 'allow'}:
                 error = '无效扫描控制指令'
             elif type(command.get('revision')) is not int or command['revision'] != self.revision:
@@ -125,6 +131,21 @@ class ScannerController:
                         or any(tool not in TOOLS for tool in command['tools'])
                         or not isinstance(command.get('constraints', ''), str)):
                     error = '派遣需提供 target、goal、合法 tools 及文字 constraints'
+                elif 'nuclei_scan' in command['tools']:
+                    from spiritscout.blackboard.hypotheses import resolve
+
+                    hypothesis = resolve(self.infra.blackboard, command.get('hypothesis_ref', ''))
+                    if hypothesis is None:
+                        error = 'Nuclei 派遣必须引用当前会话已有漏洞假设'
+                    else:
+                        record_id, data, version = hypothesis
+                        normalized_hypothesis_ref = f'topology:{record_id}@{version}'
+                        basis = data.get('technical_basis') if isinstance(
+                            data.get('technical_basis'), dict) else {}
+                        if data.get('state') not in {'open', 'investigating', 'blocked'}:
+                            error = 'Nuclei 只能验证仍活动的漏洞假设'
+                        elif not any(basis.get(key) for key in ('cve_ids', 'template_ids', 'tags')):
+                            error = 'Nuclei 假设缺少 CVE、模板 ID 或 tags 技术依据'
             if error:
                 result = {'ok': False, 'action': action, 'error': error, 'revision': self.revision}
             else:
@@ -132,7 +153,10 @@ class ScannerController:
                 self.revision += 1
                 if action == 'dispatch':
                     self.assignment = {k: copy.deepcopy(command.get(k, ''))
-                                       for k in ('target', 'goal', 'tools', 'constraints', 'reason')}
+                                       for k in ('target', 'goal', 'hypothesis_ref', 'tools',
+                                                 'constraints', 'reason')}
+                    if normalized_hypothesis_ref:
+                        self.assignment['hypothesis_ref'] = normalized_hypothesis_ref
                 if action == 'forbid':
                     self.forbidden = True
                 elif action == 'allow':
@@ -170,6 +194,25 @@ class ScannerController:
                 error='主控已撤回在途扫描，已产生的证据保留')
         finally:
             self.calls.discard(task)
+
+    def worker_finished(self, worker_id: str, status: str, summary: str) -> None:
+        """工作器自然结束时同步控制面；撤回路径已先清除 permitted，不覆盖其状态。"""
+        if (worker_id != self.worker_id or not self.permitted
+                or self.status != 'running'):
+            return
+        self.permitted = False
+        allowed = {'done', 'partial', 'incomplete', 'failed', 'cancelled', 'skipped'}
+        self.status = status if status in allowed else 'done'
+        self.last_result = {
+            'ok': status not in {'failed', 'cancelled'},
+            'action': 'worker_complete',
+            'revision': self.revision,
+            'status': self.status,
+            'summary': str(summary or ''),
+            'worker_id': worker_id,
+        }
+        self._publish()
+        self.infra.audit.log('scanner.control', 'scanner', dict(self.last_result))
 
     async def finish_discovery(self):
         async with self.lock:

@@ -61,6 +61,38 @@ class KbGuidanceTests(unittest.TestCase):
         self.assertNotIn("kb_guidance", plan.meta)
 
 
+class WildcardReconTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _task() -> Task:
+        return Task(task_id="wildcard", task_type="recon", target="*.example.test",
+                    agent_type=AgentType.RECON)
+
+    async def test_wildcard_routes_only_to_asset_discovery_handoff(self) -> None:
+        agent = object.__new__(ReconAgent)
+
+        routes = agent.route_templates(self._task())
+
+        self.assertEqual([step["action"] for step in routes[0].steps],
+                         ["asset_discovery_required"])
+
+    async def test_wildcard_defensive_steps_never_call_network_tools(self) -> None:
+        agent = object.__new__(ReconAgent)
+        agent.agent_id = "recon-test"
+        agent.agent_type = AgentType.RECON
+        agent.ctx = SimpleNamespace(tools=SimpleNamespace(call=AsyncMock()), builtin_ctx={})
+        agent._write_clue = Mock(return_value="recon_clue:test")
+        task = self._task()
+
+        results = [
+            await agent._step_homepage(task, {"url": "https://*.example.test"}),
+            await agent._step_dns(task, {}),
+            await agent._step_port_probe(task, {"port": 443}),
+        ]
+
+        self.assertTrue(all(result.ok and result.final_note for result in results))
+        agent.ctx.tools.call.assert_not_awaited()
+
+
 class TaskIntentTests(unittest.IsolatedAsyncioTestCase):
     """灵枢任务包的任务意图随每次决策下发到执行者的 LLM 上下文。"""
 

@@ -120,6 +120,16 @@ class RingLedger:
         records = self.steerings_for(agent_key, task_id=task_id)
         return records[-1] if records else None
 
+    def active_steering(self, agent_key: str, *, task_id: str, route_id: str) -> dict | None:
+        """返回本路线最新未完成指令；旧指令不与新指令同时占据模型注意力。"""
+        key = f"{task_id}|{route_id}"
+        records = self.steerings_for(agent_key, task_id=task_id)
+        if not records:
+            return None
+        latest = records[-1]
+        feedback = (latest.get("feedback") or {}).get(key) or {}
+        return None if feedback.get("status") in {"completed", "blocked"} else latest
+
     def steering_feedback(self, agent_key: str, *, task_id: str, route_id: str,
                           instruction_id: str, status: str, detail: str = "") -> bool:
         """记录投递事实或模型自报结果，不把接收指令冒充已执行。"""

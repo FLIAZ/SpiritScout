@@ -22,6 +22,11 @@ from spiritscout.ctf.platform import (
     PlatformAdapter,
     parse_platform_profile,
 )
+from spiritscout.ctf.platform_discovery import (
+    declared_profile_is_supported,
+    discover_platform_documents,
+    discovered_profile_is_supported,
+)
 
 PROFILE: dict[str, Any] = {
     "name": "tsecbench",
@@ -455,6 +460,102 @@ class PlatformAdapterTests(unittest.IsolatedAsyncioTestCase):
         got = await adapter2.ensure_instance({"id": "c1", "url": "http://x"})
         self.assertEqual(got["url"], "http://x")
         self.assertEqual(fake2.requests, [])
+
+
+class PlatformDiscoveryTests(unittest.IsolatedAsyncioTestCase):
+    def test_declared_profile_rejects_hallucinated_url_only_contract(self) -> None:
+        profile = {
+            "base_url": "https://arena.test",
+            "ops": {
+                "list": {"method": "GET", "path": "/api/challenges"},
+                "submit": {"method": "POST", "path": "/api/submit",
+                           "body": {"answer": "{flag}"}},
+            },
+            "challenge_fields": {"id": "id"},
+        }
+
+        self.assertFalse(declared_profile_is_supported(
+            profile, "智能体赛事入口 https://arena.test，请自主完成"))
+        self.assertTrue(declared_profile_is_supported(profile, (
+            "平台 https://arena.test：GET /api/challenges，题号字段 id；"
+            "POST /api/submit，body 使用 answer 提交答案。")))
+        profile["ops"]["start"] = {
+            "method": "POST", "path": "/api/challenges/{challenge}/start"}
+        self.assertFalse(declared_profile_is_supported(profile, (
+            "平台 https://arena.test：GET /api/challenges，题号字段 id；"
+            "POST /api/submit，body 使用 answer 提交答案。")))
+
+    async def test_discovery_reads_only_bounded_same_origin_documents(self) -> None:
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.url.path == "/contest":
+                return httpx.Response(200, text=(
+                    '<html><script src="/assets/app.js"></script>'
+                    '<script src="https://outside.test/evil.js"></script></html>'))
+            if request.url.path == "/openapi.json":
+                return httpx.Response(200, json={
+                    "paths": {
+                        "/api/challenges": {"get": {}},
+                        "/api/challenges/{id}/submit": {"post": {}},
+                    }})
+            if request.url.path == "/assets/app.js":
+                return httpx.Response(200, text='fetch("/api/challenges")')
+            return httpx.Response(404)
+
+        real = httpx.AsyncClient
+
+        def factory(**kwargs: Any) -> httpx.AsyncClient:
+            return real(transport=httpx.MockTransport(handler), **kwargs)
+
+        with mock.patch.object(httpx, "AsyncClient", side_effect=factory):
+            documents = await discover_platform_documents(
+                ["https://arena.test/contest"])
+
+        urls = {item["url"] for item in documents}
+        self.assertIn("https://arena.test/contest", urls)
+        self.assertIn("https://arena.test/openapi.json", urls)
+        self.assertIn("https://arena.test/assets/app.js", urls)
+        self.assertNotIn("https://outside.test/evil.js", urls)
+        self.assertLessEqual(len(requests), 24)
+        self.assertTrue(all(request.method == "GET" for request in requests))
+
+    def test_discovered_profile_requires_verifiable_list_and_submit_evidence(self) -> None:
+        excerpt = '"/api/challenges/{id}/submit":{"post":{"answer":{}}}'
+        documents = [{
+            "url": "https://arena.test/openapi.json", "status": 200,
+            "content_type": "application/json",
+            "text": '{"paths":{"/api/challenges":{"get":{}},'
+                    + excerpt + "}}",
+        }]
+        profile = {
+            "name": "arena", "base_url": "https://arena.test",
+            "ops": {
+                "list": {"method": "GET", "path": "/api/challenges"},
+                "submit": {"method": "POST",
+                           "path": "/api/challenges/{challenge}/submit",
+                           "body": {"answer": "{flag}"}},
+            },
+            "challenge_fields": {"id": "id"},
+            "evidence": {
+                "list": {"source_url": "https://arena.test/openapi.json",
+                         "excerpt": '"/api/challenges":{"get":{}}'},
+                "submit": {"source_url": "https://arena.test/openapi.json",
+                           "excerpt": excerpt},
+            },
+        }
+
+        self.assertTrue(discovered_profile_is_supported(profile, documents))
+        profile["challenge_fields"]["title"] = "guessed_title"
+        self.assertFalse(discovered_profile_is_supported(profile, documents))
+        profile["challenge_fields"].pop("title")
+        profile["ops"]["start"] = {
+            "method": "POST", "path": "/api/challenges/{challenge}/start"}
+        self.assertFalse(discovered_profile_is_supported(profile, documents))
+        profile["ops"].pop("start")
+        profile["ops"]["submit"]["url"] = "https://outside.test/submit"
+        self.assertFalse(discovered_profile_is_supported(profile, documents))
 
 
 if __name__ == "__main__":

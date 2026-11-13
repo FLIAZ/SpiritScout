@@ -34,6 +34,45 @@ _SECRET_VALUE = re.compile(
     r"\s*[=:：]?\s*)([^\s,，;；]{2,})")
 
 
+def _observed_port_evidence(target: str, blackboard) -> tuple[str, dict[int, list[str]]]:
+    """汇总目标自身和黑板中同主机的端口实证，不引入常用端口猜测。"""
+    parsed_target = urlparse(target if "://" in target else f"//{target}")
+    host = parsed_target.hostname or target
+    evidence: dict[int, list[str]] = {}
+
+    def add(port: Any, basis: str) -> None:
+        if type(port) is int and 1 <= port <= 65535:
+            evidence.setdefault(port, []).append(basis[:240])
+
+    if parsed_target.port:
+        add(parsed_target.port, f"任务目标显式指定端口：{target}")
+    elif parsed_target.scheme in {"http", "https"}:
+        port = 443 if parsed_target.scheme == "https" else 80
+        add(port, f"任务目标明确使用 {parsed_target.scheme.upper()} 协议：{target}")
+
+    for rec in blackboard.query(BlackboardLayer.ASSET, limit=500):
+        data = rec.get("data") or {}
+        value = str(data.get("value") or "")
+        asset_host = ""
+        asset_port = data.get("port")
+        if "://" in value:
+            parsed = urlparse(value)
+            asset_host = parsed.hostname or ""
+            asset_port = parsed.port or asset_port
+            if asset_port is None and parsed.scheme in {"http", "https"}:
+                asset_port = 443 if parsed.scheme == "https" else 80
+        elif data.get("asset_type") == "service" and ":" in value:
+            asset_host, raw_port = value.rsplit(":", 1)
+            try:
+                asset_port = int(raw_port)
+            except ValueError:
+                asset_port = None
+        if asset_host.rstrip(".").lower() == host.rstrip(".").lower():
+            source = str(data.get("asset_type") or "asset")
+            add(asset_port, f"黑板已有 {source} 观察：{value}")
+    return host, {port: list(dict.fromkeys(reasons)) for port, reasons in evidence.items()}
+
+
 class PortScanAgent(SubAgent):
     """听风（TA0007）：授权主机上的 TCP 存活面与服务指纹测绘。"""
 
@@ -41,25 +80,98 @@ class PortScanAgent(SubAgent):
     route_namespace = "port_scan"
 
     def route_templates(self, task: Task) -> list[RoutePlan]:
-        host = urlparse(task.target).hostname or task.target
-        return [RoutePlan(
-            name="tcp_service_sweep",
-            strategy="交付可核验结果：授权主机存活的 TCP 服务清单"
-                     "（开放端口 + 服务横幅 / HTTP 指纹证据）",
-            steps=[{"action": "tcp_sweep", "host": host},
+        """同步兜底仅使用目标自身显式协议/端口，不展开固定常用端口表。"""
+        host, evidence = self._observed_port_evidence(task)
+        return [self._route(host, evidence)] if evidence else [self._no_scan_route(host)]
+
+    async def plan_routes(self, task: Task) -> list[RoutePlan]:
+        """先读取现场，再让模型裁定有限端口；模型失败时保留可证明的显式端口。"""
+        host, observed = self._observed_port_evidence(task)
+        context = {
+            "host": host,
+            "observed_port_evidence": [
+                {"port": port, "basis": basis} for port, basis in observed.items()
+            ],
+            "task_target": task.target,
+            "task_goal": task.payload.get("mission") or task.payload.get("node_title") or "",
+            "investigation_contract": task.payload.get("investigation_contract") or {},
+            "rule": (
+                "只选择能由当前任务目标、显式 URL/服务、技术栈或接口证据解释的端口。"
+                "不要补常用端口清单，不要因为某端口常见就选择它。没有充分依据时 ports 返回空数组。"
+                "返回 JSON：{\"ports\":[{\"port\":443,\"basis\":[\"具体现场依据\"]}],"
+                "\"reason\":\"本轮选择或不扫描的原因\",\"stop_condition\":\"何时停止扩展\"}。"
+            ),
+        }
+        decision = await self._llm_chat_json(
+            "port_evidence_planner", context, max_user_chars=10000,
+            reasoning_effort=self.task_effort(task), task=task,
+        )
+        selected = dict(observed)
+        if isinstance(decision, dict):
+            selected.update(self._validated_model_ports(decision.get("ports")))
+        if not selected:
+            reason = str((decision or {}).get("reason") or
+                         "当前现场没有显式端口、已观测服务或可核验技术线索")
+            return [self._no_scan_route(host, reason)]
+        return [self._route(host, selected,
+                            str((decision or {}).get("stop_condition") or "完成所选端口核验后停止"))]
+
+    @staticmethod
+    def _validated_model_ports(raw: Any) -> dict[int, list[str]]:
+        selected: dict[int, list[str]] = {}
+        if not isinstance(raw, list):
+            return selected
+        for item in raw[:64]:
+            if not isinstance(item, dict) or type(item.get("port")) is not int:
+                continue
+            port = item["port"]
+            basis = item.get("basis")
+            reasons = ([str(value).strip()[:240] for value in basis
+                        if isinstance(value, str) and value.strip()]
+                       if isinstance(basis, list) else [])
+            if 1 <= port <= 65535 and reasons:
+                selected[port] = reasons[:4]
+        return selected
+
+    def _observed_port_evidence(self, task: Task) -> tuple[str, dict[int, list[str]]]:
+        return _observed_port_evidence(task.target, self.ctx.blackboard)
+
+    @staticmethod
+    def _route(host: str, evidence: dict[int, list[str]],
+               stop_condition: str = "完成所选端口核验后停止") -> RoutePlan:
+        ports = sorted(evidence)
+        return RoutePlan(
+            name="evidence_driven_tcp_map",
+            strategy=(f"仅核验有现场依据的 {len(ports)} 个 TCP 端口；"
+                      f"停止条件：{stop_condition}"),
+            steps=[{"action": "tcp_sweep", "host": host, "ports": ports,
+                    "basis": {str(port): evidence[port] for port in ports}},
                    {"action": "fingerprint_services", "host": host}],
-        )]
+        )
+
+    @staticmethod
+    def _no_scan_route(host: str, reason: str = "当前现场没有可解释的端口假设") -> RoutePlan:
+        return RoutePlan(
+            name="port_hypothesis_assessment",
+            strategy="先判断端口探测是否有现场依据；无依据时不发送固定清单探测",
+            steps=[{"action": "no_port_hypothesis", "host": host, "reason": reason}],
+        )
 
     async def execute_step(self, task, route, plan, step) -> StepResult:
         handler = {"tcp_sweep": self._step_tcp_sweep,
-                   "fingerprint_services": self._step_fingerprint}.get(step["action"])
+                   "fingerprint_services": self._step_fingerprint,
+                   "no_port_hypothesis": self._step_no_hypothesis}.get(step["action"])
         if handler is None:
             return StepResult(ok=False, note=f"未知步骤动作: {step['action']}")
         return await handler(task, step)
 
     async def _step_tcp_sweep(self, task: Task, step: dict) -> StepResult:
+        ports = [port for port in step.get("ports", [])
+                 if type(port) is int and 1 <= port <= 65535][:64]
+        if not ports:
+            return StepResult(ok=True, note="未形成有效端口假设，本轮未发送 TCP 探测")
         res = await self.ctx.tools.call(
-            "tcp_scan", {"host": step["host"]}, **self.ctx.builtin_ctx)
+            "tcp_scan", {"host": step["host"], "ports": ports}, **self.ctx.builtin_ctx)
         if not res.ok:
             return StepResult(ok=False, note=f"端口测绘失败: {res.error}")
         parsed = res.parsed
@@ -85,6 +197,14 @@ class PortScanAgent(SubAgent):
                   f"/{parsed.get('scanned', 0)}（{', '.join(f['value'] for f in findings[:6])}"
                   f"{'…' if len(findings) > 6 else ''}）"))
 
+    async def _step_no_hypothesis(self, task: Task, step: dict) -> StepResult:
+        reason = str(step.get("reason") or "当前现场没有可解释的端口假设")
+        self._write_clue(task, "port_scan_gap", reason, 0.7)
+        return StepResult(
+            ok=True, value=0.05, final_note=True,
+            note=f"未执行端口扫描：{reason}；等待显式 URL、服务、技术栈或接口证据后再定向核验。",
+        )
+
     async def _step_fingerprint(self, task: Task, step: dict) -> StepResult:
         services: list[tuple[str, int, str]] = []
         for rec in self.ctx.blackboard.query(BlackboardLayer.ASSET, limit=300):
@@ -98,6 +218,8 @@ class PortScanAgent(SubAgent):
             try:
                 port = int(port)
             except ValueError:
+                continue
+            if host.rstrip(".").lower() != str(step["host"]).rstrip(".").lower():
                 continue
             services.append((host, port,
                              str((data.get("attrs") or {}).get("banner", ""))))
@@ -327,8 +449,22 @@ class PostExploitAgent(SubAgent):
 
     async def _step_lateral(self, task: Task, step: dict) -> StepResult:
         host = str(step["host"])
+        _, observed = _observed_port_evidence(host, self.ctx.blackboard)
+        basis = step.get("basis") if isinstance(step.get("basis"), dict) else {}
+        explicit = PortScanAgent._validated_model_ports([
+            {"port": port, "basis": basis.get(str(port), [])}
+            for port in step.get("ports", []) if type(port) is int
+        ])
+        observed.update(explicit)
+        ports = sorted(observed)
+        if not ports:
+            return StepResult(
+                ok=True, value=0.05, final_note=True,
+                note=(f"{host} 当前没有显式端口或已观测服务依据；"
+                      "本轮未发送横向端口扫描，等待现场服务线索后再定向核验。"),
+            )
         res = await self.ctx.tools.call(
-            "tcp_scan", {"host": host}, **self.ctx.builtin_ctx)
+            "tcp_scan", {"host": host, "ports": ports}, **self.ctx.builtin_ctx)
         if not res.ok:
             return StepResult(ok=False, note=f"{host} 测绘失败: {res.error}")
         open_ports = res.parsed.get("open", [])

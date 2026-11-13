@@ -11,6 +11,30 @@ from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
 
 
 class AgentProgressTests(unittest.TestCase):
+    def test_internal_json_is_hidden_when_later_chunks_start_inside_the_object(self):
+        from spiritscout.core.audit import NullAuditLogger
+        from spiritscout.gateway.progress import PublicProgressEmitter
+
+        raw = json.dumps({
+            'paths': ['/_nuxt/builds/latest.json', '/openapi.json'],
+            'rationale': '只供内部路径决策，不进入用户正文',
+        }, ensure_ascii=False)
+        for split in range(1, len(raw)):
+            audit = NullAuditLogger()
+            emitter = PublicProgressEmitter(audit, 'recon', task_id='t')
+            for chunk in (raw[:split], raw[split:]):
+                emitter('text', chunk)
+                emitter.flush()
+            self.assertEqual([r for r in audit.records if r['type'] == 'agent.delta'], [],
+                             f'分块位置 {split}')
+
+        for fragment in (
+            '\",\"/_nuxt/builds/latest.json\",\"/openapi.json\"],\"rationale\":\"内部决策\"}',
+            '\":\"asset-one\",\"version\":1,\"offset\":0,\"limit\":12000}},{\"name\"',
+            'intent\":\"核对服务\",\"attempt\":\"读取入口\",\"state\":\"running\"}}',
+        ):
+            self.assertEqual(parse_public_progress(fragment), {'text': ''})
+
     def test_inline_discovery_json_is_hidden_across_each_possible_stream_boundary(self):
         from spiritscout.core.audit import NullAuditLogger
         from spiritscout.gateway.progress import PublicProgressEmitter

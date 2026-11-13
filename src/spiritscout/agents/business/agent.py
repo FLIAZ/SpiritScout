@@ -40,13 +40,24 @@ class BusinessContextAgent(SubAgent):
     agent_type = AgentType.BUSINESS_CONTEXT
     route_namespace = "business_context"
     health_prune_enabled = False
-    _TOOL_RESULT_CAP = 6000
+    _TOOL_RESULT_CAP = 3200
     _TOOL_TIMEOUT = 180
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # 每个任务的走访状态：消息历史 / 是否收尾 / 后端记账的导航页
         self._explore: dict[str, dict[str, Any]] = {}
+
+    def _world_state(self) -> dict[str, Any]:
+        """业务走访只自动接收稳定授权/用户/项目事实；调查面按需从黑板读取。"""
+        from spiritscout.gateway.world_state import snapshot
+
+        guard = getattr(getattr(self.ctx, "policy", None), "guard", None)
+        world = snapshot(
+            guard=guard, blackboard=getattr(self.ctx, "blackboard", None), references=False)
+        for key in ("intelligence_summary", "investigation_frontier", "asset_intelligence"):
+            world.pop(key, None)
+        return world
 
     # ------------------------------------------------------------ 路由
 
@@ -69,6 +80,16 @@ class BusinessContextAgent(SubAgent):
     def _tool_schemas(self, *, deferred: bool = False) -> list[dict[str, Any]]:
         """模型可用工具清单：record_endpoint + http_probe + 会话装配的浏览器 MCP。"""
         schemas: list[dict[str, Any]] = [
+            {"type": "function", "function": {
+                "name": "steering_feedback",
+                "description": (
+                    "回报当前灵枢任务指令：accepted 先说明将如何调整；completed 必须附已完成证据；"
+                    "blocked 说明无法执行的具体原因。收到新指令后先调用本工具，再继续或收口。"),
+                "parameters": {"type": "object", "properties": {
+                    "instruction_id": {"type": "string"},
+                    "status": {"type": "string", "enum": ["accepted", "completed", "blocked"]},
+                    "detail": {"type": "string"},
+                }, "required": ["instruction_id", "status", "detail"]}}},
             {"type": "function", "function": {
                 "name": "record_endpoint",
                 "description": (
@@ -124,7 +145,10 @@ class BusinessContextAgent(SubAgent):
                 "选项彼此不互斥、用户可能同时选多项时设 true（如「接下来"
                 "优先看哪些流程」「需要开通哪些账号/权限」），「允许/拒绝」"
                 "这类互斥决策保持 false（默认单选、点选即提交）；多选选项要"
-                "写成可独立成立的动作或结论。targets 只列当前授权范围外、"
+                "写成可独立成立的动作或结论。索取账号、密码、验证码、Token、"
+                "Cookie 或请求记录时，直接要求用户在当前提问卡输入；options"
+                "只给无法提供或改走其他方案等即时决策，不要让用户选择稍后再给。"
+                "targets 只列当前授权范围外、"
                 "希望纳入本次测试的新目标，形如 "
                 "[{\"target\": \"主机或 URL\", \"why\": \"一句话说明它是什么、"
                 "为什么需要\"}]，用户勾选后记为本次授权事实。"),
@@ -161,21 +185,24 @@ class BusinessContextAgent(SubAgent):
 
     def _explore_brief(self, task: Task) -> str:
         """走访任务书：目标、任务意图与交付契约（怎么走由模型决定）。"""
-        from spiritscout.gateway.world_state import environment, snapshot
+        from spiritscout.gateway.world_state import environment
 
-        guard = getattr(getattr(self.ctx, "policy", None), "guard", None)
         workspace = str(self.ctx.builtin_ctx.get("workspace_root") or "")
         artifacts = workspace.rstrip("/") + "/artifacts" if workspace else ""
         payload: dict[str, Any] = {
             "target": task.target,
-            "world_state": snapshot(guard=guard, blackboard=self.ctx.blackboard, env=environment(
-                workspace=workspace, artifacts=artifacts), references=(getattr(self.ctx, 'mode', None) == 'competition'
-                    and not getattr(getattr(self.ctx.gateway, 'config', None), 'lightweight_local', False))),
+            "world_state": {**self._world_state(), "environment": environment(
+                workspace=workspace, artifacts=artifacts)},
             "交付要求": (
                 "以真实用户视角走访该目标的业务流程。渲染后的页面、网络请求"
                 "（XHR/fetch）都是证据；把实际观测到的接口交易用 record_endpoint "
                 "登记（方法/URL/参数名/业务语义，不要参数值）。结论只写有证据"
-                "支撑的。证据收集完成后直接输出结论文本（不再调用工具），"
+                "支撑的。先判断页面是否真的存在值得深入的交易、角色权限或对象状态流："
+                "电商、账户中心、工单等交互型业务可继续走访；内容展示门户或只有公开"
+                "登录入口、当前又没有测试凭据时，只记录公开页面、表单和已发生请求，"
+                "把登录后流程列为缺口后立即收尾，不要反复尝试登录、注册或等待账号。"
+                "需要用户独有输入时至多提出当前必要问题；用户无法提供或选择未登录测试"
+                "后，不再重复询问。证据收集完成后直接输出结论文本（不再调用工具），"
                 "系统会据此归纳业务上下文。"),
         }
         intent = {"mission": str(task.payload.get("mission", ""))[:600],
@@ -223,8 +250,14 @@ class BusinessContextAgent(SubAgent):
             from spiritscout.blackboard.exchange import ensure_memory_contract
 
             ensure_memory_contract(st)
-        steering = (self.ctx.ring.steerings_for(self.agent_type.value, task_id=task.task_id)
-                    if self.ctx.ring is not None else [])
+        active = (self.ctx.ring.active_steering(
+            self.agent_type.value, task_id=task.task_id, route_id=route.route_id)
+            if self.ctx.ring is not None else None)
+        steering = [active] if active else []
+        if active:
+            self.ctx.ring.steering_feedback(
+                self.agent_type.value, task_id=task.task_id, route_id=route.route_id,
+                instruction_id=active["id"], status="delivered")
         append_instruction_events(st, steering, consumer_key=f"{task.task_id}|{route.route_id}")
         append_catalog(runtime_for(self.ctx), st, st["messages"])
         size = len(json.dumps(st["messages"], ensure_ascii=False))
@@ -271,6 +304,8 @@ class BusinessContextAgent(SubAgent):
             return StepResult(ok=False, note=f"走访决策不可用: {exc}")
 
         emitter.flush()
+        # 将本次请求末尾的短提醒固化进历史，使下一轮请求完整复用上一轮前缀；
+        # 下一轮的新提醒只追加在工具结果之后，不重写既有消息。
         st['messages'].append({'role': 'user', 'content': FORMAT_GUIDANCE, '_progress_reminder': True})
         # assistant 消息（含工具调用）回灌，保持多轮协议完整
         publish_progress(self.ctx.audit, self.agent_id, resp.content or "",
@@ -340,6 +375,9 @@ class BusinessContextAgent(SubAgent):
         try:
             if call.get("parse_error"):
                 ok, text = False, f"工具参数解析失败: {call['parse_error']}。请修正 JSON 后重新调用。"
+            elif missing := self._missing_tool_arguments(name, args):
+                ok, text = False, (f"工具参数无效：{name or '未知工具'} 缺少必填参数 "
+                                   f"{', '.join(missing)}。请按工具 schema 补齐后重新调用。")
             elif name in NAMES:
                 result = execute(self.ctx.blackboard, name, args, actor=self.agent_id,
                                  agent_type=self.agent_type, source=event_scope,
@@ -359,6 +397,15 @@ class BusinessContextAgent(SubAgent):
                 ok, text = True, json.dumps(result, ensure_ascii=False)
             elif name == "record_endpoint":
                 ok, text = await self._tool_record_endpoint(task, args)
+            elif name == "steering_feedback":
+                ring = self.ctx.ring
+                ok = bool(ring and ring.steering_feedback(
+                    self.agent_type.value, task_id=task.task_id,
+                    route_id=event_scope["route_id"],
+                    instruction_id=str(args.get("instruction_id") or ""),
+                    status=str(args.get("status") or ""),
+                    detail=str(args.get("detail") or "")))
+                text = "指令回执已记录" if ok else "指令回执无效：请核对当前 instruction_id、状态与任务归属"
             elif name == "ask_user":
                 ok, text = await self._tool_ask_user(task, args)
             else:
@@ -368,6 +415,16 @@ class BusinessContextAgent(SubAgent):
                         raise ValueError("MCP 工具不在当前角色目录，或 arguments 不是对象")
                     args = arguments
                     result_meta["tool"] = name
+                if name == "http_probe" and args.get("refresh") is True:
+                    refresh_key = json.dumps({
+                        key: value for key, value in args.items() if key != "refresh"
+                    }, ensure_ascii=False, sort_keys=True, default=str)
+                    refreshed = self._explore.setdefault(task.task_id, {}).setdefault(
+                        "refreshed_http_requests", set())
+                    if refresh_key in refreshed:
+                        args = {**args, "refresh": False}
+                    else:
+                        refreshed.add(refresh_key)
                 res = await self.ctx.tools.call(name, args, **self.ctx.builtin_ctx)
                 ok = res.ok
                 text = (f"工具执行失败: {res.failure_reason()}"
@@ -391,6 +448,21 @@ class BusinessContextAgent(SubAgent):
         self.ctx.audit.log("agent.tool_result", self.agent_id, {
             "id": call.get("id") or "", "name": name, **event_scope, "ok": ok, "note": result_meta.get("skill", {}).get("note") or text[:300], **result_meta})
         return text
+
+    def _missing_tool_arguments(self, name: str, args: dict[str, Any]) -> list[str]:
+        """按本轮实际下发的 schema 拦截缺参，避免把模型错误变成 Python TypeError。"""
+        for schema in self._tool_schemas(deferred=True):
+            function = schema.get("function") or {}
+            if function.get("name") != name:
+                continue
+            parameters = function.get("parameters") or {}
+            missing = []
+            for key in parameters.get("required") or []:
+                value = args.get(key)
+                if key not in args or value is None or isinstance(value, str) and not value.strip():
+                    missing.append(str(key))
+            return missing
+        return []
 
     async def _tool_ask_user(self, task: Task,
                              args: dict[str, Any]) -> tuple[bool, str]:
@@ -459,6 +531,7 @@ class BusinessContextAgent(SubAgent):
                 "status_code": int(status) if isinstance(status, (int, float)) else None,
                 "note": str(args.get("note") or "")[:300],
                 "source": "model_observed",
+                "sources": ["business_observation", "target_response"],
             },
             source_agent=self.agent_id,
         )
@@ -520,10 +593,19 @@ class BusinessContextAgent(SubAgent):
         model_context = await self._llm_chat_json("business_analyst", {
             "evidence": evidence,
             "constraints": (
-                "返回 JSON：{roles:[{name,evidence_refs}], objects:[{name,evidence_refs}], "
+                "返回 JSON：{surface_assessment:{type:transactional|account_workflow|content_portal|"
+                "login_wall|mixed|unknown,business_complexity:low|medium|high|unknown,"
+                "rationale:str,evidence_refs:[str]}, roles:[{name,evidence_refs}], "
+                "objects:[{name,evidence_refs}], "
                 "workflows:[{name,steps,evidence_refs}], trust_boundaries:[{description,"
                 "evidence_refs}], facts:[{statement,evidence_refs}], hypotheses:[{statement,"
-                "evidence_refs}], unknowns:[str]}。每条结论必须引用 evidence 中的 id；"
+                "evidence_refs}], blockers:[{type:authentication_required|sso_required|"
+                "captcha_required|credentials_required|user_interaction_required|"
+                "environment_unavailable|other,description:str,prerequisite:str,"
+                "user_resolvable:bool,alternative_capabilities:[script_and_api_extraction|"
+                "evidence_enrichment|service_mapping|business_boundary_modeling],"
+                "evidence_refs:[str]}], unknowns:[str]}。每条结论和 blocker 必须引用"
+                "evidence 中的 id；"
                 "证据不能支持时放到 unknowns，不得猜账号角色、权限或隐藏接口。"
             ),
         }, max_user_chars=12000, reasoning_effort=self.task_effort(task), task=task,
@@ -564,10 +646,33 @@ class BusinessContextAgent(SubAgent):
             updated_by=self.agent_id,
             dedup_key="business|context",
         )
+        blockers = list(context.get("blockers") or [])
+        assessment = context.get("surface_assessment")
+        assessment = assessment if isinstance(assessment, dict) else {}
+        if (assessment.get("type") == "login_wall"
+                and har_count + recorded == 0):
+            fallback_blocker = {
+                "type": "authentication_required",
+                "description": "当前公开入口止于登录墙，尚未形成登录后业务流或权限边界证据",
+                "prerequisite": "测试账号、一次性验证码协助，或登录后关键操作的请求记录",
+                "user_resolvable": True,
+                "alternative_capabilities": [
+                    "script_and_api_extraction", "evidence_enrichment", "service_mapping",
+                ],
+                "evidence_refs": assessment.get("evidence_refs", []),
+            }
+            if not any(blocker.get("type") in {
+                    "authentication_required", "sso_required", "captcha_required",
+                    "credentials_required", "user_interaction_required",
+            } for blocker in blockers):
+                blockers.append(fallback_blocker)
+        findings = ([{"type": "business_context", "coverage": coverage}]
+                    if context["ready_for_testing"] else [])
         return StepResult(
             ok=True,
             value=0.9 if context["ready_for_testing"] else 0.3,
-            findings=[{"type": "business_context", "coverage": coverage}],
+            findings=findings,
+            blockers=blockers,
             note=(f"业务上下文：{coverage}，页面 {len(pages)}，"
                   f"端点 {len(endpoint_records)}（含登记交易 {recorded}、"
                   f"请求记录 {har_count}）；缺口 {len(context['gaps'])} 项"),
@@ -577,6 +682,22 @@ class BusinessContextAgent(SubAgent):
     @staticmethod
     def _validated_context(raw: dict[str, Any], valid_ids: set[str]) -> dict[str, Any]:
         out: dict[str, Any] = {}
+        assessment = raw.get("surface_assessment")
+        if isinstance(assessment, dict):
+            refs = [ref for ref in assessment.get("evidence_refs", []) if ref in valid_ids]
+            surface_type = str(assessment.get("type") or "unknown")
+            complexity = str(assessment.get("business_complexity") or "unknown")
+            out["surface_assessment"] = {
+                "type": surface_type if surface_type in {
+                    "transactional", "account_workflow", "content_portal", "login_wall",
+                    "mixed", "unknown",
+                } else "unknown",
+                "business_complexity": complexity if complexity in {
+                    "low", "medium", "high", "unknown",
+                } else "unknown",
+                "rationale": re.sub(r"\s+", " ", str(assessment.get("rationale") or "")).strip()[:300],
+                "evidence_refs": refs,
+            }
         for key in ("roles", "objects", "workflows", "trust_boundaries", "facts", "hypotheses"):
             clean: list[dict[str, Any]] = []
             for item in raw.get(key) or []:
@@ -589,6 +710,37 @@ class BusinessContextAgent(SubAgent):
                 sanitized["evidence_refs"] = refs
                 clean.append(sanitized)
             out[key] = clean[:30]
+        blocker_types = {
+            "authentication_required", "sso_required", "captcha_required",
+            "credentials_required", "user_interaction_required",
+            "environment_unavailable", "other",
+        }
+        allowed_alternatives = {
+            "script_and_api_extraction", "evidence_enrichment", "service_mapping",
+            "business_boundary_modeling",
+        }
+        blockers: list[dict[str, Any]] = []
+        for item in raw.get("blockers") or []:
+            if not isinstance(item, dict):
+                continue
+            refs = [ref for ref in item.get("evidence_refs", []) if ref in valid_ids]
+            description = re.sub(r"\s+", " ", str(item.get("description") or "")).strip()[:500]
+            prerequisite = re.sub(r"\s+", " ", str(item.get("prerequisite") or "")).strip()[:500]
+            if not refs or not (description or prerequisite):
+                continue
+            blocker_type = str(item.get("type") or "other")
+            blockers.append({
+                "type": blocker_type if blocker_type in blocker_types else "other",
+                "description": description,
+                "prerequisite": prerequisite,
+                "user_resolvable": item.get("user_resolvable") is True,
+                "alternative_capabilities": list(dict.fromkeys(
+                    str(value) for value in item.get("alternative_capabilities", [])
+                    if str(value) in allowed_alternatives
+                ))[:8],
+                "evidence_refs": refs,
+            })
+        out["blockers"] = blockers[:12]
         out["unknowns"] = [
             re.sub(r"\s+", " ", str(item)).strip()[:300]
             for item in (raw.get("unknowns") or [])

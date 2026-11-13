@@ -9,10 +9,19 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
-from spiritscout.agents.scanner import close_scanner, start_scanner
+from spiritscout.agents.scanner import (
+    _discovery_outcome,
+    _discovery_summary,
+    _discovery_unknowns,
+    _run,
+    close_scanner,
+    start_scanner,
+)
 from spiritscout.blackboard import Blackboard
+from spiritscout.blackboard.hypotheses import resolve as resolve_hypothesis
+from spiritscout.blackboard.hypotheses import upsert
 from spiritscout.config.settings import ScannerConfig, SystemConfig
 from spiritscout.core.exceptions import PolicyViolation
 from spiritscout.core.models import (
@@ -154,6 +163,129 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
             audit=SimpleNamespace(log=lambda *a, **k: None), guard=self.guard,
             gateway=object(), agent_models={}, tools=self.registry(mode))
 
+    def hypothesis(self, *, tags=None, template_ids=None):
+        identity = ','.join(tags or template_ids or ['generic'])
+        return upsert(
+            self.bb, claim=f'目标可能受 {identity} 对应的组件漏洞影响',
+            subject='http://fixture.test', test_type='cve',
+            technical_basis={'tags': tags or [], 'template_ids': template_ids or []},
+            actor='master', agent_type=AgentType.MASTER,
+        )['hypothesis_ref']
+
+    def test_discovery_summary_does_not_hide_zero_subdomains_or_failed_sources(self):
+        result = {
+            "published": ["vulbox.test"],
+            "observations": {
+                "passive_subdomains": {"error": "HTTPStatusError"},
+                "http_endpoints": [
+                    {"url": "https://vulbox.test/", "ok": False,
+                     "error": "重定向次数超过上限 0"},
+                    {"url": "http://vulbox.test/", "ok": False,
+                     "error": "重定向次数超过上限 0"},
+                ],
+            },
+        }
+
+        summary = _discovery_summary("*.vulbox.test", result)
+
+        self.assertIn("只确认根域，未发现子域", summary)
+        self.assertIn("HTTP 基线存活 0/2", summary)
+        self.assertIn("被动子域来源失败", summary)
+        self.assertIn("尚未获得可验证的子域候选",
+                      _discovery_unknowns("*.vulbox.test", result))
+        self.assertEqual(_discovery_outcome("*.vulbox.test", result), "incomplete")
+
+    def test_discovery_outcome_marks_degraded_delivery_partial(self):
+        result = {
+            "published": ["fixture.test", "api.fixture.test"],
+            "observations": {
+                "passive_subdomains": {"error": "one provider failed"},
+                "http_endpoints": [{"url": "https://api.fixture.test/", "ok": True}],
+            },
+        }
+
+        self.assertEqual(_discovery_outcome("*.fixture.test", result), "partial")
+
+    def test_discovery_summary_exposes_batch_and_cache_reuse(self):
+        result = {
+            "published": ["fixture.test", "api.fixture.test"],
+            "observations": {
+                "http_endpoints": [{"url": "https://api.fixture.test/", "ok": True}],
+                "batch_execution": {
+                    "verification_batches": 2, "provider_cache_hits": 1,
+                    "tool_cache_hits": 2, "tool_shared_hits": 1,
+                },
+            },
+        }
+
+        summary = _discovery_summary("*.fixture.test", result)
+
+        self.assertIn("候选核验 2 批", summary)
+        self.assertIn("复用 4 次既有证据", summary)
+
+    def test_discovery_unknowns_include_provider_and_dns_gaps(self):
+        result = {
+            "published": ["fixture.test"],
+            "observations": {
+                "passive_subdomains": {"candidate_count": 2},
+                "fofa": {"status": "not_configured"},
+                "dns_candidates": [
+                    {"host": "fixture.test", "ok": True},
+                    {"host": "api.fixture.test", "ok": False},
+                ],
+            },
+        }
+
+        unknowns = _discovery_unknowns("*.fixture.test", result)
+
+        self.assertIn("FOFA 已启用但尚未配置凭据", unknowns)
+        self.assertIn("1 个候选未通过 DNS 核验", unknowns)
+
+    def test_discovery_outcome_marks_complete_delivery_done(self):
+        result = {
+            "published": ["fixture.test", "api.fixture.test"],
+            "observations": {
+                "passive_subdomains": {"candidate_count": 1},
+                "http_endpoints": [{"url": "https://api.fixture.test/", "ok": True}],
+            },
+        }
+
+        self.assertEqual(_discovery_outcome("*.fixture.test", result), "done")
+
+    async def test_readonly_discovery_publishes_progress_and_completes_controller(self):
+        infra = self.infra(RunMode.SRC)
+        events = []
+        infra.audit = SimpleNamespace(log=lambda kind, actor, detail: events.append((kind, actor, detail)))
+        control = SimpleNamespace(worker_id="", _publish=lambda: None, worker_finished=Mock())
+        discovery = {
+            "published": ["fixture.test", "api.fixture.test"],
+            "observations": {"passive_subdomains": {"candidate_count": 1},
+                             "http_endpoints": [{"url": "https://api.fixture.test/", "ok": True}]},
+        }
+        async def discover_with_progress(*args, on_progress=None, **kwargs):
+            await on_progress({"kind": "dns_verified", "value": "api.fixture.test",
+                               "ips": ["203.0.113.10"], "priority_score": 70})
+            await on_progress({"kind": "live_asset", "value": "api.fixture.test",
+                               "url": "https://api.fixture.test/",
+                               "status_code": 302, "priority_score": 85})
+            return discovery
+
+        with patch("spiritscout.agents.discovery.discover",
+                   AsyncMock(side_effect=discover_with_progress)):
+            await _run(infra, None, "*.fixture.test", mission="收集子域", standing_rules="",
+                       dialogue_history=[], delegation={"target": "*.fixture.test",
+                       "goal": "收集子域", "tools": ["asset_discover"], "constraints": ""},
+                       control=control)
+
+        progress = [detail["text"] for kind, _, detail in events if kind == "agent.progress"]
+        self.assertEqual(len(progress), 4)
+        self.assertIn("开始", progress[0])
+        self.assertIn("已核验资产 api.fixture.test", progress[1])
+        self.assertIn("https://api.fixture.test/（HTTP 302）", progress[2])
+        self.assertIn("发现 1 个子域", progress[3])
+        control.worker_finished.assert_called_once()
+        self.assertEqual(control.worker_finished.call_args.args[1], "done")
+
     async def test_specialist_dispatch_runs_script_in_parallel_and_keeps_request_prefix(self):
         from spiritscout.agents.scan_control import ScannerController
         from spiritscout.ctf.agents import CTFBaseAgent
@@ -262,17 +394,131 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_worker_runs_scan_and_publishes_shared_observation(self):
         infra = self.infra()
+        hypothesis_ref = self.hypothesis(tags=['tech'])
         decisions = [SimpleNamespace(content=json.dumps({"decision": "scan", "reason": "验证现场指纹",
             "arguments": {"targets": ["http://fixture.test"], "tags": ["tech"], "action": "analysis"}})),
             SimpleNamespace(content='{"decision":"finish","reason":"线索已交接"}')]
+        control = SimpleNamespace(worker_id='', permitted=True, forbidden=False,
+                                  _publish=lambda: None, worker_finished=Mock())
         with patch.object(NucleiScanner, "preflight", AsyncMock(return_value=ToolResult(tool="preflight", ok=True))), \
              patch("spiritscout.agents.scanner.chat_decision", AsyncMock(side_effect=decisions)), \
              patch("spiritscout.tools.scanner.sandbox_exec", side_effect=self.fake_scan):
-            await start_scanner(infra, SimpleNamespace(), "target", mission="测试", standing_rules="")
+            await _run(infra, SimpleNamespace(), "http://fixture.test", mission="测试",
+                       standing_rules="", dialogue_history=[], delegation={
+                           'target': 'http://fixture.test', 'goal': '验证组件漏洞',
+                           'hypothesis_ref': hypothesis_ref, 'tools': ['nuclei_scan'],
+                           'constraints': '仅使用 tech 标签', 'reason': '已有组件指纹',
+                       }, control=control)
         observations = self.bb.query(BlackboardLayer.RECON_CLUE,
                                       data_filter=("clue_type", "scanner_observation"))
         self.assertEqual(len(observations), 1)
         self.assertEqual(observations[0]["data"]["detail"]["result"]["findings"], 2)
+        self.assertEqual(resolve_hypothesis(self.bb, hypothesis_ref)[1]['state'], 'supported')
+        findings = self.bb.query(BlackboardLayer.RECON_CLUE,
+                                 data_filter=('clue_type', 'scanner_finding'))
+        self.assertTrue(findings)
+        self.assertTrue(all(row['data']['hypothesis_ref'].split('@')[0]
+                            == hypothesis_ref.split('@')[0] for row in findings))
+
+    async def test_nuclei_selection_must_match_hypothesis_basis(self):
+        infra = self.infra()
+        hypothesis_ref = self.hypothesis(tags=['tech'])
+        decisions = [SimpleNamespace(content=json.dumps({"decision": "scan", "reason": "错误泛扫",
+            "arguments": {"targets": ["http://fixture.test"], "tags": ["default-login"],
+                          "action": "analysis"}})),
+            SimpleNamespace(content='{"decision":"finish","reason":"无法执行定向实验"}')]
+        control = SimpleNamespace(worker_id='', permitted=True, forbidden=False,
+                                  _publish=lambda: None, worker_finished=Mock())
+        infra.tools.call = AsyncMock()
+        with patch.object(NucleiScanner, "preflight", AsyncMock(return_value=ToolResult(tool="preflight", ok=True))), \
+             patch("spiritscout.agents.scanner.chat_decision", AsyncMock(side_effect=decisions)):
+            await _run(infra, SimpleNamespace(), 'http://fixture.test', mission='测试',
+                       standing_rules='', dialogue_history=[], delegation={
+                           'target': 'http://fixture.test', 'goal': '验证组件漏洞',
+                           'hypothesis_ref': hypothesis_ref, 'tools': ['nuclei_scan'],
+                           'constraints': '仅使用 tech 标签', 'reason': '已有组件指纹',
+                       }, control=control)
+        infra.tools.call.assert_not_awaited()
+        self.assertEqual(resolve_hypothesis(self.bb, hypothesis_ref)[1]['state'], 'blocked')
+
+    async def test_nuclei_target_cannot_escape_master_assignment(self):
+        infra = self.infra()
+        hypothesis_ref = self.hypothesis(tags=['tech'])
+        decisions = [SimpleNamespace(content=json.dumps({"decision": "scan", "reason": "尝试偏离目标",
+            "arguments": {"targets": ["http://other.test"], "tags": ["tech"],
+                          "action": "analysis"}})),
+            SimpleNamespace(content='{"decision":"finish","reason":"无法执行定向实验"}')]
+        control = SimpleNamespace(worker_id='', permitted=True, forbidden=False,
+                                  _publish=lambda: None, worker_finished=Mock())
+        infra.tools.call = AsyncMock()
+        with patch.object(NucleiScanner, "preflight", AsyncMock(return_value=ToolResult(tool="preflight", ok=True))), \
+             patch("spiritscout.agents.scanner.chat_decision", AsyncMock(side_effect=decisions)):
+            await _run(infra, SimpleNamespace(), 'http://fixture.test', mission='测试',
+                       standing_rules='', dialogue_history=[], delegation={
+                           'target': 'http://fixture.test', 'goal': '验证组件漏洞',
+                           'hypothesis_ref': hypothesis_ref, 'tools': ['nuclei_scan'],
+                           'constraints': '仅测试派遣目标', 'reason': '已有组件指纹',
+                       }, control=control)
+        infra.tools.call.assert_not_awaited()
+        self.assertEqual(resolve_hypothesis(self.bb, hypothesis_ref)[1]['state'], 'blocked')
+
+    async def test_all_nuclei_findings_inherit_hypothesis_beyond_preview_limit(self):
+        infra = self.infra()
+        hypothesis_ref = self.hypothesis(tags=['tech'])
+        self.rows = [{
+            'template-id': f'fixture-{index}', 'host': 'http://fixture.test',
+            'info': {'severity': 'info'},
+        } for index in range(12)]
+        decisions = [SimpleNamespace(content=json.dumps({
+            'decision': 'scan', 'reason': '定向验证', 'arguments': {
+                'targets': ['http://fixture.test'], 'tags': ['tech'], 'action': 'analysis',
+            }})), SimpleNamespace(content='{"decision":"finish","reason":"实验结束"}')]
+        control = SimpleNamespace(worker_id='', permitted=True, forbidden=False,
+                                  _publish=lambda: None, worker_finished=Mock())
+        with patch.object(NucleiScanner, 'preflight', AsyncMock(
+                return_value=ToolResult(tool='preflight', ok=True))), \
+             patch('spiritscout.agents.scanner.chat_decision', AsyncMock(side_effect=decisions)), \
+             patch('spiritscout.tools.scanner.sandbox_exec', side_effect=self.fake_scan):
+            await _run(infra, SimpleNamespace(), 'http://fixture.test', mission='测试',
+                       standing_rules='', dialogue_history=[], delegation={
+                           'target': 'http://fixture.test', 'goal': '验证组件漏洞',
+                           'hypothesis_ref': hypothesis_ref, 'tools': ['nuclei_scan'],
+                           'constraints': '仅使用 tech 标签', 'reason': '已有组件指纹',
+                       }, control=control)
+        findings = self.bb.query(BlackboardLayer.RECON_CLUE,
+                                 data_filter=('clue_type', 'scanner_finding'), limit=100)
+        self.assertEqual(len(findings), 12)
+        self.assertTrue(all(row['data']['hypothesis_ref'].split('@')[0]
+                            == hypothesis_ref.split('@')[0] for row in findings))
+
+    async def test_nuclei_zero_hit_and_failure_update_hypothesis_state(self):
+        for result, expected in (
+            (ToolResult(tool='nuclei_scan', ok=True, parsed={'findings': 0},
+                        invocation_id='scan-zero'), 'exhausted'),
+            (ToolResult(tool='nuclei_scan', ok=False, error='scanner failed',
+                        invocation_id='scan-failed'), 'blocked'),
+        ):
+            with self.subTest(expected=expected):
+                hypothesis_ref = self.hypothesis(template_ids=[f'fixture-{expected}'])
+                decisions = [SimpleNamespace(content=json.dumps({
+                    'decision': 'scan', 'reason': '定向验证', 'arguments': {
+                        'targets': ['http://fixture.test'],
+                        'template_ids': [f'fixture-{expected}'], 'tags': [], 'action': 'analysis',
+                    }})), SimpleNamespace(content='{"decision":"finish","reason":"实验结束"}')]
+                infra = self.infra()
+                infra.tools.call = AsyncMock(return_value=result)
+                control = SimpleNamespace(worker_id='', permitted=True, forbidden=False,
+                                          _publish=lambda: None, worker_finished=Mock())
+                with patch.object(NucleiScanner, 'preflight', AsyncMock(
+                        return_value=ToolResult(tool='preflight', ok=True))), \
+                     patch('spiritscout.agents.scanner.chat_decision', AsyncMock(side_effect=decisions)):
+                    await _run(infra, SimpleNamespace(), 'http://fixture.test', mission='测试',
+                               standing_rules='', dialogue_history=[], delegation={
+                                   'target': 'http://fixture.test', 'goal': '验证组件漏洞',
+                                   'hypothesis_ref': hypothesis_ref, 'tools': ['nuclei_scan'],
+                                   'constraints': '仅使用指定模板', 'reason': '已有组件指纹',
+                               }, control=control)
+                self.assertEqual(resolve_hypothesis(self.bb, hypothesis_ref)[1]['state'], expected)
 
     async def test_real_sandbox_cli_fixture_and_blackboard_pipeline(self):
         from spiritscout.tools.sandbox import sandbox_available
@@ -320,9 +566,11 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
                     control = master_context.extra['scan_controller']
                     self.assertIsNone(control.task)
                     self.assertFalse(started.is_set())
+                    hypothesis_ref = self.hypothesis(tags=['tech'])
                     await control.apply({'action': 'dispatch', 'revision': control.revision,
                         'reason': '按用户授权核对环境', 'target': 'http://fixture.test',
-                        'goal': '核对环境', 'tools': ['nuclei_scan']}, actor='master')
+                        'goal': '核对环境', 'hypothesis_ref': hypothesis_ref,
+                        'tools': ['nuclei_scan']}, actor='master')
                     await asyncio.wait_for(started.wait(), 1)
                     return {"rounds_executed": 1}
                 def master(context):

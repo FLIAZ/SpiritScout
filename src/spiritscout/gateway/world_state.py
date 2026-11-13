@@ -24,6 +24,20 @@ _NEGATIVE_STATES = {
     "blocked", "cancelled", "failed", "false_positive", "inconclusive", "interrupted",
     "out_of_rules", "refuted", "rejected", "stopped", "timeout",
 }
+_FRONTIER_LIMIT = 8
+_TARGET_ORIGIN_MARKERS = {
+    "browser", "har", "page_network", "target_response", "traffic_capture",
+}
+_DERIVED_ORIGIN_MARKERS = {"js_static", "source_map", "model_observed"}
+_GENERATED_ORIGIN_MARKERS = {
+    "bruteforce", "dictionary", "fuzz", "guessed", "model_generated",
+    "model_generated_test", "scanner_generated", "wordlist",
+}
+_OBSERVED_API_SOURCES = {
+    "business_observation", "har", "page_network", "target_response", "traffic_capture",
+}
+_ASSET_STAGES = ("external_candidate", "in_scope", "dns_verified", "live_verified",
+                 "fingerprinted")
 
 
 def _ref(layer: BlackboardLayer, row: dict[str, Any]) -> dict[str, Any]:
@@ -96,6 +110,191 @@ def _failure_mode(data: dict[str, Any]) -> str:
     return ""
 
 
+def _expert_action_signals(blackboard: Any, asset_rows: list[dict[str, Any]],
+                           clue_rows: list[dict[str, Any]],
+                           vuln_rows: list[dict[str, Any]],
+                           task_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """把已记录事实压成规划信号；只描述证据成熟度，不替模型选择固定流程。"""
+    candidate_stages = Counter(
+        str(row["data"].get("stage") or "external_candidate")
+        for row in clue_rows if row["data"].get("clue_type") == "asset_candidate")
+    scripts = [row["data"] for row in asset_rows
+               if row["data"].get("asset_type") == "script"]
+    endpoints = [row["data"] for row in asset_rows
+                 if row["data"].get("asset_type") == "endpoint"]
+    services = [row["data"] for row in asset_rows
+                if row["data"].get("asset_type") == "service"]
+
+    observed_endpoints = 0
+    parameterized_endpoints = 0
+    authenticated_endpoints = 0
+    for endpoint in endpoints:
+        attrs = endpoint.get("attrs") if isinstance(endpoint.get("attrs"), dict) else {}
+        sources = {str(value).lower() for value in attrs.get("sources", [])
+                   if isinstance(value, str)}
+        source = str(attrs.get("source") or "").lower()
+        if sources & _OBSERVED_API_SOURCES or source == "model_observed":
+            observed_endpoints += 1
+        if any(isinstance(value, str) and value.strip() for value in attrs.get("params", [])):
+            parameterized_endpoints += 1
+        if attrs.get("auth_required") is True or attrs.get("authenticated") is True:
+            authenticated_endpoints += 1
+
+    route_count = sum(
+        max(0, int((script.get("attrs") or {}).get("route_count") or 0))
+        for script in scripts if isinstance(script.get("attrs"), dict))
+    source_map_count = sum(
+        len((script.get("attrs") or {}).get("source_maps", []))
+        for script in scripts
+        if isinstance(script.get("attrs"), dict)
+        and isinstance((script.get("attrs") or {}).get("source_maps"), list))
+
+    read = getattr(blackboard, "read", None)
+    business = (read(BlackboardLayer.TOPOLOGY, "business-context")
+                if callable(read) else None) or {}
+    roles = len(business.get("roles") or [])
+    objects = len(business.get("objects") or [])
+    workflows = len(business.get("workflows") or [])
+    boundaries = len(business.get("trust_boundaries") or [])
+    business_evidence = roles + objects + workflows + boundaries
+    surface = business.get("surface_assessment")
+    surface = surface if isinstance(surface, dict) else {}
+    surface_type = str(surface.get("type") or "unknown")
+    complexity = str(surface.get("business_complexity") or "unknown")
+    if complexity not in {"low", "medium", "high", "unknown"}:
+        complexity = "unknown"
+    if complexity == "unknown":
+        complexity = ("high" if workflows >= 2 and roles >= 2 and objects >= 2
+                      else "medium" if business_evidence >= 3 and workflows
+                      else "low" if business and business_evidence == 0 else "unknown")
+
+    verified_web_assets = 0
+    fingerprinted_assets = 0
+    for row in asset_rows:
+        data = row["data"]
+        attrs = data.get("attrs") if isinstance(data.get("attrs"), dict) else {}
+        sources = {str(value).lower() for value in attrs.get("sources", [])
+                   if isinstance(value, str)}
+        if (data.get("asset_type") in {"url", "app", "endpoint", "script"}
+                and (sources & _OBSERVED_API_SOURCES or attrs.get("status_code") is not None)):
+            verified_web_assets += 1
+        if _technology_names(data.get("fingerprint")):
+            fingerprinted_assets += 1
+    if fingerprinted_assets:
+        maturity = "fingerprinted"
+    elif verified_web_assets or services:
+        maturity = "live_verified"
+    elif asset_rows:
+        maturity = "formal_asset"
+    elif candidate_stages:
+        maturity = "candidate_only"
+    else:
+        maturity = "unknown"
+
+    business_tasks = []
+    repeated_unknowns: Counter[str] = Counter()
+    structured_blockers: list[dict[str, Any]] = []
+    for row in (task_rows if task_rows is not None else
+                blackboard.query(BlackboardLayer.TASK_STATE, limit=80)):
+        data = row["data"]
+        task = data.get("task") if isinstance(data.get("task"), dict) else {}
+        summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
+        handoff = summary.get("handoff") if isinstance(summary.get("handoff"), dict) else {}
+        for blocker in handoff.get("blockers", []):
+            if isinstance(blocker, dict) and blocker not in structured_blockers:
+                structured_blockers.append(blocker)
+        if task.get("agent_type") != "business_context":
+            continue
+        business_tasks.append({"status": str(task.get("status") or summary.get("status") or ""),
+                               "task_ref": _ref(BlackboardLayer.TASK_STATE, row)})
+        repeated_unknowns.update(str(value)[:300] for value in
+                                 handoff.get("remaining_unknowns", []) if isinstance(value, str))
+    repeated = [value for value, count in repeated_unknowns.items() if count > 1][:6]
+    low_value_business = bool(business_tasks and business and observed_endpoints == 0
+                              and not business.get("recorded_transactions")
+                              and not business.get("har_transactions")
+                              and complexity == "low")
+    login_page_stall = bool(
+        (low_value_business and surface_type == "login_wall")
+        or any(blocker.get("type") in {"authentication_required", "sso_required",
+                                       "captcha_required", "credentials_required"}
+               for blocker in structured_blockers))
+    stall_reasons = []
+    if login_page_stall:
+        stall_reasons.append("登录墙走访已完成但没有新增交易、接口或权限边界证据")
+    elif low_value_business:
+        stall_reasons.append("业务走访已完成但没有形成可测试的流程、接口或边界")
+    if repeated:
+        stall_reasons.append("多个任务交接重复保留相同信息缺口")
+
+    candidates_only = bool(candidate_stages and not asset_rows)
+    web_test_ready = bool((observed_endpoints and (parameterized_endpoints or business_evidence))
+                          or vuln_rows)
+    return {
+        "asset_maturity": {
+            "level": maturity,
+            "formal_assets": len(asset_rows),
+            "verified_web_assets": verified_web_assets,
+            "candidate_stages": {stage: candidate_stages.get(stage, 0)
+                                 for stage in _ASSET_STAGES if candidate_stages.get(stage)},
+            "candidate_only": candidates_only,
+        },
+        "business_complexity": {
+            "level": complexity, "surface_type": surface_type,
+            "roles": roles, "objects": objects, "workflows": workflows,
+            "trust_boundaries": boundaries,
+            "deep_analysis_supported": complexity in {"medium", "high"},
+        },
+        "js_surface": {
+            "scripts": len(scripts), "extracted_routes": route_count,
+            "source_maps": source_map_count,
+            "density": ("high" if route_count >= 10 or len(scripts) >= 4
+                        else "medium" if route_count or scripts else "none"),
+        },
+        "api_surface": {
+            "endpoints": len(endpoints), "observed_endpoints": observed_endpoints,
+            "parameterized_endpoints": parameterized_endpoints,
+            "web_test_ready": web_test_ready,
+        },
+        "auth_surface": {
+            "login_wall": surface_type == "login_wall",
+            "authenticated_endpoints": authenticated_endpoints,
+            "role_or_account_evidence": bool(roles or surface_type == "account_workflow"),
+            "observed": bool(authenticated_endpoints or roles
+                             or surface_type in {"login_wall", "account_workflow"}),
+        },
+        "service_evidence": {
+            "services": len(services),
+            "ports": sorted({int(item["port"]) for item in services
+                             if isinstance(item.get("port"), int)})[:32],
+            "port_scan_supported": bool(services),
+        },
+        "route_stall": {
+            "detected": bool(stall_reasons), "login_page_stall": login_page_stall,
+            "reasons": stall_reasons, "repeated_unknowns": repeated,
+            "blockers": structured_blockers[:12],
+            "user_resolvable": any(blocker.get("user_resolvable") is True
+                                   for blocker in structured_blockers),
+            "recommended_pivot": ("js_api_or_asset_surface" if login_page_stall
+                                  else "alternate_capability_or_asset" if stall_reasons
+                                  else ""),
+        },
+        "dispatch_evidence": {
+            "continue_asset_verification": candidates_only,
+            "business_surface_observed": bool(verified_web_assets or observed_endpoints),
+            "business_context_supported": complexity in {"medium", "high"},
+            "js_reverse_supported": bool(scripts or route_count or verified_web_assets),
+            "web_vuln_supported": web_test_ready,
+            "port_scan_supported": bool(services),
+        },
+        "contract": (
+            "这些是证据摘要而非固定流程：模型结合任务目标决定派工；candidate_only 不足以支持"
+            "业务或脚本分析需要已验证 Web 表面，漏洞或端口测试需要更强证据；端口角色需要"
+            "已观测服务证据，Web 漏洞角色需要已验证接口及"
+            "参数/权限/输入证据或已有漏洞候选。"),
+    }
+
+
 def intelligence_summary(blackboard: Any) -> dict[str, Any]:
     """统一资产、扫描、JS、负证据和漏洞候选的紧凑观察面。"""
     assets = blackboard.query(BlackboardLayer.ASSET, limit=_ASSET_SAMPLE_LIMIT + 1)
@@ -107,7 +306,18 @@ def intelligence_summary(blackboard: Any) -> dict[str, Any]:
     asset_total = count(BlackboardLayer.ASSET) if callable(count) else len(assets)
     clue_total = count(BlackboardLayer.RECON_CLUE) if callable(count) else len(clues)
     vuln_total = count(BlackboardLayer.VULN) if callable(count) else len(vulns)
-    if not any((asset_total, clue_total, vuln_total)):
+    read = getattr(blackboard, "read", None)
+    business_context = (read(BlackboardLayer.TOPOLOGY, "business-context")
+                        if callable(read) else None)
+    task_rows = blackboard.query(BlackboardLayer.TASK_STATE, limit=80)
+    has_action_handoff = any(
+        isinstance((row.get("data") or {}).get("summary"), dict)
+        and isinstance(((row.get("data") or {}).get("summary") or {}).get("handoff"), dict)
+        and any((((row.get("data") or {}).get("summary") or {}).get("handoff") or {}).get(key)
+                for key in ("blockers", "remaining_unknowns", "resolved_unknowns"))
+        for row in task_rows
+    )
+    if not any((asset_total, clue_total, vuln_total, business_context, has_action_handoff)):
         return {}
 
     assets_by_type = Counter(str(row["data"].get("asset_type") or "unknown")
@@ -164,6 +374,31 @@ def intelligence_summary(blackboard: Any) -> dict[str, Any]:
                     refs.append(_ref(BlackboardLayer.RECON_CLUE, row))
 
     clue_types = Counter(str(row["data"].get("clue_type") or "unknown") for row in clue_rows)
+    asset_candidates = []
+    for row in clue_rows:
+        data = row["data"]
+        if data.get("clue_type") != "asset_candidate":
+            continue
+        asset_candidates.append({
+            "blackboard_ref": _ref(BlackboardLayer.RECON_CLUE, row),
+            "value": _safe_location(data.get("value")),
+            "asset_type": str(data.get("asset_type") or "domain")[:30],
+            "stage": str(data.get("stage") or "external_candidate")[:40],
+            "priority_score": int(data.get("priority_score") or 0),
+            "priority_components": [
+                {"name": str(item.get("name") or "")[:80],
+                 "points": int(item.get("points") or 0),
+                 "basis": str(item.get("basis") or "")[:240]}
+                for item in data.get("priority_components", [])[:8]
+                if isinstance(item, dict)
+            ],
+            "providers": [str(value)[:60] for value in data.get("providers", [])[:8]
+                          if isinstance(value, str)],
+            "source_count": int(data.get("source_count") or 0),
+            "unknowns": [str(value)[:240] for value in data.get("unknowns", [])[:6]
+                        if isinstance(value, str)],
+        })
+    asset_candidates.sort(key=lambda item: (-item["priority_score"], item["value"]))
     scanner_samples = []
     negative_samples = []
     negative_total = 0
@@ -226,11 +461,18 @@ def intelligence_summary(blackboard: Any) -> dict[str, Any]:
                          for name, refs in list(technology_refs.items())[:24]],
         "scanner_clues": {"total": clue_total, "by_type": dict(sorted(clue_types.items())),
                            "samples": scanner_samples},
+        "asset_candidates": {
+            "total_in_clue_window": len(asset_candidates),
+            "prioritized": asset_candidates[:24],
+            "note": "外部候选不代表授权、归属、存活或正式资产；分数只用于调查排序",
+        },
         "negative_evidence": {"total_in_clue_window": negative_total,
                               "samples": negative_samples,
                               "note": "固定失败分类；完整原文按 blackboard_ref 读取"},
         "vulnerabilities": {"total": vuln_total, "by_status": dict(sorted(vuln_status.items())),
                             "samples": vuln_samples},
+        "action_signals": _expert_action_signals(
+            blackboard, asset_rows, clue_rows, vuln_rows, task_rows),
         "truncated": {"assets": asset_total > len(asset_rows),
                       "clues": clue_total > len(clue_rows),
                       "vulnerabilities": vuln_total > len(vuln_rows)},
@@ -241,6 +483,162 @@ def intelligence_summary(blackboard: Any) -> dict[str, Any]:
         return redact_known(blackboard.database_path.parent, summary)
     except (AttributeError, OSError, ValueError):
         return summary
+
+
+def _origin_markers(data: dict[str, Any], row: dict[str, Any]) -> list[str]:
+    """提取记录已经声明的来源；不根据 URL 形态猜测真实性。"""
+    attrs = data.get("attrs") if isinstance(data.get("attrs"), dict) else {}
+    values: list[Any] = []
+    for source in (data, attrs):
+        raw = source.get("sources")
+        if isinstance(raw, list):
+            values.extend(raw)
+        values.extend(source.get(key) for key in ("source", "origin", "scanner")
+                      if source.get(key))
+    provenance = data.get("provenance")
+    if isinstance(provenance, dict) and provenance.get("origin"):
+        values.append(provenance["origin"])
+    if row.get("updated_by"):
+        values.append(row["updated_by"])
+    return list(dict.fromkeys(str(value).strip()[:80] for value in values
+                              if str(value).strip()))[:8]
+
+
+def _frontier_subject(layer: BlackboardLayer, row: dict[str, Any]) -> str:
+    data = row["data"]
+    if layer == BlackboardLayer.VULN:
+        return str(data.get("title") or data.get("endpoint") or data.get("target")
+                   or row["record_id"])[:240]
+    return (_safe_location(data.get("value") or data.get("endpoint") or data.get("target"))
+            or str(data.get("name") or data.get("clue_type") or row["record_id"])[:240])
+
+
+def _frontier_status(layer: BlackboardLayer, data: dict[str, Any], origins: list[str]) -> str:
+    state = str(data.get("status") or data.get("verification_status")
+                or data.get("execution_status") or "").lower()
+    evidence = str(data.get("evidence_state") or "unverified").lower()
+    origin_words = {part.lower() for value in origins for part in value.replace("-", "_").split("/")}
+    if state in _NEGATIVE_STATES:
+        return "exhausted_leads"
+    if _failure_mode(data):
+        return "blocked_leads"
+    if (layer == BlackboardLayer.VULN and state in {"accepted", "confirmed"}) \
+            or evidence == "independently_verified":
+        return "breakthroughs"
+    if origin_words & _GENERATED_ORIGIN_MARKERS or evidence in {"conflicting", "expired"}:
+        return "needs_disambiguation"
+    if evidence == "unverified" and not origin_words & _TARGET_ORIGIN_MARKERS:
+        return "needs_disambiguation"
+    return "actionable_leads"
+
+
+def investigation_frontier(blackboard: Any) -> dict[str, Any]:
+    """将现有事实整理成可排序的调查候选，不替模型判断漏洞价值。"""
+    groups: dict[str, list[dict[str, Any]]] = {
+        key: [] for key in ("breakthroughs", "actionable_leads", "needs_disambiguation",
+                            "blocked_leads", "exhausted_leads")
+    }
+    changed: list[dict[str, Any]] = []
+    lead_subjects: set[str] = set()
+    for row in blackboard.query(BlackboardLayer.TOPOLOGY, limit=160):
+        data = row["data"]
+        if data.get("kind") != "lead_card":
+            continue
+        subject = _safe_location(data.get("subject")) or str(data.get("subject") or "")[:240]
+        if subject:
+            lead_subjects.add(subject)
+        status = str(data.get("status") or "needs_disambiguation")
+        group = {
+            "breakthrough": "breakthroughs", "actionable": "actionable_leads",
+            "investigating": "actionable_leads", "new": "needs_disambiguation",
+            "needs_disambiguation": "needs_disambiguation", "blocked": "blocked_leads",
+            "exhausted": "exhausted_leads", "refuted": "exhausted_leads",
+        }.get(status, "needs_disambiguation")
+        if len(groups[group]) >= _FRONTIER_LIMIT:
+            continue
+        card = {
+            "ref": _ref(BlackboardLayer.TOPOLOGY, row),
+            "source_kind": "lead_card",
+            "lead_id": str(data.get("lead_id") or row["record_id"]),
+            "subject": subject,
+            "origin": [str(value)[:80] for value in data.get("origins", [])
+                       if isinstance(value, str)],
+            "origin_class": str(data.get("origin_class") or "unspecified"),
+            "evidence_state": str(data.get("evidence_state") or "unverified")[:40],
+            "authenticity": data.get("authenticity") or {},
+            "unknowns": [str(value)[:300] for value in data.get("unknowns", [])
+                         if isinstance(value, str)][:8],
+            "next_minimal_experiment": str(data.get("next_minimal_experiment") or "")[:500],
+            "novelty": "new_record" if row["version"] == 1 else "updated_record",
+            "repetition": {"record_versions": row["version"],
+                           "observations": int(data.get("observation_count") or 0),
+                           "reobserved": int(data.get("observation_count") or 0) > 1},
+            "status": group,
+        }
+        groups[group].append(card)
+        if len(changed) < _FRONTIER_LIMIT:
+            changed.append({"ref": card["ref"], "updated_at": row.get("updated_at", ""),
+                            "status": group})
+    for layer, limit in ((BlackboardLayer.ASSET, 120), (BlackboardLayer.RECON_CLUE, 120),
+                         (BlackboardLayer.VULN, 80)):
+        for row in blackboard.query(layer, limit=limit):
+            data = row["data"]
+            subject = _frontier_subject(layer, row)
+            if subject in lead_subjects:
+                continue
+            origins = _origin_markers(data, row)
+            group = _frontier_status(layer, data, origins)
+            if len(groups[group]) >= _FRONTIER_LIMIT:
+                continue
+            origin_words = {part.lower() for value in origins
+                            for part in value.replace("-", "_").split("/")}
+            card = {
+                "ref": _ref(layer, row),
+                "source_kind": str(
+                    data.get("asset_type") or data.get("clue_type")
+                    or data.get("vuln_type") or layer.value
+                )[:80],
+                "subject": subject,
+                "origin": origins,
+                "origin_class": (
+                    "target_observation" if origin_words & _TARGET_ORIGIN_MARKERS
+                    else "derived_observation" if origin_words & _DERIVED_ORIGIN_MARKERS
+                    else "generated_test" if origin_words & _GENERATED_ORIGIN_MARKERS
+                    else "unspecified"),
+                "evidence_state": str(data.get("evidence_state") or "unverified")[:40],
+                "novelty": "new_record" if row["version"] == 1 else "updated_record",
+                "repetition": {"record_versions": row["version"],
+                               "reobserved": row["version"] > 1},
+                "status": group,
+            }
+            groups[group].append(card)
+            if len(changed) < _FRONTIER_LIMIT:
+                changed.append({"ref": card["ref"], "updated_at": row.get("updated_at", ""),
+                                "status": group})
+
+    handoffs = []
+    for row in blackboard.query(BlackboardLayer.TASK_STATE, limit=80):
+        handoff = (row["data"].get("summary") or {}).get("handoff")
+        if isinstance(handoff, dict):
+            handoffs.append({"task_ref": _ref(BlackboardLayer.TASK_STATE, row), **handoff})
+        if len(handoffs) >= 12:
+            break
+    if not any(groups.values()) and not handoffs:
+        return {}
+    frontier = {
+        **groups,
+        "recently_changed": changed,
+        "recent_handoffs": handoffs,
+        "ranking_contract": (
+            "这些字段只描述来源、证据状态、重复和交接缺口；结合任务目标判断预期信息增益，"
+            "不要把 generated_test 或单一 HTTP 状态直接当成真实入口。"),
+    }
+    try:
+        from spiritscout.resources.session_secrets import redact_known
+
+        return redact_known(blackboard.database_path.parent, frontier)
+    except (AttributeError, OSError, ValueError):
+        return frontier
 
 
 def _asset_intelligence(assets: list[dict[str, Any]], legacy: list[dict[str, Any]]) -> dict[str, Any]:
@@ -402,7 +800,44 @@ def snapshot(*, guard: Any = None, env: dict[str, Any] | None = None,
             summary = intelligence_summary(blackboard)
             if summary:
                 out["intelligence_summary"] = summary
+            from spiritscout.blackboard.hypotheses import summary as hypothesis_summary
+
+            hypotheses = hypothesis_summary(blackboard)
+            if hypotheses:
+                out["vulnerability_hypotheses"] = hypotheses
+            frontier = investigation_frontier(blackboard)
+            if frontier:
+                out["investigation_frontier"] = frontier
+            from spiritscout.blackboard.opportunities import build_opportunity_pool
+
+            opportunities = build_opportunity_pool(
+                frontier, hypotheses,
+                blackboard.query(BlackboardLayer.TASK_STATE, limit=300),
+                action_signals=summary.get("action_signals") or {},
+            )
+            if opportunities.get("total") or opportunities["action_yield"]["completed_tasks"]:
+                out["testing_opportunities"] = opportunities
             assets = blackboard.query(BlackboardLayer.ASSET, limit=_ASSET_SAMPLE_LIMIT)
+            from spiritscout.blackboard.expert_scorecard import build_scorecard
+
+            scorecard_assets = blackboard.query(BlackboardLayer.ASSET, limit=10000)
+            scorecard_vulns = blackboard.query(BlackboardLayer.VULN, limit=10000)
+            asset_count = (blackboard.count(BlackboardLayer.ASSET)
+                           if callable(getattr(blackboard, "count", None))
+                           else len(scorecard_assets))
+            vuln_counts = (blackboard.status_counts(BlackboardLayer.VULN)
+                           if callable(getattr(blackboard, "status_counts", None))
+                           else dict(Counter(str(row.get("data", {}).get("status") or "candidate")
+                                             for row in scorecard_vulns)))
+            scorecard = build_scorecard(
+                asset_count=asset_count,
+                asset_rows=scorecard_assets,
+                vuln_rows=scorecard_vulns,
+                opportunities=opportunities, hypotheses=hypotheses,
+                vuln_counts=vuln_counts,
+            )
+            if assets or opportunities.get("total") or hypotheses:
+                out["expert_scorecard"] = scorecard
             legacy = blackboard.query(BlackboardLayer.JS_INTEL, limit=100)
             js_projection = _asset_intelligence(assets, legacy)
             if js_projection:

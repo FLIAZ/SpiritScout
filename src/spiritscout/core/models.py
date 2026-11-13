@@ -197,6 +197,8 @@ class Vulnerability(BaseModel):
     found_by: str = ""
     scanner_evidence: list[dict[str, Any]] = Field(default_factory=list, description="扫描原始证据与交付件引用；不代表独立复核通过")
     vulnerability_ids: list[str] = Field(default_factory=list, description="原工具实际提供的 CVE/CWE 等编号")
+    hypothesis_ref: str = Field(default="", description="发现与复核共同引用的当前会话漏洞假设")
+    hypothesis_refs: list[str] = Field(default_factory=list, description="去重汇聚后仍需共同回写的漏洞假设引用")
     found_at: datetime = Field(default_factory=utcnow)
     exploitable: bool = False          # 实际可利用性（收录硬条件之一）
 
@@ -273,6 +275,8 @@ class RouteState(BaseModel):
     step_times: list[float] = Field(default_factory=list)  # 近期步骤时间戳（monotonic，探测频率依据，上限 60 条）
     health: float = 1.0                # 健康度（6.5 公式计算结果）
     notes: list[str] = Field(default_factory=list)
+    findings: list[dict[str, Any]] = Field(default_factory=list)
+    blockers: list[dict[str, Any]] = Field(default_factory=list)
     # 路线已单独发过 agent.conclude（如 CTF 解题环收尾）——任务级收尾
     # 拼结论时跳过，否则同一段结论文本上两遍时间线
     conclusion_published: bool = False

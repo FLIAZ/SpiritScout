@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,32 @@ from typing import Any
 from spiritscout.core.audit import AuditLogger, NullAuditLogger
 from spiritscout.core.exceptions import ScopeViolation
 from spiritscout.core.ids import new_id
+
+_DIRECT_INPUT_QUESTION = re.compile(
+    r"账号|用户名|密码|凭据|验证码|手机号|邮箱|token|cookie|api[ _-]?key|密钥|请求记录|har",
+    re.IGNORECASE,
+)
+_DEFERRED_INPUT_OPTION = re.compile(
+    r"稍后|之后|后续|待会|一会儿|过会|我(?:可以|能|会)提供|(?:可以|能够)提供|"
+    r"(?:注册|准备|整理|拿到|获取).{0,12}(?:后|好).{0,12}(?:给|提供|发送|补充)|"
+    r"再.{0,12}(?:给|提供|发送|补充)",
+    re.IGNORECASE,
+)
+_NEGATIVE_INPUT_OPTION = re.compile(r"没有|无账号|无法|不能|不提供|暂不|不便|拒绝|只做|跳过")
+
+
+def normalize_options(question: str, options: Any) -> list[str]:
+    """具体输入直接走当前卡片文本框，不保留“以后再给”的承诺选项。"""
+    cleaned: list[str] = []
+    for value in (options or [])[:6]:
+        option = str(value).strip()[:200]
+        if option and option not in cleaned:
+            cleaned.append(option)
+    if not _DIRECT_INPUT_QUESTION.search(question):
+        return cleaned
+    return [option for option in cleaned
+            if not (_DEFERRED_INPUT_OPTION.search(option)
+                    and not _NEGATIVE_INPUT_OPTION.search(option))]
 
 
 def normalize_targets(targets: Any) -> list[dict[str, str]]:
@@ -117,8 +144,7 @@ class QuestionBroker:
         self._fingerprints[qid] = fingerprint
         self._pending[qid] = {
             "question_id": qid, "agent": agent, "question": question,
-            "options": [str(o).strip()[:200] for o in (options or [])[:6]
-                        if str(o).strip()],
+            "options": normalize_options(question, options),
             "multiple": bool(multiple),
             "secret": bool(secret),
             "targets": normalize_targets(targets),

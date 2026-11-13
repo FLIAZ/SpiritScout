@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import ipaddress
 from typing import Any
 from urllib.parse import urlparse
 
 from spiritscout.agents.sub.base import RoutePlan, StepResult, SubAgent
+from spiritscout.blackboard.leads import (
+    assess_authenticity,
+    compact_profile,
+    response_profile,
+    upsert_lead,
+)
 from spiritscout.core.ids import new_id
-from spiritscout.core.models import AgentType, Asset, BlackboardLayer, RunMode, Task
+from spiritscout.core.models import AgentType, Asset, BlackboardLayer, Task
 
-# 服务发现常用 Web 端口（MVP 最小集；仅 SRC/渗透赛模式使用）
-COMMON_WEB_PORTS = [80, 443, 8080, 8000, 8443, 3000, 5000, 9000]
 # 命中即判定内容泄露的标记（侦察线索置信度依据）
 EXPOSURE_MARKERS = {
     "/.git/HEAD": "ref:",
@@ -24,6 +29,11 @@ EXPOSURE_MARKERS = {
 ARCHIVE_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz", ".sql", ".bak", ".7z", ".rar")
 
 
+def _is_wildcard_target(target: str) -> bool:
+    parsed = urlparse(target if "://" in target else f"//{target}")
+    return "*" in (parsed.hostname or target)
+
+
 class ReconAgent(SubAgent):
     agent_type = AgentType.RECON
     route_namespace = "recon"
@@ -31,6 +41,12 @@ class ReconAgent(SubAgent):
     # ------------------------------------------------------------ 路线模板
 
     def route_templates(self, task: Task) -> list[RoutePlan]:
+        if _is_wildcard_target(task.target):
+            return [RoutePlan(
+                name="wildcard_asset_handoff",
+                strategy="通配符只声明资产范围，不能作为具体主机发送 HTTP、DNS 或端口请求",
+                steps=[{"action": "asset_discovery_required"}],
+            )]
         base = task.target.rstrip("/")
         routes = [
             RoutePlan(
@@ -52,14 +68,6 @@ class ReconAgent(SubAgent):
                 strategy="交付可核验结果：已授权主机的身份记录（IP 解析证据），供资产归并",
                 steps=[{"action": "dns"}],
             ))
-        if self.ctx.policy.mode != RunMode.CTF and host_wide:
-            # 只有域名/IP/CIDR 级授权才扩展端口；URL 前缀授权不推断其他端口。
-            routes.append(RoutePlan(
-                name="service_discovery",
-                strategy="交付可核验结果：主机级授权范围内存活的 Web 服务清单"
-                         "（附响应状态与指纹证据）",
-                steps=[{"action": "port_probe", "port": p} for p in COMMON_WEB_PORTS],
-            ))
         return routes
 
     # ------------------------------------------------------------ 单步执行
@@ -74,6 +82,7 @@ class ReconAgent(SubAgent):
             "robots_discover": self._step_robots_discover,
             "port_probe": self._step_port_probe,
             "llm_path_sweep": self._step_llm_path_sweep,
+            "asset_discovery_required": self._step_asset_discovery_required,
         }.get(action)
         if handler is None:
             return StepResult(ok=False, note=f"未知步骤动作: {action}")
@@ -81,6 +90,8 @@ class ReconAgent(SubAgent):
 
     async def _step_homepage(self, task: Task, step: dict) -> StepResult:
         url = step["url"]
+        if _is_wildcard_target(url):
+            return self._wildcard_gap(task)
         res = await self.ctx.tools.call(
             "http_probe", {"url": url}, **self.ctx.builtin_ctx)
         if not res.ok:
@@ -91,10 +102,12 @@ class ReconAgent(SubAgent):
             port=urlparse(url).port, fingerprint=parsed.get("fingerprint", {}),
             attrs={"title": parsed.get("title", ""),
                    "status_code": parsed.get("status_code"),
+                   "sources": ["target_response"],
                    "headers": self._safe_headers(parsed.get("headers", {}))},
             source_agent=self.agent_id,
         )
         _, is_new = self.ctx.convergence.merge_asset(asset, self.agent_type)
+        profile = response_profile(res.stdout, parsed)
         return StepResult(
             ok=True, value=0.3 if is_new else 0.1,
             findings=[{"type": "asset", "value": url, "title": parsed.get("title")}],
@@ -103,11 +116,14 @@ class ReconAgent(SubAgent):
                 "fingerprint": parsed.get("fingerprint", {}),
                 "title": parsed.get("title", ""),
                 "headers": self._safe_headers(parsed.get("headers", {})),
+                "response_profile": profile,
             }},
         )
 
     async def _step_dns(self, task: Task, step: dict) -> StepResult:
         host = urlparse(task.target).hostname or task.target
+        if _is_wildcard_target(host):
+            return self._wildcard_gap(task)
         res = await self.ctx.tools.call("dns_resolve", {"host": host}, **self.ctx.builtin_ctx)
         if not res.ok:
             return StepResult(ok=False, note=f"DNS 解析失败: {res.error}")
@@ -155,28 +171,89 @@ class ReconAgent(SubAgent):
         if not res.ok:
             return StepResult(ok=True, value=0.0, note=f"{path} 不可达（不计失败）")
         status = res.parsed.get("status_code", 0)
+        origin = str(step.get("origin") or "model_generated_test")
+        profile = response_profile(res.stdout, res.parsed)
         if status != 200:
+            assessment = assess_authenticity(
+                profile=profile, baseline=None, origin=origin, marker_confirmed=False)
+            upsert_lead(
+                self.ctx.blackboard, subject=url, origins=[origin], status=assessment["lead_status"],
+                authenticity=assessment, observation=compact_profile(profile),
+                unknowns=[] if assessment["lead_status"] in {"refuted", "blocked"}
+                else ["该候选是否对应独立真实入口"], replace_unknowns=True,
+                actor=self.agent_id, agent_type=self.agent_type,
+            )
             return StepResult(ok=True, value=0.0, note=f"{path} → {status}")
+        baseline = await self._response_baseline(
+            task, include_missing=origin == "model_generated_test")
+        assessment = assess_authenticity(
+            profile=profile, baseline=baseline, origin=origin,
+            marker_confirmed=False,
+        )
         marker = EXPOSURE_MARKERS.get(path)
         marker_hit = bool(marker and marker in res.stdout)
         content_type = str((res.parsed.get("headers") or {}).get("content-type", "")).lower()
         archive_hit = path.lower().endswith(ARCHIVE_SUFFIXES) and "text/html" not in content_type
         confirmed = marker_hit or archive_hit
+        if confirmed:
+            assessment = assess_authenticity(
+                profile=profile, baseline=baseline, origin=origin,
+                marker_confirmed=True,
+            )
         # 确认命中给足价值分：保证命中路线不被健康度剪枝误杀（阈值调优）
         value = 0.8 if confirmed else 0.2
-        self._write_clue(
-            task, clue_type="sensitive_path" if confirmed else "observed_path", value=url,
-            confidence=0.9 if confirmed else 0.6,
-            detail={"status_code": status, "marker": marker,
-                    "marker_hit": marker_hit, "archive_hit": archive_hit,
-                    "exposure_confirmed": confirmed},
+        soft_200 = assessment["verdict"] == "soft_200_suspected"
+        if soft_200:
+            value = 0.0
+        clue_ref = ""
+        # 软 200 仍是待消歧候选，不同时写成普通 observed_path，避免下游把
+        # “真实性存疑”和“已观察到有效路径”当成两条相互矛盾的事实。
+        if confirmed or assessment["lead_status"] == "actionable":
+            clue_ref = self._write_clue(
+                task, clue_type="sensitive_path" if confirmed else "observed_path", value=url,
+                confidence=0.9 if confirmed else 0.6,
+                detail={"status_code": status, "marker": marker,
+                        "marker_hit": marker_hit, "archive_hit": archive_hit,
+                        "exposure_confirmed": confirmed},
+            )
+        upsert_lead(
+            self.ctx.blackboard, subject=url, origins=[origin],
+            source_refs=[clue_ref] if clue_ref else [],
+            evidence_state="observed", status=assessment["lead_status"],
+            authenticity=assessment, observation=compact_profile(profile),
+            unknowns=[] if assessment["lead_status"] == "actionable"
+            else ["该候选是否对应独立真实入口"], replace_unknowns=True,
+            next_minimal_experiment=("比较不存在路径、Content-Type、正文摘要、重定向与候选类型标记"
+                                     if assessment["lead_status"] == "needs_disambiguation" else ""),
+            actor=self.agent_id, agent_type=self.agent_type,
         )
         return StepResult(ok=True, value=value,
                           findings=[{"type": "sensitive_path" if confirmed else "observed_path",
                                      "value": url,
-                                     "confirmed": confirmed}],
-                          note=(f"{'泄露证据命中' if confirmed else '路径可达'} "
-                                f"{path} → 200"))
+                                     "confirmed": confirmed,
+                                     "authenticity": assessment["verdict"]}],
+                          note=(f"{'泄露证据命中' if confirmed else '疑似软 200' if soft_200 else '路径可达'} "
+                                f"{path} → 200（{assessment['reason']}）"))
+
+    def _contract_incomplete_reason(self, task: Task, summary: dict[str, Any]) -> str:
+        """子域清单型任务没有产出任何子域时不能以根域探测冒充完成。"""
+        contract = task.payload.get("investigation_contract")
+        if not isinstance(contract, dict):
+            return ""
+        expected = str(contract.get("expected_information") or "")
+        if "子域" not in expected:
+            return ""
+        base_host = (urlparse(task.target).hostname or task.target).lower().lstrip("*.")
+        domains = {
+            str(row["data"].get("value") or "").lower().rstrip(".")
+            for row in self.ctx.blackboard.query(BlackboardLayer.ASSET, limit=2000)
+            if row["data"].get("asset_type") == "domain"
+        }
+        discovered = sorted(value for value in domains
+                            if value != base_host and value.endswith("." + base_host))
+        if discovered:
+            return ""
+        return "调查契约要求交付子域清单，但本任务未发现或验证任何子域；根域与端口基线不能替代该交付"
 
     async def _step_robots_discover(self, task: Task, step: dict) -> StepResult:
         """robots.txt 路径发现：解析 Disallow/Allow 条目接力探测。
@@ -211,7 +288,7 @@ class ReconAgent(SubAgent):
             confidence=0.6, detail={"source": "robots.txt", "count": len(entries)})
         hits: list[str] = []
         for path in entries:
-            sub = await self._step_path_probe(task, {"path": path})
+            sub = await self._step_path_probe(task, {"path": path, "origin": "robots.txt"})
             hits.append(sub.note)
         return StepResult(
             ok=True, value=0.3,
@@ -271,7 +348,7 @@ class ReconAgent(SubAgent):
         hits = 0
         notes = []
         for path in paths:
-            sub = await self._step_path_probe(task, {"path": path})
+            sub = await self._step_path_probe(task, {"path": path, "origin": "model_generated_test"})
             notes.append(sub.note)
             hits += sum(1 for f in sub.findings if f.get("confirmed"))
         return StepResult(ok=True, value=min(0.3 + 0.4 * hits, 1.0),
@@ -282,6 +359,8 @@ class ReconAgent(SubAgent):
     async def _step_port_probe(self, task: Task, step: dict) -> StepResult:
         parsed_target = urlparse(task.target)
         host = parsed_target.hostname or task.target
+        if _is_wildcard_target(host):
+            return self._wildcard_gap(task)
         port = step["port"]
         if parsed_target.port == port:
             return StepResult(ok=True, value=0.0, note=f"端口 {port} 与目标同端口，跳过")
@@ -294,7 +373,8 @@ class ReconAgent(SubAgent):
         asset = Asset(
             asset_id=new_id("asset"), asset_type="service", value=f"{host}:{port}",
             port=port, service=scheme, fingerprint=res.parsed.get("fingerprint", {}),
-            attrs={"title": res.parsed.get("title", "")}, source_agent=self.agent_id,
+            attrs={"title": res.parsed.get("title", ""), "sources": ["target_response"]},
+            source_agent=self.agent_id,
         )
         _, is_new = self.ctx.convergence.merge_asset(asset, self.agent_type)
         return StepResult(ok=True, value=0.3 if is_new else 0.1,
@@ -302,6 +382,21 @@ class ReconAgent(SubAgent):
                           note=f"端口 {port} Web 服务 {res.parsed.get('status_code')}")
 
     # ------------------------------------------------------------ 内部
+
+    async def _step_asset_discovery_required(
+            self, task: Task, step: dict | None = None) -> StepResult:
+        return self._wildcard_gap(task)
+
+    def _wildcard_gap(self, task: Task) -> StepResult:
+        note = ("通配符不能作为具体主机主动探测；本路线未发送 HTTP、DNS 或端口请求，"
+                "等待探微交付具体 hostname 后再继续侦察。")
+        self._write_clue(
+            task, clue_type="asset_discovery_gap", value=task.target,
+            confidence=0.95,
+            detail={"reason": "wildcard_requires_concrete_host",
+                    "next": "等待资产发现交付具体 hostname"},
+        )
+        return StepResult(ok=True, value=0.05, final_note=True, note=note)
 
     def _host_wide_scope(self, target: str) -> bool:
         host = urlparse(target).hostname or target
@@ -325,12 +420,42 @@ class ReconAgent(SubAgent):
         return {key: value for key, value in headers.items()
                 if str(key).lower() in allowed}
 
+    async def _response_baseline(
+            self, task: Task, *, include_missing: bool = False) -> list[dict[str, Any]]:
+        base = task.target.rstrip("/")
+        homepage = self.cache.get(self.route_namespace, f"fingerprint|{base}") or {}
+        profiles: list[dict[str, Any]] = []
+        profile = homepage.get("response_profile")
+        if isinstance(profile, dict):
+            profiles.append(profile)
+
+        if not include_missing:
+            return profiles
+        missing_key = f"authenticity-missing|{base}"
+        missing = self.cache.get(self.route_namespace, missing_key)
+        if not isinstance(missing, dict):
+            suffix = hashlib.sha256(base.encode()).hexdigest()[:12]
+            res = await self.ctx.tools.call(
+                "http_probe", {"url": f"{base}/.spiritscout-missing-{suffix}"},
+                **self.ctx.builtin_ctx)
+            if res.ok:
+                missing = response_profile(res.stdout, res.parsed)
+                self.cache.put(self.route_namespace, missing_key, missing)
+        if isinstance(missing, dict):
+            profiles.append(missing)
+        return profiles
+
     def _write_clue(self, task: Task, *, clue_type: str, value: str,
-                    confidence: float, detail: dict[str, Any]) -> None:
+                    confidence: float, detail: dict[str, Any]) -> str:
+        record_id = new_id("clue")
+        dedup_key = f"clue|{clue_type}|{value}"
         self.ctx.blackboard.write(
-            BlackboardLayer.RECON_CLUE, new_id("clue"),
+            BlackboardLayer.RECON_CLUE, record_id,
             {"clue_type": clue_type, "value": value, "confidence": confidence,
              "detail": detail, "task_id": task.task_id, "found_by": self.agent_id},
             agent_type=self.agent_type, updated_by=self.agent_id,
-            dedup_key=f"clue|{clue_type}|{value}",
+            dedup_key=dedup_key,
         )
+        saved = self.ctx.blackboard.find_by_dedup_key(BlackboardLayer.RECON_CLUE, dedup_key)
+        return (f"recon_clue:{saved['record_id']}@{saved['version']}" if saved
+                else f"recon_clue:{record_id}")

@@ -12,6 +12,7 @@ import re
 import time
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, ClassVar
 
 from spiritscout.agents.ring import RingLedger, attempt_key
@@ -21,6 +22,7 @@ from spiritscout.blackboard import ConvergenceEngine
 from spiritscout.blackboard.store import Blackboard
 from spiritscout.bus.base import EventBus
 from spiritscout.core.audit import AuditLogger, NullAuditLogger
+from spiritscout.core.exceptions import VersionConflict
 from spiritscout.core.ids import new_id
 from spiritscout.core.models import (
     AgentType,
@@ -58,6 +60,7 @@ class StepResult:
     value: float = 0.0                       # 本步价值增量 0~1（喂健康度价值分）
     progress_delta: float = 0.0
     findings: list[dict[str, Any]] = field(default_factory=list)
+    blockers: list[dict[str, Any]] = field(default_factory=list)
     note: str = ""
     cache_writes: dict[str, Any] = field(default_factory=dict)
     risk_delta: float = 0.0
@@ -162,7 +165,11 @@ _ASK_CHANNEL_NOTE = (
     "不互斥、用户可能同时选多项时设 true（如「接下来优先做哪些独立检查」"
     "「需要开通哪些账号/权限」）；「允许/拒绝」「方案 A/B」这类互斥决策"
     "保持 false（默认单选，点选即提交），多选问题的选项要写成可独立成立的"
-    "动作或结论。targets 仅在需要访问当前授权范围外的新目标时给出；why 用"
+    "动作或结论。若问题是在索取账号、密码、验证码、Token、Cookie、请求记录"
+    "等具体内容，直接在问句中要求用户填写当前提问卡下方输入框；options 只给"
+    "「无法提供/改走未登录测试」等可立即提交的替代决策，不要生成「稍后提供」"
+    "「注册好再给」「之后在对话里发送」这类延迟承诺选项。targets 仅在需要"
+    "访问当前授权范围外的新目标时给出；why 用"
     "一句话说明它是什么、为什么需要（面向普通用户）——控制台会渲染成"
     "「允许访问」勾选项，只有用户勾选才会纳入本会话范围；不要在 targets 里"
     "罗列已在范围内的目标。问题面向普通用户，用平实中文，不用 HAR、PoC 这类"
@@ -221,6 +228,7 @@ class SubAgent(abc.ABC):
 
     async def _run_task(self, task: Task) -> dict[str, Any]:
         """执行一个任务包：路线生成 → 并发执行 → 汇总上报。"""
+        task_started = time.perf_counter()
         task.status = TaskStatus.RUNNING
         self.ctx.audit.log("task.start", self.agent_id,
                            {"task_id": task.task_id, "type": task.task_type, "agent_type": self.agent_type.value,
@@ -252,6 +260,22 @@ class SubAgent(abc.ABC):
         else:
             task.status = TaskStatus.CANCELLED
         summary = self._summarize(task, routes)
+        summary["execution_feedback"]["duration_ms"] = round(
+            (time.perf_counter() - task_started) * 1000, 3)
+        incomplete = self._contract_incomplete_reason(task, summary)
+        if task.status == TaskStatus.DONE and incomplete:
+            task.status = TaskStatus.FAILED
+            summary["status"] = task.status.value
+            summary["contract_satisfied"] = False
+            summary["incomplete_reason"] = incomplete[:500]
+            summary["handoff"]["remaining_unknowns"] = list(dict.fromkeys([
+                *summary["handoff"].get("remaining_unknowns", []), incomplete[:300],
+            ]))[:12]
+            self.ctx.audit.log("decision.change", self.agent_id, {
+                "action": "task_completion_rejected", "task_id": task.task_id,
+                "reason": incomplete[:300],
+            })
+        self._settle_hypothesis(task, summary)
         task.result_summary = summary
         # 任务收尾：各路线最后一条现场笔记拼成可读结论，随事件流上时间线。
         # 已单独发过 agent.conclude 的路线（conclusion_published，如 CTF
@@ -264,6 +288,51 @@ class SubAgent(abc.ABC):
                                {"task_id": task.task_id, "summary": conclude})
         await self._report(task, routes, summary)
         return summary
+
+    def _contract_incomplete_reason(self, task: Task, summary: dict[str, Any]) -> str:
+        """角色可按稳定、可证明的交付契约拒绝伪完成；默认不增加规则判断。"""
+        return ""
+
+    def _settle_hypothesis(self, task: Task, summary: dict[str, Any]) -> None:
+        """按任务实际交付回写假设；支持信号不等于漏洞已终审。"""
+        contract = task.payload.get("investigation_contract")
+        contract = contract if isinstance(contract, dict) else {}
+        ref = str(contract.get("hypothesis_ref") or "").strip()
+        if not ref or getattr(self.ctx, "blackboard", None) is None:
+            return
+        findings = summary.get("findings") if isinstance(summary.get("findings"), list) else []
+        evidence_refs = [str(value)[:200] for value in
+                         (summary.get("handoff") or {}).get("evidence_refs", [])
+                         if isinstance(value, str)]
+        evidence_refs.extend(str(item.get("evidence_ref"))[:200] for item in findings
+                             if isinstance(item, dict) and item.get("evidence_ref"))
+        if findings:
+            state, outcome = "supported", "supporting_signal"
+            reason = "最小实验产出结构化发现，已形成待复核支持信号"
+        elif task.status == TaskStatus.DONE and summary.get("contract_satisfied", True):
+            state, outcome = "exhausted", "no_supporting_signal"
+            reason = "已完成约定最小实验但未产出支持信号；零命中不代表全局无漏洞"
+        elif task.status in {TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.PRUNED}:
+            state, outcome = "blocked", task.status.value
+            reason = str(summary.get("incomplete_reason") or "任务未完成最小实验")[:500]
+        else:
+            state, outcome, reason = "investigating", task.status.value, "假设仍在验证中"
+        try:
+            from spiritscout.blackboard.hypotheses import transition
+
+            updated = transition(
+                self.ctx.blackboard, ref, state=state, reason=reason,
+                task_id=task.task_id, evidence_refs=evidence_refs, outcome=outcome,
+                actor=self.agent_id, agent_type=self.agent_type,
+            )
+            summary["hypothesis"] = {
+                "hypothesis_ref": updated["hypothesis_ref"],
+                "state": state, "outcome": outcome,
+            }
+        except (ValueError, VersionConflict) as exc:
+            self.ctx.audit.log("hypothesis.transition_failed", self.agent_id, {
+                "task_id": task.task_id, "hypothesis_ref": ref, "error": str(exc)[:300],
+            })
 
     # ------------------------------------------------------------ 路线生成
 
@@ -445,6 +514,9 @@ class SubAgent(abc.ABC):
             # 不中断半截工具态）；灵枢对话与审批通道不经此门，照常可用
             if self.ctx.pause_gate is not None:
                 await self.ctx.pause_gate.wait()
+            delay = self._adaptive_delay(routes or [route])
+            if delay:
+                await asyncio.sleep(delay)
             # 健康度剪枝门（每步评估；宽限期内不剪，见 BranchHealthManager）
             if self.health_prune_enabled and self.health_mgr.should_prune(route):
                 self.health_mgr.prune(route, f"健康度 {route.health:.2f} 低于阈值")
@@ -563,7 +635,51 @@ class SubAgent(abc.ABC):
             # 过程笔记只留摘要
             route.notes.append(result.note[:1600] if result.final_note
                                else result.note[:300])
+        if result.findings:
+            route.findings.extend(
+                finding for finding in result.findings
+                if isinstance(finding, dict) and finding not in route.findings)
+            del route.findings[:-40]
+        for blocker in result.blockers:
+            normalized = SubAgent._normalize_blocker(blocker)
+            if normalized and normalized not in route.blockers:
+                route.blockers.append(normalized)
+        del route.blockers[:-20]
         self.health_mgr.evaluate(route)
+
+    @staticmethod
+    def _adaptive_delay(routes: list[RouteState]) -> float:
+        """只有出现 WAF/403/429 等现场信号后才放慢后续步骤。"""
+        signals = sum(max(0, int(route.detection_signals)) for route in routes)
+        if not signals:
+            return 0.0
+        recent = sum(len(route.step_times[-6:]) for route in routes)
+        return min(1.5, 0.2 * signals + 0.05 * max(0, recent - 4))
+
+    @staticmethod
+    def _normalize_blocker(blocker: Any) -> dict[str, Any] | None:
+        """收敛角色报告的阻塞；阻塞是行动条件，不是漏洞发现。"""
+        if not isinstance(blocker, dict):
+            return None
+        blocker_type = str(blocker.get("type") or "unknown_prerequisite").strip()[:80]
+        description = " ".join(str(blocker.get("description") or "").split())[:500]
+        prerequisite = " ".join(str(blocker.get("prerequisite") or "").split())[:500]
+        if not description and not prerequisite:
+            return None
+        alternatives = [str(value).strip()[:120]
+                        for value in blocker.get("alternative_capabilities", [])[:12]
+                        if isinstance(value, str) and value.strip()]
+        refs = [str(value).strip()[:200]
+                for value in blocker.get("evidence_refs", [])[:20]
+                if isinstance(value, str) and value.strip()]
+        return {
+            "type": blocker_type,
+            "description": description,
+            "prerequisite": prerequisite,
+            "user_resolvable": blocker.get("user_resolvable") is True,
+            "alternative_capabilities": list(dict.fromkeys(alternatives)),
+            "evidence_refs": list(dict.fromkeys(refs)),
+        }
 
     def _reflect(self, route: RouteState, plan: RoutePlan) -> None:
         """局部反思与纠错（规则化，毫秒级本地决策）：
@@ -582,7 +698,11 @@ class SubAgent(abc.ABC):
     # ------------------------------------------------------------ 汇总上报
 
     def _summarize(self, task: Task, routes: list[RouteState]) -> dict[str, Any]:
-        return {
+        conclusions = [{"route": route.name, "text": route.notes[-1]}
+                       for route in routes if route.notes]
+        contract = task.payload.get("investigation_contract")
+        contract = contract if isinstance(contract, dict) else {}
+        summary = {
             "task_id": task.task_id,
             "agent_id": self.agent_id,
             "agent_type": self.agent_type.value,
@@ -594,7 +714,52 @@ class SubAgent(abc.ABC):
             "status": task.status.value,
             "cache_stats": self.cache.stats(),
             "route_health": {r.name: round(r.health, 3) for r in routes},
+            "execution_feedback": {
+                "tool_calls": sum(r.tool_calls for r in routes),
+                "detection_signals": sum(r.detection_signals for r in routes),
+                "adaptive_pacing": (
+                    "slow_down" if sum(r.detection_signals for r in routes) >= 2
+                    else "cautious" if any(r.detection_signals for r in routes)
+                    else "normal"),
+            },
+            "findings": [finding for route in routes for finding in
+                         getattr(route, "findings", [])],
         }
+        blockers: list[dict[str, Any]] = []
+        for route in routes:
+            for blocker in getattr(route, "blockers", []):
+                normalized = SubAgent._normalize_blocker(blocker)
+                if normalized and normalized not in blockers:
+                    blockers.append(normalized)
+        evidence_refs = [str(value)[:200] for value in
+                         contract.get("evidence_refs", [])[:20]
+                         if isinstance(value, str)]
+        workspace = str((getattr(getattr(self, "ctx", None), "builtin_ctx", None) or {}).get(
+            "workspace_root") or "")
+        current_session = Path(workspace).name if workspace else ""
+        # 历史资产可作为规划依据，但不能在新任务交接中冒充本轮证据。
+        evidence_refs = [ref for ref in evidence_refs
+                         if not ref.startswith("sess-")
+                         or not current_session or ref.startswith(current_session + ":")]
+        summary["handoff"] = {
+            "opportunity_ref": str(contract.get("opportunity_ref") or "")[:200],
+            "opportunity_revision": str(contract.get("opportunity_revision") or "")[:40],
+            "opportunity_score": int(contract.get("opportunity_score") or 0),
+            "established_facts": conclusions,
+            "resolved_unknowns": [str(value)[:300] for value in
+                                  contract.get("resolved_unknowns", [])[:12]
+                                  if isinstance(value, str)],
+            "remaining_unknowns": [str(value)[:300] for value in
+                                   contract.get("remaining_unknowns", [])[:12]
+                                   if isinstance(value, str)],
+            "evidence_refs": evidence_refs,
+            "expected_information": str(contract.get("expected_information") or "")[:500],
+            "decision_impact": str(contract.get("decision_impact") or "")[:500],
+            "next_minimal_experiment": str(contract.get("next_minimal_experiment") or "")[:500],
+            "stop_condition": str(contract.get("stop_condition") or "")[:500],
+            "blockers": blockers[:20],
+        }
+        return summary
 
     async def _report(
         self, task: Task, routes: list[RouteState], summary: dict[str, Any]
@@ -644,6 +809,9 @@ class SubAgent(abc.ABC):
         if task is not None:
             intent = {"mission": str(task.payload.get("mission", ""))[:600],
                       "node": str(task.payload.get("node_title", ""))[:120]}
+            contract = task.payload.get("investigation_contract")
+            if isinstance(contract, dict) and contract:
+                intent["investigation_contract"] = contract
             rules = str(task.payload.get("rules", "")).strip()
             if rules:
                 intent["rules"] = rules

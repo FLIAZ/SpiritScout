@@ -129,6 +129,25 @@ class ConvergenceMergeTests(unittest.TestCase):
             AgentType.WEB_VULN)
         self.assertEqual(self._stored().status, VulnStatus.REJECTED_FP)
 
+    def test_duplicate_vulnerability_preserves_all_hypothesis_refs(self) -> None:
+        first = _vuln("v1", status=VulnStatus.CANDIDATE,
+                      evidence=[{"m": "a"}]).model_copy(update={
+            "hypothesis_ref": "topology:hypothesis-one@1",
+            "hypothesis_refs": ["topology:hypothesis-one@1"],
+        })
+        second = _vuln("v2", status=VulnStatus.CANDIDATE,
+                       evidence=[{"m": "b"}]).model_copy(update={
+            "hypothesis_ref": "topology:hypothesis-two@2",
+            "hypothesis_refs": ["topology:hypothesis-one@3", "topology:hypothesis-two@2"],
+        })
+
+        self.engine.merge_vulnerability(first, AgentType.WEB_VULN)
+        self.engine.merge_vulnerability(second, AgentType.WEB_VULN)
+
+        self.assertEqual(self._stored().hypothesis_refs, [
+            "topology:hypothesis-one@3", "topology:hypothesis-two@2",
+        ])
+
     def test_conflict_with_new_evidence_requeues_for_model_reverify(self) -> None:
         rejected = _vuln("v1", status=VulnStatus.REJECTED_FP,
                          evidence=[{"m": "a"}],

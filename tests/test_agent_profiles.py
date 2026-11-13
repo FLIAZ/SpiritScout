@@ -58,7 +58,7 @@ class AgentProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(pwn.mcp_tools), {"mcp__ida__decompile"})
         self.assertEqual(set(web.mcp_tools), {"mcp__yakit__scan"})
 
-    def test_master_forces_business_context_before_other_src_nodes(self) -> None:
+    def test_master_does_not_make_business_context_a_global_src_gate(self) -> None:
         master = object.__new__(MasterAgent)
         master.ctx = SimpleNamespace(
             agents={AgentType.BUSINESS_CONTEXT: object()},
@@ -70,9 +70,24 @@ class AgentProfileTests(unittest.IsolatedAsyncioTestCase):
             {"tactic": "TA0001", "title": "web", "depends_on": ["TA0043"]},
         ])
 
-        self.assertEqual(nodes[0]["tactic"], "BUSINESS-CONTEXT")
-        self.assertIn("BUSINESS-CONTEXT", nodes[1]["depends_on"])
-        self.assertIn("BUSINESS-CONTEXT", nodes[2]["depends_on"])
+        self.assertEqual([node["tactic"] for node in nodes], ["TA0043", "TA0001"])
+        self.assertNotIn("BUSINESS-CONTEXT", nodes[0]["depends_on"])
+        self.assertEqual(nodes[1]["depends_on"], ["TA0043"])
+
+    def test_master_does_not_invent_business_task_when_plan_omits_it(self) -> None:
+        master = object.__new__(MasterAgent)
+        master.ctx = SimpleNamespace(
+            agents={AgentType.BUSINESS_CONTEXT: object()},
+            tactic_map=None,
+        )
+
+        nodes = master._ensure_business_gate([
+            {"tactic": "TA0043", "title": "recon", "depends_on": []},
+            {"tactic": "JS-REVERSE", "title": "js", "depends_on": ["BUSINESS-CONTEXT"]},
+        ])
+
+        self.assertEqual([node["tactic"] for node in nodes], ["TA0043", "JS-REVERSE"])
+        self.assertEqual(nodes[1]["depends_on"], [])
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from spiritscout.blackboard.hypotheses import merge_versioned_refs
 from spiritscout.blackboard.store import Blackboard
 from spiritscout.core.ids import new_id
 from spiritscout.core.models import (
@@ -59,7 +60,7 @@ class ConvergenceEngine:
             elif method == "UNKNOWN" and len(candidates) == 1:
                 existing = candidates[0]
         if existing is None:
-            self._bb.write(
+            version = self._bb.write(
                 BlackboardLayer.ASSET,
                 asset.asset_id,
                 asset.model_dump(mode="json"),
@@ -67,6 +68,11 @@ class ConvergenceEngine:
                 updated_by=asset.source_agent,
                 dedup_key=key,
             )
+            from spiritscout.blackboard.leads import sync_asset_lead
+
+            sync_asset_lead(self._bb, record_id=asset.asset_id, version=version,
+                            data=asset.model_dump(mode="json"), actor=asset.source_agent,
+                            agent_type=agent_type)
             return asset.asset_id, True
         # 合并：保留更完整字段（fingerprint/attrs 并集，新的实测覆盖同字段旧值，历史由黑板版本与共享观测保留）
         merged = existing["data"]
@@ -115,7 +121,7 @@ class ConvergenceEngine:
                 changed = True
         if changed:
             merged_key = Asset.model_validate(merged).dedup_key()
-            self._bb.write(
+            version = self._bb.write(
                 BlackboardLayer.ASSET,
                 existing["record_id"],
                 merged,
@@ -124,6 +130,12 @@ class ConvergenceEngine:
                 dedup_key=merged_key,
                 expected_version=existing["version"],
             )
+        else:
+            version = existing["version"]
+        from spiritscout.blackboard.leads import sync_asset_lead
+
+        sync_asset_lead(self._bb, record_id=existing["record_id"], version=version,
+                        data=merged, actor=asset.source_agent, agent_type=agent_type)
         return existing["record_id"], False
 
     # ------------------------------------------------------------ 漏洞汇聚
@@ -174,6 +186,11 @@ class ConvergenceEngine:
         winner.scanner_evidence = [*prev.scanner_evidence,
             *[item for item in vuln.scanner_evidence if item not in prev.scanner_evidence]]
         winner.vulnerability_ids = list(dict.fromkeys([*prev.vulnerability_ids, *vuln.vulnerability_ids]))
+        winner.hypothesis_refs = merge_versioned_refs(
+            prev.hypothesis_refs, [prev.hypothesis_ref],
+            vuln.hypothesis_refs, [vuln.hypothesis_ref], limit=20,
+        )
+        winner.hypothesis_ref = winner.hypothesis_refs[0] if winner.hypothesis_refs else ""
         self._bb.write(
             BlackboardLayer.VULN,
             existing["record_id"],

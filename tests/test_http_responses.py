@@ -174,6 +174,8 @@ class HTTPResponseTests(unittest.IsolatedAsyncioTestCase):
         info = result.parsed
         self.assertTrue(info['download_complete'])
         self.assertFalse(info['body_truncated'])
+        self.assertEqual(info['body_sha256'], hashlib.sha256(self.source.encode()).hexdigest())
+        self.assertEqual(info['content_type'], 'text/html')
         self.assertTrue(info['preview_truncated'])
         self.assertNotIn('answer=[17,29,255]', result.stdout)
         body_path = Path(info['body_path'])

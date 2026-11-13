@@ -6,6 +6,7 @@ import sys
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import AsyncMock, patch
 
 from spiritscout.core.models import RunMode, Scope
 from spiritscout.policy import PolicyEngine, ScopeGuard
@@ -215,6 +216,16 @@ class DnsResolveDeniedAddressTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result.ok)
         self.assertTrue(result.parsed["ips"])
+
+    async def test_empty_answer_is_not_reported_as_verified(self) -> None:
+        from spiritscout.tools.builtin import dns_resolve
+
+        guard = ScopeGuard(Scope(allowed_domains=["empty.fixture.test"]))
+        with patch("asyncio.BaseEventLoop.getaddrinfo", new=AsyncMock(return_value=[])):
+            result = await dns_resolve("empty.fixture.test", guard=guard)
+
+        self.assertFalse(result.ok)
+        self.assertIn("没有 A 记录", result.error)
 
 
 if __name__ == "__main__":

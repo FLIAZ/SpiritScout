@@ -56,6 +56,11 @@ for(const size of [2,7,11,content.length]) {send('agent.delta',{task_id:'p',rout
 const protocolAgent=protocol.agents.get('ctf-web-protocol');
 assert.ok(protocolAgent.blocks.every(b=>!b.text.includes('"exploration"') && !b.text.includes('"intent"')),'protocol metadata never appears as user-facing text');
 assert.ok(protocolAgent.blocks.some(b=>b.text.includes('已确认入口需要先取得会话。')),'natural-language observation remains visible');
+send('model.started',{task_id:'p',route_id:'r',call_id:'json-call',cache_scope:'payload_planner'});
+send('agent.delta',{task_id:'p',route_id:'r',call_id:'json-call',kind:'reasoning',text:'正在规划最小对照实验'});
+send('agent.delta',{task_id:'p',route_id:'r',call_id:'json-call',kind:'text',text:'{"payloads":[{"payload":"GET /private"}]}' });
+assert.ok(protocolAgent.blocks.every(b=>!b.text.includes('/private')),'machine JSON calls never enter the workbench');
+assert.ok(protocolAgent.blocks.some(b=>b.text.includes('正在规划最小对照实验')),'machine-call reasoning remains visible in the workbench');
 feed('agent.delta',{task_id:'t1',route_id:'r1',route:'same-route',turn:1,kind:'reasoning',text:'任务一'});
 feed('agent.delta',{task_id:'t2',route_id:'r2',route:'same-route',turn:1,kind:'reasoning',text:'任务二'});
 assert.equal(active.blocks.filter(b=>b.taskId==='t1').at(-1).text,'任务一');

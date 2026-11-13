@@ -10,10 +10,47 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from spiritscout.agents.js_reverse import _route_observations, analyze_script
+from spiritscout.blackboard import Blackboard
+from spiritscout.blackboard.hypotheses import upsert
+from spiritscout.core.models import AgentType, BlackboardLayer
 from spiritscout.resources.session_secrets import SessionSecrets
 
 
 class JSIntelTests(unittest.TestCase):
+    def test_repeated_hypothesis_merges_into_stable_identity_and_keeps_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bb = Blackboard(Path(tmp) / "bb.db")
+            self.addCleanup(bb.close)
+            first = upsert(
+                bb, claim="接口可能存在对象级权限边界", subject="https://a.test/api/user",
+                test_type="idor", asset_refs=["asset:script@1"],
+                expected_signal="替换对象 ID 后返回其他用户数据",
+                next_minimal_experiment="使用两个授权账号比较同一对象请求",
+                stop_condition="服务端始终按会话身份约束对象归属",
+                technical_basis={"technologies": "REST", "rationale": "脚本暴露 user_id 参数"},
+                actor="js-reverse", agent_type=AgentType.JS_REVERSE,
+            )
+            second = upsert(
+                bb, claim="接口可能存在对象级权限边界", subject="https://a.test/api/user",
+                test_type="idor", asset_refs=["asset:endpoint@2"],
+                counter_signal="跨账号请求被拒绝或只返回当前账号对象",
+                technical_basis={"technologies": ["GraphQL"], "tags": ["idor"]},
+                actor="js-reverse", agent_type=AgentType.JS_REVERSE,
+            )
+
+            rows = [row for row in bb.query(BlackboardLayer.TOPOLOGY)
+                    if row["data"].get("hypothesis_contract") is True]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(first["hypothesis_ref"].split("@")[0],
+                             second["hypothesis_ref"].split("@")[0])
+            self.assertEqual(rows[0]["data"]["asset_refs"], [
+                "asset:script@1", "asset:endpoint@2",
+            ])
+            self.assertIn("两个授权账号", rows[0]["data"]["next_minimal_experiment"])
+            self.assertIn("对象归属", rows[0]["data"]["stop_condition"])
+            self.assertEqual(rows[0]["data"]["technical_basis"]["technologies"], ["REST", "GraphQL"])
+            self.assertEqual(rows[0]["data"]["technical_basis"]["tags"], ["idor"])
+
     def test_redaction_preserves_schema_keys_and_existing_references(self):
         from spiritscout.resources.session_secrets import protect_values
 
@@ -72,6 +109,63 @@ class JSIntelTests(unittest.TestCase):
 
 
 class SecretInjectionTests(unittest.IsolatedAsyncioTestCase):
+    def test_wildcard_scope_accepts_apex_and_subdomain_for_redirects(self):
+        from spiritscout.agents.scoped_assets import _within
+        from spiritscout.core.models import Scope
+
+        scope = Scope(allowed_domains=["*.example.com"])
+        self.assertTrue(_within("https://example.com/", scope))
+        self.assertTrue(_within("https://www.example.com/app.js", scope))
+
+    async def test_js_role_follows_in_scope_redirect_before_parsing_scripts(self):
+        from spiritscout.agents.js_reverse import JSReverseAgent
+        from spiritscout.blackboard.store import Blackboard
+        from spiritscout.core.audit import NullAuditLogger
+        from spiritscout.core.models import Scope
+        from spiritscout.policy.scope import ScopeGuard
+
+        requested = []
+        async def serve(reader, writer):
+            request = await reader.readuntil(b'\r\n\r\n')
+            path = request.split(b' ')[1].decode()
+            requested.append(path)
+            if path == '/':
+                response = b'HTTP/1.1 302 Found\r\nLocation: /home/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'
+            elif path == '/home/':
+                body = b'<script src="/app.js"></script>'
+                response = (b'HTTP/1.1 200 OK\r\nContent-Length: ' + str(len(body)).encode()
+                            + b'\r\nConnection: close\r\n\r\n' + body)
+            else:
+                body = b'fetch("/api/user")'
+                response = (b'HTTP/1.1 200 OK\r\nContent-Length: ' + str(len(body)).encode()
+                            + b'\r\nConnection: close\r\n\r\n' + body)
+            writer.write(response)
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_server(serve, '127.0.0.1', 0)
+        base = f'http://127.0.0.1:{server.sockets[0].getsockname()[1]}/'
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                bb = Blackboard(Path(root) / 'bb.db')
+                try:
+                    guard = ScopeGuard(Scope(allowed_urls=[base]))
+                    ctx = SimpleNamespace(for_agent=lambda key: ctx, shared_cache=None,
+                        policy=SimpleNamespace(guard=guard), builtin_ctx={'workspace_root': root},
+                        blackboard=bb, audit=NullAuditLogger())
+                    agent = JSReverseAgent(ctx, enable_llm_planning=False)
+                    agent._llm_chat_json = AsyncMock(return_value={})
+                    result = await agent.execute_step(
+                        SimpleNamespace(target=base), None, None, {'action': 'analyze'})
+                    self.assertTrue(result.ok, result.note)
+                    self.assertEqual(requested, ['/', '/home/', '/app.js'])
+                finally:
+                    bb.close()
+        finally:
+            server.close()
+            await server.wait_closed()
+
     async def test_js_role_reads_scoped_scripts_and_inline_source_map_without_fetching_sources(self):
         from spiritscout.agents.js_reverse import JSReverseAgent
         from spiritscout.blackboard.store import Blackboard
@@ -149,7 +243,9 @@ class SecretInjectionTests(unittest.IsolatedAsyncioTestCase):
                         (refs[map_url], 'contains', refs[map_url + '#source-0']),
                     })
                     self.assertEqual(hypotheses[0]['node_type'], 'hypothesis')
-                    self.assertEqual(hypotheses[0]['asset_refs'], [refs[script_url]])
+                    self.assertEqual(hypotheses[0]['asset_refs'], [
+                        f"{refs[script_url]}@{by_value[script_url]['version']}"
+                    ])
                     self.assertIn('对象级权限边界', hypotheses[0]['text'])
 
                     public = json.dumps({'assets': records, 'topology': topology})

@@ -1,6 +1,6 @@
 /* ================= 视图：会话详情/拓扑/报告 ================= */
 /* ================= 会话详情 ================= */
-const TABS = ["chat", "topo", "assets", "challenges", "vulns", "flags", "experience", "traffic", "background", "events", "deliverables", "report"];
+const TABS = ["chat", "topo", "assets", "opportunities", "challenges", "vulns", "flags", "experience", "traffic", "background", "events", "deliverables", "report"];
 const STEERING_STATUS_CN = {delivered: I18n.t("已投递"), accepted: I18n.t("计划执行"), completed: I18n.t("已报告完成"), blocked: I18n.t("执行受阻")};
 function openSession(id) {
   if (typeof ComposerCommands !== "undefined") ComposerCommands.reset();
@@ -56,6 +56,7 @@ document.querySelectorAll("#s-tabs button").forEach(b => {
     b.scrollIntoView({block:"nearest", inline:"nearest"});
     if (S.tab === "topo") drawTopo();
     if (S.tab === "assets") renderAssetLibrary();
+    if (S.tab === "opportunities") renderOpportunities();
     if (S.tab === "challenges") renderChallenges();
     if (S.tab === "vulns") renderVulns();
     if (S.tab === "flags") renderFlags();
@@ -114,6 +115,7 @@ async function refreshState() {
     renderSessionHead(); renderChips(); renderApprovals(); renderQuestions();
     if (S.tab === "topo") drawTopo();
     if (S.tab === "assets") renderAssetLibrary();
+    if (S.tab === "opportunities") renderOpportunities();
     if (S.tab === "vulns") renderVulns();
     if (S.tab === "flags") renderFlags();
     if (S.tab === "experience" && typeof SessionExperience !== "undefined") SessionExperience.load();
@@ -622,6 +624,42 @@ function renderAssetLibrary() {
   if(!S.state)return;
   const routes=typeof TaskTrace!=="undefined" ? TaskTrace.routeSnapshot() : [];
   SessionTopology.render(S.state,routes,true);
+}
+
+function renderOpportunities() {
+  const root=$("#tab-opportunities"),pool=S.state?.testing_opportunities || {};
+  const scorecard=S.state?.expert_scorecard || {};
+  const rows=pool.prioritized || [],yieldData=pool.action_yield || {},portfolio=pool.portfolio_review || {};
+  const signature=JSON.stringify([S.cur,rows,pool.stalled,yieldData,portfolio,scorecard]);
+  if(root._content===signature)return;root._content=signature;
+  const kind={vulnerability_hypothesis:I18n.t("漏洞假设"),investigation_lead:I18n.t("调查线索")};
+  const work={independent_verification:I18n.t("独立复核"),minimal_hypothesis_test:I18n.t("最小假设实验"),resolve_blocker:I18n.t("消除阻塞"),authenticity_disambiguation:I18n.t("真实性消歧"),evidence_followup:I18n.t("证据跟进")};
+  const direction={productive:I18n.t("当前有产出"),blocked:I18n.t("等待可解除条件"),diminishing:I18n.t("边际收益下降"),exhausted:I18n.t("当前方向已穷尽")};
+  const capabilityLabel={
+    TA0043:I18n.t("斥候 · 事实补证"),"JS-REVERSE":I18n.t("析微 · 脚本与接口"),
+    TA0001:I18n.t("破壁 · Web 边界测试"),TA0007:I18n.t("听风 · 服务测绘"),
+    "HOST-VULN":I18n.t("贯甲 · 服务审计"),"BUSINESS-CONTEXT":I18n.t("知行 · 业务边界"),
+    "SCANNER-CONTROL":I18n.t("探微 · 定向扫描"),"VERIFICATION-QUEUE":I18n.t("鉴真 · 独立复核")};
+  const effective=yieldData.effective_action_rate==null?I18n.t("暂无样本"):`${Math.round(yieldData.effective_action_rate*100)}%`;
+  const concentration=portfolio.target_concentration || {};
+  root.innerHTML=I18n.html`<section class="opportunity-dashboard">
+    <header class="opportunity-head"><div><h3>行动机会</h3><p>按当前证据的信息收益、执行就绪度与重复成本排序；分数不是漏洞结论。</p></div>
+      <div class="opportunity-metrics"><span><b>${effective}</b>有效动作</span><span><b>${Number(yieldData.empty_completion_count||0)}</b>空完成</span><span><b>${Number(yieldData.tool_calls||0)}</b>工具调用</span><span><b>${Number(yieldData.detection_signals||0)}</b>拦截信号</span><span><b>${Number((pool.stalled||[]).length)}</b>停滞机会</span></div></header>
+    ${(portfolio.low_yield_capabilities||[]).length || concentration.over_concentrated?`<aside class="opportunity-review"><b>攻击面复盘</b>${concentration.over_concentrated?`<span>行动过度集中于 ${esc(concentration.target||"单一目标")}（${Math.round(Number(concentration.share||0)*100)}%）</span>`:""}${(portfolio.low_yield_capabilities||[]).length?`<span>连续低收益能力：${portfolio.low_yield_capabilities.map(item=>esc(item.capability||"")).join("、")}</span>`:""}</aside>`:""}
+    ${(scorecard.calibration||[]).length?`<aside class="opportunity-review"><b>专家校准</b>${scorecard.calibration.slice(0,4).map(item=>`<span>${esc(item)}</span>`).join("")}</aside>`:""}
+    ${rows.length?`<div class="grid-cards">${rows.slice(0,12).map((item,index)=>`<article class="card opportunity-card ${item.stalled?"stalled":""}">
+      <div class="h"><span class="opportunity-rank">#${index+1}</span><b>${esc(item.subject||item.claim||I18n.t("待评估机会"))}</b><span class="tag ${item.priority_score>=70?"green":item.priority_score<35?"":"gold"}">${Number(item.priority_score||0)}</span></div>
+      <div class="opportunity-meta"><span>${esc(kind[item.kind]||item.kind||"")}</span><span>${esc(work[item.recommended_work]||item.recommended_work||"")}</span><span class="tag ${item.direction_state==="productive"?"green":item.direction_state==="diminishing"?"gold":""}">${esc(direction[item.direction_state]||item.direction_state||"")}</span><span>边际收益 ${Math.round(Number(item.marginal_yield||0)*100)}%</span></div>
+      ${item.expected_information?I18n.html`<p><b>预期新增：</b>${esc(item.expected_information)}</p>`:""}
+      ${item.decision_impact?I18n.html`<p><b>决策影响：</b>${esc(item.decision_impact)}</p>`:""}
+      ${item.next_minimal_experiment?I18n.html`<p><b>最小实验：</b>${esc(item.next_minimal_experiment)}</p>`:""}
+      ${item.stop_condition?I18n.html`<p class="muted"><b>停止条件：</b>${esc(item.stop_condition)}</p>`:""}
+      ${(item.blockers||[]).length?I18n.html`<div class="opportunity-blockers"><b>当前阻塞：</b>${item.blockers.slice(0,3).map(blocker=>`<p>${esc(blocker.description||blocker.prerequisite||blocker.type||"")}${blocker.user_resolvable?" · 可由用户补充条件":""}</p>`).join("")}</div>`:""}
+      ${item.pivot_recommendation?I18n.html`<p class="opportunity-pivot"><b>建议换路：</b>${esc(item.pivot_recommendation)}</p>`:""}
+      ${(item.capability_candidates||[]).length?I18n.html`<div class="opportunity-capabilities"><b>能力候选：</b>${item.capability_candidates.map(c=>`<span class="tag ${c.preferred?"green":""}" title="${esc(c.basis||"")}">${esc(capabilityLabel[c.tactic]||c.capability||c.tactic||"")}${c.yield?.attempts?` · ${Math.round(Number(c.yield.marginal_yield||0)*100)}%`:""}</span>`).join("")}</div>`:""}
+      <details><summary>优先级依据</summary><ul>${(item.priority_components||[]).map(c=>`<li><b>${Number(c.points)>0?"+":""}${Number(c.points||0)}</b> ${esc(c.basis||c.name||"")}</li>`).join("")}</ul><code>${esc(item.opportunity_ref||"")}</code></details>
+    </article>`).join("")}</div>`:I18n.html`<div class="empty-note">当前还没有形成可排序的行动机会。</div>`}
+  </section>`;
 }
 
 function topoFocus(id) { SessionTopology.focus(id); }

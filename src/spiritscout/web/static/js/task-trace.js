@@ -6,7 +6,11 @@ const TaskTrace = (() => {
   const supported = /^(task\.(start|done|failed|cancelled|pruned)|agent\.(turn|delta|tool_call|tool_result|conclude|note|progress|ask_user|ask_answered|blocked|error)|executor\.identity|model\.(started|call|failed|cancelled))$/;
   const wrapper = name => name === "investigate" || name === "explore";
   const worker = actor => !!actor && !/^(master(?:-|$)|gateway$|runtime$|system$|user$)/.test(actor);
-  const create = () => ({tasks:new Map(), routes:new Map(), calls:new Map(), singleActors:new Map()});
+  const create = () => ({tasks:new Map(), routes:new Map(), calls:new Map(), singleActors:new Map(), machineCalls:new Set()});
+  const machineScope = scope => new Set([
+    "payload_planner", "response_analyst", "business_analyst",
+    "path_planner", "js_reverse_analysis",
+  ]).has(String(scope || ""));
   let timelineEpoch = 0, activeIntentKey = null;
   const keyOf = (actor, id) => JSON.stringify([actor, id]);
   const brief = text => String(text || "").replace(/\s+/g, " ").trim().slice(0, 180);
@@ -55,6 +59,9 @@ const TaskTrace = (() => {
     }
     if (!worker(e.actor) || !supported.test(e.type)) return null;
     const d = e.detail || {}, key = resolve(store,e);
+    if(e.type === "model.started" && d.call_id &&
+        (d.response_format === "json" || machineScope(d.cache_scope))) store.machineCalls.add(d.call_id);
+    if(e.type === "agent.delta" && d.call_id && store.machineCalls.has(d.call_id)) return null;
     let task = store.tasks.get(key);
     if (!task) {
       task = {key, id:d.task_id || "", actor:e.actor, title:"", status:"running", progress:I18n.t("正在准备"), tools:new Map(),
@@ -346,6 +353,9 @@ const TaskTrace = (() => {
   function parsePublicProgress(raw) {
     const source=String(raw || "").trim(),prose=[],bodies=[];
     let cursor=0,exploration=null;
+    const orphanStart=/^\s*(?:["}\],:]|(?:intent|attempt|state|from|reason|paths|rationale|arguments|name|version|offset|limit)"?\s*:)/s;
+    const protocolField=/"(?:intent|attempt|state|from|reason|paths|rationale|arguments|name|version|offset|limit)"?\s*:/s;
+    if(orphanStart.test(source) && protocolField.test(source))return {text:""};
     const protocol=new Set(['progress','commentary','exploration','discovery','analysis','actions','steps',
       'tool_calls','skill_requests','decision','verdict','dag_nodes','local_tool','web_search']);
     function decode(start) {

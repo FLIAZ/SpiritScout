@@ -473,6 +473,7 @@ class MasterCoordination:
             "status": n.status.value, "depends_on": list(n.depends_on),
             "task_ids": list(n.task_ids), "round_created": n.round_created,
             "challenge_id": str((n.meta.get("challenge") or {}).get("id") or ""),
+            "investigation_contract": dict(n.meta.get("investigation_contract") or {}),
             "cancel_reason": n.meta.get("cancel_reason", ""),
             "skip_reason": n.meta.get("skip_reason", ""),
         } for n in dag.all_nodes()]
