@@ -116,7 +116,10 @@ class TrafficTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["response_bytes"], 1024)
         self.assertFalse(row["response_complete"])
         result = await self.fetch("/redirect", max_redirects=0)
-        self.assertFalse(result.ok)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.parsed["status_code"], 302)
+        self.assertTrue(result.parsed["redirect_not_followed"])
+        self.assertEqual(result.parsed["redirect_chain"], [self.base + "/final"])
         self.assertEqual([r["status"] for r in recorder.page(self.root)["items"]], [302, 200])
 
     async def test_concurrent_recording_pagination_and_literal_filter(self):

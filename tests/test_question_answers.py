@@ -161,6 +161,20 @@ class QuestionAnswerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await waiting)["answer"], "自定义答复")
         self.assertEqual((await self.client.post(self.url(qid), json={"text": "再次提交"})).status_code, 409)
 
+    async def test_concrete_input_question_removes_deferred_promise_options(self) -> None:
+        waiting = asyncio.create_task(self.session.questions.ask(
+            "master", "请在下方输入可登录的测试账号和密码；如果没有账号请选择替代方案。",
+            ["我可以提供账号（稍后在对话里给出）", "没有账号，只做未登录测试",
+             "我先注册好再把账号给你"]))
+        self.tasks.append(waiting)
+        await asyncio.sleep(0)
+        question = self.session.questions.view()[0]
+        self.assertEqual(question["options"], ["没有账号，只做未登录测试"])
+        response = await self.client.post(self.url(question["question_id"]), json={
+            "text": "使用本次测试专用账号，凭据已在当前输入框提交"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("当前输入框提交", (await waiting)["answer"])
+
     async def test_other_session_cannot_answer_this_question(self) -> None:
         qid, waiting = await self.ask()
         other = Session(session_id="other", mode="src", target="local", workspace=Path(self.tmp.name) / "other")

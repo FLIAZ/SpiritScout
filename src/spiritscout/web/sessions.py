@@ -344,6 +344,118 @@ async def _llm_extract_platform(cfg: SystemConfig, models: list[ModelEntry],
     return profile.to_dict()
 
 
+async def _llm_discover_platform(cfg: SystemConfig, models: list[ModelEntry],
+                                 mission: str, entry_urls: list[str],
+                                 audit: AuditLogger) -> dict[str, Any] | None:
+    """智能体赛事无显式接口时，从同源只读证据生成平台档案。
+
+    发现阶段不调用候选业务接口；模型必须为列题与提交接口各引用一段实际
+    抓取证据，随后再由确定性校验确认同源和逐字可复核，才允许接入运行时。
+    """
+    from spiritscout.ctf.platform import parse_platform_profile
+    from spiritscout.ctf.platform_discovery import (
+        discover_platform_documents,
+        discovered_profile_is_supported,
+    )
+    from spiritscout.gateway.backends import extract_json
+
+    documents = await discover_platform_documents(entry_urls, audit=audit)
+    if not documents:
+        audit.log("decision.change", "platform_discovery", {
+            "action": "platform_discovery_not_found",
+            "rationale": "赛事入口未返回可分析的同源文档"})
+        return None
+    gateway = _conversation_gateway(cfg, models, audit)
+    try:
+        resp = await gateway.chat(
+            [{"role": "system", "content": (
+                "你是智能体赛事平台接口接入器。输入包含用户任务原文和系统从"
+                "用户明确授权的赛事入口只读抓取的页面、OpenAPI 或同源前端脚本。"
+                "只依据这些证据生成平台档案，不得猜测、补全惯例路径或调用接口。"
+                "只有同时明确定位题目列表接口与答案提交接口时才返回 platform；"
+                "否则返回 {\"platform\": null}。ops 中返回的每一个接口都必须在 evidence 中"
+                "给出 source_url 和原文连续 excerpt，excerpt 必须逐字出现在对应"
+                "文档。接口必须与入口同源。提交 body/query 使用 {challenge} 和"
+                "{flag} 占位；列表必须提供 challenge_fields.id。"
+                "ROLE: autonomous_platform_discovery")},
+             {"role": "user", "content": json.dumps({
+                 "mission": mission[:12000],
+                 "documents": documents,
+                 "answer_shape": {
+                     "platform": {
+                         "name": "平台名或主机名",
+                         "base_url": "证据中的同源 API 根地址",
+                         "headers": {"证据明确出现的固定请求头": "原值"},
+                         "ops": {
+                             "list": {"method": "GET|POST", "path": "/path",
+                                      "query": {}, "body": {},
+                                      "items_field": "题目数组点路径"},
+                             "start": {"method": "POST", "path": "/path",
+                                       "query": {}, "body": {},
+                                       "addr_field": "容器地址点路径"},
+                             "close": {"method": "POST", "path": "/path",
+                                       "query": {}, "body": {}},
+                             "submit": {"method": "POST", "path": "/path",
+                                        "query": {}, "body": {},
+                                        "accepted_field": "判定字段点路径",
+                                        "duplicate_code": "重复提交业务码"},
+                         },
+                         "challenge_fields": {
+                             "id": "题号字段点路径", "title": "标题字段点路径",
+                             "container_addr": "容器地址字段点路径",
+                             "is_completed": "完成态字段点路径"},
+                         "limits": {"max_active": "证据明确出现时填写"},
+                         "evidence": {
+                             "list": {"source_url": "文档 URL",
+                                      "excerpt": "含列表路径和方法/字段的连续原文"},
+                             "start": {"source_url": "文档 URL",
+                                       "excerpt": "只有证据明确时返回，与 ops.start 对应"},
+                             "close": {"source_url": "文档 URL",
+                                       "excerpt": "只有证据明确时返回，与 ops.close 对应"},
+                             "submit": {"source_url": "文档 URL",
+                                        "excerpt": "含提交路径和方法/字段的连续原文"},
+                         },
+                     },
+                     "rationale": "无法安全接入时说明缺失证据",
+                 },
+             }, ensure_ascii=False)}],
+            task_type="classification", response_format="json",
+            reasoning_effort="low", model=_bound_model(cfg, models),
+            timeout_seconds=min(90, cfg.gateway.request_timeout_seconds))
+    except Exception as exc:  # noqa: BLE001 —— 自动发现失败不阻断赛事开工
+        audit.log("system.lifecycle", "platform_discovery", {
+            "action": "platform_discovery_model_failed", "error": str(exc)[:200]})
+        return None
+    try:
+        data = extract_json(resp.content)
+    except Exception:  # noqa: BLE001
+        data = None
+    raw = (data or {}).get("platform") if isinstance(data, dict) else None
+    if not isinstance(raw, dict) or not raw:
+        audit.log("decision.change", "platform_discovery", {
+            "action": "platform_discovery_not_found",
+            "rationale": str((data or {}).get("rationale", "")
+                             if isinstance(data, dict) else "")[:300]})
+        return None
+    if not discovered_profile_is_supported(raw, documents, mission):
+        audit.log("decision.change", "platform_discovery", {
+            "action": "platform_discovery_evidence_rejected"})
+        return None
+    raw = dict(raw)
+    raw.pop("evidence", None)
+    try:
+        profile = parse_platform_profile(raw)
+    except ValueError as exc:
+        audit.log("decision.change", "platform_discovery", {
+            "action": "platform_discovery_profile_invalid", "error": str(exc)[:200]})
+        return None
+    if not profile.ops.get("list") or not profile.ops.get("submit"):
+        return None
+    audit.log("decision.change", "platform_discovery", {
+        "action": "platform_profile_discovered", "profile": profile.redacted()})
+    return profile.to_dict()
+
+
 # ---------------------------------------------------------------- 会话自动命名
 # 与 ChatGPT 用 mini 级模型给会话起标题同一套路：旁路小调用、低思考档、
 # 短输出短超时、失败静默降级（展示回退 mission 首行）；命名失败绝不影响
@@ -2448,10 +2560,10 @@ class SessionManager:
                             "llm_mode": routed.value, "kept": mode.value,
                             "contest_type": routed_contest,
                             "reason": str(exc)[:300]})
-                # CTF/渗透赛无显式平台档案时做一次抽取：任务文本若描述了托管
-                # 平台的 API 文档（跑分/CTF 平台），把档案落进本次运行并按平台
-                # 列题/开容器/回收/提交；没描述则是零影响的小调用。抽到的
-                # 档案回写启动参数（续传/重建计划不再重抽）
+                # CTF/渗透赛无显式平台档案时先从任务原文抽取。智能体模式若
+                # 原文未给 API 文档但给了赛事入口，再做有界同源只读发现，只有
+                # 列题与提交接口都能引用实际证据时才接入；发现结果回写启动参数，
+                # 续传/重建计划不再重复探测。
                 if (mode in (RunMode.CTF, RunMode.COMPETITION)
                         and plan.platform_profile is None
                         and cfg.gateway.automatic_platform_extraction
@@ -2459,6 +2571,27 @@ class SessionManager:
                     self._set_phase(session, "platform_profile", audit)
                     found = await _llm_extract_platform(
                         cfg, models, scope_mission if continuation_handled else plan.mission, audit)
+                    if found and mode == RunMode.COMPETITION:
+                        from spiritscout.ctf.platform_discovery import (
+                            declared_profile_is_supported,
+                        )
+
+                        source_mission = (scope_mission if continuation_handled
+                                          else plan.mission)
+                        if not declared_profile_is_supported(found, source_mission):
+                            audit.log("decision.change", "platform_discovery", {
+                                "action": "platform_text_extraction_rejected",
+                                "rationale": "任务原文未同时提供可复核的列题与提交契约"})
+                            found = None
+                    if not found and mode == RunMode.COMPETITION:
+                        entry_urls, _ = extract_targets(
+                            scope_mission if continuation_handled else plan.mission)
+                        if plan.target.startswith(("http://", "https://")):
+                            entry_urls = [plan.target, *entry_urls]
+                        found = await _llm_discover_platform(
+                            cfg, models,
+                            scope_mission if continuation_handled else plan.mission,
+                            list(dict.fromkeys(entry_urls)), audit)
                     if found:
                         plan.platform_profile = found
                         if isinstance(session.launch_request, dict):

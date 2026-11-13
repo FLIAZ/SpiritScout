@@ -13,7 +13,8 @@ _FACT_LAYERS = {BlackboardLayer.ASSET, BlackboardLayer.RECON_CLUE, BlackboardLay
 
 
 def is_fact(layer: BlackboardLayer, data: dict[str, Any]) -> bool:
-    return layer in _FACT_LAYERS or layer == BlackboardLayer.TOPOLOGY and data.get('kind') == 'finding'
+    return (layer in _FACT_LAYERS or layer == BlackboardLayer.TOPOLOGY
+            and data.get('kind') in {'finding', 'lead_card'})
 
 
 def _table(conn: sqlite3.Connection, name: str) -> bool:

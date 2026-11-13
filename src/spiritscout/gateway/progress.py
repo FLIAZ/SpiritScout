@@ -149,16 +149,14 @@ class PublicProgressEmitter:
         self._last = time.monotonic()
         if not text.strip():
             return
-        # 用户界面只看正文；建图 JSON 由完整响应解析，不进入实时流。
+        # 用户界面只看正文；所有 text 流都按累计原文解析。结构化输出经常跨
+        # 节流帧，若逐帧解析，首帧的 ``{"paths":`` 会被隐藏，下一帧从
+        # ``","/api`` 开始却会被误认成普通正文，造成内部 JSON 泄漏。
         if self._kind == "text":
-            if self._inline_discovery:
-                # JSON 可跨节流帧；保留解析前缀，不能把下一帧的字段碎片误当正文。
-                self._public_raw += text
-                public = parse_public_progress(self._public_raw).get('text', '')
-                text = public[len(self._public_sent):] if public.startswith(self._public_sent) else ''
-                self._public_sent += text
-            else:
-                text = parse_public_progress(text).get("text", "")
+            self._public_raw += text
+            public = parse_public_progress(self._public_raw).get('text', '')
+            text = public[len(self._public_sent):] if public.startswith(self._public_sent) else ''
+            self._public_sent += text
             if not text:
                 return
         for start in range(0, len(text), 4000):
@@ -221,6 +219,17 @@ def public_exploration(value: Any) -> dict[str, Any] | None:
 def parse_public_progress(content: str) -> dict[str, Any]:
     """分离公开正文与显式展示对象；支持正文夹带 JSON，不解析或展示内部决策。"""
     raw = str(content or '').strip()
+    # 兼容旧审计：早期流式过滤可能吞掉 JSON 首帧，却把后续中段作为正文
+    # 落盘。它们没有开括号，无法再用 JSONDecoder 识别，但会保留明显的协议
+    # 字段与分隔符；只过滤这类孤立片段，不猜测普通自然语言。
+    if re.match(
+        r'(?s)^\s*(?:["}\],:]|(?:intent|attempt|state|from|reason|paths|rationale|arguments|name|version|offset|limit)"?\s*:)',
+        raw,
+    ) and re.search(
+        r'"(?:intent|attempt|state|from|reason|paths|rationale|arguments|name|version|offset|limit)"?\s*:',
+        raw,
+    ):
+        return {'text': ''}
     prose: list[str] = []
     bodies: list[str] = []
     semantic = None

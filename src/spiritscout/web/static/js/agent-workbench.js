@@ -10,7 +10,7 @@ const AgentWorkbench = (() => {
     if (!/^(agent\.(turn|delta|tool_call|tool_result|conclude|note|error|ask_user|ask_answered)|task\.(start|done|failed|cancelled|pruned)|model\.(started|call|failed|cancelled))$/.test(type)) return;
     let agent = store.agents.get(actor);
     if (!agent) {
-      agent = {actor, status:"等待事件", turn:0, sequence:0, blocks:[], tools:new Map(), calls:new Set(), tasks:new Map(), callTasks:new Map(), taskId:"", updated:event.ts};
+      agent = {actor, status:"等待事件", turn:0, sequence:0, blocks:[], tools:new Map(), calls:new Set(), machineCalls:new Set(), tasks:new Map(), callTasks:new Map(), taskId:"", updated:event.ts};
       store.agents.set(actor, agent);
       if (!store.selected) store.selected = actor;
     }
@@ -40,14 +40,21 @@ const AgentWorkbench = (() => {
     };
     if (type === "task.start") { agent.status="执行中"; agent.target=d.target || ""; if(taskId && agent.tasks.has(taskId)) agent.tasks.get(taskId).status="执行中"; }
     if (type === "agent.turn") { agent.turn=d.turn || 0; agent.status="执行中"; append("进展",d.angle); }
-    if (type === "model.started") { agent.calls.add(d.call_id); agent.callTasks.set(d.call_id,taskId); agent.status="模型生成中"; }
+    if (type === "model.started") {
+      agent.calls.add(d.call_id); agent.callTasks.set(d.call_id,taskId); agent.status="模型生成中";
+      if(d.response_format === "json" || ["payload_planner","response_analyst","business_analyst","path_planner","js_reverse_analysis"].includes(d.cache_scope))
+        agent.machineCalls.add(d.call_id);
+    }
     if (/^model\.(call|failed|cancelled)$/.test(type)) {
       agent.calls.delete(d.call_id);agent.callTasks.delete(d.call_id);
+      agent.machineCalls.delete(d.call_id);
       agent.status=agent.calls.size ? "模型生成中" : type === "model.call" ? "执行中" : "调用异常";
       if (d.error) append("错误", d.error);
     }
     if (type === "agent.delta") {
       const stem = d.call_id || `${d.task_id || ""}:${d.route_id || d.route || ""}:${d.turn || agent.turn}`;
+      const machine = d.call_id && agent.machineCalls?.has(d.call_id);
+      if(machine && !["reasoning","reset"].includes(d.kind)) return;
       if (d.kind === "reset") {
         agent.blocks = agent.blocks.filter(b => !b.key.startsWith(stem+":"));
       } else if (d.kind !== "tool_call") {

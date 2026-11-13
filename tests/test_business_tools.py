@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, Mock
 
 from spiritscout.agents.business.agent import BusinessContextAgent
 from spiritscout.core.audit import NullAuditLogger
-from spiritscout.core.models import AgentType, Task
+from spiritscout.core.models import AgentType, BlackboardLayer, Task
 from spiritscout.tools.spec import ToolResult
 
 
@@ -84,10 +84,111 @@ class BusinessToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(nav["description"], "Navigate to a URL")
         self.assertEqual(schemas["mcp__playwright__browser_tabs"]["parameters"]["properties"]["action"]["enum"][0], "list")
 
+    def test_business_world_state_omits_dynamic_investigation_indexes(self) -> None:
+        self.agent.ctx.policy = SimpleNamespace(guard=None)
+        records = {
+            (BlackboardLayer.TARGET_AUTH, "user-context"): {
+                "mission": "只验证公开业务流程",
+            },
+            (BlackboardLayer.TOPOLOGY, "project-memory"): {
+                "description": "禁止触发真实支付",
+            },
+        }
+        self.agent.ctx.blackboard = SimpleNamespace(
+            read=lambda layer, key: records.get((layer, key)),
+            query=lambda *args, **kwargs: [{"record_id": "a", "version": 1,
+                "updated_at": "now", "data": {"asset_type": "url", "value": "https://a.test"}}],
+        )
+        state = self.agent._world_state()
+        self.assertEqual(state["user_context"]["mission"], "只验证公开业务流程")
+        self.assertEqual(state["project_rules"], "禁止触发真实支付")
+        self.assertNotIn("intelligence_summary", state)
+        self.assertNotIn("investigation_frontier", state)
+        self.assertNotIn("asset_intelligence", state)
+
+    async def test_missing_required_arguments_are_rejected_before_tool_execution(self) -> None:
+        for name, expected in (("http_probe", "url"), ("asset_memory_lookup", "host"),
+                               ("mcp_call", "name"), ("blackboard_read", "layer"),
+                               ("graph_read", "graph"), ("record_endpoint", "url")):
+            with self.subTest(name=name):
+                text = await self.agent._run_tool_call_inner(
+                    self.task, {"id": f"bad-{name}", "name": name, "arguments": {}})
+                self.assertIn("工具参数无效", text)
+                self.assertIn(expected, text)
+        self.agent.ctx.tools.call.assert_not_awaited()
+
     def test_ask_user_is_exposed_to_explorer_tool_loop(self) -> None:
         schemas = {s["function"]["name"]: s["function"] for s in self.agent._tool_schemas()}
         self.assertIn("ask_user", schemas)
         self.assertEqual(schemas["ask_user"]["parameters"]["required"], ["question"])
+
+    def test_business_context_validates_structured_surface_assessment(self) -> None:
+        context = self.agent._validated_context({
+            "surface_assessment": {
+                "type": "content_portal", "business_complexity": "low",
+                "rationale": "公开内容为主", "evidence_refs": ["E1", "unknown"],
+            },
+            "roles": [], "objects": [], "workflows": [], "trust_boundaries": [],
+            "facts": [], "hypotheses": [], "unknowns": [],
+            "blockers": [{
+                "type": "sso_required", "description": "需企业单点登录",
+                "prerequisite": "测试账号或登录后请求记录", "user_resolvable": True,
+                "alternative_capabilities": ["script_and_api_extraction", "invalid"],
+                "evidence_refs": ["E1", "unknown"],
+            }],
+        }, {"E1"})
+
+        self.assertEqual(context["surface_assessment"], {
+            "type": "content_portal", "business_complexity": "low",
+            "rationale": "公开内容为主", "evidence_refs": ["E1"],
+        })
+        self.assertEqual(context["blockers"], [{
+            "type": "sso_required", "description": "需企业单点登录",
+            "prerequisite": "测试账号或登录后请求记录", "user_resolvable": True,
+            "alternative_capabilities": ["script_and_api_extraction"],
+            "evidence_refs": ["E1"],
+        }])
+
+    def test_only_latest_steering_is_exposed_and_feedback_is_available(self) -> None:
+        from spiritscout.agents.ring import RingLedger
+
+        ring = RingLedger()
+        ring.steer("business_context", "旧指令", task_id=self.task.task_id)
+        latest = ring.steer("business_context", "新指令", task_id=self.task.task_id)
+        self.agent.ctx.ring = ring
+        active = ring.active_steering(
+            "business_context", task_id=self.task.task_id, route_id="r1")
+        self.assertEqual(active["id"], latest)
+        schemas = {s["function"]["name"]: s["function"] for s in self.agent._tool_schemas()}
+        self.assertIn("steering_feedback", schemas)
+
+    def test_blocked_steering_is_not_reinjected_on_later_turns(self) -> None:
+        from spiritscout.agents.ring import RingLedger
+
+        ring = RingLedger()
+        instruction = ring.steer(
+            "business_context", "完成需要用户验证码的流程", task_id=self.task.task_id)
+        self.assertTrue(ring.steering_feedback(
+            "business_context", task_id=self.task.task_id, route_id="r1",
+            instruction_id=instruction, status="blocked", detail="用户尚未提供验证码"))
+
+        active = ring.active_steering(
+            "business_context", task_id=self.task.task_id, route_id="r1")
+
+        self.assertIsNone(active)
+
+    async def test_duplicate_forced_refresh_is_downgraded_to_cacheable_probe(self) -> None:
+        self.agent.ctx.tools.call.return_value = ToolResult(
+            tool="http_probe", ok=True, stdout="ok", parsed={"status_code": 200})
+        call = {"id": "probe", "name": "http_probe",
+                "arguments": {"url": self.task.target, "refresh": True}}
+
+        await self.agent._run_tool_call(self.task, call)
+        await self.agent._run_tool_call(self.task, call)
+
+        first, second = [item.args[1] for item in self.agent.ctx.tools.call.await_args_list]
+        self.assertTrue(first["refresh"])
+        self.assertFalse(second["refresh"])
 
     async def test_ask_user_answer_and_scope_flow_back_to_agent(self) -> None:
         broker = SimpleNamespace(ask=AsyncMock(return_value={

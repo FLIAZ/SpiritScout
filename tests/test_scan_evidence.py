@@ -22,6 +22,7 @@ from spiritscout.tools.registry import ToolRegistry
 from spiritscout.tools.scan_evidence import read_finding, submit_candidate
 from spiritscout.tools.scanner import NucleiScanner
 from spiritscout.tools.spec import ToolResult
+from spiritscout.web.deliverables import read_vulnerability_page
 from spiritscout.web.file_routes import mount_artifact_routes
 
 
@@ -54,6 +55,10 @@ class ScanEvidenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_original_packets_poc_and_ids_survive_candidate_and_api(self):
         hit=await self.scan()
         self.assertEqual(self.bb.query(BlackboardLayer.VULN),[],'命中不自动生成漏洞结论')
+        hypothesis_ref='topology:hypothesis-fixture@3'
+        finding=self.bb.read(BlackboardLayer.RECON_CLUE,hit['finding_id'])
+        self.bb.write(BlackboardLayer.RECON_CLUE,hit['finding_id'],
+            {**finding,'hypothesis_ref':hypothesis_ref})
         files=hit['scan_evidence']['files']
         self.assertEqual((self.root/files['request']).read_bytes(),self.request.encode())
         self.assertEqual((self.root/files['response']).read_bytes(),self.response.encode())
@@ -66,6 +71,11 @@ class ScanEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored['status'],'candidate')
         self.assertFalse(stored['poc_verified'])
         self.assertEqual(stored['vulnerability_ids'],['CVE-fixture-only','CWE-fixture'])
+        self.assertEqual(stored['hypothesis_ref'],hypothesis_ref)
+        self.assertEqual(stored['hypothesis_refs'],[hypothesis_ref])
+        page=read_vulnerability_page(self.root)
+        self.assertEqual(page['items'][0]['hypothesis_ref'],hypothesis_ref)
+        self.assertEqual(page['items'][0]['hypothesis_refs'],[hypothesis_ref])
         app=FastAPI()
         def require(session):
             if session!='one':
@@ -76,6 +86,8 @@ class ScanEvidenceTests(unittest.IsolatedAsyncioTestCase):
             detail=await client.get('/api/sessions/one/vulnerabilities/'+result['vuln_id'])
             self.assertEqual(detail.status_code,200)
             self.assertEqual(detail.json()['data']['scanner_evidence'][0]['files'],files)
+            self.assertEqual(detail.json()['data']['hypothesis_ref'],hypothesis_ref)
+            self.assertEqual(detail.json()['data']['hypothesis_refs'],[hypothesis_ref])
             response=await client.get('/api/sessions/one/artifacts/download',params={'path':files['response']})
             self.assertEqual(response.content,self.response.encode())
             self.assertEqual((await client.get('/api/sessions/other/vulnerabilities/'+result['vuln_id'])).status_code,404)

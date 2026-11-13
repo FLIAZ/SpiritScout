@@ -11,7 +11,15 @@ from unittest.mock import AsyncMock, Mock, patch
 from spiritscout.agents.master.agent import MasterAgent
 from spiritscout.agents.scan_control import ScannerController
 from spiritscout.blackboard import Blackboard
+from spiritscout.blackboard.hypotheses import upsert
 from spiritscout.config.settings import SystemConfig
+from spiritscout.core.models import (
+    AgentType,
+    Authorization,
+    BlackboardLayer,
+    RunMode,
+    Scope,
+)
 from spiritscout.tools.metasploit import MetasploitScanner
 from spiritscout.tools.scanner import NucleiScanner
 from spiritscout.tools.spec import ToolResult
@@ -26,11 +34,42 @@ class ScanControlTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self.bb.aclose)
         self.infra = SimpleNamespace(blackboard=self.bb, audit=Mock(), cfg=SystemConfig())
         self.control = ScannerController(self.infra, None, mission='测试任务', standing_rules='用户原始规则')
+        self.hypothesis_ref = upsert(
+            self.bb, claim='目标可能暴露特定组件漏洞', subject='http://fixture.test',
+            test_type='cve', technical_basis={'tags': ['tech'], 'cve_ids': ['CVE-2026-0001']},
+            actor='master', agent_type=AgentType.MASTER,
+        )['hypothesis_ref']
         self.addAsyncCleanup(self.control.close)
 
     def command(self, action='dispatch', **changes):
         return {'action': action, 'revision': self.control.revision, 'reason': '依据用户许可与当前规则',
-                'target': 'http://fixture.test', 'goal': '核实 HTTP 环境', 'tools': ['nuclei_scan'], **changes}
+                'target': 'http://fixture.test', 'goal': '核实 HTTP 环境',
+                'hypothesis_ref': self.hypothesis_ref, 'tools': ['nuclei_scan'], **changes}
+
+    async def test_nuclei_dispatch_requires_active_hypothesis_and_technical_basis(self):
+        missing = await self.control.apply(
+            self.command(hypothesis_ref=''), actor='master')
+        self.assertFalse(missing['ok'])
+        self.assertIn('漏洞假设', missing['error'])
+
+        unsupported = upsert(
+            self.bb, claim='仅有通用存活信息', subject='http://fixture.test',
+            test_type='generic', actor='master', agent_type=AgentType.MASTER,
+        )['hypothesis_ref']
+        no_basis = await self.control.apply(
+            self.command(hypothesis_ref=unsupported), actor='master')
+        self.assertFalse(no_basis['ok'])
+        self.assertIn('技术依据', no_basis['error'])
+
+        from spiritscout.blackboard.hypotheses import transition
+
+        transition(
+            self.bb, self.hypothesis_ref, state='exhausted', reason='最小实验已完成',
+            actor='master', agent_type=AgentType.MASTER,
+        )
+        terminal = await self.control.apply(self.command(), actor='master')
+        self.assertFalse(terminal['ok'])
+        self.assertIn('活动', terminal['error'])
 
     async def test_idle_does_not_start_worker_or_allow_registered_scanning_tools(self):
         with patch('spiritscout.agents.scanner._run', new_callable=AsyncMock) as worker, \
@@ -47,6 +86,31 @@ class ScanControlTests(unittest.IsolatedAsyncioTestCase):
             worker.assert_not_awaited()
             nuclei.assert_not_awaited()
             msf.assert_not_awaited()
+
+    def test_natural_worker_completion_updates_control_status_and_result(self):
+        self.control.status = 'running'
+        self.control.permitted = True
+        self.control.worker_id = 'scanner-worker'
+
+        self.control.worker_finished('scanner-worker', 'done', '只确认根域，未发现子域')
+
+        self.assertEqual(self.control.status, 'done')
+        self.assertFalse(self.control.permitted)
+        self.assertEqual(self.control.last_result['action'], 'worker_complete')
+        self.assertIn('未发现子域', self.control.last_result['summary'])
+        saved = self.bb.read(BlackboardLayer.TASK_STATE, 'scanner-control')
+        self.assertEqual(saved['status'], 'done')
+
+    def test_incomplete_worker_delivery_is_not_coerced_to_done(self):
+        self.control.status = 'running'
+        self.control.permitted = True
+        self.control.worker_id = 'scanner-worker'
+
+        self.control.worker_finished(
+            'scanner-worker', 'incomplete', '只确认根域，未发现子域')
+
+        self.assertEqual(self.control.status, 'incomplete')
+        self.assertTrue(self.control.last_result['ok'])
 
     async def test_stopping_background_scan_does_not_interrupt_other_work(self):
         scan_entered, other_entered = asyncio.Event(), asyncio.Event()
@@ -159,6 +223,42 @@ class ScanControlTests(unittest.IsolatedAsyncioTestCase):
         result = await master._apply_scanner_control({'scan_control': self.command()})
         self.assertFalse(result['ok'])
         self.assertIsNone(self.control.task)
+
+    async def test_wildcard_src_starts_readonly_discovery_without_waiting_for_plan(self):
+        master = object.__new__(MasterAgent)
+        master.agent_id = 'master'
+        control = SimpleNamespace(
+            forbidden=False, status='idle', revision=4,
+            apply=AsyncMock(return_value={'ok': True, 'action': 'dispatch'}))
+        master.ctx = SimpleNamespace(extra={'scan_controller': control})
+        authorization = Authorization(
+            auth_id='auth', mode=RunMode.SRC,
+            scope=Scope(allowed_domains=['*.example.test']))
+
+        result = await master._start_wildcard_discovery(
+            authorization, 'https://example.test')
+
+        self.assertTrue(result['ok'])
+        command = control.apply.await_args.args[0]
+        self.assertEqual(command['target'], '*.example.test')
+        self.assertEqual(command['tools'], ['asset_discover'])
+        self.assertNotIn('nuclei_scan', command['tools'])
+
+    async def test_non_wildcard_src_does_not_auto_start_scanner(self):
+        master = object.__new__(MasterAgent)
+        master.agent_id = 'master'
+        control = SimpleNamespace(
+            forbidden=False, status='idle', revision=0, apply=AsyncMock())
+        master.ctx = SimpleNamespace(extra={'scan_controller': control})
+        authorization = Authorization(
+            auth_id='auth', mode=RunMode.SRC,
+            scope=Scope(allowed_domains=['example.test']))
+
+        result = await master._start_wildcard_discovery(
+            authorization, 'https://example.test')
+
+        self.assertIsNone(result)
+        control.apply.assert_not_awaited()
 
     async def test_forbid_survives_continuation_without_auto_resuming_old_assignment(self):
         await self.control.apply(self.command('forbid'), actor='master')

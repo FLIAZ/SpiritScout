@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 from spiritscout.agents.master.contracts import (
     TACTIC_AGENT_MAP,
@@ -50,6 +51,38 @@ class MasterAgent(MasterCoordination, MasterInteraction, MasterPlanning):
         self.ctx = ctx
         self.agent_id = new_id("master")
 
+    async def _start_wildcard_discovery(self, authorization: Authorization,
+                                        target: str) -> dict[str, Any] | None:
+        """显式通配符 SRC 首轮立即并行做只读资产发现。
+
+        这是用户授权形态直接表达的信息收集需求，不依赖元规划模型是否恰好
+        生成 scan_control。这里只许可 asset_discover；Nuclei 等验证工具仍须
+        后续基于具体漏洞假设由模型单独派遣。
+        """
+        control = (self.ctx.extra or {}).get("scan_controller")
+        wildcards = [
+            domain.strip().lower().rstrip(".")
+            for domain in authorization.scope.allowed_domains
+            if isinstance(domain, str) and domain.strip().startswith("*.")
+        ]
+        if (authorization.mode != RunMode.SRC or control is None or not wildcards
+                or control.forbidden or control.status != "idle"):
+            return None
+        host = (urlsplit(target).hostname or "").lower().rstrip(".")
+        selected = next(
+            (pattern for pattern in wildcards if host == pattern[2:]), wildcards[0])
+        return await control.apply({
+            "action": "dispatch",
+            "revision": control.revision,
+            "reason": "用户以通配符明确授权子域范围，首轮优先并行收集范围内资产",
+            "target": selected,
+            "goal": "发现范围内子域、存活 Web 入口与基础指纹，供后续按资产价值滚动派工",
+            "tools": ["asset_discover"],
+            "constraints": (
+                "仅做只读 DNS、证书透明度与 HTTP 基线；结果必须同时位于本次通配符授权"
+                "和派遣范围内；不运行 Nuclei、Metasploit、爆破或写入动作"),
+        }, actor=self.agent_id)
+
     # ------------------------------------------------------------ 分段执行
 
     async def _run_segment(self, state: MasterState) -> MasterState:
@@ -90,6 +123,7 @@ class MasterAgent(MasterCoordination, MasterInteraction, MasterPlanning):
             agent_type=AgentType.MASTER, updated_by=self.agent_id,
             dedup_key=f"auth|{authorization.auth_id}",
         )
+        await self._start_wildcard_discovery(authorization, target)
         state: MasterState = {
             "target": target,
             "round_no": 0,
@@ -99,6 +133,8 @@ class MasterAgent(MasterCoordination, MasterInteraction, MasterPlanning):
             "continue_iteration": True,
             "stop_reason": "",
             "plan_source": "",
+            "last_decision_event": "",
+            "replan_requested": False,
         }
         # 用户直达通道：与派发/督导隔离，整场运行期间并行消费用户消息
         # （开工时间戳供对话通道回答「跑了多久」类问题，不依赖主循环）

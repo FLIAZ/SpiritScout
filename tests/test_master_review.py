@@ -1,17 +1,113 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from spiritscout.agents.master.agent import MasterAgent
 from spiritscout.agents.master.dag import TaskDAG
 from spiritscout.core.exceptions import SpiritScoutError
 from spiritscout.core.models import AgentType, TaskStatus
+from spiritscout.gateway.decision_events import decision_event_fingerprint
 
 
 class MasterReviewTests(unittest.IsolatedAsyncioTestCase):
+    def test_decision_event_ignores_display_noise_but_tracks_evidence_revision(self) -> None:
+        base = {
+            "testing_opportunities": {
+                "prioritized": [{
+                    "opportunity_ref": "opportunity:one",
+                    "opportunity_revision": "rev-1",
+                    "direction_state": "productive",
+                    "priority_score": 80,
+                }],
+                "portfolio_review": {"active_targets": 1},
+            },
+            "intelligence_summary": {"api_surface": {"endpoints": 1}},
+        }
+        noisy = {**base, "environment": {"now": "later"},
+                 "shared_facts": [{"text": "render-only"}]}
+        changed = json.loads(json.dumps(base))
+        changed["testing_opportunities"]["prioritized"][0][
+            "opportunity_revision"] = "rev-2"
+
+        self.assertEqual(decision_event_fingerprint(base),
+                         decision_event_fingerprint(noisy))
+        self.assertNotEqual(decision_event_fingerprint(base),
+                            decision_event_fingerprint(changed))
+
+    async def test_unchanged_idle_world_does_not_repeat_meta_planning(self) -> None:
+        master = object.__new__(MasterAgent)
+        master.agent_id = "master-test"
+        master.ctx = SimpleNamespace(
+            audit=Mock(), extra={}, tactic_map=None, pause_gate=None,
+            policy=SimpleNamespace(mode=None),
+        )
+        world = {"expert_scorecard": {"formal_assets": 1}}
+        fingerprint = decision_event_fingerprint(world)
+        master._world_state = lambda: world
+        master._cancel_stale_opportunity_nodes = Mock()
+        master._write_dag_snapshot = Mock()
+        master._scanner_context = lambda: {}
+        master._challenge_states = lambda dag: {}
+        master._situation_digest = lambda: {}
+        master._meta_plan = MasterAgent._meta_plan.__get__(master)
+        master._acquire_plan = AsyncMock(side_effect=AssertionError("不应重复规划"))
+        state = {
+            "target": "https://a.test", "round_no": 2,
+            "dag": TaskDAG().to_dict(), "tasks_dispatched": [], "round_views": [],
+            "continue_iteration": True, "stop_reason": "", "plan_source": "llm",
+            "last_decision_event": fingerprint, "replan_requested": False,
+        }
+
+        result = await master._meta_plan(state)
+
+        self.assertEqual(result["tasks_dispatched"], [])
+        self.assertEqual(result["last_decision_event"], fingerprint)
+        master._acquire_plan.assert_not_awaited()
+
+    async def test_llm_review_receives_portfolio_attack_surface_review(self) -> None:
+        master = object.__new__(MasterAgent)
+        master.agent_id = "master-test"
+        master.ctx = SimpleNamespace(
+            tactic_map={"TA0043": (AgentType.RECON, "recon")},
+            extra={"competition_context": {}}, gateway=Mock(), audit=Mock(),
+            policy=SimpleNamespace(mode=None), agents={},
+        )
+        master._mission = lambda: "继续调查"
+        master._world_state = lambda: {}
+        master._project_rules = lambda: ""
+        master._competition_status = lambda dag: {}
+        master._route_digest = lambda state: []
+        master._challenge_states = lambda dag: {}
+        master._system_prompt = lambda: "system"
+        master._situation_digest = lambda: {"testing_opportunities": {
+            "portfolio_review": {
+                "target_concentration": {"target": "https://a.test", "share": 0.8,
+                                         "over_concentrated": True},
+                "low_yield_capabilities": [{"capability": "web_boundary_test"}],
+                "pivot_candidates": [{"recommendation": "改用 JS 能力"}],
+            },
+        }}
+        captured = {}
+
+        async def decide(gateway, messages, **kwargs):
+            captured["messages"] = messages
+            return SimpleNamespace(content=json.dumps({
+                "continue_iteration": False, "reason": "fixture", "dag_nodes": [],
+            }))
+
+        state = {"target": "a.test", "round_no": 2, "dag": TaskDAG().to_dict()}
+        with patch("spiritscout.agents.master.planning.chat_decision", side_effect=decide):
+            result = await master._llm_review(state, {})
+
+        self.assertFalse(result["continue_iteration"])
+        rendered = json.dumps(captured["messages"], ensure_ascii=False)
+        self.assertIn("portfolio_review", rendered)
+        self.assertIn("改用 JS 能力", rendered)
+
     async def test_steering_keeps_observing_after_three_decisions_and_refill(self) -> None:
         master = object.__new__(MasterAgent)
         master.ctx = SimpleNamespace(audit=Mock(), ring=Mock())

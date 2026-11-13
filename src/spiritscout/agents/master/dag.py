@@ -125,6 +125,54 @@ class TaskDAG:
             meta = dict(spec["meta"]) if isinstance(spec.get("meta"), dict) else {}
             if isinstance(spec.get("continue_from"), dict):
                 meta["continue_from"] = dict(spec["continue_from"])
+            investigation_contract = {
+                key: spec[key] for key in (
+                    "expected_information", "decision_impact", "why_now",
+                    "next_minimal_experiment", "stop_condition",
+                ) if isinstance(spec.get(key), str) and spec[key].strip()
+            }
+            if isinstance(spec.get("evidence_refs"), list):
+                investigation_contract["evidence_refs"] = [
+                    str(value)[:200] for value in spec["evidence_refs"][:20]
+                    if isinstance(value, str)
+                ]
+            if isinstance(spec.get("historical_evidence_refs"), list):
+                investigation_contract["historical_evidence_refs"] = [
+                    str(value)[:200] for value in spec["historical_evidence_refs"][:20]
+                    if isinstance(value, str)
+                ]
+            if isinstance(spec.get("unknowns_to_resolve"), list):
+                investigation_contract["remaining_unknowns"] = [
+                    str(value)[:300] for value in spec["unknowns_to_resolve"][:12]
+                    if isinstance(value, str) and value.strip()
+                ]
+            if isinstance(spec.get("hypothesis_ref"), str) and spec["hypothesis_ref"].strip():
+                investigation_contract["hypothesis_ref"] = spec["hypothesis_ref"].strip()[:200]
+            if isinstance(spec.get("opportunity_ref"), str) and spec["opportunity_ref"].strip():
+                investigation_contract["opportunity_ref"] = spec["opportunity_ref"].strip()[:200]
+                investigation_contract["opportunity_revision"] = str(
+                    spec.get("opportunity_revision") or "")[:40]
+                try:
+                    investigation_contract["opportunity_score"] = max(
+                        0, min(100, int(spec.get("opportunity_score") or 0)))
+                except (TypeError, ValueError):
+                    investigation_contract["opportunity_score"] = 0
+                if isinstance(spec.get("capability_candidates"), list):
+                    investigation_contract["capability_candidates"] = [
+                        {
+                            key: str(item.get(key) or "")[:240]
+                            for key in ("capability", "tactic", "basis", "execution")
+                        }
+                        for item in spec["capability_candidates"][:8]
+                        if isinstance(item, dict)
+                    ]
+                if isinstance(spec.get("selected_capability"), dict):
+                    investigation_contract["selected_capability"] = {
+                        key: str(spec["selected_capability"].get(key) or "")[:240]
+                        for key in ("capability", "tactic", "basis", "execution")
+                    }
+            if investigation_contract:
+                meta["investigation_contract"] = investigation_contract
             # 规划节点可指定本节点的测试目标（多域 SRC 按域拆节点）；
             # 留空则派发时沿用会话目标。
             target = str(spec.get("target") or "").strip()
@@ -237,7 +285,15 @@ class TaskDAG:
                 for d in node.depends_on
             ):
                 ready.append(node)
-        return ready
+        def opportunity_score(node: DAGNode) -> int:
+            contract = node.meta.get("investigation_contract") \
+                if isinstance(node.meta, dict) else {}
+            try:
+                return int((contract or {}).get("opportunity_score") or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        return sorted(ready, key=lambda node: (-opportunity_score(node), node.round_created))
 
     def all_nodes(self) -> list[DAGNode]:
         return list(self._nodes.values())

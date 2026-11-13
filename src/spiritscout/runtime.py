@@ -167,6 +167,7 @@ class _Infra:
     builtin_ctx: dict[str, Any]
     workspace: Path
     knowledge: KnowledgeStore
+    resources: Any = None       # 资源控制台配置（外部情报 provider 等）
     agent_models: dict[str, str] = field(default_factory=dict)  # 按 Agent 绑定模型
     ring: Any = None            # RingLedger 环形台账（主/子 Agent 共持，随会话消亡）
     shared_cache: Any = None    # LocalSharedCache 环形共享缓存（同题并行 Agent 共持）
@@ -272,6 +273,11 @@ async def _build_infra(
 
     resources = ResourceStore(resource_root(cfg), cfg.resources.freshness_hours)
     knowledge.resources = resources
+    from spiritscout.web import vault
+
+    # Web 会话副本的 root 指向会话目录，guard_root 才是共享控制面根；CLI
+    # 没有 guard_root 时直接使用 workspace.root。凭据不进入会话黑板或审计。
+    vault.configure(cfg.workspace.guard_root or cfg.workspace.root)
     cfg = cfg.model_copy(deep=True)
     from spiritscout.gateway.lightweight import lightweight_enabled
 
@@ -778,6 +784,7 @@ async def _build_infra(
             policy=policy, limiter=limiter, bus=bus, blackboard=blackboard,
             convergence=convergence, gateway=gateway, tools=registry,
             builtin_ctx=builtin_ctx, workspace=workspace, knowledge=knowledge,
+            resources=resources,
             agent_models=bound, ring=shared_ring,
             shared_cache=LocalSharedCache(default_ttl_seconds=3600),
             mcp_clients=mcp_clients, mcp_startup_tasks=mcp_startup_tasks,

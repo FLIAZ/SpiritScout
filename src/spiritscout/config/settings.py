@@ -280,6 +280,29 @@ class ScannerConfig(ValidatedConfig):
     metasploit_command: list[str] = Field(default_factory=lambda: ["msfconsole"])
 
 
+class FofaConfig(ValidatedConfig):
+    """FOFA 只提供外部候选，不直接产出正式资产或扫描目标。"""
+
+    enabled: bool = False
+    api_url: str = Field(default="https://fofa.info/api/v1/search/all", pattern=r"^https://")
+    email_env: str = "FOFA_EMAIL"
+    api_key_env: str = "FOFA_KEY"
+    vault_key_name: str = "asset-provider:fofa"
+    page_size: int = Field(default=100, ge=1, le=10000)
+    timeout_seconds: float = Field(default=20, gt=0, le=120)
+
+
+class AssetIntelligenceConfig(ValidatedConfig):
+    """外部资产情报来源；默认全部关闭，按部署显式启用。"""
+
+    max_candidates_per_provider: int = Field(default=200, ge=1, le=5000)
+    verification_batch_size: int = Field(default=20, ge=1, le=500)
+    verification_concurrency: int = Field(default=4, ge=1, le=64)
+    provider_cache_ttl_seconds: int = Field(default=900, ge=0, le=86400)
+    provider_cache_max_entries: int = Field(default=256, ge=1, le=10000)
+    fofa: FofaConfig = Field(default_factory=FofaConfig)
+
+
 class SystemConfig(ValidatedConfig):
     """系统总配置。"""
 
@@ -293,6 +316,7 @@ class SystemConfig(ValidatedConfig):
     knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
+    asset_intelligence: AssetIntelligenceConfig = Field(default_factory=AssetIntelligenceConfig)
     cve: CVEConfig = Field(default_factory=CVEConfig)
     report: ReportConfig = Field(default_factory=ReportConfig)
     web: WebConfig = Field(default_factory=WebConfig)

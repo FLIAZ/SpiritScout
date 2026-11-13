@@ -37,6 +37,8 @@ class MasterState(TypedDict):
     continue_iteration: bool
     stop_reason: str
     plan_source: str
+    last_decision_event: str
+    replan_requested: bool
 
 
 @dataclass

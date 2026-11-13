@@ -16,7 +16,8 @@ from spiritscout.blackboard import Blackboard
 from spiritscout.config.settings import ModelEntry, SystemConfig, WorkspaceConfig
 from spiritscout.core.audit import AuditLogger
 from spiritscout.core.models import AgentType, BlackboardLayer, RunMode
-from spiritscout.launch import LaunchRequest, prepare_launch
+from spiritscout.launch import LaunchRequest, extract_targets, prepare_launch
+from spiritscout.policy.scope import ScopeGuard
 from spiritscout.web.app import _read_state, create_app
 from spiritscout.web.sessions import (
     Session,
@@ -144,6 +145,34 @@ class LaunchRoutingTests(unittest.TestCase):
             mission="测试 web 资产", extra_scope=["www.example.test"]))
 
         self.assertEqual(plan.target, "https://www.example.test")
+
+    def test_src_wildcard_mission_preserves_subdomain_scope_and_uses_apex_entry(self) -> None:
+        plan = prepare_launch(LaunchRequest(
+            mode=RunMode.SRC, mission="开始对 *.vulbox.com 所有子域进行只读测试"))
+
+        self.assertEqual(plan.target, "https://vulbox.com")
+        self.assertIn("*.vulbox.com", plan.authorization.scope.allowed_domains)
+        guard = ScopeGuard(plan.authorization.scope)
+        self.assertTrue(guard.is_allowed("https://vulbox.com/"))
+        self.assertTrue(guard.is_allowed("https://www.vulbox.com/"))
+
+    def test_excluded_domains_in_mission_do_not_become_authorized_scope(self) -> None:
+        plan = prepare_launch(LaunchRequest(
+            mode=RunMode.SRC,
+            mission=("测试 *.vulbox.com 所有子域，3001.net 相关域名漏洞不收取，"
+                     "不要测试 https://legacy.example.net/admin"),
+        ))
+
+        self.assertEqual(plan.authorization.scope.allowed_domains, ["*.vulbox.com"])
+        self.assertNotIn("https://legacy.example.net/admin",
+                         plan.authorization.scope.allowed_urls)
+
+    def test_target_extraction_keeps_multiple_positive_mentions(self) -> None:
+        urls, domains = extract_targets(
+            "测试 https://shop.example.test 和 api.example.test；排除 old.example.test")
+
+        self.assertEqual(urls, ["https://shop.example.test"])
+        self.assertEqual(domains, ["api.example.test"])
 
     def test_plan_node_target_beats_session_target(self) -> None:
         node = SimpleNamespace(meta={"target": "hg.example.test"})
@@ -273,6 +302,37 @@ class SessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(state["tasks"][0]["routes"][0]["route_id"], "r1")
             self.assertEqual(state["findings"][0]["finding_id"], "f1")
             self.assertEqual(state["findings"][0]["task_id"], "t1")
+
+    async def test_state_rebuilds_ranked_opportunities_from_persisted_blackboard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Session(session_id="sess-opportunities", mode="src",
+                              target="https://a.test", workspace=Path(tmp), status="completed")
+            bb = Blackboard(session.bb_path)
+            bb.write(BlackboardLayer.TOPOLOGY, "lead-api", {
+                "kind": "lead_card", "lead_id": "lead-api",
+                "subject": "https://a.test/api/orders", "status": "actionable",
+                "origins": ["page_network"], "origin_class": "target_observation",
+                "evidence_state": "verified", "unknowns": ["是否存在对象权限边界"],
+                "next_minimal_experiment": "比较两个授权账号读取同一对象",
+                "observation_count": 1,
+            })
+            bb.write(BlackboardLayer.TASK_STATE, "task-empty", {
+                "task": {"status": "done", "payload": {}},
+                "summary": {"status": "done", "findings": [], "handoff": {
+                    "established_facts": [], "resolved_unknowns": [],
+                    "remaining_unknowns": ["尚未形成有效结论"]}},
+            })
+            bb.close()
+
+            state = _read_state(session)
+
+            pool = state["testing_opportunities"]
+            self.assertEqual(pool["total"], 1)
+            self.assertEqual(pool["prioritized"][0]["subject"],
+                             "https://a.test/api/orders")
+            self.assertEqual(pool["prioritized"][0]["recommended_work"],
+                             "evidence_followup")
+            self.assertEqual(pool["action_yield"]["empty_completion_count"], 1)
 
     async def test_resume_cancels_stale_running_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -477,6 +537,87 @@ class PlatformExtractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(profile["base_url"], "http://10.0.100.58")
             # 平台宿主并入授权域（纯托管题任务也能通过启动门）
             self.assertIn("10.0.100.58", plan.authorization.scope.allowed_domains)
+
+    async def test_competition_discovers_platform_from_entry_evidence(self) -> None:
+        mission = "智能体渗透赛入口 https://arena.test/contest，请自主完成并提交答案"
+        discovered = json.dumps({
+            "platform": {
+                "name": "arena", "base_url": "https://arena.test",
+                "ops": {
+                    "list": {"method": "GET", "path": "/api/challenges",
+                             "items_field": "data.items"},
+                    "submit": {"method": "POST",
+                               "path": "/api/challenges/{challenge}/submit",
+                               "body": {"answer": "{flag}"},
+                               "accepted_field": "correct"},
+                },
+                "challenge_fields": {"id": "id"},
+                "evidence": {
+                    "list": {
+                        "source_url": "https://arena.test/openapi.json",
+                        "excerpt": ('"/api/challenges":{"get":'
+                                    '{"data":{"items":[{"id":{}}]}}')},
+                    "submit": {
+                        "source_url": "https://arena.test/openapi.json",
+                        "excerpt": ('"/api/challenges/{id}/submit":'
+                                    '{"post":{"answer":{},"correct":{}}}')},
+                },
+            }}, ensure_ascii=False)
+        documents = [{
+            "url": "https://arena.test/openapi.json", "status": 200,
+            "content_type": "application/json",
+            "text": ('{"paths":{"/api/challenges":{"get":'
+                     '{"data":{"items":[{"id":{}}]}},'
+                     '"/api/challenges/{id}/submit":'
+                     '{"post":{"answer":{},"correct":{}}}}}'),
+        }]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = SystemConfig(workspace=WorkspaceConfig(root=str(root)))
+            models = [ModelEntry(model="test-model")]
+            manager = SessionManager(cfg, models)
+            workspace = root / "sessions" / "sess-discovery"
+            workspace.mkdir(parents=True)
+            session = Session(session_id="sess-discovery", mode="competition",
+                              target="https://arena.test/contest", workspace=workspace)
+            session.launch_request = {"mission": mission, "mode": "competition"}
+            cfg.audit_log_path = str(session.audit_path)
+            plan = prepare_launch(LaunchRequest(
+                mode=RunMode.COMPETITION, mission=mission,
+                rules_yaml="contest_type: jeopardy\n"))
+            gateway = _FakeChatGateway(json.dumps({
+                "platform": {
+                    "name": "guessed", "base_url": "https://arena.test",
+                    "ops": {
+                        "list": {"method": "GET", "path": "/guessed/list"},
+                        "submit": {"method": "POST", "path": "/guessed/submit",
+                                   "body": {"flag": "{flag}"}},
+                    },
+                    "challenge_fields": {"id": "id"},
+                }}), discovered)
+            with patch("spiritscout.web.sessions._conversation_gateway",
+                       return_value=gateway), patch(
+                    "spiritscout.ctf.platform_discovery.discover_platform_documents",
+                    new=AsyncMock(return_value=documents)) as discover_mock, patch(
+                    "spiritscout.runtime.run_competition_engagement",
+                    new=AsyncMock(return_value=SimpleNamespace(
+                        run_summary={}, verify_stats={}, flag_stats={},
+                        report_path=str(workspace / "report.md")))) as run_mock:
+                await manager._run(session, cfg, plan, False, models)
+
+            profile = run_mock.call_args.kwargs["platform_profile"]
+            self.assertEqual(profile["ops"]["list"]["path"], "/api/challenges")
+            self.assertEqual(profile["ops"]["submit"]["body"], {"answer": "{flag}"})
+            self.assertIn("arena", session.launch_request["platform_yaml"])
+            discover_mock.assert_awaited_once_with(
+                ["https://arena.test/contest"], audit=unittest.mock.ANY)
+
+    async def test_ctf_does_not_probe_entry_when_platform_doc_is_missing(self) -> None:
+        with patch("spiritscout.web.sessions._llm_discover_platform",
+                   new=AsyncMock()) as discover_mock:
+            await self._run(PLAIN_CTF_MISSION, json.dumps({"platform": None}))
+
+        discover_mock.assert_not_awaited()
 
     async def test_model_routed_competition_rebuild_does_not_fall_back_to_ctf(self) -> None:
         """回归 sess-289f9346：模型已判竞赛，不能因缺用户规则 YAML 留在 CTF。"""

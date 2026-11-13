@@ -67,6 +67,7 @@ def _read_state(session: Session) -> dict[str, Any]:
         "model_usage": live_usage or run_summary.get("model_usage"),
         "verify": session.summary.get("verify"),
         "business_context": None,
+        "testing_opportunities": {},
         "topology": {"dag_nodes": [], "tasks": [], "public_stages": read_public_stages(session.audit_path),
                      "process": {"nodes": [], "edges": []}},
     }
@@ -162,6 +163,8 @@ def _read_state(session: Session) -> dict[str, Any]:
                 "status": status, "cvss_score": d.get("cvss_score"),
                 "poc_verified": d.get("poc_verified"),
                 "version": rec["version"], "vulnerability_ids": d.get("vulnerability_ids", []),
+                "hypothesis_ref": d.get("hypothesis_ref", ""),
+                "hypothesis_refs": d.get("hypothesis_refs", []),
                 "verification": d.get("verification", {}),
                 "false_positive_reason": d.get("false_positive_reason"),
                 "endpoint": d.get("endpoint"),
@@ -169,6 +172,19 @@ def _read_state(session: Session) -> dict[str, Any]:
         state["vulns"]["by_status"] = bb.status_counts(BlackboardLayer.VULN)
         state["vulns"]["total"] = bb.count(BlackboardLayer.VULN)
         state["vulns"]["has_more"] = state["vulns"]["total"] > len(state["vulns"]["items"])
+        from spiritscout.blackboard.hypotheses import summary as hypothesis_summary
+        from spiritscout.blackboard.opportunities import build_opportunity_pool
+        from spiritscout.gateway.world_state import (
+            intelligence_summary,
+            investigation_frontier,
+        )
+
+        intelligence = intelligence_summary(bb)
+        state["testing_opportunities"] = build_opportunity_pool(
+            investigation_frontier(bb), hypothesis_summary(bb),
+            bb.query(BlackboardLayer.TASK_STATE, limit=300),
+            action_signals=intelligence.get("action_signals") or {},
+        )
         # 灵枢应答流：拓扑「你 → 灵枢」节点的回执展示
         replies = []
         topology_records = bb.query(BlackboardLayer.TOPOLOGY, limit=400)

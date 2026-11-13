@@ -66,7 +66,14 @@ class LaunchPlan:
 _URL_RE = re.compile(
     r"https?://[^\s，。；：、！？（）【】《》「」『』\"'<>()]+", re.IGNORECASE)
 _DOMAIN_RE = re.compile(
-    r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b", re.IGNORECASE)
+    r"(?<![a-z0-9_-])(?:\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"[a-z]{2,}(?![a-z0-9_-])", re.IGNORECASE)
+_TARGET_CLAUSE_BOUNDARY_RE = re.compile(r"[,，。；;！!？?\n\r]")
+_TARGET_EXCLUSION_RE = re.compile(
+    r"(?:不收取|不接收|不测试|不要测试|无需测试|不在范围|不属于范围|"
+    r"排除|除外|禁止(?:测试|访问|探测)?)",
+    re.IGNORECASE,
+)
 
 # 这里只识别用户已经明确写出的任务类型，不从漏洞名、URL 或业务词猜模式。
 # 中文紧邻英文缩写时 ``\b`` 不可靠，因此使用 ASCII 标识符边界。
@@ -83,19 +90,39 @@ _SRC_DECLARATION_RE = re.compile(
     r"漏洞赏金|漏洞挖掘|授权渗透(?:测试)?|安全评估")
 
 
+def _mention_is_excluded(text: str, start: int, end: int) -> bool:
+    """只在目标所在短句判断明确排除语义，避免把后续规则误套到前一目标。"""
+    left = max((match.end() for match in _TARGET_CLAUSE_BOUNDARY_RE.finditer(
+        text, 0, start)), default=0)
+    boundary = _TARGET_CLAUSE_BOUNDARY_RE.search(text, end)
+    right = boundary.start() if boundary else len(text)
+    return bool(_TARGET_EXCLUSION_RE.search(text[left:right]))
+
+
 def extract_targets(mission: str) -> tuple[list[str], list[str]]:
-    """从自然语言任务意图提取（URL 列表, 域名列表）——用户告诉主 Agent 的
-    用户提到的资产落成授权事实，测试边界仍由模型结合原文理解。"""
-    urls = [u.rstrip("/").rstrip(".,;") for u in _URL_RE.findall(mission or "")]
+    """从自然语言任务意图提取明确授权的（URL 列表, 域名列表）。
+
+    被用户明确标注为不收取、排除或不测试的目标仍保留在任务原文中供模型理解，
+    但不能仅因被提及就升级为结构化授权范围。
+    """
+    text = mission or ""
+    url_spans: list[tuple[int, int]] = []
+    urls: list[str] = []
+    for match in _URL_RE.finditer(text):
+        url_spans.append(match.span())
+        if _mention_is_excluded(text, *match.span()):
+            continue
+        value = match.group(0).rstrip("/").rstrip(".,;")
+        if value not in urls:
+            urls.append(value)
     domains: list[str] = []
-    for m in _DOMAIN_RE.findall(mission or ""):
-        if not any(m in u for u in urls) and m not in domains:
-            domains.append(m)
-    dedup_urls: list[str] = []
-    for u in urls:
-        if u not in dedup_urls:
-            dedup_urls.append(u)
-    return dedup_urls, domains
+    for match in _DOMAIN_RE.finditer(text):
+        if any(start <= match.start() < end for start, end in url_spans):
+            continue
+        value = match.group(0)
+        if not _mention_is_excluded(text, *match.span()) and value not in domains:
+            domains.append(value)
+    return urls, domains
 
 
 def parse_challenges_yaml(text: str) -> list[dict]:
@@ -208,7 +235,8 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
     elif mission and not req.target and m_domains and req.mode != RunMode.AWDP:
         # 任务中已有纯域名时补齐工作入口；无目标的 SRC 则保留空值。
         # AWDP 修补只认附件，任务文本里的文件名（如 fix.tar.gz）不是目标。
-        req = LaunchRequest(**{**req.__dict__, "target": "https://" + m_domains[0]})
+        req = LaunchRequest(**{**req.__dict__,
+                               "target": "https://" + m_domains[0].removeprefix("*.")})
     challenges = (parse_challenges_yaml(req.challenges_yaml)
                   if req.challenges_yaml else [])
     if req.mode in (RunMode.CTF, RunMode.AWDP) and not challenges:
@@ -312,7 +340,7 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
         if allowed_urls:
             target = allowed_urls[0]
         elif allowed_domains:
-            target = "https://" + allowed_domains[0]
+            target = "https://" + allowed_domains[0].removeprefix("*.")
     authorization = Authorization(
         auth_id=new_id("auth"), mode=req.mode, scope=scope,
         target_description=target or (

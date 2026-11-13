@@ -46,6 +46,15 @@ class ExaSettingsChange(BaseModel):
     expected_version: int = Field(default=0, ge=0)
 
 
+class FofaSettingsChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    email: SecretStr | None = None
+    api_key_value: SecretStr | None = None
+    enabled: StrictBool = False
+    clear_credentials: StrictBool = False
+    expected_version: int = Field(default=0, ge=0)
+
+
 class ResourceMessage(BaseModel):
     message: str = Field(min_length=1, max_length=16000)
 
@@ -105,6 +114,34 @@ def mount_resources(
                 "allowed_modes": ["src", "ctf"], "competition_allowed": False,
                 "billing_policy": "free_first_paid_only_for_blockers"}
 
+    def fofa_settings_view() -> dict[str, Any]:
+        import json
+        import os
+
+        from spiritscout.web import vault
+
+        row = next((item for item in store.settings("asset_provider")
+                    if item["id"] == "fofa"), None)
+        saved = vault.get_key(cfg.asset_intelligence.fofa.vault_key_name)
+        try:
+            saved_data = json.loads(saved) if saved else {}
+        except (TypeError, ValueError):
+            saved_data = {}
+        environment = bool(os.environ.get(cfg.asset_intelligence.fofa.email_env, "").strip()
+                           and os.environ.get(cfg.asset_intelligence.fofa.api_key_env, "").strip())
+        stored = bool(saved_data.get("email") and saved_data.get("key"))
+        enabled = bool((row or {}).get("data", {}).get(
+            "enabled", cfg.asset_intelligence.fofa.enabled))
+        return {
+            "version": row["version"] if row else 0,
+            "enabled": enabled,
+            "key_configured": stored or environment,
+            "stored_credentials": stored,
+            "key_source": "saved" if stored else "environment" if environment else "none",
+            "provider": "fofa",
+            "candidate_policy": "external_candidates_require_scope_dns_http_verification",
+        }
+
     @app.get("/api/resources/search/exa")
     def exa_settings() -> dict[str, Any]:
         return exa_settings_view()
@@ -128,6 +165,42 @@ def mount_resources(
             data["enabled"] = payload.enabled
             store.save("search", "exa", data, payload.expected_version)
             return exa_settings_view()
+        except (ValueError, TypeError, SpiritScoutError) as exc:
+            raise fail(exc) from exc
+
+    @app.get("/api/resources/assets/fofa")
+    def fofa_settings() -> dict[str, Any]:
+        return fofa_settings_view()
+
+    @app.put("/api/resources/assets/fofa")
+    async def save_fofa_settings(request: Request) -> dict[str, Any]:
+        import json
+
+        from spiritscout.web import vault
+
+        try:
+            payload = FofaSettingsChange.model_validate(await request.json())
+            email = payload.email.get_secret_value().strip() if payload.email else ""
+            key = (payload.api_key_value.get_secret_value().strip()
+                   if payload.api_key_value else "")
+            if any(ord(char) < 32 for char in email + key) or len(email) > 320 or len(key) > 4096:
+                raise ValueError("FOFA 凭据格式不正确")
+            if payload.clear_credentials and (email or key):
+                raise ValueError("清除凭据时不能同时填写新凭据")
+            if bool(email) != bool(key):
+                raise ValueError("FOFA 邮箱与 API Key 必须同时填写")
+            row = next((item for item in store.settings("asset_provider")
+                        if item["id"] == "fofa"), None)
+            data = dict(row["data"] if row else {})
+            data["enabled"] = payload.enabled
+            store.save("asset_provider", "fofa", data, payload.expected_version)
+            if payload.clear_credentials:
+                vault.drop_key(cfg.asset_intelligence.fofa.vault_key_name)
+            elif email and key:
+                vault.set_key(cfg.asset_intelligence.fofa.vault_key_name,
+                              json.dumps({"email": email, "key": key}, allow_nan=False))
+            cfg.asset_intelligence.fofa.enabled = payload.enabled
+            return fofa_settings_view()
         except (ValueError, TypeError, SpiritScoutError) as exc:
             raise fail(exc) from exc
 

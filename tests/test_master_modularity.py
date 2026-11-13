@@ -230,7 +230,8 @@ class SegmentExecutionTests(unittest.IsolatedAsyncioTestCase):
             checkpoint=lambda *args, **kwargs: checkpoints.append(args[2])))
 
         state = {"target": "t", "round_no": 0, "dag": {}, "tasks_dispatched": [],
-                 "round_views": [], "continue_iteration": True, "stop_reason": "", "plan_source": ""}
+                 "round_views": [], "continue_iteration": True, "stop_reason": "", "plan_source": "",
+                 "last_decision_event": "", "replan_requested": False}
         final = await master._run_segment(state)
 
         self.assertEqual([name for name, _ in seen],

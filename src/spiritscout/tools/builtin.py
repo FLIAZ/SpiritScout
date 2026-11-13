@@ -9,6 +9,7 @@ file_analyze 仅访问本地文件（CTF 附件分析），不触网，路径需
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import re
@@ -270,6 +271,7 @@ async def http_probe(
         current_data = data
         current_params = params
         redirect_chain: list[str] = []
+        redirect_not_followed = False
         # 中转跳的响应头单独留存：登录/提交后常由 302 + Set-Cookie 下发会话，
         # 只回传最终响应会让模型看不到这段关键证据。
         redirect_hops: list[dict[str, Any]] = []
@@ -299,14 +301,6 @@ async def http_probe(
                 location = resp.headers.get("location")
                 if resp.status_code not in {301, 302, 303, 307, 308} or not location:
                     break
-                await resp.aclose()              # 中转体不读：跳转链不占内存
-                await record_http(workspace_root, req, resp, started=hop_started)
-                hop_recorded = True
-                if hop >= max_redirects:
-                    return ToolResult(
-                        tool="http_probe", ok=False, returncode=-2,
-                        error=f"重定向次数超过上限: {max_redirects}",
-                        duration_ms=(time.perf_counter() - started) * 1000)
                 next_url = urljoin(str(resp.url), location)
                 redirect_chain.append(next_url)
                 redirect_hops.append({
@@ -318,6 +312,14 @@ async def http_probe(
                                 if str(k).lower() in ("set-cookie", "location",
                                                       "www-authenticate")},
                 })
+                if hop >= max_redirects:
+                    # “不跟随”是调用方要求的观测边界，不是请求失败。保留当前
+                    # 3xx 响应及 Location 作为最终证据，但绝不请求跳转目标。
+                    redirect_not_followed = True
+                    break
+                await resp.aclose()              # 中转体不读：跳转链不占内存
+                await record_http(workspace_root, req, resp, started=hop_started)
+                hop_recorded = True
                 old = urlparse(current_url)
                 new = urlparse(next_url)
                 if (old.scheme, old.hostname, old.port) != (new.scheme, new.hostname, new.port):
@@ -384,9 +386,12 @@ async def http_probe(
         "final_url": final_url,
         "redirect_chain": redirect_chain,
         "redirects": redirect_hops,
+        "redirect_not_followed": redirect_not_followed,
         "download_complete": not body_truncated,
         "response_is_partial": final_status == 206,
         "text_decode_lossy": text_decode_lossy,
+        "content_type": str(final_headers.get("content-type") or "").split(";", 1)[0].lower(),
+        "body_sha256": hashlib.sha256(content).hexdigest(),
     }
     if workspace_root:
         from spiritscout.tools.http_responses import save_response
@@ -460,6 +465,8 @@ async def dns_resolve(
                 loop.getaddrinfo(host, None, family=socket.AF_INET), timeout=timeout
             )
             ips = sorted({info[4][0] for info in infos})
+        if not ips:
+            raise ValueError('DNS 响应没有 A 记录')
     except (TimeoutError, socket.gaierror, httpx.HTTPError, ValueError) as exc:
         await record_network_event(workspace_root, protocol="DNS", target=f"dns://{host}", source="dns_resolve",
             started=started, observations={"host": host}, error=type(exc).__name__)

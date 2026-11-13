@@ -583,6 +583,7 @@ class ModelGateway:
                 "api_format": entry.api_format, "configured_context_window": entry.context_window,
                 "requested_reasoning_effort": requested_reasoning_effort,
                 "sent_reasoning_effort": reasoning_effort,
+                "response_format": response_format or "",
                 "task_type": task_type, "task_id": scope.task_id, "route_id": scope.route_id, "cache_scope": role or task_type, **prefix}
         self.audit.log("model.started", actor, call)
         stream = None

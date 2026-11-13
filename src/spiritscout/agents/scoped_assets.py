@@ -27,7 +27,7 @@ def _within(value: str, scope: Scope) -> bool:
             if any(address in ipaddress.ip_network(cidr, strict=False) for cidr in scope.allowed_cidrs):
                 return True
         elif any(host == _host(domain) if not domain.startswith('*.') else
-                 host.endswith('.' + _host(domain[2:])) and host != _host(domain[2:])
+                 host == _host(domain[2:]) or host.endswith('.' + _host(domain[2:]))
                  for domain in scope.allowed_domains):
             return True
         if parsed.scheme not in {'http', 'https'}:

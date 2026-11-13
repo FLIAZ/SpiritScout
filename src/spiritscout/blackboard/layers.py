@@ -7,7 +7,11 @@ from spiritscout.core.models import AgentType, BlackboardLayer
 # 写入方/消费方对照设计书 4.8.1 表
 LAYER_WRITE_PERMISSIONS: dict[AgentType, set[BlackboardLayer]] = {
     AgentType.JS_REVERSE: {BlackboardLayer.ASSET, BlackboardLayer.TASK_STATE},
-    AgentType.VERIFIER: {BlackboardLayer.VULN, BlackboardLayer.TASK_STATE},
+    AgentType.VERIFIER: {
+        BlackboardLayer.VULN,
+        BlackboardLayer.TOPOLOGY,  # 独立复核可将 supported 假设更新为 refuted
+        BlackboardLayer.TASK_STATE,
+    },
     AgentType.MASTER: set(BlackboardLayer),  # 主 Agent 全权（焦点管理/终审）
     AgentType.BUSINESS_CONTEXT: {
         BlackboardLayer.ASSET,

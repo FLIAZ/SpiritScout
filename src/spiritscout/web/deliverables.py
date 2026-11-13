@@ -244,7 +244,9 @@ def read_vulnerability_page(workspace: Path, offset: int = 0, limit: int = 50) -
         total = conn.execute("SELECT COUNT(*) FROM bb_records WHERE layer='vuln'").fetchone()[0]
         rows = conn.execute("SELECT data,version FROM bb_records WHERE layer='vuln' "
                             "ORDER BY updated_at DESC,record_id LIMIT ? OFFSET ?", (limit, offset)).fetchall()
-    fields = ("vuln_id", "title", "vuln_type", "severity", "status", "cvss_score", "poc_verified", "endpoint", "verification", "false_positive_reason", "vulnerability_ids")
+    fields = ("vuln_id", "title", "vuln_type", "severity", "status", "cvss_score",
+              "poc_verified", "endpoint", "verification", "false_positive_reason",
+              "vulnerability_ids", "hypothesis_ref", "hypothesis_refs")
     items = [{**{key: data.get(key) for key in fields}, "version": row[1]} for row in rows if isinstance(data := json.loads(row[0]), dict)]
     return {"items": sanitize_record({"detail": {"items": items}})["detail"]["items"], "total": total}
 
