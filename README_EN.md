@@ -24,7 +24,13 @@ Actual interface with local demo data. Click an image to enlarge.
 
 [![Task entry](docs/images/screenshots/task-entry.png)](docs/images/screenshots/task-entry.png)
 
+<details>
+<summary>Browse all interface screenshots</summary>
+
 <table>
+<tr>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/task-entry.png"><img src="docs/images/screenshots/task-entry.png" alt="Task entry" width="100%"></a><br><b>Task entry</b></td>
+</tr>
 <tr>
 <td width="33%" align="center" valign="top">
 <a href="docs/images/screenshots/dashboard.png"><img src="docs/images/screenshots/dashboard.png" alt="Dashboard" width="100%"></a><br>
@@ -95,7 +101,14 @@ Actual interface with local demo data. Click an image to enlarge.
 <b>Proxy pool</b>
 </td>
 </tr>
+<tr>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/asset-collection.png"><img src="docs/images/screenshots/asset-collection.png" alt="Asset collection" width="100%"></a><br><b>Asset collection</b></td>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/asset-intelligence.png"><img src="docs/images/screenshots/asset-intelligence.png" alt="Asset intelligence" width="100%"></a><br><b>Asset intelligence</b></td>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/system-resources.png"><img src="docs/images/screenshots/system-resources.png" alt="System resources" width="100%"></a><br><b>System resources</b></td>
+</tr>
 </table>
+
+</details>
 
 ## Capabilities and modes
 

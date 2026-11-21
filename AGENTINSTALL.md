@@ -359,7 +359,7 @@ llama.cpp 将 URL 换成 `http://host.docker.internal:8081/v1/models`。容器�
 
 配置位于 `.spiritscout-light-config/`，数据位于 `light-data` 卷。已有配置时初始化脚本拒绝覆盖，这是保护行为。先核对并备份原配置，再修改相应字段，不删除整个目录重试。更换网页端口用 `.env` 的 `SPIRITSCOUT_LIGHT_PORT`，随后重新执行 `up`。
 
-进入控制台后选择 CTF 或 AWDP；SRC、智能体模式及混入云端候选的配置不会启用本地轻量执行。离线使用前应在断公网条件下验证模型、工具及附件处理。更多参数见 [Ollama 轻量配置](docs/Ollama轻量配置.md) 和 [Windows 轻量测试](docs/Windows轻量测试.md)；后者的测试副本仓库地址不替代本文的主仓库地址。
+进入控制台后选择 CTF 或 AWDP；SRC、智能体模式及混入云端候选的配置不会启用本地轻量执行。离线使用前应在断公网条件下验证模型、工具及附件处理。更多参数见 [Ollama 轻量配置](docs/Ollama轻量配置.md)，部署与兼容范围见 [部署与配置](docs/部署与配置.md)。
 
 ## 8. 配置模型并验证
 
