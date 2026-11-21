@@ -2,9 +2,13 @@ name: Release
 
 on:
   workflow_dispatch:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-main
   cancel-in-progress: false
 
 permissions:
@@ -13,8 +17,16 @@ permissions:
 jobs:
   prepare:
     name: Prepare release
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-24.04
     outputs:
+      release: ${{ steps.existing.outputs.release }}
+      sha: ${{ github.event.workflow_run.head_sha || github.sha }}
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
     steps:
@@ -25,6 +37,7 @@ jobs:
           exit 1
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
       - id: version
         name: Read source version
@@ -48,23 +61,36 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               output.write(f'version={version}\n')
               output.write(f'tag=v{version}\n')
-      - name: Refuse an existing release
+      - id: existing
+        name: Check release eligibility
+        uses: actions/github-script@v7
         env:
-          GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
-        run: |
-          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
-            echo "标签 $TAG 已存在，不会覆盖。" >&2
-            exit 1
-          fi
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $TAG 已存在，不会覆盖。" >&2
-            exit 1
-          fi
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const tag = process.env.TAG;
+            try {
+              const {data} = await github.rest.repos.getReleaseByTag({owner, repo, tag});
+              if (data.draft) throw new Error(`Release ${tag} is still a draft`);
+              core.info(`Release ${tag} already exists; skipping build`);
+              core.setOutput('release', 'false');
+              return;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            try {
+              await github.rest.git.getRef({owner, repo, ref: `tags/${tag}`});
+              throw new Error(`Tag ${tag} already exists without a published release`);
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            core.setOutput('release', 'true');
 
   windows:
     name: Windows x86_64
     needs: prepare
+    if: needs.prepare.outputs.release == 'true'
     runs-on: windows-latest
     timeout-minutes: 45
     env:
@@ -73,7 +99,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.prepare.outputs.sha }}
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: '3.11'
@@ -123,6 +149,7 @@ jobs:
   linux:
     name: Linux ${{ matrix.arch }}
     needs: prepare
+    if: needs.prepare.outputs.release == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
@@ -136,7 +163,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.prepare.outputs.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -212,6 +239,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.prepare.outputs.tag }}
           VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
         run: |
           mapfile -d '' assets < <(find dist/release -maxdepth 1 -type f -print0 | sort -z)
           if ((${#assets[@]} == 0)); then
@@ -220,6 +248,6 @@ jobs:
           fi
           gh release create "$TAG" "${assets[@]}" \
             --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
+            --target "$RELEASE_SHA" \
             --title "SpiritScout v$VERSION" \
             --generate-notes

@@ -411,7 +411,8 @@ class H(http.server.BaseHTTPRequestHandler):
   self.send_response(200);self.end_headers();self.wfile.write(json.dumps(dict(version=version,pid=os.getpid(),id=jobid,idle=True)).encode())
  def log_message(self,*args):pass
 server=http.server.HTTPServer(('127.0.0.1',0),H)
-open(portfile,'w').write(str(server.server_port))
+with open(portfile+'.tmp','w') as output:output.write(str(server.server_port))
+os.replace(portfile+'.tmp',portfile)
 server.serve_forever()
 """
 
