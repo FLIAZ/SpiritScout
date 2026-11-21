@@ -141,10 +141,15 @@ def main(argv: list[str] | None = None) -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="backslashreplace")
     args = build_parser().parse_args(args_list)
+    from spiritscout.startup import StartupDisplay, serve
+
+    display = StartupDisplay()
+    display.start()
+    display.phase("读取配置")
     try:
         _prepare_portable_runtime()
     except OSError as exc:
-        print(f"[错误] 无法初始化运行目录：{exc}", file=sys.stderr)
+        display.failed(f"无法初始化运行目录：{exc}")
         return 2
     dotenv = _find_dotenv()
     if dotenv:
@@ -154,11 +159,10 @@ def main(argv: list[str] | None = None) -> int:
         _ensure_default_model_config(cfg.models_config_path)
         models = load_model_config(cfg.models_config_path)
     except SpiritScoutError as exc:
-        print(f"[错误] {exc}", file=sys.stderr)
+        display.failed(str(exc))
         return 2
 
-    import uvicorn
-
+    display.phase("装配控制台")
     from spiritscout.web import create_app
 
     host = args.host or cfg.web.host
@@ -168,27 +172,15 @@ def main(argv: list[str] | None = None) -> int:
     cfg.web.host = host
     cfg.web.port = port
     try:
-        app = create_app(cfg, models,
-                         max_concurrent=cfg.web.max_concurrent_sessions)
+        app = create_app(cfg, models)
         app.state.updater.configure_launch(args_list, host, port, args.config)
     except SpiritScoutError as exc:
-        print(f"[错误] {exc}", file=sys.stderr)
+        display.failed(str(exc))
         return 2
-    # 预热 litellm：把 ~2s 的库导入成本从「首次调用途中」挪到启动时
-    # （调用在事件循环上，冷导入曾把控制台冻 22s+）；失败留待调用路径
-    # 原生报错，不阻断启动
-    try:
-        import litellm  # noqa: F401
-    except Exception as exc:  # noqa: BLE001
-        print(f"[警告] litellm 预热失败（首次调用时重试）：{exc}", file=sys.stderr)
-    auth_note = ("管理员登录已启用" if app.state.auth_enabled
-                 else "未配置管理员，仅回环地址可访问")
-    print(f"灵枢 Web 控制台: http://{host}:{port}  "
-          f"({auth_note}，并发上限 {cfg.web.max_concurrent_sessions}，"
-          "Ctrl+C 停止)")
+    display.phase("启动 HTTP 服务")
     # SSE 会等待运行中的会话结束；会话清理却在 HTTP 请求排空之后执行。
     # 限制排空等待，让 Ctrl+C 能进入 lifespan 清理，避免长连接无限阻塞退出。
-    uvicorn.run(app, host=host, port=port, log_level="warning",
+    serve(app, display=display, host=host, port=port, log_level="warning",
                 timeout_graceful_shutdown=5)
     return 0
 

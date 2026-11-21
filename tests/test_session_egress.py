@@ -16,6 +16,29 @@ from spiritscout.traffic.proxy import tool_environment
 
 
 class EgressTests(unittest.IsolatedAsyncioTestCase):
+    def test_session_brief_projects_fixed_route_without_credentials(self):
+        from spiritscout.web.sessions import Session
+
+        with tempfile.TemporaryDirectory() as root:
+            session = Session(session_id='route-view', mode='src', target='example.test',
+                              workspace=Path(root))
+            self.assertIsNone(session.brief()['proxy_route'])
+            session.launch_request = {'proxy_plan_id': 'direct'}
+            self.assertEqual(session.brief()['proxy_route'], {'id': 'direct'})
+            binding = {'id': 'proxy-fixture', 'name': '创建时的方案',
+                       'verification': 'verified_at_start', 'exit_ip': '8.8.8.8',
+                       'password': 'private-password', 'nodes': [{
+                           'name': '节点 A', 'type': 'http', 'server': 'proxy.test', 'port': 8080,
+                           'username': 'private-user', 'password': 'private-node-password'}]}
+            session.request = {'proxy_binding': binding, 'proxy_plan_id': 'proxy-fixture'}
+            view = session.brief()['proxy_route']
+            self.assertEqual(view['name'], '创建时的方案')
+            self.assertEqual(view['exit_ip'], '8.8.8.8')
+            self.assertEqual(view['nodes'], [{'name': '节点 A', 'type': 'http',
+                                             'server': 'proxy.test', 'port': 8080}])
+            self.assertNotIn('private-', json.dumps(view))
+            self.assertIn('password', binding, '展示不修改持久快照')
+
     def test_mihomo_runtime_explicit_override_and_shared_detection(self):
         from spiritscout.traffic.mihomo import executable
 
@@ -45,7 +68,7 @@ class EgressTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.effect_status, 'none')
         self.assertTrue((await registry.call('offline', {})).ok)
 
-    async def test_resume_egress_failure_preserves_existing_terminal_result(self):
+    async def test_resume_egress_failure_interrupts_current_run_and_preserves_prior_summary(self):
         from spiritscout.config.settings import SystemConfig, WorkspaceConfig
         from spiritscout.web.sessions import Session, SessionManager
 
@@ -58,7 +81,7 @@ class EgressTests(unittest.IsolatedAsyncioTestCase):
                 workspace=workspace, status='running', resume_prev_status='completed', summary={'previous': 'result'},
                 request={'proxy_binding': {'id': 'proxy-fixture'}})
             await manager._run(session, cfg, None, True, [], resume=True)
-            self.assertEqual(session.status, 'completed')
+            self.assertEqual((session.status, session.phase), ('interrupted', 'interrupted'))
             self.assertEqual(session.summary, {'previous': 'result'})
             self.assertIn('续传未完成', session.error)
 

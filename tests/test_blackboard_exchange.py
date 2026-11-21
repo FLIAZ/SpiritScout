@@ -10,6 +10,52 @@ from spiritscout.core.models import AgentType, BlackboardLayer
 
 
 class BlackboardExchangeTests(unittest.TestCase):
+    def test_task_messages_survive_restart_and_same_role_handoff_is_visible(self):
+        from spiritscout.gateway.world_state import snapshot
+        from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bb.db"
+            bb = Blackboard(path)
+            for task in ("first", "next"):
+                bb.write(BlackboardLayer.TASK_STATE, task,
+                         {"task": {"status": "running", "payload": {"node_title": task}}},
+                         agent_type=AgentType.CTF_MISC, updated_by="misc")
+            sent = execute(bb, "team_message", {"task_id": "next",
+                           "text": "接力资料：条件 A 已排除，条件 B 尚未验证。", "evidence_refs": ["log-A"]},
+                           actor="misc", agent_type=AgentType.CTF_MISC,
+                           source={"task_id": "first", "route_id": "route-A"})
+            self.assertTrue(sent["ok"])
+            self.assertFalse(sent["read"])
+            bb.close()
+            bb = Blackboard(path)
+            self.addCleanup(bb.close)
+            index = snapshot(blackboard=bb, references=True)["team"]
+            self.assertEqual(index["messages"][0]["message_id"], sent["message_id"])
+            result = execute(bb, "team_read", {"message_id": sent["message_id"]},
+                             actor="misc", agent_type=AgentType.CTF_MISC,
+                             source={"task_id": "next", "route_id": "route-B"})
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["from_task"], "first")
+            self.assertEqual(result["evidence_refs"], ["log-A"])
+            self.assertEqual(result["read_by"], ["misc|next|route-B"])
+            again = execute(bb, "team_read", {"message_id": sent["message_id"]},
+                            actor="misc", source={"task_id": "next", "route_id": "route-B"})
+            self.assertEqual(again["read_by"], result["read_by"])
+            self.assertEqual(bb.read(BlackboardLayer.TASK_STATE, "next")["task"]["status"], "running")
+            bad = execute(bb, "team_message", {"task_id": "missing", "text": "fixture"}, actor="misc")
+            self.assertFalse(bad["ok"])
+            token = current_execution_scope.set(ExecutionScope(task_id="first", route_id="route-A",
+                                                               tool_call_id="retry-fixture"))
+            try:
+                first = execute(bb, "team_message", {"task_id": "next", "text": "一次交接"},
+                                actor="misc", agent_type=AgentType.CTF_MISC)
+                retry = execute(bb, "team_message", {"task_id": "next", "text": "一次交接"},
+                                actor="misc", agent_type=AgentType.CTF_MISC)
+                self.assertEqual(first["message_id"], retry["message_id"])
+            finally:
+                current_execution_scope.reset(token)
+
     def test_shared_rejection_is_searchable_after_newer_facts_and_revisable_by_peer(self):
         from spiritscout.gateway.world_state import snapshot
 

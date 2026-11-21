@@ -76,3 +76,56 @@ const cards=vm.runInContext("FileCards",context),body=element("fd-body"),dialog=
   dialog.close();assert.equal(packetCloses,1,"关闭附件释放查看器和轮询");
   console.log("capture preview: passive attachment hint, manual opening, stale parse isolation and cleanup passed");
 })().catch(error=>{console.error(error);process.exitCode=1;});
+
+(async()=>{
+  const controls=new Map(),pending=[];let ready;
+  function node(){return {hidden:false,disabled:false,value:'',textContent:'',innerHTML:'',dataset:{},handlers:{},children:[],scrollTop:0,
+    querySelector:control,addEventListener(name,fn){this.handlers[name]=fn;},
+    replaceChildren(){this.children.forEach(child=>{child.parentNode=null;});this.children=[];},
+    get firstElementChild(){return this.children[0] || null;},
+    get nextElementSibling(){const siblings=this.parentNode?.children || [];return siblings[siblings.indexOf(this)+1] || null;},
+    remove(){if(this.parentNode){this.parentNode.children.splice(this.parentNode.children.indexOf(this),1);this.parentNode=null;}},
+    insertBefore(child,anchor){child.remove();const index=anchor ? this.children.indexOf(anchor) : this.children.length;this.children.splice(index,0,child);child.parentNode=this;}};}
+  function control(key){if(!controls.has(key))controls.set(key,node());return controls.get(key);}
+  const root=control('root'),tab={classList:{add(){},remove(){},toggle(){}}};
+  const ctx=vm.createContext(require('./helpers/i18n').context({S:{cur:'one',tab:'chat'},$:s=>s==='#tab-chat'?tab:root,
+    document:{addEventListener(name,fn){if(name==='DOMContentLoaded')ready=fn;},createElement:node,querySelector:control},api:(url,options)=>new Promise((resolve,reject)=>pending.push({url,options,resolve,reject})),
+    actorName:x=>x,esc:x=>String(x),FileCards:{card:()=>''}}));
+  vm.runInContext(fs.readFileSync(path.join(__dirname,'../src/spiritscout/web/static/js/session-files.js'),'utf8'),ctx);
+  const files=vm.runInContext('SessionFiles',ctx);ready();
+  files.reset('one');files.sync({mode:'src'});
+  assert.equal(pending.length,0,'会话阅读不请求报告列表');
+  assert.equal(control('[data-tab="files"]').hidden,false,'SRC 提供独立报告文件入口');
+  ctx.S.tab='files';files.refresh(true);
+  const older=pending[0],latest=files.refresh(true);
+  pending[1].resolve({items:[]});await latest;
+  older.reject(new Error('STALE_ERROR'));await new Promise(r=>setImmediate(r));
+  assert.equal(control('[data-files-error]').hidden,true,'旧请求失败不能覆盖最新列表');
+  assert.equal(control('[data-files-refresh]').disabled,false,'最新请求恢复按钮');
+  const previous=files.refresh(true);
+  ctx.S.cur='two';files.reset('two');files.sync({mode:'src'});
+  pending[2].reject(new Error('OTHER_SESSION_ERROR'));await previous;
+  assert.equal(control('[data-files-error]').hidden,true,'会话切换后旧错误不泄漏');
+  assert.equal(control('[data-files-refresh]').disabled,true,'旧 finally 不提前恢复新会话按钮');
+  const saved={path:'reports/tasks/a.md',name:'a.md',title:'权限对照',actor:'recon-a',task_id:'task-a',status:'done'};
+  pending[3].resolve({items:[saved]});await new Promise(r=>setImmediate(r));
+  assert.equal(control('[data-files-refresh]').disabled,false);
+  const list=control('[data-files-list]'),row=list.children[0];list.scrollTop=80;
+  const update=files.refresh(true);pending[4].resolve({items:[{...saved,path:'reports/tasks/b.md',name:'b.md',title:'API 对照'},saved]});await update;
+  assert.equal(list.children[1],row,'相同报告保留原 DOM 节点');
+  assert.equal(list.children[0].innerHTML.includes('API 对照'),true,'新报告排在最前');
+  assert.equal(list.scrollTop,80,'同步保留文件列表滚动');
+  control('[data-files-search]').value='API';control('[data-files-search]').handlers.input();
+  assert.equal(row.hidden,true);assert.equal(list.children[0].hidden,false);
+  const recovery=control('[data-files-recover]').handlers.click();
+  ctx.S.cur='three';files.reset('three');files.sync({mode:'src'});
+  pending[5].reject(new Error('STALE_RECOVERY'));await recovery;
+  assert.equal(control('[data-files-error]').hidden,true,'旧补齐请求不污染新会话');
+  assert.equal(control('[data-files-recover]').disabled,false);
+  pending[6].resolve({items:[]});await new Promise(r=>setImmediate(r));
+  ctx.S.tab='chat';const count=pending.length;await files.refresh(true);
+  assert.equal(pending.length,count,'退出文件分区后停止刷新报告');
+  files.sync({mode:'ctf'});assert.equal(root.hidden,true,'CTF 不改变既有栏布局');
+  assert.equal(control('[data-tab="files"]').hidden,true,'不支持报告索引的模式隐藏文件入口');
+  console.log('report panel: request generations, stale errors, button restoration and session isolation passed');
+})().catch(error=>{console.error(error);process.exitCode=1;});

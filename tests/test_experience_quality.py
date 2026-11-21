@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from spiritscout.blackboard import Blackboard
-from spiritscout.core.models import BlackboardLayer
+from spiritscout.core.models import BlackboardLayer, RunMode
 from spiritscout.gateway.context import estimate_input_tokens
 from spiritscout.knowledge.experience import ExperienceStore, format_insights, read_page
 from spiritscout.runtime import _distill_digest, _distill_experience, _recall_experience
@@ -130,6 +130,14 @@ class ExperienceQualityTests(unittest.TestCase):
                  'text': '原观察有冲突', 'evidence_state': 'conflicting'})
         self.assertEqual(_recall_experience(infra, self.store, '登录'), [])
         self.assertEqual(self.store.count(), 1, 'source changes must not delete the inspectable historical entry')
+
+    def test_src_never_automatically_recalls_experience_but_archive_remains_searchable(self):
+        self.store.add('登录的历史观察', tags=['登录'], source_session='sess-source', sources=[source()])
+        infra = SimpleNamespace(authorization=SimpleNamespace(mode=RunMode.SRC))
+        with patch.object(self.store, 'recall') as recall:
+            self.assertEqual(_recall_experience(infra, self.store, '登录'), [])
+        recall.assert_not_called()
+        self.assertEqual(self.store.search('登录')[0]['insight'], '登录的历史观察')
 
 
 class DistillSourceContractTests(unittest.IsolatedAsyncioTestCase):

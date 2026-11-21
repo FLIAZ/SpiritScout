@@ -140,7 +140,8 @@ async def http_response_read(*, workspace_root: str = '', **kwargs: Any) -> Tool
 
 
 SPEC = ToolSpec(name='http_response_read', kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY,
-                description='本地读取或搜索 HTTP 响应快照，不发送网络请求')
+                description='本地读取或搜索 HTTP 响应快照，不发送网络请求',
+                required_params=('body_ref',))
 SCHEMA = {'type': 'function', 'function': {'name': 'http_response_read',
     'description': '按 body_ref 读取完整源码或搜索原文字面量，不重新请求网页、不做 HTML 摘要。offset/limit 按字符，返回续读偏移和行号；单行 JS 也可分段读取。',
     'parameters': {'type': 'object', 'properties': {

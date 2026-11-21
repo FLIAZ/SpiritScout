@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "types": [],
+    "skipLibCheck": false
+  },
+  "files": [
+    "src/spiritscout/web/static/js/frontend-types.d.ts",
+    "src/spiritscout/web/static/js/frontend-globals.d.ts",
+    "src/spiritscout/web/static/js/task-trace.js",
+    "src/spiritscout/web/static/js/session-history.js",
+    "src/spiritscout/web/static/js/session-stream.js",
+    "tests/types/frontend-contracts.js"
+  ]
+}

@@ -275,7 +275,7 @@ const FileCards = (() => {
     }
     // 报告/档案页里已有的 a[download]：换成可选目录的保存流程
     const anchor = event.target.closest('a[download][href^="/api/sessions/"]');
-    if (anchor && window.showSaveFilePicker) {
+    if (anchor && (window.showSaveFilePicker || anchor.classList?.contains("tl-output-log"))) {
       event.preventDefault();
       await saveFile(anchor.getAttribute("href"), anchor.getAttribute("download") || "");
     }

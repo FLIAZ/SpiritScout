@@ -116,11 +116,43 @@ class HistoryRepairTests(unittest.TestCase):
             self.assertEqual(first["total"], 55)
             self.assertEqual(len(first["items"]), 50)
             self.assertEqual(len(second["items"]), 5)
+            self.assertEqual(first["category_counts"], second["category_counts"])
+            self.assertEqual(
+                [(row["taxonomy_id"], row["count"], row["confirmed_count"])
+                 for row in first["category_counts"]],
+                [("unclassified", 55, 55)],
+            )
             history = read_record_history(root, "topology", "business-context", limit=1)
             self.assertTrue(history["has_more"])
             self.assertEqual(history["items"][0]["data"]["facts"], ["new"])
             older = read_record_history(root, "topology", "business-context", before=2)
             self.assertEqual(older["items"][0]["data"]["facts"], ["old"])
+
+    def test_vulnerability_categories_filter_without_guessing_legacy_subtypes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bb = Blackboard(root / "bb.db")
+            for key, raw_type, status in (
+                ("v1", "基于DOM型XSS", "accepted"),
+                ("v2", "DOM-XSS", "candidate"),
+                ("v3", "xss", "accepted"),
+                ("v4", "XXE注入", "rejected_false_positive"),
+            ):
+                bb.write(BlackboardLayer.VULN, key, {
+                    "vuln_id": key, "vuln_type": raw_type, "status": status,
+                })
+            bb.close()
+            page = read_vulnerability_page(root, category="dom_xss", confirmed_only=True)
+            self.assertEqual(page["total"], 1)
+            self.assertEqual(page["items"][0]["vuln_type"], "基于DOM型XSS")
+            self.assertEqual(page["items"][0]["label"], "DOM型XSS")
+            self.assertEqual(
+                {row["taxonomy_id"]: (row["count"], row["confirmed_count"])
+                 for row in page["category_counts"]},
+                {"xss": (1, 1), "dom_xss": (2, 1), "xxe": (1, 0)},
+            )
+            self.assertEqual(read_vulnerability_page(root, category="dom_xss")["total"], 2)
+            self.assertEqual(read_vulnerability_page(root, category="xss")["total"], 1)
 
     def test_context_prefix_is_stable_and_compaction_preserves_call_pairing(self) -> None:
         first = decision_messages("role", {"constraints": "fixed", "observations": "first"})

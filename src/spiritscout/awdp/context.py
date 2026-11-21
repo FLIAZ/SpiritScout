@@ -175,7 +175,7 @@ def query_index(root: Path, challenge: str, args: dict) -> dict:
 
 
 async def source_context(agent, task, route, args):
-    from spiritscout.ctf.agents import _ToolOutcome
+    from spiritscout.ctf.contracts import _ToolOutcome
 
     try:
         if not isinstance(args, dict) or set(args) - set(SCHEMA['function']['parameters']['properties']):

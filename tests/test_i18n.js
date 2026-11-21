@@ -52,6 +52,12 @@ assert.equal(en.api.html('<input value="未分类" placeholder="未分类" data-
 assert.equal(en.api.html`<p>${en.api.t('未分类')}</p>`, '<p>Unassigned</p>');
 assert.equal(zh.api.html`<p title="刷新">${'全部项目'}</p>`, '<p title="刷新">全部项目</p>');
 
+assert.equal(en.api.html`<h2>题目资料</h2><p>独立对话（不引用任务）</p><span>${'用户自己的题目'}</span>`,
+  '<h2>Challenge details</h2><p>Independent chat (no task reference)</p><span>用户自己的题目</span>');
+assert.equal(en.api.t`已选 ${4} 个资产`, '4 assets selected');
+assert.equal(en.api.t('资产收集模型用量'), 'Asset collection model usage');
+assert.equal(en.api.t('创建固定方案'), 'Create fixed plan');
+
 const catalog = vm.runInContext('EN_MESSAGES', en.context);
 assert.ok(Object.keys(catalog).length > 2000);
 for (const [key, value] of Object.entries(catalog)) {

@@ -52,7 +52,7 @@ def project_blackboard(blackboard: Any) -> dict[str, Any]:
     for layer in (BlackboardLayer.TARGET_AUTH, BlackboardLayer.ASSET,
                   BlackboardLayer.JS_INTEL,
                   BlackboardLayer.RECON_CLUE, BlackboardLayer.VULN,
-                  BlackboardLayer.CREDENTIAL, BlackboardLayer.TOPOLOGY):
+                  BlackboardLayer.CREDENTIAL, BlackboardLayer.TOPOLOGY, BlackboardLayer.TASK_REPORT):
         records = blackboard.query(layer, limit=201)
         has_more = has_more or len(records) > 200
         for rec in records[:200]:
@@ -92,7 +92,8 @@ def project_blackboard(blackboard: Any) -> dict[str, Any]:
                               and not (data.get('text') or data.get('title')) else
                               'evidence' if re.fullmatch(r'https?://\S+', title.strip()) else '')
             nodes.append({'id': nid, 'kind': 'rule' if is_rule else
-                          'exploration' if data.get('kind') == 'exploration' else 'finding',
+                          'exploration' if data.get('kind') == 'exploration' else
+                          'report' if layer == BlackboardLayer.TASK_REPORT else 'finding',
                           'title': title[:90], 'body': '' if is_rule else body,
                           'record_id': key, 'layer': layer.value, 'version': rec['version'],
                           'task_id': data.get('task_id', ''), 'route_id': data.get('route_id', ''),
@@ -103,6 +104,7 @@ def project_blackboard(blackboard: Any) -> dict[str, Any]:
                           'parent_refs': data.get('parent_refs', []),
                           'asset_refs': data.get('asset_refs', []),
                           'exploration_refs': data.get('exploration_refs', []),
+                          'report': data.get('report'),
                           'source_ref': data.get('source_ref', ''), 'target_ref': data.get('target_ref', ''),
                           'relation': data.get('relation', '') if data.get('type') == 'asset_relation' else '',
                           'reference_type': reference_type,

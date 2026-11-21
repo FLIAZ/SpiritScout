@@ -5,8 +5,10 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import ipaddress
+import re
+from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 from spiritscout.agents.sub.base import RoutePlan, StepResult, SubAgent
 from spiritscout.blackboard.leads import (
@@ -16,7 +18,7 @@ from spiritscout.blackboard.leads import (
     upsert_lead,
 )
 from spiritscout.core.ids import new_id
-from spiritscout.core.models import AgentType, Asset, BlackboardLayer, Task
+from spiritscout.core.models import AgentType, Asset, BlackboardLayer, RunMode, Task
 
 # 命中即判定内容泄露的标记（侦察线索置信度依据）
 EXPOSURE_MARKERS = {
@@ -27,6 +29,11 @@ EXPOSURE_MARKERS = {
     "/.svn/entries": "svn",
 }
 ARCHIVE_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz", ".sql", ".bak", ".7z", ".rar")
+_SCRIPT_SRC_RE = re.compile(
+    r"(?is)<script\b[^>]*\bsrc\s*=\s*([\"'])(.*?)\1")
+_PAGE_PATH_RE = re.compile(
+    r"(?is)<(?:a\b[^>]*\bhref|form\b[^>]*\baction|iframe\b[^>]*\bsrc)\s*=\s*([\"'])(.*?)\1")
+_API_LITERAL_RE = re.compile(r'''["']((?:/api(?:/|\?|$)|/graphql(?:\?|$))[^"'\s<>]*)["']''', re.I)
 
 
 def _is_wildcard_target(target: str) -> bool:
@@ -37,6 +44,8 @@ def _is_wildcard_target(target: str) -> bool:
 class ReconAgent(SubAgent):
     agent_type = AgentType.RECON
     route_namespace = "recon"
+    # 入口→完整源码→真实路径/脚本是单条证据链，通用早期健康分会把它误剪。
+    health_prune_enabled = False
 
     # ------------------------------------------------------------ 路线模板
 
@@ -44,8 +53,17 @@ class ReconAgent(SubAgent):
         if _is_wildcard_target(task.target):
             return [RoutePlan(
                 name="wildcard_asset_handoff",
-                strategy="通配符只声明资产范围，不能作为具体主机发送 HTTP、DNS 或端口请求",
+                strategy="任务契约要求资产发现；交由探微执行 CT、通配基线与范围内候选核验，"
+                         "不以根域页面、robots 或路径猜测替代子域清单",
                 steps=[{"action": "asset_discovery_required"}],
+            )]
+        contract = task.payload.get("investigation_contract")
+        if (isinstance(contract, dict) and contract
+                or getattr(getattr(getattr(self, "ctx", None), "policy", None), "mode", None) == RunMode.SRC):
+            return [RoutePlan(
+                name="contract_investigation",
+                strategy="执行任务书中的具体最小实验，按实际响应和契约判据交付；不以通用页面基线替代",
+                steps=[{"action": "investigate"}],
             )]
         base = task.target.rstrip("/")
         routes = [
@@ -57,7 +75,7 @@ class ReconAgent(SubAgent):
                     {"action": "homepage", "url": base},
                     {"action": "fingerprint"},
                     {"action": "robots_discover"},
-                    {"action": "llm_path_sweep"},
+                    {"action": "source_path_followup"},
                 ],
             ),
         ]
@@ -75,6 +93,7 @@ class ReconAgent(SubAgent):
     async def execute_step(self, task, route, plan, step) -> StepResult:
         action = step["action"]
         handler = {
+            "investigate": self._step_investigate,
             "homepage": self._step_homepage,
             "dns": self._step_dns,
             "fingerprint": self._step_fingerprint,
@@ -82,11 +101,41 @@ class ReconAgent(SubAgent):
             "robots_discover": self._step_robots_discover,
             "port_probe": self._step_port_probe,
             "llm_path_sweep": self._step_llm_path_sweep,
+            "source_path_followup": self._step_source_path_followup,
             "asset_discovery_required": self._step_asset_discovery_required,
         }.get(action)
         if handler is None:
             return StepResult(ok=False, note=f"未知步骤动作: {action}")
         return await handler(task, step)
+
+    def _observe_investigation_tool(self, task: Task, name: str, arguments: dict, result: Any) -> dict:
+        """归档模型实际取得的资产与脚本证据，不追加探测或继承 IP 授权。"""
+        if not result.ok:
+            return {}
+        refs = []
+        if name == "dns_resolve":
+            if result.parsed.get("proxy_virtual"):
+                return {}
+            host = str(arguments.get("host") or "")
+            for ip in result.parsed.get("ips", []):
+                record_id, _ = self.ctx.convergence.merge_asset(Asset(
+                    asset_id=new_id("asset"), asset_type="ip", value=ip,
+                    attrs={"resolved_from": host, "sources": ["dns_resolution"], "scope_inherited": False},
+                    source_agent=self.agent_id), self.agent_type)
+                refs.append(f"asset:{record_id}")
+        elif name == "http_probe":
+            url = str(result.parsed.get("final_url") or arguments.get("url") or "")
+            record_id, _ = self.ctx.convergence.merge_asset(Asset(
+                asset_id=new_id("asset"), asset_type="url", value=url,
+                fingerprint=result.parsed.get("fingerprint", {}),
+                attrs={"method": str(arguments.get("method") or "GET").upper(),
+                       "status_code": result.parsed.get("status_code"), "sources": ["target_response"],
+                       "body_ref": result.parsed.get("body_ref"), "body_sha256": result.parsed.get("body_sha256")},
+                source_agent=self.agent_id), self.agent_type)
+            refs.append(f"asset:{record_id}")
+            if str(result.parsed.get("content_type") or "").lower() == "text/html":
+                self._publish_script_assets(task, url, result, source=self._response_text(result))
+        return {"evidence_refs": refs} if refs else {}
 
     async def _step_homepage(self, task: Task, step: dict) -> StepResult:
         url = step["url"]
@@ -107,18 +156,94 @@ class ReconAgent(SubAgent):
             source_agent=self.agent_id,
         )
         _, is_new = self.ctx.convergence.merge_asset(asset, self.agent_type)
-        profile = response_profile(res.stdout, parsed)
+        source = self._response_text(res)
+        script_findings = self._publish_script_assets(task, url, res, source=source)
+        page_paths = self._observed_page_paths(url, source)
+        profile = response_profile(source, parsed)
         return StepResult(
             ok=True, value=0.3 if is_new else 0.1,
-            findings=[{"type": "asset", "value": url, "title": parsed.get("title")}],
-            note=f"首页 {parsed.get('status_code')} title={parsed.get('title')!r}",
+            findings=[{"type": "asset", "value": url, "title": parsed.get("title")},
+                      *script_findings],
+            note=(f"首页 {parsed.get('status_code')} title={parsed.get('title')!r}；"
+                  f"提取可分析脚本 {len(script_findings)} 个、源码真实路径 {len(page_paths)} 个"),
             cache_writes={f"fingerprint|{url}": {
                 "fingerprint": parsed.get("fingerprint", {}),
                 "title": parsed.get("title", ""),
                 "headers": self._safe_headers(parsed.get("headers", {})),
                 "response_profile": profile,
+                "page_paths": page_paths,
             }},
         )
+
+    def _response_text(self, result: Any) -> str:
+        """优先读 http_probe 已保存的完整正文，不再次请求目标。"""
+        body_ref = str(result.parsed.get("body_ref") or "")
+        workspace = Path(str(self.ctx.builtin_ctx.get("workspace_root") or ""))
+        if re.fullmatch(r"[a-f0-9]{32}", body_ref) and workspace:
+            root = (workspace / "http-responses").resolve()
+            body = (root / body_ref / "body.txt").resolve()
+            if body.parent.parent == root and body.is_file() and not body.is_symlink():
+                try:
+                    return body.read_text(encoding="utf-8")
+                except OSError:
+                    pass
+        return str(result.stdout or "")
+
+    @staticmethod
+    def _observed_page_paths(source_page: str, source: str) -> list[dict[str, str]]:
+        """只提取 HTML/内联配置中真实出现的站内入口，不按技术栈猜路径。"""
+        origin = urlsplit(source_page)
+        observed: dict[str, dict[str, str]] = {}
+        for match in _PAGE_PATH_RE.finditer(source):
+            raw = match.group(2).strip()
+            absolute = urlsplit(urljoin(source_page, raw))
+            if (absolute.scheme, absolute.hostname, absolute.port) != (
+                    origin.scheme, origin.hostname, origin.port):
+                continue
+            path = urlunsplit(("", "", absolute.path or "/", absolute.query, ""))
+            if path != "/" and ".." not in path:
+                observed.setdefault(path, {"path": path[:500], "source": "html_navigation"})
+        for match in _API_LITERAL_RE.finditer(source):
+            path = match.group(1).strip()
+            if ".." not in path:
+                observed.setdefault(path, {"path": path[:500], "source": "inline_api_literal"})
+        return list(observed.values())[:80]
+
+    def _publish_script_assets(self, task: Task, source_page: str, result: Any, *,
+                               source: str | None = None) -> list[dict[str, Any]]:
+        """把页面明确引用的脚本交给静态分析；跨域只继承精确 URL 的只读许可。"""
+        guard = self.ctx.policy.guard
+        evidence_ref = str(result.invocation_id or result.parsed.get("source_invocation_id") or "")
+        body_ref = str(result.parsed.get("body_ref") or "")
+        findings: list[dict[str, Any]] = []
+        for _, raw in _SCRIPT_SRC_RE.findall(source if source is not None else result.stdout or ""):
+            absolute = urljoin(source_page, raw.strip())
+            parsed = urlparse(absolute)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                continue
+            in_scope = guard.is_allowed(absolute)
+            decision = "in_scope" if in_scope else "derived_readonly"
+            if not in_scope:
+                absolute = guard.approve_derived_resource(absolute, source_page)
+            finding = {
+                "type": "script", "absolute_url": absolute,
+                "source_page": source_page, "host": parsed.hostname,
+                "scope_decision": decision, "evidence_ref": evidence_ref,
+                "body_ref": body_ref,
+            }
+            findings.append(finding)
+            self.ctx.convergence.merge_asset(Asset(
+                asset_id=new_id("asset"), asset_type="script", value=absolute,
+                attrs={
+                    "source": "recon_html", "source_page": source_page,
+                    "scope_decision": decision, "evidence_ref": evidence_ref,
+                    "body_ref": body_ref, "sources": ["target_response"],
+                    "verification_status": "observed",
+                    "readonly": True,
+                },
+                source_agent=self.agent_id,
+            ), self.agent_type)
+        return findings
 
     async def _step_dns(self, task: Task, step: dict) -> StepResult:
         host = urlparse(task.target).hostname or task.target
@@ -136,8 +261,10 @@ class ReconAgent(SubAgent):
         for ip in res.parsed.get("ips", []):
             self.ctx.convergence.merge_asset(Asset(
                 asset_id=new_id("asset"), asset_type="ip", value=ip,
+                attrs={"resolved_from": host, "sources": ["dns_resolution"],
+                       "scope_inherited": False},
                 source_agent=self.agent_id), self.agent_type)
-            findings.append({"type": "ip", "value": ip})
+            findings.append({"type": "ip", "value": ip, "resolved_from": host})
         return StepResult(ok=True, value=0.2, findings=findings,
                           note=f"DNS {host} → {res.parsed.get('ips')}")
 
@@ -235,26 +362,6 @@ class ReconAgent(SubAgent):
                           note=(f"{'泄露证据命中' if confirmed else '疑似软 200' if soft_200 else '路径可达'} "
                                 f"{path} → 200（{assessment['reason']}）"))
 
-    def _contract_incomplete_reason(self, task: Task, summary: dict[str, Any]) -> str:
-        """子域清单型任务没有产出任何子域时不能以根域探测冒充完成。"""
-        contract = task.payload.get("investigation_contract")
-        if not isinstance(contract, dict):
-            return ""
-        expected = str(contract.get("expected_information") or "")
-        if "子域" not in expected:
-            return ""
-        base_host = (urlparse(task.target).hostname or task.target).lower().lstrip("*.")
-        domains = {
-            str(row["data"].get("value") or "").lower().rstrip(".")
-            for row in self.ctx.blackboard.query(BlackboardLayer.ASSET, limit=2000)
-            if row["data"].get("asset_type") == "domain"
-        }
-        discovered = sorted(value for value in domains
-                            if value != base_host and value.endswith("." + base_host))
-        if discovered:
-            return ""
-        return "调查契约要求交付子域清单，但本任务未发现或验证任何子域；根域与端口基线不能替代该交付"
-
     async def _step_robots_discover(self, task: Task, step: dict) -> StepResult:
         """robots.txt 路径发现：解析 Disallow/Allow 条目接力探测。
 
@@ -295,64 +402,35 @@ class ReconAgent(SubAgent):
             findings=[{"type": "robots_entry", "value": e} for e in entries],
             note=f"robots.txt 披露 {len(entries)} 条路径，已接力探测；" + "; ".join(hits)[:200])
 
-    # ------------------------------------------------------------ LLM 路径建议
+    # ------------------------------------------------------------ 页面源码路径接力
 
-    LLM_PATH_CAP = 12          # 仅按已观测指纹提出少量可解释假设
+    LLM_PATH_CAP = 12          # 兼容旧调用名；实际只筛选页面已观测路径
 
     async def _step_llm_path_sweep(self, task: Task, step: dict) -> StepResult:
-        """收尾步：LLM 按已观测指纹/标题建议追加敏感路径（云端主路径）。
+        """兼容旧路线名：不再让模型凭技术栈创造路径。"""
+        return await self._step_source_path_followup(task, step)
 
-        观察来自路线间共享缓存与黑板（首页指纹、技术栈线索）；建议路径经
-        确定性校验（站内相对路径、无穿越、去重、封顶）后走同一 http_probe
-        通道（范围标注/限速不动）。LLM 不可用 → 空步（字典即骨架兜底）。
-        """
+    async def _step_source_path_followup(self, task: Task, step: dict) -> StepResult:
+        """仅验证首页源码真实出现的站内导航/API 路径。"""
         base = task.target.rstrip("/")
         fp = self.cache.get(self.route_namespace, f"fingerprint|{base}") or {}
-        observed = {
-            "fingerprint": fp.get("fingerprint", {}), "title": fp.get("title", ""),
-            "tech_clues": [rec["data"].get("value")
-                           for rec in self.ctx.blackboard.query(
-                               BlackboardLayer.RECON_CLUE, limit=100)
-                           if rec["data"].get("clue_type") == "tech_stack"][:5],
-            "already_probed": ["/robots.txt"],
-        }
-        data = await self._llm_chat_json("path_planner", {
-            "action": "suggest_paths", "target": task.target, **observed,
-            "max_paths": self.LLM_PATH_CAP,
-            "constraints": (
-                "返回 JSON：{\"paths\": [str], \"rationale\": str}。仅站内相对路径"
-                "（以 / 开头），不要重复已探测清单；针对观测到的技术栈给出"
-                "少量高价值信息泄露面（配置/公开文档/调试端点）；每个建议都必须"
-                "能由给出的技术栈或页面标题解释，不猜测业务接口。"),
-        }, reasoning_effort=self.task_effort(task))
-        if data is None:
-            return StepResult(ok=True, value=0.0,
-                              note="无可信的指纹扩展建议，未做字典猜测")
-        paths: list[str] = []
-        for p in data.get("paths", []):
-            if not isinstance(p, str):
-                continue
-            p = p.strip()
-            # 确定性校验：站内相对路径、禁目录穿越、去重（骨架 + 本轮）
-            if (not p.startswith("/")) or "://" in p or ".." in p \
-                    or p == "/robots.txt" or p in paths:
-                continue
-            paths.append(p[:200])
+        paths = [str(item.get("path") or "") for item in fp.get("page_paths", [])
+                 if isinstance(item, dict)]
+        paths = [path for path in dict.fromkeys(paths)
+                 if path.startswith("/") and path not in {"/", "/robots.txt"}
+                 and ".." not in path][: self.LLM_PATH_CAP]
         paths = paths[: self.LLM_PATH_CAP]
         if not paths:
-            return StepResult(ok=True, value=0.0, note="LLM 无新增路径建议")
-        assert self.ctx.audit is not None
-        self.ctx.audit.log("llm.step_decision", self.agent_id, {
-            "action": "suggest_paths", "decided": len(paths),
-            "rationale": str(data.get("rationale", ""))[:200]})
+            return StepResult(ok=True, value=0.0,
+                              note="页面源码没有可接力的真实站内路径；未做字典猜测")
         hits = 0
         notes = []
         for path in paths:
-            sub = await self._step_path_probe(task, {"path": path, "origin": "model_generated_test"})
+            sub = await self._step_path_probe(task, {"path": path, "origin": "page_source"})
             notes.append(sub.note)
             hits += sum(1 for f in sub.findings if f.get("confirmed"))
         return StepResult(ok=True, value=min(0.3 + 0.4 * hits, 1.0),
-                          findings=[{"type": "llm_path_sweep", "paths": paths,
+                          findings=[{"type": "source_path_followup", "paths": paths,
                                      "confirmed": hits}],
                           note="; ".join(notes)[:300])
 
@@ -388,13 +466,13 @@ class ReconAgent(SubAgent):
         return self._wildcard_gap(task)
 
     def _wildcard_gap(self, task: Task) -> StepResult:
-        note = ("通配符不能作为具体主机主动探测；本路线未发送 HTTP、DNS 或端口请求，"
-                "等待探微交付具体 hostname 后再继续侦察。")
+        note = ("资产发现契约不能由页面路径侦察代替；本路线未发送 HTTP、DNS 或端口请求，"
+                "等待探微完成 CT、通配基线与具体 hostname 核验后再继续侦察。")
         self._write_clue(
             task, clue_type="asset_discovery_gap", value=task.target,
             confidence=0.95,
-            detail={"reason": "wildcard_requires_concrete_host",
-                    "next": "等待资产发现交付具体 hostname"},
+            detail={"reason": "asset_discovery_requires_scanner",
+                    "next": "等待资产发现交付已核验的具体 hostname"},
         )
         return StepResult(ok=True, value=0.05, final_note=True, note=note)
 

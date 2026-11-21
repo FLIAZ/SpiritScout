@@ -140,10 +140,12 @@ class WebAuthTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, env_only(
                 SPIRITSCOUT_ADMIN_PASSWORD="test-secret"):
             with TestClient(_app(tmp), follow_redirects=False) as client:
-                response = client.get("/api/sessions")
-                self.assertEqual(response.status_code, 401)
-                self.assertEqual(response.json()["detail"], "需要管理员登录")
-                self.assertNotIn("www-authenticate", response.headers)
+                for path in ("/api/sessions", "/api/system/resources"):
+                    with self.subTest(path=path):
+                        response = client.get(path)
+                        self.assertEqual(response.status_code, 401)
+                        self.assertEqual(response.json()["detail"], "需要管理员登录")
+                        self.assertNotIn("www-authenticate", response.headers)
 
     def test_login_sets_httponly_cookie_and_unlocks_console(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, env_only(

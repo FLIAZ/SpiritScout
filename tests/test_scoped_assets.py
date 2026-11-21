@@ -121,16 +121,78 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result['published'], [])
             requested = [(call.args[0], call.args[1])
                          for call in infra.tools.call.call_args_list]
-            self.assertEqual(requested, [
-                ('dns_resolve', {'host': 'example.com'}),
-                ('dns_resolve', {'host': 'a.example.com'}),
-            ])
+            resolved = [args for name, args in requested if name == 'dns_resolve']
+            self.assertIn({'host': 'a.example.com'}, resolved)
+            self.assertNotIn({'host': 'example.com'}, resolved)
+            self.assertTrue(any(args['host'].endswith('.example.com')
+                                and args['host'].startswith('ss-') for args in resolved))
             self.assertEqual(bb.query(BlackboardLayer.ASSET), [])
             candidate = next(row['data'] for row in bb.query(BlackboardLayer.RECON_CLUE)
                              if row['data'].get('clue_type') == 'asset_candidate'
                              and row['data'].get('value') == 'a.example.com')
             self.assertEqual(candidate['value'], 'a.example.com')
             self.assertEqual(candidate['stage'], 'in_scope')
+
+    async def test_certificate_transparency_timeout_uses_fallback_source(self):
+        import httpx
+
+        from spiritscout.agents.discovery import discover
+        from spiritscout.blackboard.convergence import ConvergenceEngine
+        from spiritscout.blackboard.store import Blackboard
+        from spiritscout.config.settings import AssetIntelligenceConfig
+        from spiritscout.tools.spec import ToolResult
+
+        crt_calls = 0
+        class Body(httpx.AsyncByteStream):
+            def __init__(self, payload):
+                self.payload = json.dumps(payload).encode()
+            async def __aiter__(self):
+                yield self.payload
+
+        async def handle(request):
+            nonlocal crt_calls
+            if request.url.host == 'crt.sh':
+                crt_calls += 1
+                raise httpx.ReadTimeout('fixture timeout', request=request)
+            if request.url.host == 'api.certspotter.com':
+                return httpx.Response(200, stream=Body([
+                    {'dns_names': ['fallback.example.com', 'evil.test']},
+                ]))
+            return httpx.Response(200, stream=Body({'Answer': []}))
+
+        async def tool_call(name, args, **kwargs):
+            if name == 'dns_resolve' and args['host'] == 'fallback.example.com':
+                return ToolResult(tool=name, ok=True, invocation_id='dns-fallback',
+                                  parsed={'ips': ['203.0.113.9']})
+            return ToolResult(tool=name, ok=False, invocation_id='fixture-failed',
+                              error='unreachable')
+
+        original = httpx.AsyncClient
+        def client(**options):
+            return original(**options, transport=httpx.MockTransport(handle))
+
+        with tempfile.TemporaryDirectory() as root:
+            bb = Blackboard(Path(root) / 'bb.db')
+            self.addCleanup(bb.close)
+            from unittest.mock import AsyncMock
+
+            infra = SimpleNamespace(
+                cfg=SimpleNamespace(workspace=SimpleNamespace(root=root),
+                                    asset_intelligence=AssetIntelligenceConfig()),
+                convergence=ConvergenceEngine(bb), blackboard=bb,
+                authorization=SimpleNamespace(scope=Scope(allowed_domains=['*.example.com'])),
+                builtin_ctx={'limiter': SimpleNamespace(acquire=AsyncMock())},
+                tools=SimpleNamespace(call=tool_call),
+            )
+            with patch('spiritscout.agents.discovery.tool_environment',
+                       AsyncMock(return_value={})), \
+                    patch('spiritscout.agents.discovery.httpx.AsyncClient', side_effect=client):
+                result = await discover(infra, '*.example.com')
+
+        self.assertEqual(crt_calls, 2)
+        self.assertIn('fallback.example.com', result['published'])
+        self.assertNotIn('evil.test', result['published'])
+        self.assertTrue(result['observations']['passive_subdomains']['fallback_used'])
 
     async def test_dns_verified_candidate_is_promoted_and_http_probed(self):
         import httpx
@@ -183,16 +245,15 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
             with patch('spiritscout.agents.discovery.httpx.AsyncClient', side_effect=client):
                 result = await discover(infra, '*.example.com')
 
-            self.assertEqual(result['published'], ['a.example.com', 'example.com'])
-            self.assertEqual([call for call in calls if call[0] == 'dns_resolve'], [
-                ('dns_resolve', {'host': 'example.com'}),
-                ('dns_resolve', {'host': 'a.example.com'}),
-            ])
+            self.assertEqual(result['published'], ['a.example.com'])
+            dns_calls = [call for call in calls if call[0] == 'dns_resolve']
+            self.assertIn(('dns_resolve', {'host': 'a.example.com'}), dns_calls)
+            self.assertNotIn(('dns_resolve', {'host': 'example.com'}), dns_calls)
             probed = {call[1]['url'] for call in calls if call[0] == 'http_probe'}
-            self.assertEqual(probed, {
-                'https://example.com/', 'http://example.com/',
-                'https://a.example.com/', 'http://a.example.com/',
-            })
+            self.assertIn('https://a.example.com/', probed)
+            self.assertIn('http://a.example.com/', probed)
+            self.assertNotIn('https://example.com/', probed)
+            self.assertNotIn('http://example.com/', probed)
             self.assertEqual({row['data']['asset_type'] for row in bb.query(BlackboardLayer.ASSET)},
                              {'domain', 'url'})
 
@@ -340,6 +401,7 @@ class ScopedAssetTests(unittest.TestCase):
         wildcard = Scope(allowed_domains=['*.example.com'])
         self.assertFalse(_within('other.example.com', exact))
         self.assertTrue(_within('other.example.com', wildcard))
+        self.assertFalse(_within('example.com', wildcard))
         self.assertFalse(_within('example.com.evil.test', wildcard))
         self.assertFalse(_within('203.0.113.1', wildcard))
         self.assertFalse(_within('other.exam\nple.com', wildcard))

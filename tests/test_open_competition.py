@@ -34,8 +34,22 @@ stages: [协作取证, 维持服务, 提交证据]
         self.assertEqual(plan.rules.raw['scoring']['service_uptime'], 50)
         self.assertEqual(plan.rules.raw['stages'][-1], '提交证据')
 
+    def test_src_role_pool_no_longer_collects_assets(self) -> None:
+        ctx = SimpleNamespace(shared_cache=None)
+        ctx.for_agent = lambda role: ctx
+        assembly = ModeAssembler(ctx, enable_llm_planning=True).assemble(RunMode.SRC)
+        self.assertNotIn(AgentType.RECON, assembly.agents)
+        self.assertNotIn('TA0043', assembly.tactic_map)
+        self.assertNotIn(AgentType.PORT_SCAN, assembly.agents)
+        self.assertNotIn('TA0007', assembly.tactic_map)
+        self.assertIn(AgentType.HOST_VULN, assembly.agents)
+        self.assertIn(AgentType.WEB_VULN, assembly.agents)
+        self.assertIn(AgentType.BUSINESS_CONTEXT, assembly.agents)
+
     def test_all_contest_labels_get_same_capabilities_and_model_planner(self) -> None:
-        assembler = ModeAssembler(SimpleNamespace(), enable_llm_planning=True)
+        ctx = SimpleNamespace(shared_cache=None)
+        ctx.for_agent = lambda role: ctx
+        assembler = ModeAssembler(ctx, enable_llm_planning=True)
         # 复用真实装配分支，角色实例用无副作用对象替代。
         def src() -> SimpleNamespace:
             return SimpleNamespace(mode=RunMode.SRC,
@@ -54,6 +68,8 @@ stages: [协作取证, 维持服务, 提交证据]
                 self.assertIsNone(assembly.plan_provider)
                 self.assertIn(AgentType.RECON, assembly.agents)
                 self.assertIn(AgentType.CTF_WEB, assembly.agents)
+                self.assertIn(AgentType.PORT_SCAN, assembly.agents)
+                self.assertEqual(assembly.tactic_map["TA0007"][0], AgentType.PORT_SCAN)
                 self.assertEqual(assembly.competition_context['rules']['custom_goal'], 'evidence')
                 self.assertEqual(assembly.competition_context['challenges'][0]['id'], 'stage-1')
 
@@ -68,6 +84,7 @@ stages: [协作取证, 维持服务, 提交证据]
         master.agent_id = 'master-test'
         master.ctx = SimpleNamespace(audit=NullAuditLogger(), pause_gate=None,
             enable_llm_planning=True, plan_override=None,
+            blackboard=SimpleNamespace(read=lambda *_: None),
             extra={'mode_prompt': '开放赛制'}, tactic_map={}, agents={})
         master._llm_plan = AsyncMock(return_value=None)
         master._rule_plan = Mock(side_effect=AssertionError('不应套用固定 SRC 流程'))

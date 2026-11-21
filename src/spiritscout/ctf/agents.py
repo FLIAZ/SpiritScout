@@ -6,61 +6,130 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
-import codecs
 import copy
 import hashlib
-import html
 import json
 import re
 import time
-import urllib.parse
 import zlib
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
 from spiritscout.agents.ring import attempt_key
-from spiritscout.agents.scan_control import SCHEMA as SCANNER_CONTROL_SCHEMA
 from spiritscout.agents.sub.base import RoutePlan, StepResult, SubAgent
-from spiritscout.blackboard.exchange import GUIDANCE, NAMES, SCHEMAS, execute
+from spiritscout.blackboard.exchange import GUIDANCE, NAMES, execute
 from spiritscout.blackboard.exchange import project_rules as project_rules_fn
 from spiritscout.core.ids import new_id
 from spiritscout.core.models import AgentType, BlackboardLayer, RunMode, Task
-from spiritscout.ctf.ai_tools import SCHEMA as AI_SCHEMA
 from spiritscout.ctf.ai_tools import inspect as inspect_ai
+from spiritscout.ctf.contracts import (
+    _ToolOutcome,
+)
+from spiritscout.ctf.conversation import (
+    _challenge_text,
+    _challenge_view,
+    _complete_tool_history,
+    _head_tail,
+    _model_messages,
+    read_history,
+)
+from spiritscout.ctf.encoding import (
+    _MIN_BLOB_LEN,
+    _caesar_brute,
+    _decode_blobs,
+    _decode_chain,
+    _rail_fence_brute,
+    _try_single_decode,
+)
 from spiritscout.ctf.flags import FlagManager
+from spiritscout.ctf.observations import (
+    _CALL_SITE,
+    _HTML_HINT,
+    _OBS_EXCERPT_CAP,
+    _OBS_HEADERS,
+    _STR_LITERAL,
+    _TOKEN_HINT,
+    _challenge_instance_blocker,
+    _collapse,
+    _html_digest,
+    _http_observation,
+    _obs_text,
+    _signal_line,
+    _text_digest,
+)
+from spiritscout.ctf.solver import (
+    _MSG_CHAR_BUDGET,
+    _SOLVER_TIMEOUT,
+    _TOOL_RESULT_CAP,
+    _TURN_PROGRESS,
+    SolverTurn,
+)
+from spiritscout.ctf.tool_schemas import (
+    _HTTP_METHODS,
+    CTF_TOOL_SCHEMAS,
+    _fn,
+)
 from spiritscout.gateway import world_state
 from spiritscout.gateway.context import (
-    append_instruction_events,
     estimate_input_tokens,
 )
 from spiritscout.gateway.progress import PublicProgressEmitter as _DeltaEmitter
 from spiritscout.resources.runtime import (
     SKILL_GUIDANCE,
     SKILL_NAMES,
-    SKILL_SCHEMAS,
     SkillRuntime,
 )
 from spiritscout.resources.store import ResourceStore
 from spiritscout.tools.background import NAMES as BACKGROUND_NAMES
-from spiritscout.tools.background import SCHEMAS as BACKGROUND_SCHEMAS
-from spiritscout.tools.catalog import MCP_PROXY_SCHEMAS, search_mcp_tools
-from spiritscout.tools.cve import SCHEMA as CVE_SCHEMA
+from spiritscout.tools.catalog import search_mcp_tools
 from spiritscout.tools.cyberchef import NAMES as CYBERCHEF_NAMES
-from spiritscout.tools.cyberchef import SCHEMAS as CYBERCHEF_SCHEMAS
-from spiritscout.tools.http_responses import SCHEMA as RESPONSE_SCHEMA
 from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
+from spiritscout.tools.sandbox_paths import sandbox_directory
 from spiritscout.tools.search_policy import search_allowed
-from spiritscout.tools.spec import ActionCategory
-from spiritscout.tools.web_search import SEARCH_SCHEMA
 from spiritscout.traffic.tools import NAMES as TRAFFIC_NAMES
-from spiritscout.traffic.tools import SCHEMAS as TRAFFIC_SCHEMAS
 
-# 题面中疑似编码串的最小长度（降噪）
-_MIN_BLOB_LEN = 12
+# 保留历史导入入口；能力模块直接依赖各自的契约和工具模块。
+__all__ = [
+    "_DeltaEmitter",
+    "_TURN_PROGRESS",
+    "_ToolOutcome",
+    "_challenge_text",
+    "_challenge_view",
+    "_complete_tool_history",
+    "_head_tail",
+    "_model_messages",
+    "_MIN_BLOB_LEN",
+    "_caesar_brute",
+    "_decode_blobs",
+    "_decode_chain",
+    "_rail_fence_brute",
+    "_try_single_decode",
+    "_CALL_SITE",
+    "_HTML_HINT",
+    "_OBS_EXCERPT_CAP",
+    "_OBS_HEADERS",
+    "_STR_LITERAL",
+    "_TOKEN_HINT",
+    "_challenge_instance_blocker",
+    "_collapse",
+    "_html_digest",
+    "_http_observation",
+    "_obs_text",
+    "_signal_line",
+    "_text_digest",
+    "_HTTP_METHODS",
+    "CTF_TOOL_SCHEMAS",
+    "_fn",
+    "CTFBaseAgent",
+    "CTFWebAgent",
+    "CTFCryptoAgent",
+    "CTFMiscAgent",
+    "CTFReverseAgent",
+    "CTFPwnAgent",
+]
+
 # 外部安全技能库（NoorQureshi/security-skills，MIT，206 条）——
 # kb_search 只返回发现信息，完整原文由技能工具按需读取。
 _SEC_SKILLS: list[dict[str, Any]] | None = None
@@ -75,422 +144,10 @@ def _load_sec_skills() -> list[dict[str, Any]]:
         except (OSError, ValueError):
             _SEC_SKILLS = []
     return _SEC_SKILLS
-# 喂给 LLM 的单条观察摘录上限（控制 token 扇出）；页面观察是解题的第一手
-# 情报，预算给足——链接/表单等接口清单与题面文案（可见文本）都要装得下
-_OBS_EXCERPT_CAP = 4000
-# 对话字符预算：超出后从最旧消息开始折叠工具结果（长对话的上下文治理）
-_MSG_CHAR_BUDGET = 48000
-# 单条工具结果回灌上限
-_TOOL_RESULT_CAP = 6000
 # 沙箱输出回灌模型的上限（头尾保留；完整输出已落盘，不丢过程）
 _SAND_MODEL_CAP = 3600
-# 解题环单次 LLM 调用超时：重推理模型单次可达 3~4 分钟
-_SOLVER_TIMEOUT = 420
-# 单回合路线进度增量（进度展示用；无固定回合顶，进度饱和于 1.0）
-_TURN_PROGRESS = 0.04
-# HTTP 动作参数上限（上下文保护，非行为限制；测试边界由模型结合用户上下文维护）
-_HTTP_METHODS = ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS")
 # 语义上无副作用的读取方法（其余方法须模型自报 action 行为类别才执行）
 _HTTP_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
-# HTML 结构探测：响应首段命中常见标签即按 HTML 摘要处理
-_HTML_HINT = re.compile(
-    r"<\s*(?:!doctype|html|head|body|div|span|a|p|form|table|script|style|title)\b",
-    re.IGNORECASE)
-# 观察保留的高信号响应头（跳转目标/会话/指纹/鉴权）
-_OBS_HEADERS = ("location", "set-cookie", "server", "x-powered-by",
-                "content-type", "www-authenticate", "x-flag", "allow")
-
-
-def _challenge_text(ch: dict[str, Any]) -> str:
-    """赛题载荷的全部字符串（含嵌套，逐段截断）——题面线索不限于固定字段名。"""
-    parts: list[str] = []
-
-    def walk(node: Any, depth: int) -> None:
-        if depth > 2 or len(parts) > 40:
-            return
-        if isinstance(node, str):
-            if node.strip():
-                parts.append(node[:4000])
-        elif isinstance(node, dict):
-            for value in node.values():
-                walk(value, depth + 1)
-        elif isinstance(node, list):
-            for value in node[:10]:
-                walk(value, depth + 1)
-
-    walk(ch, 0)
-    return "\n".join(parts)
-
-
-def _decode_blobs(text: str) -> list[str]:
-    """文本中的疑似编码串 → 链式解码结果（去重保序，≤20 条）。"""
-    out: list[str] = []
-    for blob in re.findall(rf"[A-Za-z0-9+/=_-]{{{_MIN_BLOB_LEN},}}", text)[:20]:
-        decoded = _decode_chain(blob)
-        if decoded and decoded != blob and decoded not in out:
-            out.append(decoded)
-    return out
-
-
-def _challenge_view(ch: dict[str, Any], *, total_cap: int = 6000) -> dict[str, Any]:
-    """赛题载荷的 LLM 上下文视图：全字段透传（截断），附件单列不走此口。
-
-    总长超预算时逐档收紧单字段上限——视图整体可入上下文，调用侧不触发截断。
-    """
-    view: dict[str, Any] = {}
-    for per_field in (1500, 700, 300, 120):
-        view = {}
-        for key, value in list(ch.items())[:20]:
-            if key in {"attachments", "user_type_hints"}:
-                continue
-            if isinstance(value, str):
-                view[key] = value[:per_field]
-            elif isinstance(value, (int, float, bool)) or value is None:
-                view[key] = value
-            elif isinstance(value, list):
-                view[key] = [str(x)[: min(per_field, 200)] for x in value[:10]]
-            elif isinstance(value, dict):
-                view[key] = {str(kk)[:40]: str(vv)[: min(per_field, 200)]
-                             for kk, vv in list(value.items())[:10]}
-        if len(json.dumps(view, ensure_ascii=False)) <= total_cap:
-            break
-    if ch.get("user_type_hints"):
-        view["user_type_hints"] = copy.deepcopy(ch["user_type_hints"])
-    return view
-
-
-def _collapse(text: str) -> str:
-    """空白折叠（多行 HTML 片段 → 单行可读文本）。"""
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def _model_messages(messages: list[dict[str, Any]], *, initialized: bool) \
-        -> list[dict[str, Any]]:
-    """原样回放模型正文、思考与工具调用；仅移除框架内部元数据。
-
-    空正文的工具调用也是有效原生响应，不能合成正文污染缓存前缀。
-    嵌套工具参数必须脱离持久状态，防止适配器修改历史。
-    """
-    return copy.deepcopy([{k: v for k, v in message.items() if not k.startswith("_")}
-                          for message in messages])
-
-
-def _complete_tool_history(messages: Any) -> bool:
-    """恢复时只接受完整的原生工具往返；不猜测中断工具的执行结果。"""
-    if not isinstance(messages, list):
-        return False
-    pending: set[str] = set()
-    for message in messages:
-        if not isinstance(message, dict):
-            return False
-        if message.get("role") == "tool":
-            call_id = message.get("tool_call_id")
-            if call_id not in pending:
-                return False
-            pending.remove(call_id)
-        else:
-            if pending:
-                return False
-            for call in message.get("tool_calls") or []:
-                if not isinstance(call, dict) or not isinstance(call.get("id"), str):
-                    return False
-                if not call["id"] or call["id"] in pending:
-                    return False
-                pending.add(call["id"])
-    return not pending
-
-
-def _challenge_instance_blocker(status: Any, text: str) -> str:
-    """识别比赛平台明确返回的实例生命周期错误。
-
-    只接受状态码与平台原文的组合，不把普通业务 404 当作环境故障。该判断
-    用于及时停止无效探测，保留证据并让用户回题目页重启实例。
-    """
-    try:
-        code = int(status)
-    except (TypeError, ValueError):
-        return ""
-    if code not in (404, 410, 502, 503, 504):
-        return ""
-    body = _collapse(text).lower()
-    strong_markers = (
-        "题目实例未找到",
-        "题目实例不存在、已经销毁",
-        "请从比赛题目页重新启动实例",
-        "challenge-gateway / route-check",
-    )
-    if not any(marker in body for marker in strong_markers):
-        return ""
-    return (
-        f"赛题实例不可用（平台网关 HTTP {code}）：实例不存在、已销毁或地址"
-        "已失效。请从比赛题目页重新启动实例并提供新的入口地址。")
-
-
-def _html_digest(body: str) -> str | None:
-    """HTML 响应 → 结构化观察摘要（纯机械提取，不做判断）。
-
-    样式/脚本块剔除（内联 CSS 会把真正的入口信息挤出上下文）；注释单列且
-    靠前——开发备注类线索（接口地址、口令提示）常藏于此；另提取标题、表单、
-    输入字段、链接、脚本引用与内联脚本。非 HTML 返回 None（回退文本提取）。
-    """
-    # HTML 文档以标签开头；JS/CSS/JSON 文本里出现 "<div" 之类字面量不算 HTML
-    head = body.lstrip("﻿ \t\r\n")[:200].lower()
-    if not head.startswith("<") or not _HTML_HINT.search(body[:4000]):
-        return None
-    m = re.search(r"<title[^>]*>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
-    title = _collapse(m.group(1))[:150] if m else ""
-    script_srcs = list(dict.fromkeys(
-        s[:150] for s in re.findall(
-            r"<script\b[^>]*\bsrc=[\"']([^\"']+)[\"']", body, re.IGNORECASE)))
-    inline_js = [s for s in (_collapse(x) for x in re.findall(
-        r"<script\b(?![^>]*\bsrc=)[^>]*>(.*?)</script\s*>", body,
-        re.IGNORECASE | re.DOTALL)) if s]
-    stripped = re.sub(r"<(style|script|noscript)\b[^>]*>.*?</\1\s*>", " ",
-                      body, flags=re.IGNORECASE | re.DOTALL)
-    comments = [c for c in (_collapse(x) for x in re.findall(
-        r"<!--(.*?)-->", stripped, re.DOTALL)) if c and not c.startswith("[if")]
-    stripped = re.sub(r"<!--.*?-->", " ", stripped, flags=re.DOTALL)
-    forms: list[str] = []
-    for tag in re.findall(r"<form\b[^>]*>", stripped, re.IGNORECASE)[:5]:
-        action = re.search(r"\baction=[\"']([^\"']*)[\"']", tag, re.IGNORECASE)
-        method = re.search(r"\bmethod=[\"']([^\"']*)[\"']", tag, re.IGNORECASE)
-        forms.append(f"{method.group(1).upper() if method else 'GET'} "
-                     f"{action.group(1) if action else ''}".strip())
-    field_bits: list[str] = []
-    for attrs in re.findall(r"<input\b([^>]*)>", stripped, re.IGNORECASE)[:10]:
-        nm = re.search(r"\bname=[\"']([^\"']+)[\"']", attrs, re.IGNORECASE)
-        if not nm:
-            continue
-        val = re.search(r"\bvalue=[\"']([^\"']*)[\"']", attrs, re.IGNORECASE)
-        field_bits.append(
-            f"{nm.group(1)}={val.group(1)[:60]}" if val else nm.group(1))
-    links: list[str] = []
-    for href in re.findall(
-            r"<(?:a|link|area)\b[^>]*\bhref=[\"']([^\"']+)[\"']",
-            stripped, re.IGNORECASE):
-        if href.startswith(("#", "javascript:", "mailto:", "data:")) or href in links:
-            continue
-        links.append(href[:200])
-        if len(links) >= 25:
-            break
-    text = _collapse(html.unescape(re.sub(r"<[^>]+>", " ", stripped)))
-    # 段序即优先级：页面文案（可见文本）排在接口清单（链接/表单/脚本）之前
-    # ——排在末尾时最容易被总帽截掉，而页面想让解题者读到的话（题面提示、
-    # 使用说明）恰是第一手情报；文案过长时保头保尾（提示常在中后段）
-    parts = [f"[HTML 摘要] 样式/脚本块已剔除（原文 {len(body)} 字符）"]
-    if title:
-        parts.append(f"[标题] {title}")
-    if comments:
-        parts.append("[注释] " + " ｜ ".join(c[:500] for c in comments[:5])[:1200])
-    if text:
-        visible = text[:1000]
-        if len(text) > 1600:
-            visible = (text[:1100]
-                       + f"\n…[可见文本中段略去 {len(text) - 1600} 字符，末尾接下]…\n"
-                       + text[-500:])
-        parts.append("[可见文本] " + visible)
-    if links:
-        parts.append("[链接] " + " ".join(links)[:500])
-    if forms:
-        parts.append("[表单] " + " ｜ ".join(forms)[:300])
-    if field_bits:
-        parts.append("[输入字段] " + ", ".join(field_bits[:10])[:300])
-    if script_srcs:
-        parts.append("[脚本引用] " + " ".join(script_srcs)[:250])
-    if inline_js:
-        parts.append("[内联脚本] " + " ｜ ".join(inline_js[:3])[:600])
-    return "\n".join(parts)[:_OBS_EXCERPT_CAP]
-
-
-_STR_LITERAL = re.compile(r"""["'`]([^"'`\n]{2,200})["'`]""")
-_CALL_SITE = re.compile(
-    r"""(?:fetch|axios(?:\.\w+)?|\$\.(?:get|post|ajax|getJSON)|\.open|WebSocket"""
-    r"""|EventSource|\.(?:get|post|put|delete|patch))\s*\(\s*["'`]([^"'`\s]{1,200})["'`]""",
-    re.IGNORECASE)
-_TOKEN_HINT = re.compile(
-    r"(token|key|secret|passw|admin|cmd|command|exec|shell|flag|auth)", re.IGNORECASE)
-
-
-def _text_digest(body: str, content_type: str = "") -> str | None:
-    """非 HTML 文本（JS/JSON/纯文本）→ 机械提取：调用点、地址串、敏感词字面量。
-
-    前端代码与接口应答是理解应用行为的现场；整段压缩代码直接进上下文会挤爆
-    预算且读不出结构，这里只做机械提取（提出来的都是原文片段，不做判断），
-    另附首尾原文——怎么用它由模型决定。
-    """
-    if len(body) < 200 and not _CALL_SITE.search(body):
-        return None
-    sites = list(dict.fromkeys(m for m in _CALL_SITE.findall(body) if m.strip()))[:30]
-    paths = list(dict.fromkeys(
-        s for s in _STR_LITERAL.findall(body)
-        if s.startswith(("/", "http://", "https://", "ws://", "wss://"))
-        and not s.startswith(("//", "/**"))))[:40]
-    tokens = list(dict.fromkeys(
-        s for s in _STR_LITERAL.findall(body)
-        if _TOKEN_HINT.search(s) and 2 < len(s) < 120))[:15]
-    if not (sites or paths or tokens):
-        return None
-    kind = "JSON/文本" if "json" in content_type.lower() else "脚本/文本"
-    note = "结构提取如下，尾部附首尾原文"
-    if len(body) > 6000:
-        note = ("超出单次上下文预算，结构提取 + 首尾原文如下；"
-                "需要完整内容可用 headers.Range 分段请求")
-    parts = [f"[{kind} 提取] 原文 {len(body)} 字符（{note}）"]
-    if sites:
-        parts.append("[调用点] " + " ｜ ".join(sites)[:900])
-    if paths:
-        parts.append("[地址串] " + " ".join(paths)[:700])
-    if tokens:
-        parts.append("[敏感词字面量] " + " ｜ ".join(tokens)[:500])
-    head = body[:1400]
-    tail = body[-700:] if len(body) > 2200 else ""
-    parts.append("[原文首段] " + head)
-    if tail:
-        parts.append("[原文尾段] " + tail)
-    return "\n".join(parts)[:_OBS_EXCERPT_CAP]
-
-
-def _http_observation(desc: str, res: Any, url: str,
-                      flags: list[str]) -> dict[str, Any]:
-    """HTTP 结果 → 观察条目：状态/跳转/高信号响应头/正文摘要（HTML 结构化）。"""
-    parsed = res.parsed if isinstance(res.parsed, dict) else {}
-    obs: dict[str, Any] = {"action": desc,
-                           "status": parsed.get("status_code", 0)}
-    final = str(parsed.get("final_url") or "")
-    if final and final.rstrip("/") != url.rstrip("/"):
-        obs["final_url"] = final[:300]
-    if parsed.get("scope_note"):
-        obs["scope_note"] = str(parsed["scope_note"])
-    headers = {str(k).lower(): str(v)
-               for k, v in (parsed.get("headers") or {}).items()}
-    picked = {k: headers[k][:300] for k in _OBS_HEADERS if k in headers}
-    if picked:
-        obs["headers"] = picked
-    if parsed.get("redirects"):
-        # 中转跳的原始响应头（尤其 302 + Set-Cookie）必须回传给模型，
-        # 否则登录/提交后的会话证据只能靠猜 Cookie 值补。
-        obs["redirects"] = [{
-            "status": int(hop.get("status") or 0),
-            "url": str(hop.get("url") or "")[:300],
-            "location": str(hop.get("location") or "")[:300],
-            **({"set_cookie": str(hop["set_cookie"])[:300]}
-               if hop.get("set_cookie") else {}),
-        } for hop in (parsed["redirects"] or [])[:8]]
-    if parsed.get("evidence_files"):
-        obs["evidence_files"] = {str(k): str(v)[:300]
-                                 for k, v in (parsed["evidence_files"] or {}).items()}
-    body = res.stdout or ""
-    ctype = headers.get("content-type", "")    # 脚本/样式/JSON 文本不走 HTML 摘要（否则会被当作标签剥离只剩碎片）
-    scripty = any(k in ctype.lower() for k in
-                  ("javascript", "ecmascript", "json", "css"))
-    if parsed.get("body_ref"):
-        # 新 HTTP 通道已保存正文：短源码原样返回，长源码只预览，禁用二次有损摘要。
-        obs.update({key: parsed.get(key) for key in
-                    ("body_ref", "body_path", "body_chars", "download_complete", "preview_truncated", "response_is_partial", "text_decode_lossy")})
-        obs["preview_truncated"] = bool(parsed.get("preview_truncated")) or len(body) > 3500
-        obs["excerpt"] = (body if len(body) <= 3500 else
-                          body[:2600] + "\n...[展示省略，非完整源码]...\n" + body[-850:])
-    else:
-        obs["excerpt"] = ((None if scripty else _html_digest(body))
-                          or _text_digest(body, ctype)
-                          or body[:_OBS_EXCERPT_CAP])
-    if flags:
-        obs["flags"] = flags
-    return obs
-
-
-def _signal_line(obs: dict[str, Any]) -> str:
-    """观察 → 一行信号（进共享缓存给同伴看）：标题/注释线索/flag 计数。"""
-    excerpt = str(obs.get("excerpt") or "")
-    bits: list[str] = []
-    for marker in ("[标题] ", "[注释] "):
-        idx = excerpt.find(marker)
-        if idx >= 0:
-            bits.append(_collapse(excerpt[idx + len(marker):].split("\n")[0])[:80])
-    if obs.get("final_url"):
-        bits.append(f"→ {str(obs['final_url'])[:60]}")
-    if obs.get("flags"):
-        bits.append(f"flag×{len(obs['flags'])}")
-    return (" " + " ｜ ".join(bits)) if bits else ""
-
-
-def _head_tail(text: str, cap: int) -> str:
-    """超长输出的上下文摘要：头尾保留、中段略去（完整内容已落盘可查）。"""
-    if len(text) <= cap:
-        return text
-    dropped = len(text) - cap
-    return (text[:cap * 3 // 4]
-            + f"\n…[中段略去 {dropped} 字符——完整输出已存工作区文件，"
-              "需要时用沙箱读取]…\n"
-            + text[-(cap // 4):])
-
-
-@dataclass
-class _ToolOutcome:
-    """一次工具调用的结果：text 回灌模型，其余喂路线状态与前端轨迹。"""
-
-    ok: bool
-    text: str
-    value: float = 0.0
-    findings: list[dict[str, Any]] = field(default_factory=list)
-    note: str = ""
-    observation: dict[str, Any] | None = None
-    empty: bool = False        # 成功执行但无有效输出（喂空转感知，不做拦截）
-    stop: bool = False         # 平台已确认该得分目标完成：不再请求模型写收尾
-    metadata: dict[str, Any] = field(default_factory=dict)
-    final_text: str = ""       # stop=True 时的确定性短回执
-
-
-def _fn(name: str, description: str, properties: dict[str, Any],
-        required: list[str] | None = None) -> dict[str, Any]:
-    """OpenAI 形态的函数工具 schema（网关统一转译到各协议）。"""
-    if "action" in properties:
-        properties = {**properties, "action": {
-            **properties["action"], "enum": [a.value for a in ActionCategory],
-        }}
-    return {"type": "function", "function": {
-        "name": name, "description": description,
-        "parameters": {"type": "object", "properties": properties,
-                       **({"required": required} if required else {})}}}
-
-
-def _obs_text(obs: dict[str, Any]) -> str:
-    """结构化观察 → 回灌模型的工具结果文本。"""
-    lines = [f"{obs.get('action', '')} → {obs.get('status', 0)}"]
-    if obs.get("final_url"):
-        lines.append(f"最终地址: {obs['final_url']}")
-    if obs.get("body_ref"):
-        lines.append(f"原文 body_ref={obs['body_ref']}；已保存 {obs.get('body_chars')} 字符；"
-                     + ("响应下载完整" if obs.get("download_complete") else "响应下载不完整，已达到正文下载上限")
-                     + ("；当前为 HTTP 206 局部响应，不代表完整资源" if obs.get("response_is_partial") else "")
-                     + ("；以下仅展示首尾预览" if obs.get("preview_truncated") else
-                        "；以下为完整响应正文" if obs.get("download_complete") else "；以下为已保存的部分正文")
-                     + "。需要源码细节调用 http_response_read 读取或搜索，不要重复请求网页。")
-        if obs.get("body_path"):
-            lines.append("源码文件（沙箱只读，可直接解析常量）: " + str(obs["body_path"]))
-        if obs.get("text_decode_lossy"):
-            lines.append("文本解码存在替换字符；原始字节保存在同目录 body.bin，可按实际编码重新解析。")
-    if obs.get("redirects"):
-        lines.append("跳转链原始响应头（含 Set-Cookie，会话凭据以此为准）:")
-        for hop in obs["redirects"]:
-            line = f"- {hop.get('status')} {hop.get('url')} → {hop.get('location')}"
-            if hop.get("set_cookie"):
-                line += f"；Set-Cookie: {hop['set_cookie']}"
-            lines.append(line)
-    if obs.get("scope_note"):
-        lines.append(str(obs["scope_note"]))
-    if obs.get("headers"):
-        lines.append("响应头: " + json.dumps(
-            obs["headers"], ensure_ascii=False)[:600])
-    if obs.get("body_path"):
-        lines.append("同目录原始证据可直接用 shell 读取: request.http（本次实际发送的完整请求，"
-                     "含工具会话携带的 Cookie）/ metadata.json / body.bin。")
-    if obs.get("excerpt"):
-        lines.append("正文:\n" + str(obs["excerpt"]))
-    if obs.get("flags"):
-        lines.append("Flag 已捕获并提交（FlagManager 确定性提取）: "
-                     + ", ".join(str(f) for f in obs["flags"]))
-    return "\n".join(lines)
 
 
 class CTFBaseAgent(SubAgent):
@@ -512,196 +169,7 @@ class CTFBaseAgent(SubAgent):
     shared_namespace: ClassVar[str] = "ctf_shared"
     flag_manager: FlagManager | None = None
     # 本方向工具目录（原生 function calling schema）；子类在此之上增补方向工具
-    tool_schemas: ClassVar[list[dict[str, Any]]] = [
-        *SKILL_SCHEMAS,
-        *SCHEMAS,
-        *MCP_PROXY_SCHEMAS,
-        RESPONSE_SCHEMA,
-        *TRAFFIC_SCHEMAS,
-        *BACKGROUND_SCHEMAS,
-        SCANNER_CONTROL_SCHEMA,
-        *CYBERCHEF_SCHEMAS,
-        _fn("steering_feedback", "向灵枢回报本任务指令的处理情况；accepted=说明下一步计划，"
-            "completed=给出实际动作与证据，blocked=说明无法执行的事实原因。回执不代替实际操作。",
-            {"instruction_id": {"type": "string"},
-             "status": {"type": "string", "enum": ["accepted", "completed", "blocked"]},
-             "detail": {"type": "string", "description": "计划、执行证据或阻塞原因"}},
-            ["instruction_id", "status", "detail"]),
-        _fn("http_request",
-            "向赛题目标发一次 HTTP 请求并拿到响应（状态码/响应头/正文摘要）。"
-            "GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS 全部支持——表单提交、"
-            "接口调用、登录动作都用它：method 指定方法，data 放请求体"
-            "（表单串按 x-www-form-urlencoded 发，JSON 原文按 application/json "
-            "发；要别的类型或精确控制时用 headers 显式给 Content-Type）。"
-            "path 传站内相对路径（推荐），或 url 传完整地址（须在授权范围内）。"
-            "响应原文保存在会话内，返回 body_ref 与完整性状态；长正文仅预览。"
-            "需要完整代码或中段线索时用 http_response_read 本地读取或搜索，不要重复抓取或依赖服务端 Range。",
-            {
-                "method": {"type": "string", "enum": list(_HTTP_METHODS),
-                           "description": "HTTP 方法，全部可用；缺省 GET，"
-                                          "提交表单/调用接口时用 POST"},
-                "path": {"type": "string",
-                         "description": "站内路径，如 /api/v1/users"},
-                "url": {"type": "string",
-                        "description": "完整 URL（与 path 二选一）"},
-                "params": {"type": "object", "description": "查询参数（键值对）"},
-                "headers": {"type": "object", "description": "额外请求头（键值对）"},
-                "data": {"type": "string", "description": "请求体原文（POST/PUT 用）"},
-                "refresh": {"type": "boolean",
-                            "description": "true=对该地址重新发起真实请求（页面"
-                            "状态变化、时序对照或独立复核时用）；缺省 false——仅精确同请求在短有效期内可复用，返回保留原执行来源"},
-                "action": {"type": "string",
-                           "description": "本次请求的行为类别（如实自报）。"
-                           "GET/HEAD/OPTIONS 纯读取可不填；POST/PUT/PATCH/"
-                           "DELETE 这类有副作用的请求必填：analysis=只是"
-                           "查询/读取；intrusive_write=写入/上传/增删改数据；"
-                           "brute_force=爆破；webshell_upload=上传 WebShell。"
-                           "危险类别（删除/爆破/反弹连接/WebShell/逃逸）会"
-                           "即时请示用户；其余如实注明即可。"
-                           "缺声明的副作用请求会被退回。"},
-            }),
-        _fn("shell",
-            "在隔离沙箱里执行一条 shell 命令（bash -c），拿到输出与退出码。"
-            "适合 HTTP 交互、socket 通信、文件检索与处理等命令行动作；"
-            "具体命令以实际执行为准，不确定时先 `command -v <name>` 探测；"
-            "工作目录在会话内持久（脚本与产物落那里，跨回合直接可用；"
-            "/tmp 每次运行即焚），系统文件只读，联网仅限授权目标。命令全文"
-            "留痕于审计。每次调用"
-            "必须用 action 如实声明这条命令要做什么——审计与审批以它为准。",
-            {
-                "command": {"type": "string", "description": "要执行的命令"},
-                "action": {"type": "string",
-                           "description": "本次执行的行为类别（如实自报，缺了"
-                           "不执行）：analysis=只读分析/读取/计算/解码；"
-                           "delete_files=删除文件；reverse_shell=反弹 shell；"
-                           "webshell_upload=上传 WebShell；container_escape="
-                           "容器/沙箱逃逸尝试；brute_force=爆破；"
-                           "intrusive_write=其他有副作用的写入/上传。删除/"
-                           "爆破/反弹连接/WebShell/逃逸会即时请示用户，每次"
-                           "单独批准；其余如实注明即可。"},
-                "timeout": {"type": "number",
-                            "description": "超时秒数（缺省 60，上限 300）"},
-            }, required=["command", "action"]),
-        _fn("python",
-            "在隔离沙箱里执行一段 Python 代码（python3），拿到输出与退出码。"
-            "适合 WebSocket/socket 协议交互、数据计算与解码、脚本化构造请求；"
-            "具体有哪些库以实际导入结果为准——不确定时先 `python3 -c "
-            "'import <模块>'` 或 `pip list | grep -i <关键词>` 查看，"
-            "不要凭记忆假设。"
-            "工作目录会话内持久，产物跨回合直接可用（/tmp 每次运行即焚）；"
-            "产物也可用附件分析工具继续研究。每次调用必须用 action 如实"
-            "声明这段代码要做什么——审计与审批以它为准。",
-            {
-                "code": {"type": "string", "description": "完整 Python 代码"},
-                "action": {"type": "string",
-                           "description": "本次执行的行为类别（如实自报，缺了"
-                           "不执行）：analysis=只读分析/读取/计算/解码；"
-                           "delete_files=删除文件；reverse_shell=反弹 shell；"
-                           "webshell_upload=上传 WebShell；container_escape="
-                           "容器/沙箱逃逸尝试；brute_force=爆破；"
-                           "intrusive_write=其他有副作用的写入/上传。删除/"
-                           "爆破/反弹连接/WebShell/逃逸会即时请示用户，每次"
-                           "单独批准；其余如实注明即可。"},
-                "timeout": {"type": "number",
-                            "description": "超时秒数（缺省 60，上限 300）"},
-            }, required=["code", "action"]),
-        _fn("analyze_text",
-            "对题面文本做编码链解码（Base64/Hex/URL/Rot13 递归）与 Flag 提取。"
-            "怀疑线索藏在题面或编码串里时用它；已经分析过就不必再来。",
-            {}),
-        _fn("analyze_attachments",
-            "对全部附件做魔数识别 + 字符串提取 + Flag 提取。有附件时先跑它，"
-            "方向工具（checksec/algo_hints/deep_strings）依赖它的结果。",
-            {}),
-        _fn("note",
-            "把关键发现写进团队共享笔记——同题并行工作的其他方向 Agent 下一"
-            "回合就能看到（如「/api/v1/admin 需要 adm_token」「终端接口是 "
-            "POST /api/exec，命令放 cmd 参数」）。只记录有依据的事实，不登记执行步骤或写文件行为。",
-            {"text": {"type": "string", "description": "要共享的事实"},
-             "evidence_refs": {"type": "array", "items": {"type": "string"},
-                               "description": "已有工具调用 ID、文件或黑板记录引用"}},
-            required=["text", "evidence_refs"]),
-        _fn("send_file",
-            "把产出文件发送到会话界面，用户可直接在线预览（Markdown 会渲染成"
-            "文档）或下载到本机。产出统一放在 artifacts/ 下（exp 脚本、字典、"
-            "解题报告等）；凡需要用户查看或保存的文件就发过去，不要只留在"
-            "工作区里。",
-            {"path": {"type": "string",
-                      "description": "artifacts/ 内的文件路径，如 artifacts/exp.py"},
-             "note": {"type": "string",
-                      "description": "一句话说明文件是什么（可选，展示在文件卡片上）"}},
-            required=["path"]),
-        _fn("asset_memory_lookup", "读取同一主机的跨会话历史观测；历史不代表当前事实，不含凭据或授权。",
-            {"host": {"type": "string"}, "query": {"type": "string"}, "offset":{"type":"integer","minimum":0}}, required=["host"]),
-        SEARCH_SCHEMA,
-        CVE_SCHEMA,
-        AI_SCHEMA,
-        _fn("kb_search",
-            "检索本地经验知识库：敏感路径/备份文件清单、PHP 弱类型等平台特性"
-            "事实、模板注入 canary、隐写与提权检查点、本机工具面与字典位置、"
-            "攻击路径模板与核验方法。遇到不熟悉的平台特性、不确定本地有哪些"
-            "工具或字典、想核对常见检查点时用它；它是参考资料，"
-            "采纳与否由你基于现场证据判断。",
-            {"query": {"type": "string",
-                       "description": "检索词，如：备份文件 / PHP 弱类型 / "
-                                      "隐写 / 提权 / 模板注入 / 工具面"}},
-            required=["query"]),
-        _fn("ask_user",
-            "向用户提问并等待答复。遇到授权范围外的目标、拿不准的路线分叉、"
-            "需要用户拍板的取舍时用它：问题用你自己的话写清「看到了什么、"
-            "为什么想继续、不同选择意味着什么」；options 给 2~4 个你建议的"
-            "选项（用户也可以自由输入其他意见）。索取账号、密码、验证码、"
-            "Token、Cookie 或请求记录时，直接要求用户在当前提问卡输入；"
-            "options 只保留无法提供或改走其他方案等即时决策，不要生成稍后"
-            "提供、准备好再给之类承诺选项；targets 填你希望纳入测试"
-            "范围的目标，形如 [{\"target\": \"主机或 URL\", \"why\": \"一句话"
-            "说明它是什么、为什么需要（面向普通用户）\"}]——用户勾选后系统会"
-            "记录扩围；已有任务授权覆盖的平台动态靶机无需重复确认，不能仅因地址"
-            "未匹配初始列表就提问。只列真正超出已有授权的新目标。一次性把"
-            "问题问清楚，不要反复追问。",
-            {"question": {"type": "string",
-                          "description": "要问用户的问题（自己组织语言）"},
-             "options": {"type": "array", "items": {"type": "string"},
-                         "description": "建议选项（2~4 个，用户可自由输入）"},
-             "multiple": {"type": "boolean",
-                          "description": ("选项可多选：仅当选项彼此不互斥、"
-                                          "用户可能同时选多项时设 true"
-                                          "（如「接下来优先看哪些方向」"
-                                          "「需要开通哪些账号/环境」）；"
-                                          "「允许/拒绝」这类互斥决策保持 "
-                                          "false。多选选项要写成可独立"
-                                          "成立的动作或结论")},
-             "targets": {"type": "array",
-                         "items": {"type": "object",
-                                   "properties": {
-                                       "target": {"type": "string",
-                                                  "description": "主机或 URL"},
-                                       "why": {"type": "string",
-                                               "description": "面向普通用户的一句话说明"}},
-                                   "required": ["target"]},
-                         "description": "希望纳入本会话范围的新目标（含一句话说明）"}},
-            required=["question"]),
-        _fn("submit_flag",
-            "把你判定为本题 Flag 的值提交（判定权在你：依据题面给定的格式与"
-            "你拿到的证据）。后端只做登记、去重与赛方接口提交，应答（对/错/"
-            "未判定）会回灌给你；同一个值不要重复提交。",
-            {"flag": {"type": "string",
-                      "description": "Flag 原文（照抄证据里的值，不要加工）"},
-             "note": {"type": "string",
-                      "description": "判定依据（一句话：来源与推导）"}},
-            required=["flag"]),
-        _fn("spawn",
-            "派生一个分支执行者去独立推进一个子问题，其最终结论会回传给你。"
-            "当前分支会等待其收尾；可独立推进的扫描请用 scanner_control，不占用主线等待。"
-            "brief 写清：为什么需要这个分支、它专属的任务是什么、解决什么"
-            "问题、与当前工作的边界（它不做什么）；expect 写清期望回传的"
-            "结论。各司其职：子问题值得独立推进时才派，顺手能做的不要派。",
-            {"brief": {"type": "string",
-                       "description": "分支任务简报（为什么派/做什么/边界）"},
-             "expect": {"type": "string",
-                        "description": "期望回传的结论"}},
-            required=["brief"]),
-    ]
+    tool_schemas: ClassVar[list[dict[str, Any]]] = CTF_TOOL_SCHEMAS
     # 解题环由模型判断收尾；健康度剪枝面向多路线资源再分配，逐轮探索的
     # 起步进展分天然低于阈值，会误杀在途调查，因此不在这里按分数剪枝
     health_prune_enabled: ClassVar[bool] = False
@@ -836,13 +304,30 @@ class CTFBaseAgent(SubAgent):
         return {**ctx, "workspace_scope": self.challenge_id(task),
                 "_environment_id": hashlib.sha256(environment.encode()).hexdigest()}
 
+    def _task_execution_environment(self, task: Task) -> dict[str, str]:
+        """模型看到的目录与真实工具上下文同源，不能把控制根目录当作可写工作区。"""
+        ctx = self._tool_ctx(task)
+        workspace = ctx.get("workspace_root")
+        if not workspace:
+            return {}
+        root = Path(workspace).resolve()
+        persistent_tmp = bool(ctx.get("_lightweight_local")) and ctx.get("_run_mode", RunMode.CTF) in (
+            RunMode.CTF, RunMode.AWDP)
+        return {
+            "default_workdir": str(root / sandbox_directory(ctx.get("workspace_scope"))),
+            "artifacts": str(root / "artifacts"),
+            "workspace_root_access": "read-only；会话内仅 default_workdir 与 artifacts 可写，附件及其他会话目录只读",
+            "process_state": "shell/python 每次新进程，cd/变量不继承；工作文件持久；"
+                             + ("本题 /tmp 持久" if persistent_tmp else "/tmp 每次执行重建"),
+        }
+
     # ------------------------------------------------------------ Flag 闭环
 
     # ------------------------------------------------------------ 路线生成
 
     def route_templates(self, task: Task) -> list[RoutePlan]:
         """模板解题已删除：保留 ABC 契约，返回单条无固定步骤的解题路线。"""
-        return [RoutePlan(name="solve", strategy="自主解题：从题面与目标出发自行决定方向",
+        return [RoutePlan(name="solve", strategy="",
                           steps=[{"action": "investigate"}])]
 
     async def plan_routes(self, task: Task) -> list[RoutePlan]:
@@ -866,7 +351,7 @@ class CTFBaseAgent(SubAgent):
         if not plans:
             plans = [RoutePlan(
                 name="solve",
-                strategy="自主解题：从题面与目标出发自行决定方向",
+                strategy="",
                 steps=[{"action": "investigate"}])]
             if k > 1:
                 # 角度提案不可用时维持单线语义的第二条路线：不注入任何
@@ -1379,8 +864,7 @@ class CTFBaseAgent(SubAgent):
             seen_notes = list(notes[:legacy])
         fresh_notes = [n for n in notes if n not in seen_notes]
         seen["notes_seen"] = (seen_notes + fresh_notes)[-64:]
-        for note in [n for n in fresh_notes
-                     if not n.startswith(f"[{self.direction}]")][-8:]:
+        for note in fresh_notes[-8:]:
             lines.append(f"· 同伴笔记 {note}")
         concl = self._shared_conclusions(task)
         seen_concl = seen.get("concl_seen")
@@ -1390,8 +874,7 @@ class CTFBaseAgent(SubAgent):
             seen_concl = list(concl[:legacy])
         fresh_concl = [c for c in concl if c not in seen_concl]
         seen["concl_seen"] = (seen_concl + fresh_concl)[-48:]
-        for c in [c for c in fresh_concl
-                  if not c.startswith(f"[{self.direction}/")][-4:]:
+        for c in fresh_concl[-4:]:
             lines.append(f"· 同伴结论 {c}")
         fresh = [f for f in self._peer_flags(task, state)
                  if self._flag_line(f) not in seen["flags"]]
@@ -1422,427 +905,7 @@ class CTFBaseAgent(SubAgent):
             current_execution_scope.reset(token)
 
     async def _solve_turn_inner(self, task: Task, route, plan: RoutePlan) -> StepResult:
-        """解题环单回合：一次原生工具调用回合（可并发多个工具）。
-
-        边界（与全系统同一原则）：LLM 只决定「试什么」，执行走同一
-        http_probe 通道（范围标注/RPS/审计/审批不变）；Flag 只由
-        模型判定后经 FlagManager 提交；LLM 不可用 → 本路线诚实停摆（无模板兜底）。
-        """
-        state = self._inv_state(task, route)
-        if state["concluded"] or state["stall"]:
-            return StepResult(ok=True, value=0.0,
-                              final_note=True,
-                              note=state["stall"] or "本路线已收尾")
-        if (getattr(self.flag_manager, "local_only", False)
-                and not task.payload.get("followup_goal")
-                and self.challenge_id(task) in self.flag_manager.completed_ids()):
-            receipt = "本题全部答案已确认，解题报告在后台生成。"
-            self._finish_accepted(task, route, state, receipt)
-            return StepResult(ok=True, final_note=True, note=receipt)
-        # 竞赛同题并行路线共享平台判定：整题完成后不再调用模型生成题解。
-        if (getattr(self.ctx, "mode", None) == RunMode.COMPETITION
-                and self.flag_manager is not None):
-            for flag in self.flag_manager.accepted_flags():
-                if (flag.challenge_id == self.challenge_id(task)
-                        and self._submission_complete(task, flag.submit_response)):
-                    receipt = self._accepted_receipt(task, flag.submit_response)
-                    self._finish_accepted(task, route, state, receipt)
-                    return StepResult(ok=True, value=0.0,
-                                      final_note=True, note=receipt)
-        # 并行同伴夺旗 → 事实通报（不再由后端下令收尾）：本轮并行同伴的
-        # Flag 获平台判定正确，每枚只通报一次；继续深挖（多 Flag 题/未竟面）
-        # 还是收尾，由模型依现场决定。候选/未判定不算战果；判错的进提示词
-        # 当禁提交清单。
-        win_notice = self._peer_win_notice(task, route, state)
-
-        boot_value, boot_note = 0.0, ""
-        if not state["messages"]:
-            try:
-                boot_value, boot_note = await self._inv_bootstrap(task, route, state)
-            except Exception as exc:  # noqa: BLE001 —— 首轮感知失败不终结调查：
-                # 把障碍原样交给模型（见过现场才知道怎么绕：换入口/换工具/先读题面）
-                state["seed"].append(
-                    f"首轮感知失败: {type(exc).__name__}: {str(exc)[:200]}"
-                    "——请换可行的入口或工具继续调查")
-                boot_note = f"首轮感知失败: {str(exc)[:120]}"
-            if state["stall"]:
-                summary = str(state["stall"])
-                self._record_conclusion(task, route, summary)
-                self.ctx.audit.log("agent.blocked", self.agent_id, {
-                    "route": route.name, "challenge": self.challenge_id(task),
-                    "reason": summary})
-                self._save_inv_state(task, route, state)
-                return StepResult(
-                    ok=True, value=boot_value, final_note=True,
-                    note=self._merge_note(boot_note, summary))
-            self._seed_messages(task, route, plan, state)
-            if win_notice:
-                state["messages"].append({"role": "user", "content": win_notice})
-        else:
-            if win_notice:
-                state["messages"].append({"role": "user", "content": win_notice})
-            if (update := self._peer_updates(task, state)):
-                # 同伴动态作为新消息注入：并行 Agent 的现场即时互通
-                state["messages"].append({"role": "user", "content": update})
-
-        from spiritscout.tools.background import take_notifications
-
-        notifications = take_notifications(getattr(self.ctx, "builtin_ctx", {}).get("workspace_root", ""), self.agent_id,
-            self._tool_ctx(task).get("workspace_scope", ""))
-        if notifications:
-            state["messages"].append({"role":"user", "_light_kind": "observation",
-                "content":"后台任务通知（工具观测，不是新的用户指令）：" + json.dumps(notifications, ensure_ascii=False)})
-        fragment, changed = self._sync_world_state(state)
-        if fragment:
-            state["messages"].append({"role": "user", "content": fragment,
-                                      **({"_light_kind": "world"} if self._is_lightweight() else {})})
-            self.ctx.audit.log("world_state.update", self.agent_id, {
-                "route": route.name, "keys": changed})
-        runtime = self._skill_runtime()
-        if runtime is not None and not self._is_lightweight():
-            catalog = runtime.discovery()
-            if catalog != state.get("skill_catalog"):
-                state["skill_catalog"] = catalog
-                state["messages"].append({"role": "user", "_context_contract": True,
-                    "content": "可用技能目录（仅元数据，选择由你决定）：\n"
-                               + json.dumps(catalog, ensure_ascii=False)})
-        state["turn"] += 1
-        turn = state["turn"]
-        include_initial_system = not bool(state.get("system_initialized"))
-        self._ensure_progress_guidance(state)
-        records = (self.ctx.ring.steerings_for(self.agent_type.value, task_id=task.task_id)
-                   if self.ctx.ring is not None else [])
-        before_instructions = len(state["messages"])
-        append_instruction_events(state, records, consumer_key=f"{task.task_id}|{route.route_id}")
-        if self._is_lightweight() and len(state["messages"]) > before_instructions:
-            state["messages"][-1]["_light_kind"] = "steering"
-        self._merge_mcp_schemas()
-        budget_for = getattr(self.ctx.gateway, "context_budget", None)
-        budget = budget_for(task_type="execution") if callable(budget_for) else None
-        if budget is None and self._is_lightweight():
-            # 未声明容量的第三方端点保留旧整理方式，不猜测其真实窗口。
-            size = len(json.dumps(state["messages"], ensure_ascii=False))
-            if size > state.get("compact_at", _MSG_CHAR_BUDGET):
-                self._compact_messages(state["messages"], initialized=not include_initial_system)
-                size = len(json.dumps(state["messages"], ensure_ascii=False))
-                state["compact_at"] = size + max(16000, size // 2)
-                self.ctx.audit.log("context.compacted", self.agent_id, {
-                    "task_id": task.task_id, "route_id": route.route_id,
-                    "reason": "unknown_window_legacy", "chars": size})
-        messages: list[dict[str, Any]] = _model_messages(
-            state["messages"], initialized=not include_initial_system)
-        directives = self._active_steering(task, route)
-        emitter = _DeltaEmitter(self.ctx.audit, self.agent_id, route=route.name,
-                                challenge=self.challenge_id(task), turn=turn,
-                                inline_discovery=not self._is_lightweight())
-        self.ctx.audit.log("agent.turn", self.agent_id, {
-            "task_id": task.task_id, "route_id": route.route_id,
-            "route": route.name, "challenge": self.challenge_id(task),
-            "turn": turn,
-            "initial_system_prompt": include_initial_system,
-            "angle": plan.strategy[:160] if turn == 1 else ""})
-        from spiritscout.gateway.light_context import ContextWindowError
-
-        try:
-            from spiritscout.gateway.manual_context import (
-                archive_boundary,
-                pending_request,
-                record_result,
-            )
-
-            compact_request = pending_request(self.ctx.blackboard, state.get("manual_compaction_id", ""))
-            before_compaction = None
-            if compact_request and self._is_lightweight():
-                try:
-                    before_compaction = estimate_input_tokens(
-                        self._light_model_messages(task, route, copy.deepcopy(state)), self._model_tool_schemas())
-                except ContextWindowError:
-                    before_compaction = estimate_input_tokens(state["messages"], self._model_tool_schemas())
-                # 留住最近四轮助手回复及其完整工具结果，旧请求不会继续归档新消息。
-                state["manual_archive_before"] = archive_boundary(state["messages"])
-            if self._is_lightweight():
-                messages = self._light_model_messages(task, route, state)
-            else:
-                from spiritscout.agents.profiles import EVIDENCE_FIRST_GUIDANCE
-                from spiritscout.gateway.normal_context import project
-                from spiritscout.gateway.progress import (
-                    EXPLORATION_PROGRESS_GUIDANCE,
-                    native_discovery_reminder,
-                )
-
-                # 硬规则每轮随提醒重述：长系统提示里远处的约束在连续工具循环中
-                # 容易被忽略，登录/302/扫描场景必须每轮可见。
-                reminder = {'role': 'user',
-                            'content': EVIDENCE_FIRST_GUIDANCE + '\n' + native_discovery_reminder(state)}
-                if directives:
-                    reminder['content'] += ('\n当前未完成任务指令（用户最新要求与授权优先，已完成内容不重做）：'
-                                            + json.dumps(directives, ensure_ascii=False))
-                has_contract = any(
-                    m.get('role') == 'user' and EXPLORATION_PROGRESS_GUIDANCE in str(m.get('content') or '')
-                    for m in state['messages'])
-                sent_contract = not has_contract
-                if sent_contract:
-                    # 仅旧检查点或投影恰好裁掉首条契约时补一次完整契约。
-                    reminder['content'] = EXPLORATION_PROGRESS_GUIDANCE + '\n' + reminder['content']
-                reserve = estimate_input_tokens([reminder])
-                view = project(state, self._model_tool_schemas(),
-                               max(1, budget - reserve) if budget is not None else None,
-                               force=compact_request is not None)
-                before_compaction = view['previous_tokens'] + reserve
-                messages = [*view['messages'], reminder]
-                if sent_contract:
-                    reminder['_context_contract'] = True
-                if view['new_archived_turns']:
-                    self.ctx.audit.log('context.projected', self.agent_id, {
-                        'task_id': task.task_id, 'route_id': route.route_id, 'mode': 'normal',
-                        **{k: v for k, v in view.items() if k != 'messages'}})
-            if compact_request:
-                state["manual_compaction_id"] = compact_request["request_id"]
-                self._save_inv_state(task, route, state)
-                record_result(self.ctx.blackboard, compact_request, f"execution:{task.task_id}:{route.route_id}",
-                    before_compaction, estimate_input_tokens(messages, self._model_tool_schemas()),
-                    audit=self.ctx.audit, actor=self.agent_id)
-            resp = await self.ctx.gateway.chat(
-                messages, task_type="execution",
-                # 输出上限由网关按模型配置处理，避免截断思考或工具参数。
-                timeout_seconds=_SOLVER_TIMEOUT,
-                tools=self._model_tool_schemas(), tool_choice="auto",
-                preserve_tool_order=bool(state.get("shared_prefix", False)
-                    or (self._is_lightweight() and getattr(self.flag_manager, 'fix_mode', False))),
-                preserve_context=True,
-                on_delta=emitter if not self._is_lightweight() or getattr(self, "public_body", False) else
-                (lambda kind, text: emitter(kind, text) if kind != "text" else None)
-                if getattr(self.flag_manager, "local_only", False) else emitter,
-                reasoning_effort=self.task_effort(task))
-        except ContextWindowError as exc:
-            state["stall"] = str(exc)
-            state["context_blocked"] = True
-            self.ctx.audit.log("context.blocked", self.agent_id, {
-                "task_id": task.task_id, "route_id": route.route_id, "error": str(exc)})
-            self._save_inv_state(task, route, state)
-            return StepResult(ok=False, final_note=True, note="上下文无法容纳当前契约：" + str(exc))
-        except Exception as exc:  # noqa: BLE001 —— 单次调用失败允许下一回合重试
-            emitter.flush()
-            state["llm_failures"] += 1
-            self.ctx.audit.log("agent.error", self.agent_id, {
-                "route": route.name, "challenge": self.challenge_id(task),
-                "turn": turn, "error": str(exc)[:300]})
-            if state["llm_failures"] >= 2:
-                state["stall"] = f"LLM 连续不可用，调查停摆（无模板兜底）：{str(exc)[:120]}"
-            note = self._extend_or_finish(
-                plan, state, f"第 {turn} 回合：LLM 调用失败（{str(exc)[:80]}）")
-            self._save_inv_state(task, route, state)
-            return StepResult(ok=True, value=boot_value,
-                              note=self._merge_note(boot_note, note))
-        emitter.flush()
-        if not self._is_lightweight():
-            state['messages'].append({**reminder, '_progress_reminder': True})
-        state["llm_failures"] = 0
-        state["system_initialized"] = True
-        self._model_response_received(task, route, state)
-        if isinstance(getattr(resp, "model", None), str) and resp.model:
-            models = state.setdefault("response_models", [])
-            if resp.model not in models:
-                models.append(resp.model)
-        for directive in directives:
-            self.ctx.ring.steering_feedback(
-                self.agent_type.value, task_id=task.task_id, route_id=route.route_id,
-                instruction_id=directive["id"], status="delivered")
-
-        from spiritscout.gateway.progress import publish_progress
-
-        public_body = not self._is_lightweight() or getattr(self, "public_body", False)
-        progress = None
-        if public_body:
-            # 流式正文服务实时展示；完整事件仍须持久化，供探索图和刷新后回放。
-            progress = publish_progress(self.ctx.audit, self.agent_id, resp.content or "",
-                task_id=task.task_id, route_id=route.route_id, turn=state.get("turn", 0),
-                streamed=emitter.has_public_text)
-        elif resp.tool_calls:
-            progress = publish_progress(self.ctx.audit, self.agent_id, resp.content or "",
-                             task_id=task.task_id, route_id=route.route_id, turn=state.get("turn", 0))
-        elif not getattr(self.flag_manager, "local_only", False):
-            progress = publish_progress(self.ctx.audit, self.agent_id, resp.content or "",
-                             task_id=task.task_id, route_id=route.route_id, turn=state.get("turn", 0))
-        self._record_public_progress(task, route, state, progress)
-        calls = [c for c in (resp.tool_calls or []) if isinstance(c, dict)]
-        lightweight = (getattr(getattr(getattr(self.ctx, "gateway", None), "config", None),
-                               "lightweight_local", False)
-                       and getattr(self.ctx, "mode", None) in (RunMode.CTF, RunMode.AWDP))
-        if calls:
-            state["prose_only_turns"] = 0
-            if lightweight:
-                state["empty_replies"] = 0
-        assistant: dict[str, Any] = {"role": "assistant",
-                                     "content": resp.content or ""}
-        if getattr(resp, "reasoning", "") and not lightweight:
-            # 轻量 × CTF 不持久化思考：压缩器只折 content 不折 reasoning，
-            # 思考随历史堆积即不可压缩的预算死重（48 次空转压缩实测）
-            assistant["reasoning_content"] = resp.reasoning
-        if calls:
-            assistant["tool_calls"] = [
-                {"id": c.get("id") or f"call_{i}", "type": "function",
-                 "function": {
-                     "name": str(c.get("name") or ""),
-                     "arguments": c.get("raw") or json.dumps(
-                         c.get("arguments") or {}, ensure_ascii=False)}}
-                for i, c in enumerate(calls)]
-        state["messages"].append(assistant)
-
-        if (not calls and getattr(self.flag_manager, "local_only", False)
-                and (lightweight or not task.payload.get("followup_goal")) and str(resp.content or "").strip()):
-            if lightweight:
-                # Ollama 小模型专属补偿：叙述回合用同一工具目录重试，
-                # 让模型自主选择真实动作；恢复失败只记录状态，
-                # 不能把尚未执行的口述计划当作调查结论。
-                recovered = await self._forced_tool_recovery(task, route, state, turn)
-                if recovered:
-                    calls = recovered
-                    state["prose_only_turns"] = 0
-                    state["empty_replies"] = 0
-                else:
-                    prose_only = int(state.get("prose_only_turns") or 0) + 1
-                    state["prose_only_turns"] = prose_only
-                    if prose_only == 1:
-                        instruction = self._completion_instruction()
-                        state["messages"].append({"role": "user", "_light_kind": "recovery", "content": (
-                            "上一回合只输出了文字，恢复调用也没有携带工具调用。"
-                            "需要继续调查时自主选择工具并实际调用；已完成目标时按完成契约登记；"
-                            "无法完成时用 finish_challenge(complete=false, reason=具体缺口)。"
-                            f"本模式不在会话重复题解。{instruction}")})
-                        note = self._extend_or_finish(
-                            plan, state, f"第 {turn} 回合：模型纯文本且强制恢复未果，已指明三选一")
-                        self._save_inv_state(task, route, state)
-                        return StepResult(ok=True, value=boot_value,
-                                          note=self._merge_note(boot_note, note))
-            else:
-                instruction = self._completion_instruction()
-                state["messages"].append({"role":"user", "content":"本模式不在会话重复题解。" + instruction + "无法完成时可用 finish_challenge(complete=false) 记录具体缺口。"})
-                self._save_inv_state(task, route, state)
-                return StepResult(ok=True, note="正在核对答案完整性，题解由后台报告统一生成")
-        if not calls:
-            # 兼容普通模式的正文结论；轻量模式须在下方检查显式完成动作。
-            summary = (resp.content or "").strip()
-            if not summary:
-                # 协议修复：正文为空且无工具调用，多见于思考型模型把输出
-                # 额度耗在思考段——空回合不是结论。轻量模式先强制恢复成
-                # 工具调用；恢复不了保持待执行，不能按空回复次数判定收尾
-                if lightweight:
-                    recovered = await self._forced_tool_recovery(task, route, state, turn)
-                    if recovered:
-                        calls = recovered
-                        state["empty_replies"] = 0
-                        state["prose_only_turns"] = 0
-                if not calls:
-                    state["empty_replies"] = int(state.get("empty_replies") or 0) + 1
-                    if state["empty_replies"] < 2:
-                        empty_nudge = (
-                            "上一回合没有正文或工具调用。需要继续调查时自主选择工具并实际调用；"
-                            + self._completion_instruction()
-                            + "无法继续时用 finish_challenge(complete=false) 说明缺口。" if lightweight else
-                            "（上一回合没有收到你的输出：既没有工具调用，也没有正文。）"
-                            "请继续调查；若你已判定调查结束，请写出明确结论——"
-                            "拿到了什么、依据是什么、还差什么。")
-                        state["messages"].append({"role": "user", "content": empty_nudge})
-                        note = self._extend_or_finish(
-                            plan, state, f"第 {turn} 回合：模型空输出，已请其重述")
-                        self._save_inv_state(task, route, state)
-                        return StepResult(ok=True, value=boot_value,
-                                          note=self._merge_note(boot_note, note))
-            else:
-                state["empty_replies"] = 0
-        if not calls and lightweight:
-            # 结束调查须由模型显式调用完成契约；普通正文、空回复与恢复失败都不是完成信号。
-            state["messages"].append({"role": "user", "_light_kind": "recovery", "content": (
-                "本回合仍未收到工具调用，口述计划尚未执行，任务保持进行中。"
-                "需要继续调查时实际调用工具；" + self._completion_instruction()
-                + "无法继续时调用 finish_challenge(complete=false, reason=具体缺口)，不能只输出计划代替动作。")})
-            self.ctx.audit.log("solver.awaiting_tool_action", self.agent_id, {
-                "task_id": task.task_id, "route_id": route.route_id, "turn": turn,
-                "empty_reply": not bool(str(resp.content or "").strip())})
-            note = self._extend_or_finish(plan, state, f"第 {turn} 回合：未收到工具动作，等待模型明确继续或结束")
-            self._save_inv_state(task, route, state)
-            return StepResult(ok=True, value=boot_value, note=self._merge_note(boot_note, note))
-        if not calls:
-            summary = (resp.content or "").strip()
-            state["conclusion_text"] = summary[:2000]
-            state["concluded"] = True
-            if not state["conclusion_text"].strip():
-                state["conclusion_text"] = "（模型未输出结论文本，最后动作为工具调用）"
-            self._record_conclusion(task, route, summary or "模型未给出结论文本")
-            self.ctx.audit.log("agent.conclude", self.agent_id, {
-                "route": route.name, "challenge": self.challenge_id(task),
-                "turn": turn, "summary": summary[:2000]})
-            # 结论已随上面的 agent.conclude 单独上时间线：置位让任务级
-            # 收尾（base._run_task）不再把同一段文本拼进汇总结论重复展示
-            route.conclusion_published = True
-            # 结论文本（最终答案与依据，常含 Markdown 表格）走长限额，
-            # WriteUp 的「解题依据」段不再半途截断
-            note = f"收尾（第 {turn} 回合）：{summary[:1500] or '无结论文本'}"
-            self._save_inv_state(task, route, state)
-            return StepResult(ok=True, value=boot_value, final_note=True,
-                              note=self._merge_note(boot_note, note))
-
-        self.ctx.audit.log("agent.tool_call", self.agent_id, {
-            "task_id": task.task_id, "route_id": route.route_id,
-            "route": route.name, "challenge": self.challenge_id(task),
-            "turn": turn,
-            "calls": [{"id": c.get("id"), "name": c.get("name"),
-                       "arguments": c.get("arguments")} for c in calls]})
-        outcomes = await asyncio.gather(
-            *(self._run_tool_call(task, route, state, call) for call in calls))
-        total_value = 0.0
-        notes: list[str] = []
-        findings: list[dict[str, Any]] = []
-        empty_streak = int(state.get("empty_streak") or 0)
-        for idx, (call, out) in enumerate(zip(calls, outcomes)):
-            text = out.text or "（无输出）"
-            result_name = out.metadata.get("invoked_tool") or call.get("name")
-            if idx == 0 and out.ok and empty_streak >= 3:
-                # 感知标注（非规则）：连续空输出是「方法可能不成立」的事实信号，
-                # 是否换路由模型自行判断——后端不截断不强制
-                text += (f"\n（感知：本路线已连续 {empty_streak} 次工具调用"
-                         "输出为空——若当前方法可能不成立，把已排除的假设用 "
-                         "note 记下后换条路；是否调整由你判断）")
-            state["messages"].append({
-                "role": "tool", "tool_call_id": call.get("id") or "call_0",
-                # 参数契约按需查询后必须完整可读，不能把 schema JSON 截成半段。
-                "content": text if (result_name in SKILL_NAMES | NAMES
-                    or result_name in {"mcp_search", "http_response_read", "tool_lookup", "tool_help", "history_read", "ai_inspect"}
-                    or not lightweight or result_name in {"shell", "python", "source_manifest", "verify_patch",
-                                                         "edit_source", "build_patch", "source_context", "source_scan"}) else text[:_TOOL_RESULT_CAP],
-                **({"_context_contract": True, "_skill_ref": out.metadata["skill_ref"]}
-                   if out.metadata.get("skill_ref") else
-                   {"_context_contract": True} if result_name == "mcp_search" else {})})
-            self._observe_tool_result(state, call, out)
-            total_value += out.value
-            findings.extend(out.findings)
-            if out.note:
-                notes.append(out.note)
-            self.ctx.audit.log("agent.tool_result", self.agent_id, {
-                "task_id": task.task_id, "route_id": route.route_id,
-                "route": route.name, "challenge": self.challenge_id(task),
-                "turn": turn,
-                "id": call.get("id"), "name": call.get("name"), "ok": out.ok,
-                "note": out.note[:200], "result": (out.text or "")[:1200], **out.metadata})
-        state["empty_streak"] = (empty_streak + 1) if outcomes and all(
-            o.ok and o.empty for o in outcomes) else 0
-        head = f"第 {turn} 回合"
-        note = f"{head}：" + "；".join(notes) if notes else head
-        terminal = next((o for o in outcomes if o.stop and o.final_text), None)
-        if terminal is not None:
-            summary = terminal.final_text[:600]
-            self._finish_accepted(task, route, state, summary)
-            return StepResult(
-                ok=True, value=min(boot_value + total_value, 1.0),
-                progress_delta=_TURN_PROGRESS, findings=findings,
-                final_note=True, note=self._merge_note(boot_note, summary))
-        note = self._extend_or_finish(plan, state, note)
-        self._save_inv_state(task, route, state)
-        return StepResult(
-            ok=True, value=min(boot_value + total_value, 1.0),
-            progress_delta=_TURN_PROGRESS,
-            findings=findings, note=self._merge_note(boot_note, note[:300]))
+        return await SolverTurn(self, task, route, plan).run()
 
     # ------------------------------------------------------------ 工具执行
 
@@ -1855,6 +918,9 @@ class CTFBaseAgent(SubAgent):
 
     async def _run_tool_call(self, task: Task, route, state: dict[str, Any],
                              call: dict[str, Any]) -> _ToolOutcome:
+        broker = getattr(self.ctx, "questions", None)
+        if broker is not None and call.get("name") != "ask_user":
+            await broker.wait_for_task(task.task_id)
         import hashlib
 
         environment = json.dumps(task.payload.get("platform_handoff") or self.challenge_of(task)
@@ -1912,62 +978,7 @@ class CTFBaseAgent(SubAgent):
             return _ToolOutcome(ok=result['ok'], text=json.dumps(result, ensure_ascii=False, separators=(',', ':')),
                 metadata={'memory_revision': result['revision']} if result['ok'] else {})
         if name == "history_read":
-            index, identifier = args.get("message_index"), args.get("instruction_id")
-            offset, length = args.get("offset", 0), args.get("length", 2000)
-            if (type(offset) is not int or offset < 0
-                    or type(length) is not int or not 1 <= length <= 4000):
-                return _ToolOutcome(ok=False, text="需要非负 offset 与 1–4000 的 length")
-            if identifier is not None:
-                original = (state.get("instruction_state") or {}).get(identifier) if isinstance(identifier, str) else None
-                if original is None:
-                    return _ToolOutcome(ok=False, text="instruction_id 不在本题当前指令中")
-            else:
-                if type(index) is not int or not 0 <= index < len(state["messages"]):
-                    return _ToolOutcome(ok=False, text="需要有效 message_index 或本题当前 instruction_id")
-                original = state["messages"][index]
-            raw = json.dumps({k: v for k, v in original.items() if not k.startswith("_")},
-                             ensure_ascii=False, separators=(",", ":"))
-            extra = {}
-            if not self._is_lightweight():
-                from spiritscout.ctf.evidence_memory import source_digest
-
-                view = args.get('view', 'message')
-                if view not in ('message', 'content'):
-                    return _ToolOutcome(ok=False, text='view 需要 message 或 content')
-                if view == 'content':
-                    if not isinstance(original.get('content'), str):
-                        return _ToolOutcome(ok=False, text='该消息不是文本 content，请用 view=message 读取')
-                    raw = original['content']
-                invocation_id = (original.get('_normal_observation') or {}).get('invocation_id')
-                extra = {'view': view, 'source_sha256': source_digest(original), 'offset_unit': 'characters',
-                         'evidence_refs': [invocation_id] if invocation_id else []}
-                query = args.get('find')
-                if query is not None:
-                    if not isinstance(query, str) or not 1 <= len(query) <= 200:
-                        return _ToolOutcome(ok=False, text='find 需要 1–200 字符的精确原文')
-                    position = raw.find(query, offset)
-                    positions, cursor = [], offset
-                    while len(positions) < 16:
-                        hit = raw.find(query, cursor)
-                        if hit < 0:
-                            break
-                        positions.append(hit)
-                        cursor = hit + len(query)
-                    count = raw.count(query, offset)
-                    extra.update(found=position >= 0, match_offset=position if position >= 0 else None,
-                        total_matches=raw.count(query), matches_from_offset=count, match_offsets=positions,
-                        offsets_truncated=count > len(positions), search_complete=True,
-                        search_semantics='精确、区分大小写、非重叠；total_matches 覆盖该 view 全文，位置从请求 offset 起列举')
-                    if position < 0:
-                        return _ToolOutcome(ok=True, text=json.dumps({'message_index': index, **extra,
-                            'offset': offset, 'text': '', 'total_chars': len(raw), 'next_offset': len(raw),
-                            'has_more': False}, ensure_ascii=False))
-                    # 保证短页也包含命中位置；分页仍以返回的 view 和 next_offset 延续。
-                    offset = max(offset, position - min(200, length // 4))
-            return _ToolOutcome(ok=True, text=json.dumps({"message_index": index, "instruction_id": identifier,
-                "offset": offset, "text": raw[offset:offset + length], "total_chars": len(raw),
-                "next_offset": min(offset + length, len(raw)), "has_more": offset + length < len(raw), **extra},
-                ensure_ascii=False))
+            return read_history(state, args, lightweight=self._is_lightweight())
         if name in NAMES:
             result = execute(self.ctx.blackboard, name, args, actor=self.agent_id,
                              agent_type=self.agent_type,
@@ -2282,11 +1293,12 @@ class CTFBaseAgent(SubAgent):
             if not published.get("ok"):
                 return _ToolOutcome(ok=False, text="证据发布失败，答案尚未登记，不能确认完成："
                                     + str(published.get("error") or "未获得成功回执"))
-        candidate = manager.register(value, challenge_id=self.challenge_id(task), found_by=self.agent_id) or manager.get(value)
+        candidate = manager.register(value, challenge_id=self.challenge_id(task), found_by=self.agent_id) or manager.get(
+            value, challenge_id=self.challenge_id(task))
         if normal and (candidate is None or candidate.challenge_id != self.challenge_id(task)):
             return _ToolOutcome(ok=False, text="答案未登记到当前题目，不能确认完成。")
         if normal:
-            manager.record_answer_evidence(value, refs, review)
+            manager.record_answer_evidence(value, refs, review, challenge_id=self.challenge_id(task))
         self._record_flag(task, value, "local", route=route.name)
         if not normal and blackboard is not None:
             publish_evidence()
@@ -2350,7 +1362,7 @@ class CTFBaseAgent(SubAgent):
         cand = self.flag_manager.register(
             value, challenge_id=self.challenge_id(task), found_by=self.agent_id)
         if cand is None:
-            existing = self.flag_manager.get(value)
+            existing = self.flag_manager.get(value, challenge_id=self.challenge_id(task))
             if (getattr(self.ctx, "mode", None) == RunMode.COMPETITION
                     and existing is not None and existing.accepted is True
                     and existing.challenge_id == self.challenge_id(task)):
@@ -2554,11 +1566,13 @@ class CTFBaseAgent(SubAgent):
         multiple = bool(args.get("multiple"))
         if getattr(broker, "interactive", True):
             self.ctx.audit.log("agent.ask_user", self.agent_id, {
+                "task_id": task.task_id, "route_id": route.route_id,
                 "route": route.name, "challenge": self.challenge_id(task),
                 "question": question[:500], "options": options,
                 "multiple": multiple, "targets": targets})
         result = await broker.ask(self.agent_type.value, question, options, targets,
-                                  multiple=multiple)
+                                  multiple=multiple, blocking_task_ids=args.get("blocking_task_ids"),
+                                  block_all_tasks=args.get("block_all_tasks", False))
         if result.get("autonomous"):
             return _ToolOutcome(ok=True, value=0.0, note="全自动模式：交回 Agent 自主决策",
                                 text=str(result.get("answer") or "基于已有证据自主决策。"))
@@ -2573,6 +1587,7 @@ class CTFBaseAgent(SubAgent):
             lines.append("以下目标已由用户确认加入本会话授权范围，可继续测试: "
                          + ", ".join(added))
         self.ctx.audit.log("agent.ask_answered", self.agent_id, {
+            "task_id": task.task_id, "route_id": route.route_id,
             "route": route.name, "answer": answer[:300], "scope_added": added})
         return _ToolOutcome(ok=True, value=0.1,
                             note=f"用户答复: {answer[:60]}",
@@ -2830,7 +1845,7 @@ class CTFBaseAgent(SubAgent):
         """沙箱执行动作（shell/python）：LLM 出代码 → bwrap 沙箱运行 → 观察。
 
         与 http_request 同一原则：LLM 只决定「跑什么」，执行边界由沙箱
-        （整机只读 + 主目录遮蔽 + 工作区可写）与审计留痕约束；输出照常过
+        （整机只读 + 控制面遮蔽 + 本题目录和 artifacts 可写）与审计留痕约束；输出照常过
         Flag 提取与观察序列。
         """
         param = "command" if name == "shell" else "code"
@@ -2911,10 +1926,11 @@ class CTFBaseAgent(SubAgent):
             lines.append(f"本次退出码、{compared}与此前 {same_output_count} 次调用完全一致；"
                          "这不证明环境没变，但不能当作新增结果。若是必要对照可继续，"
                          "否则依据已排除事实选择未覆盖的问题，不反复重读同一输出。")
-        if self._is_lightweight() and rc != 0 and not pipeline_partial:
-            lines.append("环境事实：attachments 只读，不等于整个沙箱只读；"
+        if rc != 0 and not pipeline_partial and workdir:
+            lines.append("环境事实：会话根、附件及本题 workdir 之外的 sandbox 目录只读；"
                          f"当前可写工作目录为 {workdir}，artifacts 路径见 world_state。"
-                         "失败和 stderr 也是本次证据，应核对路径和实际错误后再选择动作。")
+                         "可写挂载不改变文件属主或模式；Permission denied 需核对这些属性，"
+                         "不能把单个路径失败当整个环境不可写，也不自动重试或提升权限。")
         if res.stdout:
             if self._is_lightweight() and captures[0].get('contains_nul'):
                 lines.append("stdout 含 NUL，以下仅为前 128 字节十六进制预览，不能当作完整文本：\n" + captures[0].get('head_hex', ''))
@@ -2939,14 +1955,15 @@ class CTFBaseAgent(SubAgent):
             else:
                 lines.append("本次只确认到达时限仍未完成，原因未定；不能据此认定目标或环境故障。"
                              "按需核对脚本最后完成阶段、回调/响应匹配及原始异常，再选择区分原因的最小检查。")
-        metadata = {"invocation_id": res.invocation_id, "output_file": out_file}
+        metadata = {"invocation_id": res.invocation_id, "output_file": out_file,
+                    "output_complete": res.parsed.get("output_complete", False),
+                    "same_raw_output": bool(same_output_count and raw_comparison)}
         if not self._is_lightweight() and (not res.ok or rc != 0 or res.timed_out):
             metadata['failure_evidence'] = {'exit_code': rc, 'timed_out': res.timed_out,
                                             'attribution': 'undetermined'}
         if self._is_lightweight():
             metadata.update(output_rotated=bool(res.parsed.get('output_rotated')),
                             previous_output_file=res.parsed.get('previous_output_file', ''),
-                            output_complete=res.parsed.get('output_complete', False),
                             output_sha256=res.parsed.get('output_sha256', ''),
                             previous_output_sha256=res.parsed.get('previous_output_sha256', ''))
             if rc != 0 and not pipeline_partial and getattr(self, 'evidence_review_enabled', False):
@@ -3439,8 +2456,7 @@ class CTFBaseAgent(SubAgent):
         if prior:
             parts.append("## 已有结论（同伴路线/前轮尝试，避免重复做功）\n"
                          + "\n".join(prior))
-        notes = [n for n in self._shared_notes(task) if not n.startswith(
-            f"[{self.direction}]")][-8:]
+        notes = self._shared_notes(task)[-8:]
         if notes:
             parts.append("## 同伴共享笔记（并行工作的其他方向 Agent 写下）\n"
                          + "\n".join(notes))
@@ -3861,91 +2877,3 @@ class CTFPwnAgent(CTFBaseAgent):
             findings=[{"type": "pwn_lead", "value": lead} for lead in leads],
             note=f"危险函数线索 {len(leads)} 条",
             text="危险函数线索:\n" + "\n".join(leads))
-
-
-# ================================================================ 编码/古典密码工具
-
-
-def _decode_chain(text: str, max_depth: int = 4) -> str:
-    """编码变换链自动推理：Base64/Hex/URL/Rot13 逐层尝试（4.4.4 编码变换链）。
-
-    每层只接受「可打印且发生变化」的解码，避免指数爆炸。
-    """
-    current = text.strip()
-    for _ in range(max_depth):
-        next_text = _try_single_decode(current)
-        if next_text is None or next_text == current:
-            break
-        current = next_text
-    return current
-
-
-def _try_single_decode(text: str) -> str | None:
-    candidates: list[str] = []
-    # Base64（需合法字符集与长度）
-    if re.fullmatch(r"[A-Za-z0-9+/=]+", text) and len(text) % 4 == 0:
-        try:
-            candidates.append(base64.b64decode(text, validate=True)
-                                .decode("utf-8", errors="strict"))
-        except (binascii.Error, UnicodeDecodeError, ValueError):
-            pass
-    # Hex
-    if re.fullmatch(r"(?:[0-9a-fA-F]{2})+", text) and len(text) >= 4:
-        try:
-            candidates.append(bytes.fromhex(text).decode("utf-8", errors="strict"))
-        except UnicodeDecodeError:
-            pass
-    # URL
-    if "%" in text:
-        decoded = urllib.parse.unquote(text)
-        if decoded != text:
-            candidates.append(decoded)
-    # Rot13（字母串）
-    if re.fullmatch(r"[A-Za-z]+", text):
-        candidates.append(codecs.decode(text, "rot_13"))
-    for cand in candidates:
-        if cand and all(ch.isprintable() or ch.isspace() for ch in cand):
-            return cand
-    return None
-
-
-def _caesar_brute(text: str) -> list[str]:
-    """凯撒全位移爆破（仅对纯字母密文），返回全部位移结果。"""
-    if not re.fullmatch(r"[A-Za-z]+", text.strip()):
-        return []
-    out = []
-    for shift in range(1, 26):
-        out.append("".join(
-            chr((ord(c) - base - shift) % 26 + base) if c.isalpha() else c
-            for c in text.strip()
-            for base in (ord('A') if c.isupper() else ord('a'),)
-        ))
-    return out
-
-
-def _rail_fence_brute(text: str, max_rails: int = 6) -> list[str]:
-    """栅栏密码定栏还原（W 型简化为之字形标准栅栏）。"""
-    cipher = text.strip()
-    if len(cipher) < 4 or not cipher.isalpha():
-        return []
-    results = []
-    for rails in range(2, min(max_rails, len(cipher) - 1) + 1):
-        # 计算每栏字符数
-        pattern = list(range(rails)) + list(range(rails - 2, 0, -1))
-        counts = [0] * rails
-        for i in range(len(cipher)):
-            counts[pattern[i % len(pattern)]] += 1
-        # 切分密文并按栏重排
-        rows: list[list[str]] = []
-        idx = 0
-        for count in counts:
-            rows.append(list(cipher[idx: idx + count]))
-            idx += count
-        pos = [0] * rails
-        plain = []
-        for i in range(len(cipher)):
-            rail = pattern[i % len(pattern)]
-            plain.append(rows[rail][pos[rail]])
-            pos[rail] += 1
-        results.append("".join(plain))
-    return results

@@ -28,7 +28,6 @@ report:
 web:
   host: 127.0.0.1
   port: 8001
-  max_concurrent_sessions: 1
   auto_name_sessions: false
 resources:
   root: .spiritscout-ollama/resources

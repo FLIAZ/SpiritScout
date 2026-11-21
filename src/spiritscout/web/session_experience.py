@@ -79,7 +79,7 @@ def read_distill_events(audit_path: str | Path, *, limit: int = 8) -> list[dict[
 
 def session_digest(session: Any) -> dict[str, Any]:
     """复用证据投影，停止不是完成；任务文字本身不算执行活动。"""
-    from spiritscout.runtime import _distill_digest
+    from spiritscout.knowledge.distillation import _distill_digest
 
     request = session.request if isinstance(session.request, dict) else {}
     mission = next((str(request[key]) for key in ('mission', 'text', 'task') if request.get(key)), '')
@@ -122,7 +122,7 @@ def distill_blocker(session: Any, digest: dict[str, Any] | None = None) -> str:
 
 
 def _busy(session: Any) -> bool:
-    from spiritscout.runtime import pending_distill_snapshots
+    from spiritscout.knowledge.distillation import pending_distill_snapshots
 
     task = _TASKS.get(str(session.workspace))
     return bool((task and not task.done()) or pending_distill_snapshots(session.workspace))
@@ -141,9 +141,12 @@ def session_page(cfg: Any, session: Any) -> dict[str, Any]:
 
 async def _manual_worker(cfg: Any, manager: Any, session: Any, digest: dict[str, Any], snapshot: Path) -> None:
     from spiritscout.config import load_model_config
-    from spiritscout.runtime import _background_distill, _update_distill_snapshot
+    from spiritscout.knowledge.distillation import (
+        _background_distill,
+        _update_distill_snapshot,
+    )
     from spiritscout.web import agentcfg, vault
-    from spiritscout.web.sessions import _conversation_gateway
+    from spiritscout.web.session_assistant import _conversation_gateway
 
     audit = AuditLogger(session.audit_path)
     store = None
@@ -175,7 +178,7 @@ async def _manual_worker(cfg: Any, manager: Any, session: Any, digest: dict[str,
 
 
 async def request_distill(cfg: Any, manager: Any, session: Any) -> dict[str, Any]:
-    from spiritscout.runtime import _persist_distill_snapshot
+    from spiritscout.knowledge.distillation import _persist_distill_snapshot
 
     if _busy(session):
         raise HTTPException(409, '正在提炼或等待后台恢复，请勿重复请求')

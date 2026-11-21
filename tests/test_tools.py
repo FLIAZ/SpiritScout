@@ -60,6 +60,34 @@ class _EchoHandler(BaseHTTPRequestHandler):
 
 
 class ToolBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_tool_execution_obeys_question_dependencies_in_all_modes(self) -> None:
+        from spiritscout.policy.questions import QuestionBroker
+        from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
+
+        for mode in (RunMode.SRC, RunMode.CTF, RunMode.COMPETITION):
+            executor = _RecordingExecutor()
+            registry = ToolRegistry(executor)
+            broker = QuestionBroker(interactive=mode != RunMode.COMPETITION)
+            registry.questions = broker
+            registry.register(ToolSpec(name="fixture", kind=ToolKind.CLI,
+                                      command_template=["fixture"], risk=RiskLevel.READONLY))
+            ask = asyncio.create_task(broker.ask("master", "fixture", [], blocking_task_ids=["blocked"]))
+            await asyncio.sleep(0)
+            token = current_execution_scope.set(ExecutionScope(task_id="blocked"))
+            try:
+                action = asyncio.create_task(registry.call("fixture", {}))
+                await asyncio.sleep(0)
+                if mode != RunMode.COMPETITION:
+                    self.assertEqual(executor.calls, 0)
+                    self.assertFalse(action.done())
+                    broker._resolve(broker.view()[0]["question_id"], {"answer": "fixture"})
+                self.assertTrue((await asyncio.wait_for(action, 1)).ok)
+                self.assertEqual(executor.calls, 1)
+                await ask
+            finally:
+                current_execution_scope.reset(token)
+                broker.cancel_all()
+
     async def test_legacy_denied_target_executes_without_backend_boundary_gate(self) -> None:
         """旧排除声明只传模型，执行层不做禁打匹配。"""
         executor = _RecordingExecutor()

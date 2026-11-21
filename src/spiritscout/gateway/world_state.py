@@ -283,15 +283,13 @@ def _expert_action_signals(blackboard: Any, asset_rows: list[dict[str, Any]],
             "continue_asset_verification": candidates_only,
             "business_surface_observed": bool(verified_web_assets or observed_endpoints),
             "business_context_supported": complexity in {"medium", "high"},
-            "js_reverse_supported": bool(scripts or route_count or verified_web_assets),
+            "js_reverse_supported": bool(scripts or route_count),
             "web_vuln_supported": web_test_ready,
             "port_scan_supported": bool(services),
         },
         "contract": (
-            "这些是证据摘要而非固定流程：模型结合任务目标决定派工；candidate_only 不足以支持"
-            "业务或脚本分析需要已验证 Web 表面，漏洞或端口测试需要更强证据；端口角色需要"
-            "已观测服务证据，Web 漏洞角色需要已验证接口及"
-            "参数/权限/输入证据或已有漏洞候选。"),
+            "这些字段描述已有证据，不是派工门槛或固定阶段；模型结合用户目标自主选择"
+            "补证、探索或验证。未知不等于不存在，任何新探测仍遵循授权和审批。"),
     }
 
 
@@ -794,9 +792,26 @@ def snapshot(*, guard: Any = None, env: dict[str, Any] | None = None,
         if context:
             out["user_context"] = context
         project = blackboard.read(BlackboardLayer.TOPOLOGY, "project-memory") or {}
-        if project.get("description"):
+        history_policy = blackboard.read(BlackboardLayer.TOPOLOGY, "history-policy") or {}
+        if history_policy.get("on_demand") or project.get("history_on_demand"):
+            out["history_access"] = {"tool": "history_lookup", "automatic_context": False}
+            if "project_id" in history_policy and (
+                    not history_policy["project_id"] or project.get("project_id") != history_policy["project_id"]):
+                project = {}
+            if project:
+                from spiritscout.resources.store import project_context
+
+                out["project_context"] = project_context(project)
+        elif project.get("description"):
             out["project_rules"] = project["description"]
         if callable(getattr(blackboard, 'query', None)):
+            from spiritscout.blackboard.collaboration import overview
+            from spiritscout.tools.invocation import current_execution_scope
+
+            execution = current_execution_scope.get()
+            team = overview(blackboard, execution.task_id if execution else "")
+            if team["tasks"] or team["messages"] or team["handoffs"] or team["waiting"]:
+                out["team"] = team
             summary = intelligence_summary(blackboard)
             if summary:
                 out["intelligence_summary"] = summary

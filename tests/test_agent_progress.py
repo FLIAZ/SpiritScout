@@ -11,6 +11,18 @@ from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
 
 
 class AgentProgressTests(unittest.TestCase):
+    def test_long_public_prose_roundtrips_without_changing_model_requests(self):
+        import tempfile
+
+        from spiritscout.core.audit import AuditLogger, read_record
+        text = "## 已确认的事实\n" + "公开结果与证据。\n" * 3200 + "它的完整后续也必须保留。"
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = AuditLogger(Path(tmp) / "audit.jsonl")
+            detail = publish_progress(audit, "fixture", text, task_id="task-long", streamed=True)
+            self.assertEqual(detail["text"], text)
+            record = read_record((Path(tmp) / "audit.jsonl").read_text().strip())
+            self.assertEqual(record["detail"]["text"], text)
+
     def test_internal_json_is_hidden_when_later_chunks_start_inside_the_object(self):
         from spiritscout.core.audit import NullAuditLogger
         from spiritscout.gateway.progress import PublicProgressEmitter

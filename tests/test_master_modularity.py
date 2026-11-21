@@ -141,6 +141,7 @@ class PlanPriorityTests(unittest.IsolatedAsyncioTestCase):
             enable_llm_planning=True,
             plan_override=Mock(return_value={"dag_nodes": [], "analysis": "规则派单"}),
             extra={"mode_prompt": ""})
+        master._user_input_revision = Mock(return_value="unchanged")
         master._llm_plan = AsyncMock(return_value={"dag_nodes": [{"tactic": "X"}],
                                                    "analysis": "模型规划"})
 
@@ -149,12 +150,47 @@ class PlanPriorityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((source, plan["analysis"]), ("llm", "模型规划"))
         master.ctx.plan_override.assert_not_called()
 
+    async def test_src_active_hypothesis_still_uses_model_selected_plan(self) -> None:
+        master = object.__new__(MasterAgent)
+        master.ctx = SimpleNamespace(
+            enable_llm_planning=True, plan_override=None,
+            tactic_map={"TA0001": (AgentType.WEB_VULN, "web_probe")},
+            policy=SimpleNamespace(mode=RunMode.SRC), extra={})
+        master._situation_digest = lambda: {"testing_opportunities": {
+            "prioritized": [{
+                "kind": "vulnerability_hypothesis", "state": "open",
+                "direction_state": "productive", "subject": "https://a.test/api/orders",
+                "claim": "订单接口可能缺少对象归属校验",
+                "expected_information": "跨账号读取是否被服务端拒绝",
+                "opportunity_ref": "opportunity:h1",
+                "hypothesis_ref": "topology:hypothesis-h1@1",
+                "capability_candidates": [{
+                    "capability": "web_hypothesis_test", "tactic": "TA0001",
+                    "execution": "dag", "basis": "已有合法对象与角色边界证据",
+                    "yield": {"consecutive_empty": 0},
+                }],
+            }],
+        }}
+        selected = {"dag_nodes": [{"tactic": "TA0001", "hypothesis_ref": "topology:hypothesis-h1@1"}]}
+        master._user_input_revision = Mock(return_value="unchanged")
+        master._llm_plan = AsyncMock(return_value=selected)
+
+        plan, source = await master._acquire_plan({"round_no": 3})
+
+        self.assertEqual(source, "llm")
+        master._llm_plan.assert_awaited_once()
+        self.assertIs(plan, selected)
+        self.assertEqual(plan["dag_nodes"][0]["tactic"], "TA0001")
+        self.assertEqual(plan["dag_nodes"][0]["hypothesis_ref"],
+                         "topology:hypothesis-h1@1")
+
     async def test_mode_assembly_is_fallback_not_shortcut(self) -> None:
         master = object.__new__(MasterAgent)
         master.ctx = SimpleNamespace(
             enable_llm_planning=True,
             plan_override=Mock(return_value={"dag_nodes": [], "analysis": "规则派单"}),
             extra={"mode_prompt": ""})
+        master._user_input_revision = Mock(return_value="unchanged")
         master._llm_plan = AsyncMock(return_value=None)  # 规划失败/不可用
 
         plan, source = await master._acquire_plan({"round_no": 0})

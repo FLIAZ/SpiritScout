@@ -206,7 +206,7 @@ const TopologyLayout = (() => {
       if(excluded.has(record.id)) continue;
       let payload={};try{payload=JSON.parse(record.body || '{}');}catch{/* 旧记录仍保留原文。 */}
       const view_kind=record.kind==='exploration' ? (record.node_type==='goal' ? 'goal' : record.node_type==='attempt' ? 'attempt' : 'intent') :
-        record.layer==='vuln' ? 'vulnerability' : record.layer==='recon_clue' || payload?.type==='note' ? 'hint' : 'fact';
+        record.kind==='report' ? 'report' : record.layer==='vuln' ? 'vulnerability' : record.layer==='recon_clue' || payload?.type==='note' ? 'hint' : 'fact';
       add({...record,view_kind,task_id:record.task_id || record.provenance?.producer?.task_id || '',
         route_id:record.route_id || record.provenance?.producer?.route_id || ''});
       const taskId=known.get(record.id).task_id;
@@ -375,7 +375,7 @@ const TopologyLayout = (() => {
       const saved=edges.find(e=>e.source===edge.source && e.target===edge.target && e.kind===kind);
       saved.references.push(...edge.references);
     }
-    for(const fact of [...known.values()].filter(n=>['fact','vulnerability','hint'].includes(n.view_kind))) {
+    for(const fact of [...known.values()].filter(n=>['fact','vulnerability','hint','report'].includes(n.view_kind))) {
       if(!fact.task_id || edges.some(e=>e.target===fact.id)) continue;
       const source=fact.provenance?.producer || {};
       const exact=nodes.filter(n=>(n.view_kind==='attempt' || n.node_type==='milestone') && n.task_id===fact.task_id && n.route_id===fact.route_id
@@ -384,7 +384,8 @@ const TopologyLayout = (() => {
       const intents=intentsByTask.get(fact.task_id) || [];
       // 只在归属唯一时展示任务产出；并行分支的歧义不能凭时间补边。
       const sameRoute=intents.filter(id=>fact.route_id && known.get(id).route_id===fact.route_id);
-      const producer=sameRoute.length===1 ? sameRoute[0] : intents.length===1 ? intents[0] : null;
+      const producer=fact.kind==='report' ? goalByDag.get(taskRows.get(fact.task_id)?.parent_dag_node) :
+        sameRoute.length===1 ? sameRoute[0] : intents.length===1 ? intents[0] : null;
       if(producer) link(producer,fact.id,fact.view_kind==='hint' ? 'hint' : 'task_output',I18n.t('产出'));
     }
     for(const node of known.values()) if(['goal','intent','attempt'].includes(node.view_kind) && !edges.some(e=>e.target===node.id))
@@ -427,7 +428,7 @@ const TopologyLayout = (() => {
       if(!incoming.has(edge.target))incoming.set(edge.target,[]);
       incoming.get(edge.target).push(edge);
     }
-    const isResult=n=>n.node_type==='milestone' || ['fact','vulnerability','hint'].includes(n.view_kind);
+    const isResult=n=>n.node_type==='milestone' || ['fact','vulnerability','hint','report'].includes(n.view_kind);
     const keep=new Set(graph.nodes.filter(n=>['origin','goal'].includes(n.view_kind) || isResult(n)).map(n=>n.id));
     const edges=[];
     const link=(source,target,kind,references=[])=>{
@@ -513,7 +514,7 @@ const TopologyLayout = (() => {
     }
     // 按已声明的推进/转向展开新意图；布局约束不写入图，也不把时间顺序升级成证据因果。
     const ids=nodes.map(n=>n.id),preds=new Map(ids.map(id=>[id,placement.filter(e=>e.target===id).map(e=>e.source)]));
-    const base=layers(ids,preds),depth=new Map(),floor={origin:0,hint:0,goal:1,intent:2,attempt:3,discovery:3,breakthrough:3,turning_point:3,fact:4,vulnerability:4};
+    const base=layers(ids,preds),depth=new Map(),floor={origin:0,hint:0,goal:1,intent:2,attempt:3,discovery:3,breakthrough:3,turning_point:3,fact:4,report:4,vulnerability:4};
     for(const id of ids.slice().sort((a,b)=>base.depth.get(a)-base.depth.get(b))) {
       let d=floor[nodes.find(n=>n.id===id).view_kind] || 0;
       for(const parent of preds.get(id)) if(depth.has(parent) && base.depth.get(parent)<base.depth.get(id)) d=Math.max(d,depth.get(parent)+1);

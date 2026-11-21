@@ -23,7 +23,7 @@ vm.runInContext(source.slice(source.indexOf("function renderOpportunities"),sour
 vm.runInContext("renderOpportunities()",context);
 assert.match(root.innerHTML,/行动机会/);assert.match(root.innerHTML,/82/);assert.match(root.innerHTML,/50%/);
 assert.match(root.innerHTML,/破壁 · Web 边界测试/);assert.match(root.innerHTML,/探微 · 定向扫描/);
-assert.match(root.innerHTML,/边际收益下降/);assert.match(root.innerHTML,/25%/);assert.match(root.innerHTML,/建议换路/);
+assert.match(root.innerHTML,/边际收益下降/);assert.match(root.innerHTML,/25%/);assert.match(root.innerHTML,/换路建议/);
 assert.match(root.innerHTML,/攻击面复盘/);assert.match(root.innerHTML,/需要测试账号 &lt;svg onload=x&gt;/);
 assert.match(root.innerHTML,/专家校准/);assert.match(root.innerHTML,/减少同质实验 &lt;b&gt;now&lt;\/b&gt;/);
 assert.match(root.innerHTML,/&lt;script&gt;bad&lt;\/script&gt;/);assert.ok(!root.innerHTML.includes("<script>bad</script>"));
@@ -31,6 +31,12 @@ assert.match(root.innerHTML,/&lt;img src=x&gt;/);assert.doesNotMatch(root.innerH
   "机会驾驶舱不应倾倒结构化 JSON");
 const first=root.innerHTML;vm.runInContext("renderOpportunities()",context);assert.equal(root.innerHTML,first,
   "相同状态刷新不应重建机会卡");
+S.state.testing_opportunities.prioritized[0].direction_state="productive";
+vm.runInContext("renderOpportunities()",context);
+assert.doesNotMatch(root.innerHTML,/opportunity-pivot/,"有产出的机会不显示旧服务遗留的误导换路文案");
+S.state.testing_opportunities.prioritized[0].direction_state="blocked";
+vm.runInContext("renderOpportunities()",context);
+assert.match(root.innerHTML,/解除阻塞：/);
 S.cur="sess-two";S.state={testing_opportunities:{prioritized:[],stalled:[],action_yield:{}}};
 vm.runInContext("renderOpportunities()",context);assert.match(root.innerHTML,/还没有形成可排序的行动机会/);
 console.log("opportunities: ranked cards, metrics, escaping, compact output and session refresh passed");

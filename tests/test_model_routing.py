@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 import unittest
 
-from spiritscout.gateway.backends import LiteLLMBackend
+from spiritscout.gateway.backends import LiteLLMBackend, extract_json
 
 
 class RoutedModelNameTests(unittest.TestCase):
@@ -41,6 +42,24 @@ class RoutedModelNameTests(unittest.TestCase):
             LiteLLMBackend._routed_model_name("anthropic/claude-x", "https://x",
                                               anthropic=False),
             "anthropic/claude-x")
+
+
+class ExtractJsonTests(unittest.TestCase):
+    def test_complete_fenced_and_embedded_json_preserve_values(self) -> None:
+        values = [{"x": "}", "y": 1}, {"x": "a{b", "nested": [1, {"v": "[\"\\"}]},
+                  [1, 2, "}[]"], {"json": '{"embedded":true}', "unicode": "中文"}]
+        for value in values:
+            encoded = json.dumps(value, ensure_ascii=False)
+            for text in (encoded, f"```json\n{encoded}\n```", f"前言 {encoded} 后语"):
+                with self.subTest(text=text):
+                    self.assertEqual(extract_json(text), value)
+
+    def test_compatibility_priority_and_invalid_json(self) -> None:
+        self.assertEqual(extract_json('前言 {"first":1} 后语 [2]'), {"first": 1})
+        self.assertEqual(extract_json('前言 {"first":1} ```json\n[2]\n```'), [2])
+        for text in ('', '无 JSON', '前言 {"x":[1,} 后语', '前言 {"x":"未结束'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                extract_json(text)
 
 
 if __name__ == "__main__":

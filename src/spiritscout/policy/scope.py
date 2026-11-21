@@ -11,7 +11,7 @@ import fnmatch
 import ipaddress
 import posixpath
 from datetime import UTC, datetime
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlparse, urlunparse
 
 from spiritscout.core.exceptions import ScopeViolation
 from spiritscout.core.models import Scope
@@ -24,6 +24,10 @@ class ScopeGuard:
         self._approved_sensitive: set[str] = set()
         # 会话级范围批准集：用户确认扩围后写入（URL 归一到 origin、主机归一到域）
         self._approved_targets: set[str] = set()
+        # 已授权页面直接引用的公开静态资源只继承“精确 URL 的只读分析”许可。
+        # 它不等价于用户扩围，不能把 CDN origin、相邻路径或脚本里发现的接口放行。
+        self._derived_readonly_resources: dict[str, str] = {}
+        self._asset_decisions: dict[str, dict[str, object]] = {}
 
     # ------------------------------------------------------------ 启动门
 
@@ -57,6 +61,66 @@ class ScopeGuard:
             return target
         raise ScopeViolation(f"目标超出授权范围: {target}")
 
+    def register_asset_decision(
+        self, target: str, status: str, *, reason: str = "", evidence: list[str] | None = None,
+    ) -> str:
+        """登记组织归属候选或资产级测试资格。"""
+        allowed = {"candidate_only", "needs_review", "report_only", "allowed_test", "blocked"}
+        if status not in allowed:
+            raise ScopeViolation(f"未知资产范围状态: {status}")
+        key = self._asset_key(target)
+        self._asset_decisions[key] = {
+            "status": status, "reason": str(reason)[:1000],
+            "evidence": [str(item)[:500] for item in (evidence or [])[:20]],
+        }
+        return key
+
+    def asset_decision(self, target: str) -> dict[str, object]:
+        """返回资产级范围决定。未登记目标按当前 Scope 策略推导。"""
+        key = self._asset_key(target)
+        explicit = self._explicit_allowed(target)
+        for pattern in [*self.scope.denied, *self.scope.excluded_assets]:
+            if self._pattern_matches(target, pattern):
+                return {"status": "blocked", "reason": "命中明确排除项", "evidence": []}
+        if self.scope.scope_mode == "explicit":
+            return {"status": "allowed_test" if explicit else "blocked",
+                    "reason": "显式范围" if explicit else "未命中显式范围", "evidence": []}
+        rule = next((item for item in self.scope.asset_rules
+                     if isinstance(item, dict) and self._pattern_matches(target, str(item.get("pattern") or ""))), None)
+        if rule is not None:
+            return {"status": str(rule.get("status") or "needs_review"),
+                    "reason": str(rule.get("reason") or "资产级规则"),
+                    "evidence": list(rule.get("evidence") or []) if isinstance(rule.get("evidence"), list) else []}
+        if key in self._asset_decisions:
+            return dict(self._asset_decisions[key])
+        if explicit:
+            return {"status": "allowed_test", "reason": "显式范围", "evidence": []}
+        if self._organization_match(target):
+            return {"status": "candidate_only", "reason": "组织归属候选待核验", "evidence": []}
+        return {"status": "blocked", "reason": "未命中项目或组织范围", "evidence": []}
+
+    def check_execution_target(self, target: str) -> str:
+        """主动测试入口使用的范围门。显式模式保持旧兼容行为。"""
+        decision = self.asset_decision(target)
+        if decision.get("status") != "allowed_test":
+            raise ScopeViolation(
+                f"资产当前不可主动测试: {target}（{decision.get('status')}，{decision.get('reason')}）"
+            )
+        return target
+
+    def check_discovery_target(self, target: str) -> str:
+        """被动归属和 DNS 发现可读取组织候选，不能因此获得主动测试资格。"""
+        decision = self.asset_decision(target)
+        if decision.get("status") == "blocked" and any(
+                self._pattern_matches(target, pattern)
+                for pattern in [*self.scope.denied, *self.scope.excluded_assets]):
+            raise ScopeViolation(f"资产命中明确排除项: {target}")
+        if self.scope.scope_mode == "explicit":
+            return self.check_target(target)
+        if decision.get("status") in {"blocked", "report_only"}:
+            raise ScopeViolation(f"资产不可执行发现请求: {target}（{decision.get('reason')}）")
+        return target
+
     def is_allowed(self, target: str) -> bool:
         """目标是否落在授权白名单/会话批准集内（信息标注用，不做拦截）。"""
         try:
@@ -64,6 +128,34 @@ class ScopeGuard:
             return True
         except ScopeViolation:
             return False
+
+    @staticmethod
+    def _asset_key(target: str) -> str:
+        value = str(target or "").strip().lower().rstrip(".")
+        return value or target
+
+    def _explicit_allowed(self, target: str) -> bool:
+        try:
+            self.check_target(target)
+            return True
+        except ScopeViolation:
+            return False
+
+    def _organization_match(self, target: str) -> bool:
+        host, url = self._split(target)
+        if not host:
+            return False
+        patterns = [*self.scope.organization_domains]
+        return any(fnmatch.fnmatchcase(self._normalize_host(host), self._normalize_host(pattern))
+                   for pattern in patterns if pattern)
+
+    def _pattern_matches(self, target: str, pattern: str) -> bool:
+        if not pattern:
+            return False
+        host, url = self._split(target)
+        if url and self._url_within(url, pattern):
+            return True
+        return bool(host and fnmatch.fnmatchcase(self._normalize_host(host), self._normalize_host(pattern)))
 
     def approve_target(self, target: str) -> str:
         """用户确认扩围：目标写入会话批准集并返回规范化条目。
@@ -91,6 +183,30 @@ class ScopeGuard:
     def approved_targets(self) -> frozenset[str]:
         """用户经提问确认的会话扩围目标（随守卫实例消亡，不落盘）。"""
         return frozenset(self._approved_targets)
+
+    def approve_derived_resource(self, target: str, source_page: str) -> str:
+        """登记授权页面明确引用的单个公开资源，返回精确规范化 URL。
+
+        查询串不参与资源身份，避免同一带版本参数的文件产生重复授权；路径、
+        origin 与端口必须精确匹配。调用方仍只能做 GET/离线分析，不能据此访问
+        同域其他资源。source_page 必须属于原授权或已经登记的派生资源。
+        """
+        if not (self.is_allowed(source_page) or self.is_derived_resource(source_page)):
+            raise ScopeViolation(f"派生资源来源页面未获授权: {source_page}")
+        entry = self._exact_resource_url(target)
+        if entry is None:
+            raise ScopeViolation(f"无法解析的派生资源: {target}")
+        self._derived_readonly_resources[entry] = str(source_page)[:2000]
+        return entry
+
+    def is_derived_resource(self, target: str) -> bool:
+        """目标是否是已登记的精确只读派生资源。"""
+        entry = self._exact_resource_url(target)
+        return bool(entry and entry in self._derived_readonly_resources)
+
+    def derived_readonly_resources(self) -> frozenset[str]:
+        """用于规划校验和请求缓存身份的精确派生资源集合。"""
+        return frozenset(self._derived_readonly_resources)
 
     def _match_approved(self, target: str, host: str | None) -> bool:
         """会话批准集匹配：origin 前缀条目按 URL 匹配，域条目按主机匹配。"""
@@ -168,8 +284,6 @@ class ScopeGuard:
             pattern = self._normalize_host(pattern)
             if fnmatch.fnmatchcase(host, pattern):
                 return True
-            if pattern.startswith("*.") and host == pattern[2:]:
-                return True
         return False
 
     def _match_url(self, url: str) -> bool:
@@ -212,6 +326,16 @@ class ScopeGuard:
         if path != "/":
             path = path.rstrip("/")
         return scheme, cls._normalize_host(parsed.hostname), port, path
+
+    @classmethod
+    def _exact_resource_url(cls, raw: str) -> str | None:
+        parts = cls._url_parts(str(raw or ""))
+        if parts is None:
+            return None
+        scheme, host, port, path = parts
+        default = 443 if scheme == "https" else 80
+        netloc = host if port == default else f"{host}:{port}"
+        return urlunparse((scheme, netloc, path, "", "", ""))
 
     @staticmethod
     def _normalize_host(host: str) -> str:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import re
@@ -13,7 +14,7 @@ import weakref
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Iterator
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import httpx
 
@@ -31,14 +32,20 @@ CREATE TABLE IF NOT EXISTS exchanges (
  status INTEGER, error TEXT NOT NULL, duration_ms REAL NOT NULL,
  request_bytes INTEGER NOT NULL, response_bytes INTEGER NOT NULL,
  agent_id TEXT NOT NULL, task_id TEXT NOT NULL, invocation_id TEXT NOT NULL,
+ identity_id TEXT NOT NULL DEFAULT '',
  detail TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS proxy_contexts (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS proxy_raw (exchange_id INTEGER PRIMARY KEY, metadata TEXT NOT NULL,
  request_blob TEXT NOT NULL, response_blob TEXT NOT NULL);
 """
-_COLUMNS = ("id,captured_at,method,url,host,status,error,duration_ms,"
-            "request_bytes,response_bytes,agent_id,task_id,invocation_id")
+_COLUMN_NAMES = (
+    "id", "captured_at", "method", "url", "host", "status", "error",
+    "duration_ms", "request_bytes", "response_bytes", "agent_id", "task_id",
+    "invocation_id", "identity_id",
+)
+_COLUMNS = ",".join(_COLUMN_NAMES)
+_READONLY_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
 def safe_url(value: str) -> str:
@@ -136,6 +143,9 @@ def _connect(workspace: Path, *, write: bool = False) -> Iterator[sqlite3.Connec
                 for statement in _SCHEMA.split(";"):
                     if statement.strip():
                         conn.execute(statement)
+                fields = {row[1] for row in conn.execute("PRAGMA table_info(exchanges)")}
+                if "identity_id" not in fields:
+                    conn.execute("ALTER TABLE exchanges ADD COLUMN identity_id TEXT NOT NULL DEFAULT ''")
             else:
                 conn.execute("PRAGMA query_only=ON")
             yield conn
@@ -156,8 +166,8 @@ def _append(workspace: Path, record: dict[str, Any]) -> int:
     with _connect(workspace, write=True) as conn:
         cursor = conn.execute("""INSERT INTO exchanges
             (captured_at,method,url,host,status,error,duration_ms,request_bytes,response_bytes,
-             agent_id,task_id,invocation_id,detail) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (*[record[key] for key in _COLUMNS.split(",")[1:]],
+             agent_id,task_id,invocation_id,identity_id,detail) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (*[record[key] for key in _COLUMN_NAMES[1:]],
              json.dumps(record["detail"], ensure_ascii=False)))
         record_id = cursor.lastrowid
         if record.get("raw"):
@@ -192,6 +202,7 @@ async def record_http(workspace: str, request: httpx.Request, response: httpx.Re
             "request_bytes": len(request_body), "response_bytes": len(content),
             "agent_id": scope.agent_id if scope else "", "task_id": scope.task_id if scope else "",
             "invocation_id": invocation.invocation_id if invocation else "",
+            "identity_id": scope.identity_id if scope else "",
             "detail": {"source": "http_probe", "tool_call_id": scope.tool_call_id if scope else "",
                        "request_headers": _headers(request.headers),
                        "request_body": _body(request_body, request.headers.get("content-type", "")),
@@ -221,6 +232,7 @@ async def record_network_event(workspace: str, *, protocol: str, target: str, so
             "request_bytes": 0, "response_bytes": len(received),
             "agent_id": scope.agent_id if scope else "", "task_id": scope.task_id if scope else "",
             "invocation_id": invocation.invocation_id if invocation else "",
+            "identity_id": scope.identity_id if scope else "",
             "detail": {"source": source, "protocol": protocol,
                 "observations": observations, "tool_call_id": scope.tool_call_id if scope else "",
                 "request_headers": [], "response_headers": [], "request_body": _body(b"", ""),
@@ -239,6 +251,15 @@ def summary(workspace: Path) -> dict[str, Any]:
             coalesce(sum(CASE WHEN error != '' OR status >= 400 THEN 1 ELSE 0 END),0) errors,
             coalesce(sum(request_bytes),0) request_bytes,
             coalesce(sum(response_bytes),0) response_bytes, max(captured_at) last_at FROM exchanges""").fetchone())
+
+
+def _column_projection(conn: sqlite3.Connection) -> str:
+    """兼容尚未发生新写入、因而未执行迁移的旧会话数据库。"""
+    fields = {str(row[1]) for row in conn.execute("PRAGMA table_info(exchanges)")}
+    return ",".join(
+        name if name in fields else f"'' AS {name}"
+        for name in _COLUMN_NAMES
+    )
 
 
 def page(workspace: Path, *, before: int | None = None, limit: int = 50,
@@ -279,7 +300,7 @@ def page(workspace: Path, *, before: int | None = None, limit: int = 50,
                 params.append(body)
             where = " WHERE " + " AND ".join(clauses)
         rows = [] if conn is None else conn.execute(
-            f"SELECT {_COLUMNS} FROM exchanges{where} ORDER BY id DESC LIMIT ?",
+            f"SELECT {_column_projection(conn)} FROM exchanges{where} ORDER BY id DESC LIMIT ?",
             (*params, limit + 1)).fetchall()
     items = [dict(row) for row in rows[:limit]]
     return {"items": items, "has_more": len(rows) > limit,
@@ -293,5 +314,124 @@ def detail(workspace: Path, record_id: int) -> dict[str, Any] | None:
     if row is None:
         return None
     result = dict(row)
+    result.setdefault("identity_id", "")
     result.update(json.loads(result.pop("detail")))
     return result
+
+
+def _json_shape(value: Any, depth: int = 0) -> Any:
+    """只保留 JSON 的类型/字段结构，不把业务值送入边界对照。"""
+    if depth >= 4:
+        return type(value).__name__
+    if isinstance(value, dict):
+        return {str(key)[:100]: _json_shape(item, depth + 1)
+                for key, item in list(value.items())[:30]}
+    if isinstance(value, list):
+        return [(_json_shape(value[0], depth + 1) if value else "empty")]
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    return "string"
+
+
+def _response_summary(row: sqlite3.Row) -> dict[str, Any] | None:
+    try:
+        detail = json.loads(str(row["detail"] or "{}"))
+    except (TypeError, ValueError, RecursionError):
+        return None
+    if not detail.get("response_complete"):
+        return None
+    body = detail.get("response_body") if isinstance(detail.get("response_body"), dict) else {}
+    if body.get("truncated"):
+        return None
+    text = str(body.get("text") or "")
+    # 敏感值脱敏后可能把两个实际不同的响应折叠成同一预览，不能用于等价判定。
+    if "[已隐藏]" in text:
+        return None
+    headers = detail.get("response_headers") if isinstance(detail.get("response_headers"), list) else []
+    content_type = next((str(value) for key, value in headers
+                         if str(key).lower() == "content-type"), "")[:200]
+    shape: Any = None
+    if text and body.get("encoding") in {"text", "utf-8"} and "json" in content_type.lower():
+        try:
+            shape = _json_shape(json.loads(text))
+        except (TypeError, ValueError, RecursionError):
+            shape = None
+    identity = str(row["identity_id"] or "")
+    return {
+        "record_id": int(row["id"]),
+        # 身份只用于证明样本确实不同；不给执行角色暴露账号标识原文。
+        "identity_ref": hashlib.sha256(identity.encode()).hexdigest()[:12],
+        "status": row["status"],
+        "response_bytes": int(row["response_bytes"] or 0),
+        "content_type": content_type,
+        "response_digest": hashlib.sha256(text.encode()).hexdigest()[:16] if text else "",
+        "json_shape": shape,
+    }
+
+
+def boundary_fixtures(workspace: Path, subject: str, *, limit: int = 4) -> list[dict[str, Any]]:
+    """从真实只读流量中提取同一资源的双身份离线对照，不重放认证请求。"""
+    if not subject or not 1 <= limit <= 20:
+        return []
+    try:
+        expected = urlsplit(subject)
+    except ValueError:
+        return []
+    expected_path = expected.path or "/"
+    expected_host = (expected.hostname or "").lower()
+    expected_scheme = expected.scheme.lower()
+    with _connect(workspace) as conn:
+        if conn is None:
+            return []
+        fields = {str(row[1]) for row in conn.execute("PRAGMA table_info(exchanges)")}
+        if "identity_id" not in fields:
+            return []
+        rows = conn.execute(
+            """SELECT id,method,url,status,response_bytes,identity_id,detail
+               FROM exchanges
+               WHERE identity_id != '' AND method IN ('GET','HEAD','OPTIONS')
+               ORDER BY id DESC LIMIT 1000"""
+        ).fetchall()
+
+    grouped: dict[tuple[str, str], dict[str, sqlite3.Row]] = {}
+    for row in rows:
+        url = str(row["url"] or "")
+        # 脱敏参数会让不同真实对象折叠成同一个展示 URL，不能据此拼夹具。
+        if "[已隐藏]" in unquote(url):
+            continue
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            continue
+        if (parts.path or "/") != expected_path:
+            continue
+        if expected_host and (parts.hostname or "").lower() != expected_host:
+            continue
+        if expected_scheme and parts.scheme.lower() != expected_scheme:
+            continue
+        method = str(row["method"] or "").upper()
+        if method not in _READONLY_HTTP_METHODS:
+            continue
+        identity = str(row["identity_id"] or "")
+        grouped.setdefault((method, url), {}).setdefault(identity, row)
+
+    fixtures: list[dict[str, Any]] = []
+    for (method, url), identities in grouped.items():
+        if len(identities) < 2:
+            continue
+        records = []
+        for row in list(identities.values())[:2]:
+            summary_item = _response_summary(row)
+            if summary_item is not None:
+                records.append(summary_item)
+        if len(records) != 2 or records[0]["identity_ref"] == records[1]["identity_ref"]:
+            continue
+        fixtures.append({"method": method, "url": url, "path": expected_path,
+                         "records": records})
+        if len(fixtures) >= limit:
+            break
+    return fixtures

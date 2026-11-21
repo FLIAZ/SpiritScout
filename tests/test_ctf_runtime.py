@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from spiritscout.agents.ring import attempt_key
 from spiritscout.agents.sub.base import RoutePlan
 from spiritscout.core.audit import NullAuditLogger
 from spiritscout.core.models import AgentType, RunMode, Task
+from spiritscout.core.pause import PauseGate
 from spiritscout.ctf.agents import (
     CTFBaseAgent,
     _challenge_instance_blocker,
@@ -19,11 +21,33 @@ from spiritscout.ctf.agents import (
     _obs_text,
 )
 from spiritscout.ctf.flags import FlagManager, SubmitResult
+from spiritscout.ctf.solver import SolverTurn
 from spiritscout.runtime import _write_competition_summary
 from spiritscout.tools.spec import ToolResult
 
 
 class DiscoveryReportingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_paused_turn_does_not_advertise_or_dispatch_proposed_tool(self):
+        gate, audit = PauseGate(), Mock()
+        gate.pause()
+        agent = SimpleNamespace(ctx=SimpleNamespace(audit=audit, pause_gate=gate),
+                                agent_id="worker", challenge_id=lambda _task: "fixture",
+                                _run_tool_call=AsyncMock(side_effect=RuntimeError("fixture dispatch")))
+        turn = SolverTurn(agent, SimpleNamespace(task_id="task"),
+                          SimpleNamespace(route_id="route", name="fixture"), RoutePlan("fixture", ""))
+        turn.state = {"turn": 1}
+        pending = asyncio.create_task(turn._execute_calls([{"id": "one", "name": "fixture"}], False))
+        try:
+            await asyncio.sleep(0)
+            audit.log.assert_not_called()
+            agent._run_tool_call.assert_not_awaited()
+        finally:
+            gate.resume()
+            with self.assertRaisesRegex(RuntimeError, "fixture dispatch"):
+                await pending
+        self.assertEqual(audit.log.call_args.args[0], "agent.tool_call")
+        agent._run_tool_call.assert_awaited_once()
+
     async def test_competition_native_shared_memory_uses_append_only_contract_and_existing_tool(self):
         from spiritscout.blackboard import Blackboard
         from spiritscout.blackboard.exchange import SCHEMAS
@@ -108,6 +132,10 @@ class FailureAttributionTests(unittest.IsolatedAsyncioTestCase):
                     + "TypeError: connect() got an unexpected keyword argument 'extra_headers'"), 'extra_headers'),
             ('refused', ToolResult(tool='sandbox_exec', ok=True, returncode=1,
                 stderr='ConnectionRefusedError: [Errno 111] Connection refused'), 'ConnectionRefusedError'),
+            ('read-only', ToolResult(tool='sandbox_exec', ok=True, returncode=1,
+                stderr="mkdir: cannot create directory 'work': Read-only file system"), 'Read-only file system'),
+            ('permission', ToolResult(tool='sandbox_exec', ok=True, returncode=1,
+                stderr="PermissionError: [Errno 13] Permission denied: 'input.bin'"), 'Permission denied'),
             ('exited', ToolResult(tool='sandbox_exec', ok=True, returncode=7,
                 stdout='fixture service exited with code 7'), 'exited with code 7'),
         ]
@@ -123,6 +151,9 @@ class FailureAttributionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(outcome.metadata['invocation_id'], 'inv-fixture')
                 self.assertEqual(outcome.metadata['output_file'], '/fixture/output.log')
                 self.assertNotIn('超时通常意味着', outcome.text)
+                if name in {'read-only', 'permission'}:
+                    self.assertIn('/fixture/work', outcome.text)
+                    self.assertIn('属主或模式', outcome.text)
 
     async def test_cloud_no_output_failure_keeps_execution_reference_and_error(self):
         result = ToolResult(tool='sandbox_exec', ok=False, returncode=-9, timed_out=True,
@@ -264,11 +295,19 @@ class AcceptedFlagTerminationTests(unittest.IsolatedAsyncioTestCase):
     async def test_duplicate_accepted_flag_still_finishes_competition(self) -> None:
         agent = self._agent(json.dumps({
             "correct_flag_count": 1, "total_flag_count": 1}))
-        for _ in range(2):
+        agent.flag_manager.min_interval = 0
+        agent.flag_manager.submit_fn = AsyncMock(return_value=SubmitResult(True, json.dumps({
+            "correct_flag_count": 1, "total_flag_count": 1})))
+        for challenge_id in ("e1-03", "e1-04", "e1-03", "e1-04"):
+            task = self._task(1)
+            task.payload["challenge"]["id"] = challenge_id
             out = await agent._tool_submit_flag(
-                self._task(1), SimpleNamespace(name="solve"), {},
+                task, SimpleNamespace(name="solve"), {},
                 {"flag": "flag{demo}"})
             self.assertTrue(out.stop)
+        self.assertEqual([call.args for call in agent.flag_manager.submit_fn.await_args_list],
+                         [("flag{demo}", "e1-03"), ("flag{demo}", "e1-04")])
+        self.assertEqual(agent.flag_manager.stats()["accepted"], 2)
 
     async def test_unknown_completion_keeps_solving(self) -> None:
         agent = self._agent("平台确认正确，但未提供整题完成态")
@@ -907,6 +946,26 @@ class CrossReplayDisclosureTests(unittest.IsolatedAsyncioTestCase):
 class EmptyReplyRepairTests(unittest.IsolatedAsyncioTestCase):
     """思考型模型空正文回合不是结论：注入提示再给一次机会，连续两次才收尾。"""
 
+    async def test_cancelled_turn_restores_scope_without_fabricating_results(self) -> None:
+        import asyncio
+
+        from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
+
+        agent = self._agent([asyncio.CancelledError()])
+        plan = RoutePlan(name="solve", strategy="", steps=[{"action": "investigate"}])
+        parent = ExecutionScope(task_id="parent", route_id="outer")
+        token = current_execution_scope.set(parent)
+        try:
+            with self.assertRaises(asyncio.CancelledError):
+                await agent._solve_turn(self._task(), self._route(), plan)
+            self.assertIs(current_execution_scope.get(), parent)
+        finally:
+            current_execution_scope.reset(token)
+        self.assertEqual(self.state["turn"], 1)
+        self.assertEqual(self.state["llm_failures"], 0)
+        self.assertFalse(self.state["concluded"])
+        self.assertFalse(any(m["role"] in ("assistant", "tool") for m in self.state["messages"]))
+
     def _agent(self, responses: list) -> CTFBaseAgent:
         agent = object.__new__(CTFBaseAgent)
         agent.agent_id = "agent-test"
@@ -975,6 +1034,23 @@ class EmptyReplyRepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.state["concluded"])
         self.assertIn("/kb", self.state["conclusion_text"])
         self.assertEqual(self.state["empty_replies"], 0)
+
+    async def test_local_handoff_text_extends_route_until_explicit_completion(self) -> None:
+        handoff = self._reply("接力资料已保存，尚未取得答案。")
+        agent = self._agent([handoff, handoff])
+        agent.flag_manager = SimpleNamespace(local_only=True, multiple_answers=False,
+                                             completed_ids=lambda: set())
+        plan = RoutePlan(name="solve", strategy="", steps=[{"action": "investigate"}])
+        for turn in (1, 2):
+            result = await agent._solve_turn(self._task(), self._route(), plan)
+            self.assertTrue(result.ok)
+            self.assertFalse(result.final_note)
+            self.assertFalse(self.state["concluded"])
+            self.assertEqual(len(plan.steps), turn + 1)
+            self.assertNotIn("正在核对答案完整性", result.note)
+        self.assertEqual(self.state["turn"], 2)
+        self.assertFalse(any(call.args[0] == "agent.conclude"
+                             for call in agent.ctx.audit.log.call_args_list))
 
     async def test_background_notification_is_injected_before_next_model_call(self) -> None:
         from spiritscout.tools.background import Job, ShellJobs
@@ -1146,6 +1222,14 @@ class PeerAcceptedFlagValveTests(unittest.TestCase):
 
 
 class PeerUpdateWatermarkTests(unittest.TestCase):
+    def test_same_role_new_route_receives_prior_notes_and_conclusions(self) -> None:
+        state = {}
+        agent = self._agent(["[web] 前一任务已经排除条件 A"], ["[web/solve] 后续需要核对条件 B"])
+        first = agent._peer_updates(self._task(), state)
+        self.assertIn("条件 A", first)
+        self.assertIn("条件 B", first)
+        self.assertEqual(agent._peer_updates(self._task(), state), "")
+
     """同伴笔记/结论按内容水位去重：共享缓冲区写满后 len 不再增长。
 
     按长度记账时写满即永久静默——同伴动态里再也看不到任何新笔记与

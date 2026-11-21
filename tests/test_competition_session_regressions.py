@@ -36,6 +36,7 @@ class CompetitionSessionRegressions(unittest.IsolatedAsyncioTestCase):
         master.agent_id = 'master-test'
         master.ctx = SimpleNamespace(
             audit=Mock(), pause_gate=None, plan_override=None, enable_llm_planning=True,
+            blackboard=SimpleNamespace(read=lambda *_: None),
             agents={AgentType.CTF_WEB: object()},
             tactic_map={'CTF-WEB': (AgentType.CTF_WEB, 'ctf_solve')},
             extra={'mode_prompt': '自主比赛', 'competition_context': {'challenges': challenges}})

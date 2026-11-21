@@ -123,11 +123,18 @@ def mount_session_read_routes(app: FastAPI, manager: SessionManager,
 
     @app.get("/api/sessions/{session_id}/vulnerabilities")
     def session_vulnerabilities(session_id: str, offset: int = Query(0, ge=0),
-                                limit: int = Query(50, ge=1, le=200)) -> JSONResponse:
+                                limit: int = Query(50, ge=1, le=200),
+                                category: str = Query("", max_length=80),
+                                confirmed_only: bool = False) -> JSONResponse:
+        from spiritscout.knowledge.vulnerability_taxonomy import known_taxonomy_id
         from spiritscout.web.deliverables import read_vulnerability_page
 
-        return JSONResponse(read_vulnerability_page(_require(session_id).workspace, offset, limit),
-                            headers={"Cache-Control": "no-store"})
+        session = _require(session_id)
+        if category and not known_taxonomy_id(category):
+            raise HTTPException(422, "未知漏洞分类")
+        page = read_vulnerability_page(session.workspace, offset, limit,
+                                       category=category, confirmed_only=confirmed_only)
+        return JSONResponse(page, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/sessions/{session_id}/record-history")
     def session_record_history(session_id: str, layer: str = Query(..., max_length=40),

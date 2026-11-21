@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +20,47 @@ from spiritscout.launch import LaunchRequest, prepare_launch
 
 
 class LocalAnswersTests(unittest.TestCase):
+    def test_equal_answers_keep_independent_evidence_and_legacy_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "flags.json"
+            path.write_text(json.dumps([{
+                "flag_id": "legacy-answer", "challenge_id": "one", "value": "42",
+                "format_ok": False, "found_by": "old-agent",
+                "evidence_refs": ["old-evidence"], "answer_review": {"basis": "old review"},
+            }]), encoding="utf-8")
+            manager = FlagManager(local_only=True, store_path=path)
+            first = manager.get("42")
+            self.assertEqual(first.flag_id, "legacy-answer")
+            second = manager.register("42", challenge_id="two", found_by="new-agent")
+            self.assertIsNotNone(second)
+            self.assertIsNone(manager.register("42", challenge_id="two", found_by="retry"))
+            manager.record_answer_evidence("42", ["new-evidence"], {"basis": "new review"},
+                                           challenge_id="two")
+            self.assertIsNone(manager.get("42"), "旧查询不能把歧义答案归给另一题")
+            with self.assertRaises(ValueError):
+                manager.record_answer_evidence("42", ["wrong"], {})
+            for challenge, candidate in (("one", first), ("two", second)):
+                self.assertTrue(manager.confirm_complete(challenge, [candidate.flag_id], "证据确认", 1))
+            restored = FlagManager(local_only=True, store_path=path)
+            self.assertEqual(restored.completed_ids(), {"one", "two"})
+            self.assertEqual(restored.get("42", challenge_id="one").flag_id, "legacy-answer")
+            self.assertEqual(restored.get("42", challenge_id="one").evidence_refs, ["old-evidence"])
+            self.assertEqual(restored.get("42", challenge_id="one").answer_review, {"basis": "old review"})
+            self.assertEqual(restored.get("42", challenge_id="two").flag_id, second.flag_id)
+            self.assertEqual(restored.get("42", challenge_id="two").evidence_refs, ["new-evidence"])
+            self.assertEqual(len(json.loads(path.read_text())), 2)
+            restored.reopen("one", "需要重新核对")
+            self.assertEqual(restored.completed_ids(), {"two"})
+
+    def test_extracted_flags_deduplicate_within_each_challenge(self) -> None:
+        manager = FlagManager()
+        for challenge in ("one", "two"):
+            found = manager.extract("flag{shared}", challenge_id=challenge, found_by="agent")
+            self.assertEqual(len(found), 1)
+            self.assertEqual(found[0].challenge_id, challenge)
+            self.assertEqual(manager.extract("flag{shared}", challenge_id=challenge, found_by="retry"), [])
+        self.assertEqual(manager.stats()["extracted"], 2)
+
     def test_answer_option_survives_session_plan_rebuild(self) -> None:
         from spiritscout.web.app import SessionCreatePayload
         from spiritscout.web.sessions import Session, SessionManager
@@ -162,85 +204,90 @@ class BackgroundReportTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         from spiritscout import runtime
 
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            cfg = SystemConfig(
-                workspace=WorkspaceConfig(root=tmp),
-                audit_log_path=str(root / "audit.jsonl"),
-            )
-            board = Mock(query=Mock(return_value=[]))
-            auth = Authorization(
-                auth_id="local-test",
-                mode=RunMode.CTF,
-                human_confirmed=True,
-                scope=Scope(local_analysis=True),
-            )
-            infra = SimpleNamespace(
-                cfg=cfg,
-                workspace=root,
-                authorization=auth,
-                blackboard=board,
-                gateway=Mock(), bus=None,
-                audit=NullAuditLogger(),
-                agent_models={},
-                experience=Mock(),
-                close=AsyncMock(),
-                outcome="failed",
-            )
+        for single in (False, True):
+            with self.subTest(single_executor=single):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    cfg = SystemConfig(
+                        workspace=WorkspaceConfig(root=tmp),
+                        audit_log_path=str(root / "audit.jsonl"),
+                    )
+                    board = Mock(query=Mock(return_value=[]))
+                    auth = Authorization(
+                        auth_id="local-test",
+                        mode=RunMode.CTF,
+                        human_confirmed=True,
+                        scope=Scope(local_analysis=True),
+                    )
+                    infra = SimpleNamespace(
+                        cfg=cfg,
+                        workspace=root,
+                        authorization=auth,
+                        blackboard=board,
+                        gateway=Mock(), bus=None,
+                        audit=NullAuditLogger(),
+                        agent_models={},
+                        experience=Mock(),
+                        close=AsyncMock(),
+                        outcome="failed",
+                    )
 
-            def assemble(mode, **kwargs):
-                return SimpleNamespace(flag_manager=kwargs["flag_manager"], notes=[])
+                    def assemble(mode, **kwargs):
+                        return SimpleNamespace(flag_manager=kwargs["flag_manager"], notes=[], single_executor=single)
 
-            async def run_master(infra, assembly, target, **kwargs):
-                manager = assembly.flag_manager
-                answer = manager.register(
-                    "plain-answer", challenge_id="one", found_by="worker"
-                )
-                manager.confirm_complete("one", [answer.flag_id], "全部目标已有依据")
-                return {"rounds_executed": 1, "dag_nodes": []}
+                    async def run_master(infra, assembly, target, **kwargs):
+                        manager = assembly.flag_manager
+                        answer = manager.register(
+                            "plain-answer", challenge_id="one", found_by="worker"
+                        )
+                        manager.confirm_complete("one", [answer.flag_id], "全部目标已有依据")
+                        return {"rounds_executed": 1, "dag_nodes": []}
 
-            entered, release = asyncio.Event(), asyncio.Event()
+                    entered, release = asyncio.Event(), asyncio.Event()
 
-            async def writer(*args, **kwargs):
-                entered.set()
-                await release.wait()
-                return "# 后台报告"
+                    async def writer(*args, **kwargs):
+                        entered.set()
+                        await release.wait()
+                        return "# 后台报告\n\n依据实际证据解释解题链。"
 
-            distill_entered = asyncio.Event()
+                    distill_entered = asyncio.Event()
 
-            async def distill():
-                distill_entered.set()
-                await release.wait()
+                    async def distill():
+                        distill_entered.set()
+                        await release.wait()
 
-            distills = []
+                    distills = []
 
-            def schedule(*args, **kwargs):
-                task = asyncio.create_task(distill())
-                distills.append(task)
-                return task
+                    def schedule(*args, **kwargs):
+                        task = asyncio.create_task(distill())
+                        distills.append(task)
+                        return task
 
-            with (
-                patch.object(
-                    runtime, "_build_infra", new=AsyncMock(return_value=infra)
-                ),
-                patch.object(
-                    runtime,
-                    "_make_assembler",
-                    return_value=SimpleNamespace(assemble=assemble),
-                ),
-                patch.object(runtime, "_run_master", side_effect=run_master),
-                patch.object(
-                    runtime, "_schedule_background_distill", side_effect=schedule
-                ),
-                patch("spiritscout.ctf.report_jobs.writeup_body", side_effect=writer),
-            ):
-                result = await runtime.run_ctf_engagement(
-                    cfg=cfg, models=[], authorization=auth, challenges=[{"id": "one"}]
-                )
-                self.assertTrue(result.run_summary["answers_complete"])
-                await entered.wait()
-                await distill_entered.wait()
-                self.assertFalse(Path(result.report_path).exists())
-                infra.close.assert_awaited_once()
-                release.set()
-                await asyncio.gather(*distills, *list(report_jobs._TASKS.values()))
+                    with (
+                        patch.object(
+                            runtime, "_build_infra", new=AsyncMock(return_value=infra)
+                        ),
+                        patch.object(
+                            runtime,
+                            "_make_assembler",
+                            return_value=SimpleNamespace(assemble=assemble),
+                        ),
+                        patch.object(runtime, "_run_master", side_effect=run_master),
+                        patch.object(
+                            runtime, "_schedule_background_distill", side_effect=schedule
+                        ),
+                        patch("spiritscout.ctf.report_jobs.writeup_body", side_effect=writer),
+                    ):
+                        result = await runtime.run_ctf_engagement(
+                            cfg=cfg, models=[], authorization=auth, challenges=[{"id": "one"}]
+                        )
+                        self.assertTrue(result.run_summary["answers_complete"])
+                        await entered.wait()
+                        if not single:
+                            await distill_entered.wait()
+                        self.assertEqual(bool(distills), not single)
+                        self.assertEqual(result.run_summary["report_job"]["status"], "queued")
+                        self.assertFalse(Path(result.report_path).exists())
+                        infra.close.assert_awaited_once()
+                        release.set()
+                        await asyncio.gather(*distills, *list(report_jobs._TASKS.values()))

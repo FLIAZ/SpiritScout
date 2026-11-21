@@ -20,6 +20,7 @@ from typing import Any
 from spiritscout.core.audit import AuditLogger, NullAuditLogger
 from spiritscout.core.exceptions import ToolExecutionError
 from spiritscout.platform_support import kill_process_tree, process_options
+from spiritscout.tools.output import command_output
 from spiritscout.tools.spec import ToolKind, ToolResult, ToolSpec
 
 
@@ -38,7 +39,7 @@ async def _wait_parent(proc: asyncio.subprocess.Process) -> None:
 
 
 async def _read_capped(stream: asyncio.StreamReader | None,
-                       cap: int) -> tuple[bytes, int]:
+                       cap: int, channel: str = "stdout") -> tuple[bytes, int]:
     """流式读取限内存：只保留头尾窗口，超出部分读走即弃。
 
     持续把管道读空，进程得以自然收尾（不因管道塞满被自己的输出卡死）；
@@ -56,6 +57,9 @@ async def _read_capped(stream: asyncio.StreamReader | None,
         if not chunk:
             break
         total += len(chunk)
+        observe = command_output.get()
+        if observe is not None:
+            observe(channel, chunk)
         if len(head) < head_cap:
             take = chunk[:head_cap - len(head)]
             head.extend(take)
@@ -112,7 +116,7 @@ class ToolExecutor(abc.ABC):
         out_task = asyncio.create_task(
             _read_capped(proc.stdout, self.max_output_chars))
         err_task = asyncio.create_task(
-            _read_capped(proc.stderr, self.max_output_chars))
+            _read_capped(proc.stderr, self.max_output_chars, "stderr"))
         try:
             try:
                 await asyncio.wait_for(_wait_parent(proc), timeout=spec.timeout_seconds)

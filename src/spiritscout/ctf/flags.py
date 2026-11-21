@@ -79,7 +79,7 @@ class FlagManager:
         self.backoff_base = backoff_base_seconds
         self.max_attempts = max_attempts
         self.store_path = Path(store_path) if store_path else None
-        self._flags: dict[str, FlagCandidate] = {}   # value → candidate（去重核心）
+        self._flags: dict[tuple[str, str], FlagCandidate] = {}  # (题号, 答案) → 候选
         self._last_submit = 0.0
         self._lock = asyncio.Lock()
         if self.store_path and self.store_path.exists():
@@ -174,16 +174,17 @@ class FlagManager:
     # ------------------------------------------------------------ 提取
 
     def extract(self, text: str, *, challenge_id: str, found_by: str) -> list[FlagCandidate]:
-        """从文本提取候选并注册（格式校验 + 全局去重）。"""
+        """从文本提取候选并注册（格式校验 + 同题去重）。"""
         new_candidates: list[FlagCandidate] = []
         for value in extract_flags(text, self.patterns):
-            if value in self._flags:
+            key = (challenge_id, value)
+            if key in self._flags:
                 continue
             cand = FlagCandidate(
                 flag_id=new_id("flag"), challenge_id=challenge_id,
                 value=value, format_ok=True, found_by=found_by,
             )
-            self._flags[value] = cand
+            self._flags[key] = cand
             new_candidates.append(cand)
             self.audit.log("flag.extracted", "flag_manager", {
                 "flag_id": cand.flag_id, "challenge_id": challenge_id,
@@ -200,13 +201,14 @@ class FlagManager:
         来提交什么就登记什么，格式匹配与否仅记录在 format_ok 供人工复核。
         """
         value = str(value or "").strip()
-        if not value or value in self._flags:
+        key = (challenge_id, value)
+        if not value or key in self._flags:
             return None
         cand = FlagCandidate(
             flag_id=new_id("flag"), challenge_id=challenge_id, value=value,
             format_ok=bool(extract_flags(value, self.patterns)), found_by=found_by,
         )
-        self._flags[value] = cand
+        self._flags[key] = cand
         if not (self.completions.get(challenge_id) or {}).get("disputed_answer_ids"):
             self.completions.pop(challenge_id, None)
         self.audit.log("flag.registered", "flag_manager", {
@@ -266,15 +268,22 @@ class FlagManager:
 
     # ------------------------------------------------------------ 查询
 
-    def get(self, value: str) -> FlagCandidate | None:
-        return self._flags.get(value)
+    def get(self, value: str, *, challenge_id: str | None = None) -> FlagCandidate | None:
+        """按题号查询；兼容旧调用时只返回唯一候选，歧义值不跨题猜测。"""
+        if challenge_id is not None:
+            return self._flags.get((challenge_id, value))
+        matches = [candidate for (_, answer), candidate in self._flags.items() if answer == value]
+        return matches[0] if len(matches) == 1 else None
 
     def all(self) -> list[FlagCandidate]:
         return list(self._flags.values())
 
-    def record_answer_evidence(self, value: str, refs: list[str], review: dict) -> None:
+    def record_answer_evidence(self, value: str, refs: list[str], review: dict, *,
+                               challenge_id: str | None = None) -> None:
         """保存本地答案的复核依据，后续多答案完成确认可重新检查来源状态。"""
-        candidate = self._flags[value]
+        candidate = self.get(value, challenge_id=challenge_id)
+        if candidate is None:
+            raise ValueError("答案不存在或归属不唯一，请指定当前题号")
         candidate.evidence_refs = list(refs)
         candidate.answer_review = dict(review)
         self._persist()
@@ -325,6 +334,6 @@ class FlagManager:
             data = json.loads(self.store_path.read_text(encoding="utf-8"))
             for item in data:
                 cand = FlagCandidate.model_validate(item)
-                self._flags[cand.value] = cand
+                self._flags[(cand.challenge_id, cand.value)] = cand
         except (json.JSONDecodeError, ValueError):  # 损坏的存档不阻断启动
             pass

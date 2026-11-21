@@ -6,8 +6,9 @@ import json
 import os
 import sqlite3
 import uuid
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from spiritscout.blackboard import Blackboard
@@ -36,7 +37,7 @@ def dialogue_messages(history: list[dict[str, Any]]) -> list[dict[str, str]]:
 _READ_PARAMETERS = {
     "type": "object", "properties": {
         "source": {"type": "string", "enum": ["blackboard", "file", "events"]},
-        "layer": {"type": "string", "enum": [layer.value for layer in BlackboardLayer]},
+        "layer": {"type": "string", "enum": [layer.value for layer in BlackboardLayer if layer != BlackboardLayer.TASK_REPORT]},
         "record_id": {"type": "string"}, "path": {"type": "string"},
         "offset": {"type": "integer", "minimum": 0},
         "limit": {"type": "integer", "minimum": 1, "maximum": 12000},
@@ -66,6 +67,26 @@ class ConversationResources:
         self.session, self.audit = session, audit
         self.workspace = session.workspace.resolve()
         self.execution_request = execution_request
+
+    @contextmanager
+    def memory(self):
+        """空闲主控沿用加密的追加式对话；只恢复理解，不恢复工具执行。"""
+        from spiritscout.gateway.context import decision_memory
+        from spiritscout.tools.journal import ExecutionJournal
+
+        bb = Blackboard(self.session.bb_path)
+        try:
+            journal = ExecutionJournal(bb, self.workspace, f"dialogue-{uuid.uuid4().hex}")
+            self.ctx = SimpleNamespace(blackboard=bb, journal=journal)
+            memory = decision_memory(self, "dialogue")
+            from spiritscout.core.exceptions import SpiritScoutError
+            from spiritscout.ctf.conversation import _complete_tool_history
+
+            if not _complete_tool_history(memory.messages):
+                raise SpiritScoutError("主控对话检查点包含未完成的工具往返，不能冒充工具成功恢复")
+            yield memory
+        finally:
+            bb.close()
 
     def context(self) -> dict[str, Any]:
         session = self.session

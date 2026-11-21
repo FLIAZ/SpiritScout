@@ -1,0 +1,197 @@
+/* 内容区延续菜单的柔和层次；语义色与可读文字沿用主题，不用减淡正文换取柔和。 */
+#app > main {
+  --line: color-mix(in srgb, var(--ink) 11%, var(--surface));
+  --line-strong: color-mix(in srgb, var(--ink) 26%, var(--surface));
+  --surface-2: color-mix(in srgb, var(--ink) 5%, var(--surface));
+  --content-well: color-mix(in srgb, var(--bg) 65%, var(--surface));
+  --content-hover: color-mix(in srgb, var(--accent) 4%, var(--surface));
+  --content-shadow: 0 2px 9px color-mix(in srgb, var(--ink) 3%, transparent);
+  --content-lift: 0 7px 20px color-mix(in srgb, var(--ink) 7%, transparent);
+}
+#app > main > section:not(#view-home, #view-session) {
+  width: 100%; max-width: 1440px; margin-inline: auto;
+}
+#app > main :is(.resource-head, .models-head, .pool-header, .console-insight-head, .dash-heading, .traffic-head, .asset-intel-head) {
+  margin-bottom: 28px; gap: 16px 24px;
+}
+#app > main :is(.resource-head, .models-head, .pool-header, .console-insight-head, .dash-heading, .traffic-head, .asset-intel-head) h2 {
+  font-size: var(--page-title-size); font-weight: 650; letter-spacing: -.015em;
+  line-height: var(--heading-leading);
+}
+#app > main :is(.resource-head, .models-head, .pool-header, .console-insight-head, .dash-heading, .traffic-head, .asset-intel-head) p {
+  max-width: 76ch; line-height: 1.8;
+}
+/* 小亮线承担呼吸感，正文和数据保持静止；不添加额外 DOM 或模型上下文。 */
+#app > main :is(.resource-head, .models-head, .pool-header, .console-insight-head, .dash-heading, .traffic-head, .asset-intel-head) h2::after {
+  content: ""; display: block; width: 24px; height: 2px; margin-top: 10px;
+  border-radius: 2px; background: var(--accent); opacity: .5; transform-origin: left;
+}
+#app > main :is(.card, .pfolder, .acard, .resource-item, .exp-card, .exp-history,
+    .browser-account-card, .asset-intel-card, .schedule-form, .schedule-card, .asset-campaign-card,
+    .asset-collection-detail, .dash-stat, .dash-panel, .session-hub-link) {
+  box-shadow: var(--content-shadow);
+}
+#app > main :is(.pfolder, .acard, .exp-card, .browser-account-card, .schedule-form, .schedule-card) {
+  padding: 22px;
+}
+#app > main :is(.projects-grid, .agrid, .session-hub-grid) { gap: 20px; }
+#app > main :is(#view-skill, #view-mcp) .resource-list { gap: 20px; }
+#app > main :is(.resource-select p, .pf-desc, .acard .desc) { line-height: 1.85; }
+
+/* 次要操作使用轻描边；主操作、危险确认和焦点继续保留明确语义。 */
+#app > main .btn { border-radius: 8px; font-weight: 550; }
+#app > main .btn:not(.primary, .danger, .armed, .tinted) { border-color: var(--line); }
+#app > main .btn:not(.primary, .danger, .armed, .tinted):hover:not(:disabled) {
+  background: var(--surface-2); border-color: var(--line-strong);
+}
+#app > main :is(.icon-btn, .nb-ops-row button) { background: transparent; border-color: transparent; }
+#app > main :is(.icon-btn, .nb-ops-row button):hover:not(:disabled) { background: var(--surface-2); }
+#app > main :is(.icon-btn, .nb-ops-row button).danger:hover:not(:disabled) {
+  background: var(--bad-soft); color: var(--bad);
+}
+#app > main :is(input:not([type="checkbox"], [type="radio"]), textarea, select, .selx-btn) {
+  transition: background-color var(--motion-fast), border-color var(--motion-fast),
+    box-shadow var(--motion-base) var(--motion-ease);
+}
+#app > main :is(input:not([type="checkbox"], [type="radio"]), select, .selx-btn):hover:not(:disabled) {
+  border-color: var(--line-strong);
+}
+#app > main :is(input, textarea, select, .selx-btn):not(:where(.side-chat-compose textarea)):focus-visible {
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+#app > main :is(.tag, .resource-badge, .exp-ins-tag, .exp-hist-badge, .pf-ro) {
+  border-color: transparent; background: var(--surface-2); font-weight: 500;
+}
+#app > main .tag.blue { background: var(--accent-soft); }
+#app > main :is(.tag.green, .exp-hist-badge.ok) { background: var(--ok-soft); }
+#app > main :is(.tag.red, .exp-hist-badge.bad) { background: var(--bad-soft); }
+#app > main .tag.gold { background: var(--gold-soft); }
+#app > main .tag.orange { background: var(--warn-soft); }
+#app > main .resource-chip { border-color: transparent; background: var(--surface-2); }
+#app > main .resource-chip.on { background: var(--accent-soft); color: var(--accent-ink); }
+
+/* 一家供应商是一组，不再给每一行模型单独套框。 */
+#app > main .naming-box { padding: 22px; gap: 16px; box-shadow: var(--content-shadow); }
+#app > main .nb-chain li { border: 0; background: var(--content-well); padding: 10px 12px; }
+#app > main .nb-idx { color: var(--accent-ink); }
+#app > main .nb-pool { gap: 8px; }
+#app > main .nb-chip {
+  border: 1px solid transparent; border-radius: 7px; padding: 7px 10px;
+  background: var(--content-well); font-family: var(--font-body);
+}
+#app > main .nb-chip b { font: 550 12px/1.6 var(--mono); }
+#app > main .nb-prov { font: 10.5px/1.6 var(--font-body); }
+#app > main .nb-chip.on { background: var(--accent-soft); color: var(--accent-ink); opacity: .65; }
+#app > main .nb-chip:hover:not(:disabled) { background: var(--accent-soft); border-color: transparent; }
+#app > main .pblock {
+  padding: 22px; margin-top: 24px; background: var(--surface);
+  border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--content-shadow);
+}
+#app > main .pb-head { padding-bottom: 18px; border-bottom: 0; align-items: center; }
+#app > main .pb-url { margin-top: 8px; }
+#app > main .model-list { margin-top: 0; gap: 0; }
+#app > main .model-row {
+  border: 0; border-radius: 8px; padding: 18px 14px;
+  background: transparent; box-shadow: none; transform: none;
+}
+#app > main .model-row + .model-row { border-top: 1px solid var(--line); border-top-left-radius: 0; border-top-right-radius: 0; }
+#app > main .model-row:hover { background: var(--content-well); box-shadow: none; }
+#app > main .model-row .mt-id b { font-size: 14px; }
+#app > main .model-row .mt-ops { gap: 4px; }
+#app > main .model-row .mt-ops button { padding-inline: 7px; white-space: nowrap; }
+#app > main .model-list .ghost-tile {
+  margin-top: 12px; border: 0; border-radius: 8px;
+  min-height: 40px; background: var(--content-well); color: var(--ink-2);
+}
+#app > main .model-list .ghost-tile:hover { background: var(--accent-soft); color: var(--accent-ink); }
+
+/* 输出、用量和工具明细使用浅底承接，保留滚动与展开的原有边界。 */
+#app > main .asset-collection-toolbar {
+  padding: 16px 18px; margin: 0 0 16px; gap: 16px 20px;
+  background: var(--content-well); border-radius: var(--radius);
+}
+#app > main .asset-collection-workspace { gap: 22px; }
+#app > main .asset-collection-detail { padding: 22px; }
+#app > main .asset-campaign-card { padding: 18px; }
+#app > main .asset-campaign-card.selected {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+  box-shadow: inset 3px 0 var(--accent), var(--content-shadow);
+}
+#app > main :is(.asset-usage, .asset-output-log) {
+  border: 0; border-radius: 8px; background: var(--content-well);
+}
+#app > main .asset-usage { padding: 16px; }
+#app > main .asset-usage dl { gap: 14px 28px; }
+#app > main .asset-output-log { padding: 20px; }
+#app > main .asset-command-block { border: 0; background: var(--surface); }
+#app > main .asset-command-block summary { padding-block: 10px; }
+#app > main .asset-command-block summary:hover { background: var(--accent-soft); }
+#app > main .pool-rail { background: var(--content-well); }
+#app > main .pool-node { background: var(--content-well); border-color: transparent; }
+#app > main .pool-node.selected { border-color: var(--accent); background: var(--accent-soft); }
+#app > main .dash-health { border: 0; background: var(--content-well); }
+#app > main .dash-toolbar { border-color: transparent; background: var(--content-well); padding: 8px; }
+#app > main .traffic-coverage { background: var(--content-well); border-radius: 0 8px 8px 0; }
+
+/* 主导航是一条完整的轻底板，次级入口不再重复画整条分割线。 */
+#app > main #view-session .session-navigation {
+  background: var(--content-well); border: 0; border-radius: 9px; padding: 5px 8px; gap: 12px;
+}
+#app > main #view-session .session-navigation #s-tabs { gap: 4px; }
+#app > main #view-session .session-navigation #s-tabs button {
+  padding: 8px 12px; border-radius: 7px;
+}
+#app > main #view-session .session-navigation #s-tabs button::after { display: none; }
+#app > main #view-session .session-navigation #s-tabs button.on {
+  background: var(--surface); box-shadow: var(--content-shadow); color: var(--accent-ink);
+}
+#app > main #view-session .session-navigation #s-tabs button:hover:not(.on) { background: var(--surface-2); }
+#app > main .session-secondary { border: 0; margin-top: 6px; margin-bottom: 12px; }
+#app > main .session-secondary > div { gap: 6px; }
+#app > main .session-secondary button { padding: 8px 10px; border-radius: 7px; }
+#app > main .session-secondary button.on { background: var(--accent-soft); }
+#app > main .session-secondary button.on::after { display: none; }
+#app > main .session-secondary button:hover:not(.on) { background: var(--content-well); }
+#app > main .session-hub-link { padding: 24px; gap: 12px; }
+#app > main .session-record-summary { border-bottom: 0; padding: 12px 16px; background: var(--content-well); border-radius: 8px; }
+#app > main :is(.skill-status-groups, .pd-tabs) { gap: 6px; }
+#app > main .skill-status-groups { border: 0; }
+#app > main .skill-status-groups button { padding: 8px 12px; border: 0; border-radius: 7px; font-size: 13px; }
+#app > main .skill-status-groups button[aria-pressed="true"] { background: var(--accent-soft); }
+#app > main .skill-status-groups button b { border-color: transparent; background: transparent; }
+#app > main .skill-status-groups button:hover { background: var(--content-well); }
+
+/* 动作反馈集中在实际可操作的区域，而非让整页容器漂浮。 */
+#app > main :is(.pfolder, .acard, .resource-item, .session-hub-link, .nb-chip,
+    .model-row, .pool-node, .skill-status-groups button, .session-secondary button,
+    .icon-btn, .nb-ops-row button, .asset-command-block summary) {
+  transition: background-color var(--motion-fast), border-color var(--motion-fast),
+    color var(--motion-fast), box-shadow var(--motion-base) var(--motion-ease),
+    transform var(--motion-base) var(--motion-ease);
+}
+#app > main :is(.pfolder, .acard, .session-hub-link):hover,
+#app > main :is(#view-skill, #view-mcp) .resource-item:hover {
+  border-color: color-mix(in srgb, var(--accent) 22%, var(--line));
+  box-shadow: var(--content-lift); background: var(--content-hover);
+}
+#app > main :is(.pfolder, .acard, .session-hub-link):focus-within,
+#app > main :is(#view-skill, #view-mcp) .resource-item:focus-within {
+  border-color: var(--line-strong);
+}
+@media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+  :root:not([data-motion="off"]) #app > main :is(.pfolder, .session-hub-link):hover {
+    transform: translateY(-3px);
+  }
+  :root:not([data-motion="off"]) #app > main :is(#view-skill, #view-mcp) .resource-item:hover {
+    transform: translateY(-3px);
+  }
+  :root:not([data-motion="off"]) #app > main :is(.nb-chip, .icon-btn):not(:disabled):active {
+    transform: translateY(1px) scale(.97);
+  }
+}
+/* 桌面窄窗口内优先给标题与操作留空间，不缩小正文或隐藏入口。 */
+@media (max-width: 1100px) {
+  #app > main #view-session .session-navigation { flex-wrap: wrap; }
+  #app > main #view-session .session-navigation #s-tabs { flex-basis: 100%; }
+  #app > main .pblock { padding: 18px; }
+}

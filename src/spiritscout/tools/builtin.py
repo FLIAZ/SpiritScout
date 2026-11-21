@@ -393,6 +393,19 @@ async def http_probe(
         "content_type": str(final_headers.get("content-type") or "").split(";", 1)[0].lower(),
         "body_sha256": hashlib.sha256(content).hexdigest(),
     }
+    proxy_failure = (bool(proxy_env) and final_status == 502
+                     and final_headers.get("x-spiritscout-proxy-error") == "UpstreamRequestError")
+    if proxy_failure:
+        parsed["response_source"] = "session_proxy"
+        parsed["upstream_status_code"] = None
+        parsed["http_failure"] = {
+            "error_type": "UpstreamRequestError", "phase": "proxy_upstream",
+            "timed_out": final_headers.get("x-spiritscout-proxy-timeout") == "true",
+            "method": method.upper(), "request_state": "unknown",
+            "status_code": None, "proxy_status_code": final_status,
+            "completed_redirects": len(redirect_chain),
+            "guidance": "录制代理访问上游失败，目标是否收到请求或执行操作未知；不能据此认定目标站返回 502，不自动重放或切换出口。",
+        }
     if workspace_root:
         from spiritscout.tools.http_responses import save_response
 
@@ -430,6 +443,12 @@ async def http_probe(
             "若已授权测试平台下发的题目靶机，其返回地址属于该任务范围，无需重复确认。"
             "仅在目标确实超出已有授权或边界不清时用 ask_user 确认。"
             "危险操作仍须按独立审批通道处理。")
+    if proxy_failure:
+        return ToolResult(tool="http_probe", ok=False, returncode=-2,
+                          error=parsed["http_failure"]["guidance"],
+                          parsed=redact_injected(parsed), stdout=redact_injected(body),
+                          timed_out=parsed["http_failure"]["timed_out"],
+                          duration_ms=(time.perf_counter() - started) * 1000)
     return ToolResult(
         tool="http_probe", ok=True, returncode=0,
         stdout=redact_injected(body), parsed=redact_injected(parsed),
@@ -707,27 +726,27 @@ BUILTIN_SPECS: dict[str, ToolSpec] = {
     "http_probe": ToolSpec(
         name="http_probe", kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY, reuse_ttl_seconds=30,
         description="HTTP 探测（任意 HTTP 方法，范围标注 + 限速 + 结构化解析）",
-        target_params=("url",), scope_required=True),
+        target_params=("url",), required_params=("url",), scope_required=True),
     "dns_resolve": ToolSpec(
         name="dns_resolve", kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY, reuse_ttl_seconds=30,
         description="DNS 解析（A/AAAA/PTR，范围标注 + 限速）",
-        target_params=("host",), scope_required=True),
+        target_params=("host",), required_params=("host",), scope_required=True),
     # 端口扫描：SRC/渗透赛测绘面（CTF 模式 C7 不装配该角色，模式层排除）
     "tcp_scan": ToolSpec(
         name="tcp_scan", kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY, reuse_ttl_seconds=10,
         description="TCP 端口扫描（连接级探测 + 服务横幅，范围标注 + 限速 + 并发上限）",
-        target_params=("host",), scope_required=True),
+        target_params=("host",), required_params=("host",), scope_required=True),
     "file_analyze": ToolSpec(
         name="file_analyze", kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY,
         description="本地文件分析（魔数/字符串/熵，仅限 allowed_dirs）",
         target_params=()),
     # 沙箱执行：风险定级按「对目标的行为」判——它本身不侵入目标，脚本内容
-    # 做什么由沙箱边界（整机只读 + 主目录遮蔽 + 工作区可写）与审计约束；
+    # 做什么由沙箱边界（整机只读 + 控制面遮蔽 + sandbox/artifacts 可写）与审计约束；
     # 工具只暴露给 CTF 方向 Agent 的目录，常规渗透模式不下发。
     "sandbox_exec": ToolSpec(
         name="sandbox_exec", kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY,
         action_required=True,
-        description="沙箱执行（bwrap：整机只读 + 主目录遮蔽 + 工作区可写）",
+        description="沙箱执行（bwrap：控制面和附件只读，仅本题 workdir/artifacts 可写）",
         target_params=()),
 }
 
@@ -748,4 +767,5 @@ async def asset_memory_lookup(host: str, query: str = "", offset: int = 0, *, gu
 
 BUILTIN_SPECS["asset_memory_lookup"] = ToolSpec(
     name="asset_memory_lookup", kind=ToolKind.BUILTIN, description="只读跨会话资产历史，按需复核时效",
-    allowed_params={"host", "query", "offset"}, target_params=("host",), risk=RiskLevel.READONLY)
+    allowed_params={"host", "query", "offset"}, required_params=("host",),
+    target_params=("host",), risk=RiskLevel.READONLY)

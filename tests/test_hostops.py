@@ -5,8 +5,12 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-from spiritscout.agents.hostops.agent import PortScanAgent, PostExploitAgent
-from spiritscout.core.models import AgentType, Task
+from spiritscout.agents.hostops.agent import (
+    HostVulnAgent,
+    PortScanAgent,
+    PostExploitAgent,
+)
+from spiritscout.core.models import AgentType, RunMode, Task
 from spiritscout.tools.spec import ToolResult
 
 
@@ -63,6 +67,14 @@ class PortScanPlanningTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(plans[0].steps[0]["ports"], [6379])
         self.assertIn("黑板已有 service 观察", plans[0].steps[0]["basis"]["6379"][0])
+
+    async def test_model_can_explore_authorized_host_without_existing_service(self):
+        agent = self.agent()
+        agent._llm_chat_json.return_value = {
+            "ports": [{"port": 8443, "basis": ["用户要求发现该授权主机的其他 Web 服务"]}],
+        }
+        plans = await agent.plan_routes(self.task("example.test"))
+        self.assertEqual(plans[0].steps[0]["ports"], [8443])
 
     async def test_no_evidence_finishes_without_calling_tcp_scan(self):
         agent = self.agent()
@@ -147,3 +159,14 @@ class PostExploitPortTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostServiceInvestigationTests(unittest.TestCase):
+    def test_src_host_role_can_investigate_without_precollected_service(self):
+        agent = object.__new__(HostVulnAgent)
+        agent.ctx = SimpleNamespace(policy=SimpleNamespace(mode=RunMode.SRC), blackboard=_Blackboard())
+        task = Task(task_id="service", task_type="host_probe", target="fixture.test", agent_type=AgentType.HOST_VULN)
+        routes = agent.route_templates(task)
+        self.assertEqual(len(routes), 1)
+        self.assertEqual(routes[0].steps, [{"action": "investigate"}])
+        self.assertEqual(routes[0].name, "service_investigation")

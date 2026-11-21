@@ -14,7 +14,7 @@ from spiritscout.tools.spec import ToolKind, ToolResult, ToolSpec
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 SPEC = ToolSpec(name="view_image", kind=ToolKind.BUILTIN,
     description="读取会话图片并用当前角色模型查看内容，保存实际输入快照供在线预览。",
-    allowed_params={"path", "question"}, automatic_replay=False)
+    allowed_params={"path", "question"}, required_params=("path",), automatic_replay=False)
 SCHEMA = {"type": "function", "function": {"name": "view_image", "description": SPEC.description,
     "parameters": {"type": "object", "properties": {
         "path": {"type": "string", "description": "附件、工作目录或 artifacts 内的本地图片路径"},

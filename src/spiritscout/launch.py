@@ -29,10 +29,12 @@ class LaunchRequest:
     mode: RunMode | None = None
     target: str | None = None
     extra_scope: list[str] = field(default_factory=list)
+    excluded_assets: list[str] = field(default_factory=list)
     platform: str | None = None
     allow_sensitive: bool = False
     rps: float = 10.0
     flag_format: str | None = None
+    generate_wp: bool = False
     multiple_answers: bool = False
     ctf_type_hints: list[str] = field(default_factory=list)
     ctf_type_note: str = ""
@@ -56,6 +58,7 @@ class LaunchPlan:
     flag_patterns: list[str] | None
     mission: str = ""                       # 任务意图原文（喂主 Agent 规划）
     platform_profile: dict | None = None    # 平台档案（含凭据；对运行时直供）
+    generate_wp: bool = False               # 智能体模式结束后按普通 CTF 生成 WP
     mode_auto: bool = False                 # 智能模式：待 LLM 路由复核
     needs_mode_routing: bool = False        # 输入未明确声明模式时才需要 LLM 语义裁决
     source_request: LaunchRequest | None = None  # 重建计划用（LLM 改判时）
@@ -123,6 +126,13 @@ def extract_targets(mission: str) -> tuple[list[str], list[str]]:
         if not _mention_is_excluded(text, *match.span()) and value not in domains:
             domains.append(value)
     return urls, domains
+
+
+def _wildcard_url_domain(value: str) -> str:
+    """通配符 URL 只表达子域集合，不能成为可直接请求的 URL 前缀。"""
+    parsed = urlparse(value)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    return host if host.startswith("*.") else ""
 
 
 def parse_challenges_yaml(text: str) -> list[dict]:
@@ -224,6 +234,7 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
     """
     mission = (req.mission or "").strip()
     m_urls, m_domains = extract_targets(mission)
+    inferred_wildcard_domain = ""
     mode_auto = req.mode is None
     # 智能模式下模式与意图一律交由 LLM 路由裁决——声明词正则只在模型
     # 不可用时作兜底参考（fallback_guess），不在运行期代替模型决策
@@ -235,6 +246,7 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
     elif mission and not req.target and m_domains and req.mode != RunMode.AWDP:
         # 任务中已有纯域名时补齐工作入口；无目标的 SRC 则保留空值。
         # AWDP 修补只认附件，任务文本里的文件名（如 fix.tar.gz）不是目标。
+        inferred_wildcard_domain = m_domains[0] if m_domains[0].startswith("*.") else ""
         req = LaunchRequest(**{**req.__dict__,
                                "target": "https://" + m_domains[0].removeprefix("*.")})
     challenges = (parse_challenges_yaml(req.challenges_yaml)
@@ -294,15 +306,24 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
         except ValueError as exc:
             raise SpiritScoutError(f"平台档案校验失败: {exc}") from exc
 
-    # 授权范围：默认限定目标 URL 前缀（最小授权原则）；extra_scope 可追加
-    allowed_urls = [req.target.rstrip("/")] if req.target else []
+    # 授权范围：确定性 URL/域名采用封闭范围；通配符 URL 仅转换为子域范围，
+    # 不把 apex 根域或同组织其他域名隐式加入测试目标。
+    target_wildcard = (_wildcard_url_domain(req.target) if req.target else "") \
+        or inferred_wildcard_domain
+    allowed_urls = ([req.target.rstrip("/")] if req.target and not target_wildcard else [])
     allowed_domains: list[str] = []
+    if target_wildcard:
+        allowed_domains.append(target_wildcard)
     for extra in req.extra_scope:
-        (allowed_urls if extra.startswith(("http://", "https://"))
-         else allowed_domains).append(extra)
+        wildcard = _wildcard_url_domain(extra) if extra.startswith(("http://", "https://")) else ""
+        (allowed_domains if wildcard else allowed_urls if extra.startswith(("http://", "https://"))
+         else allowed_domains).append(wildcard or extra)
     # 任务意图提取出的目标并入授权范围（用户原话即授权边界）
     for u in m_urls:
-        if u not in allowed_urls:
+        wildcard = _wildcard_url_domain(u)
+        if wildcard and wildcard not in allowed_domains:
+            allowed_domains.append(wildcard)
+        elif not wildcard and u not in allowed_urls:
             allowed_urls.append(u)
     for d in m_domains:
         if d not in allowed_domains:
@@ -321,7 +342,11 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
 
     # 赛方原始规则只传入模型上下文，不编译为后端禁打列表。
     scope = Scope(
+        scope_mode="hybrid" if req.mode == RunMode.SRC else "explicit",
+        organization_domains=list(allowed_domains) if req.mode == RunMode.SRC else [],
         allowed_domains=allowed_domains, allowed_urls=allowed_urls,
+        denied=list(dict.fromkeys(req.excluded_assets)),
+        excluded_assets=list(dict.fromkeys(req.excluded_assets)),
         testing_rules=(req.rules_yaml or "") if rules is not None else "",
         max_requests_per_second=req.rps,
         allow_sensitive_actions=req.allow_sensitive,
@@ -334,7 +359,8 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
     # 授权范围取第一个 URL/域名；未知时保留空值，交给模型规划和澄清，
     # 不填入 CTF 占位符 "ctf://challenges"。
     # 多域目标由规划节点各自指定 target（见 MasterAgent._task_target）。
-    target = req.target or ""
+    target = ("https://" + target_wildcard.removeprefix("*.")
+              if target_wildcard else req.target or "")
     if req.mode == RunMode.SRC and (
             not target or target.startswith("ctf://")):
         if allowed_urls:
@@ -357,6 +383,7 @@ def prepare_launch(req: LaunchRequest) -> LaunchPlan:
         flag_patterns=flag_patterns,
         mission=mission,
         platform_profile=platform_profile,
+        generate_wp=req.generate_wp,
         mode_auto=mode_auto,
         needs_mode_routing=needs_mode_routing,
         source_request=req if mode_auto else None,

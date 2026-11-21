@@ -1,10 +1,11 @@
 /* 参数首次展开时读取；并发合并、会话隔离，关闭的卡片不产生读取请求。 */
 const ToolParameters = (() => {
   let session = null, generation = 0, active = 0;
+  const present = element => typeof traceIsPresent === "function" ? traceIsPresent(element) : element.isConnected;
   const queue = [], cache = new Map(), waiting = new Set(), inflight = new Map();
   function reset(id) { session = id; generation++; queue.length = 0; cache.clear(); waiting.clear(); inflight.clear(); }
   function show(entry, data) {
-    if (!entry.element.isConnected || entry.session !== S.cur) return;
+    if (!present(entry.element) || entry.session !== S.cur) return;
     entry.pre.textContent = data.available ? JSON.stringify(data.parameters, null, 2) : data.reason;
     entry.element.querySelector('.ar').textContent = data.available
       ? argBrief(entry.call.name, data.parameters) : I18n.t('参数副本暂不可用');
@@ -17,7 +18,7 @@ const ToolParameters = (() => {
     while (active < 4 && queue.length) {
       const entry = queue.shift(), version = generation;
       entry.queued = false;
-      if (!entry.element.isConnected || !entry.box.open || entry.session !== session) continue;
+      if (!present(entry.element) || !entry.box.open || entry.session !== session) continue;
       active++;
       (async () => {
         const requestKey = `${version}:${entry.key}`;
@@ -39,7 +40,7 @@ const ToolParameters = (() => {
           else if (data.retryable !== false && entry.attempts < 3 && !TERMINAL.has(S.state?.session?.status)) waiting.add(entry);
           show(entry, data);
         } catch (error) {
-          if (version === generation && entry.session === session && entry.element.isConnected) {
+          if (version === generation && entry.session === session && present(entry.element)) {
             entry.pre.textContent = I18n.t`参数读取失败：${error.message}。收起后重新展开可重试。`;
           }
         } finally { inflight.delete(requestKey); active--; drain(); }
@@ -64,10 +65,10 @@ const ToolParameters = (() => {
     });
   }
   function refresh() {
-    for (const entry of waiting) { waiting.delete(entry); if (entry.element.isConnected) enqueue(entry); }
+    for (const entry of waiting) { waiting.delete(entry); if (present(entry.element)) enqueue(entry); }
   }
   function prune() {
-    for (const entry of waiting) if (!entry.element.isConnected) waiting.delete(entry);
+    for (const entry of waiting) if (!present(entry.element)) waiting.delete(entry);
   }
   return {reset,attach,refresh,prune};
 })();

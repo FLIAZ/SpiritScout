@@ -99,6 +99,40 @@ class UsageStorageTests(unittest.TestCase):
             self.assertEqual(ledger.read()["used_tokens"], 140)
             self.assertEqual(ledger.read()["calls"], 20)
 
+    def test_summary_matches_full_snapshot_and_keeps_history_private(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "usage.json"
+            legacy = json.dumps({"used_tokens": 12, "calls": 1, "call_series": [
+                {"ts": 1, "model": "fixture", "tokens": 12, "input_tokens": 10,
+                 "output_tokens": 2, "cached_input_tokens": 8}]})
+            for use_ledger in (False, True):
+                with self.subTest(ledger=use_ledger):
+                    path.write_text(legacy)
+                    ledger = UsageLedger(path.with_suffix('.db'), path) if use_ledger else None
+                    full = read_usage(path)
+                    selected = frozenset({"tokens", "context_parts"})
+                    projected = read_usage(path, call_fields=selected)
+                    self.assertEqual(projected, {**full, 'call_series': [
+                        {k: v for k, v in row.items() if k in selected} for row in full['call_series']]})
+                    projected['call_series'][0]['context_parts']['changed'] = 1
+                    self.assertEqual(read_usage(path), full, '投影不能改写底层调用缓存')
+                    summary = read_usage(path, include_calls=False)
+                    self.assertEqual(summary, {k: v for k, v in full.items() if k != 'call_series'})
+                    self.assertEqual(summary['cache']['hit_rate'], .8)
+                    summary['cache']['groups'].clear()
+                    summary['per_model_tokens']['fixture'] = 999
+                    self.assertEqual(read_usage(path), full, '摘要调用方不能改写缓存或明细')
+                    if ledger:
+                        ledger.append({"call_id": "new", "ts": 2, "model": "fixture", "tokens": 5,
+                                       "input_tokens": 4, "output_tokens": 1, "cached_input_tokens": 2})
+                    else:
+                        replacement = path.with_suffix('.tmp')
+                        replacement.write_text('{"used_tokens":99}')
+                        replacement.replace(path)
+                    updated = read_usage(path)
+                    self.assertEqual(read_usage(path, include_calls=False),
+                                     {k: v for k, v in updated.items() if k != 'call_series'})
+
 
 class ResourceImportPerformanceTests(unittest.TestCase):
     def test_unchanged_import_is_empty_then_reads_only_new_versions_and_full_repair(self) -> None:

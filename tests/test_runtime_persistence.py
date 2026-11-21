@@ -4,19 +4,30 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from spiritscout.agents.master.agent import MasterAgent, MasterContext
+from spiritscout.agents.master.dag import TaskDAG
 from spiritscout.agents.sub.base import RoutePlan, StepResult, SubAgent, SubAgentContext
 from spiritscout.blackboard import Blackboard, ConvergenceEngine
 from spiritscout.bus.inprocess import InProcessBus
 from spiritscout.core.exceptions import ConfigurationError
-from spiritscout.core.models import AgentType, Authorization, RunMode, Scope
+from spiritscout.core.models import (
+    AgentType,
+    Authorization,
+    BlackboardLayer,
+    RunMode,
+    Scope,
+    TaskStatus,
+)
 from spiritscout.policy.engine import PolicyEngine
 from spiritscout.policy.scope import ScopeGuard
 from spiritscout.tools.executor import LocalExecutor
@@ -135,6 +146,72 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ConfigurationError):
             ExecutionJournal(self.bb, self.root, "new")
         self.assertFalse((self.root / "execution.key").exists())
+
+    async def test_master_resume_preserves_dag_and_route_refs_without_replaying(self) -> None:
+        challenge = {'id': 'c1', 'title': 'fixture'}
+        dag = TaskDAG()
+        node = dag.upsert_from_plan([{'tactic': 'CTF-WEB', 'title': '保留调查',
+                                     'meta': {'challenge': challenge}}], 3).created[0]
+        dag.attach_task(node.node_id, 'old-task')
+        dag.mark(node.node_id, TaskStatus.RUNNING)
+        self.bb.write(BlackboardLayer.TASK_STATE, 'old-task',
+                      {'task': {'status': 'cancelled'}, 'routes': [{'route_id': 'old-route', 'name': 'solve'}]})
+        self.journal.checkpoint('master', 'master', 'before_dispatch',
+            {'target': 'local://fixture', 'dag': dag.to_dict(), 'round_no': 3,
+             'round_views': [{'round': 2}], 'tasks_dispatched': [{'task': 'old-task'}]})
+        observed = []
+        master = MasterAgent(MasterContext(bus=SimpleNamespace(), blackboard=self.bb,
+            convergence=SimpleNamespace(), gateway=SimpleNamespace(), policy=SimpleNamespace(), agents={},
+            enable_llm_planning=False, journal=self.journal,
+            extra={'execution_recovery': {'checkpoint': {'target': 'local://fixture'}}}))
+        from spiritscout.core.audit import AuditLogger
+
+        master.ctx.audit = AuditLogger(self.root / 'audit.jsonl')
+
+        async def segment(state):
+            observed.append(state)
+            return {**state, 'continue_iteration': False, 'stop_reason': '本轮只核对恢复状态'}
+
+        master._run_segment = segment
+        await master.run(Authorization(auth_id='new-auth', mode=RunMode.CTF,
+                                      scope=Scope(local_analysis=True)), 'local://fixture')
+        restored = observed[0]
+        self.assertEqual(restored['round_no'], 3)
+        self.assertEqual(restored['round_views'], [{'round': 2}])
+        self.assertEqual(restored['tasks_dispatched'], [], '不重放旧派工包')
+        self.assertTrue(restored['replan_requested'])
+        restored_dag = TaskDAG.from_dict(restored['dag'])
+        self.assertEqual(restored_dag.all_nodes()[0].status, TaskStatus.CANCELLED)
+        refs = master._conversation_refs(restored_dag)
+        self.assertEqual(refs, [{'node_id': node.node_id, 'challenge_id': 'c1',
+                                'task_id': 'old-task', 'route_id': 'old-route', 'name': 'solve'}])
+        self.assertEqual(self.journal.list_recent(), [], '恢复理解不执行历史工具')
+
+    async def test_planning_uses_new_input_before_applying_an_inflight_decision(self) -> None:
+        from spiritscout.core.audit import AuditLogger
+        from spiritscout.gateway.world_state import record_user_statement
+
+        master = MasterAgent(MasterContext(bus=SimpleNamespace(), blackboard=self.bb,
+            convergence=SimpleNamespace(), gateway=SimpleNamespace(), policy=SimpleNamespace(), agents={},
+            audit=AuditLogger(self.root / 'audit.jsonl'), journal=self.journal))
+        record_user_statement(self.bb, {'kind': 'message', 'statement_id': 'original', 'text': '原方向'})
+        count = 0
+
+        async def planning(state):
+            nonlocal count
+            count += 1
+            if count == 1:
+                record_user_statement(self.bb, {'kind': 'message', 'statement_id': 'updated', 'text': '新方向'})
+                return {'dag_nodes': [{'tactic': 'OLD'}]}
+            return {'dag_nodes': [{'tactic': 'NEW'}]}
+
+        master._llm_plan = planning
+        plan, source = await master._acquire_plan({'round_no': 0})
+        self.assertEqual(plan['dag_nodes'], [{'tactic': 'NEW'}])
+        self.assertEqual(count, 2)
+        self.assertEqual(source, 'llm')
+        await master._acquire_plan({'round_no': 0})
+        self.assertEqual(count, 3, '没有新输入时不额外重复模型请求')
 
     async def test_master_and_route_checkpoint_real_cli_and_reducer_state(self) -> None:
         bus = InProcessBus()
@@ -282,6 +359,128 @@ class JournalMigrationTests(unittest.TestCase):
 
 
 class InfraLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _config(root: Path):
+        from spiritscout.config.settings import SystemConfig, WorkspaceConfig
+
+        cfg = SystemConfig(workspace=WorkspaceConfig(root=str(root)),
+                           audit_log_path=str(root / "audit.jsonl"))
+        cfg.blackboard.sqlite_path = str(root / "bb.db")
+        cfg.knowledge.sqlite_path = str(root / "kb.db")
+        return cfg
+
+    async def test_repeated_close_cancellation_waits_for_real_cleanup(self) -> None:
+        from spiritscout.config.settings import ModelEntry
+        from spiritscout.runtime import _build_infra
+        from spiritscout.tools.background import Job, active_jobs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "session"
+            auth = Authorization(auth_id="local", mode=RunMode.CTF,
+                                 scope=Scope(local_analysis=True), human_confirmed=True)
+            infra = await _build_infra(self._config(root), [ModelEntry(model="fixture", provider="mock")], auth)
+            infra.outcome = "cancelled"
+            closing_started, release = asyncio.Event(), asyncio.Event()
+
+            async def worker():
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    closing_started.set()
+                    await release.wait()
+
+            worker_task = asyncio.create_task(worker())
+            await asyncio.sleep(0)
+            infra.tools.background_jobs.jobs["fixture"] = Job("fixture", "route", task=worker_task)
+            client = SimpleNamespace(close=AsyncMock())
+            infra.mcp_clients.append(client)
+            closing = asyncio.create_task(infra.close())
+            other = None
+            try:
+                await asyncio.wait_for(closing_started.wait(), 2)
+                for _ in range(2):
+                    closing.cancel()
+                    await asyncio.sleep(0)
+                    self.assertFalse(closing.done())
+                other = asyncio.create_task(infra.close())
+                contender = ExecutionRunLock(root, root / "bb.db")
+                with self.assertRaises(ConfigurationError):
+                    contender.acquire()
+                self.assertTrue(infra.run_lock.owned)
+                client.close.assert_not_awaited()
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await closing
+                await other
+                self.assertTrue(worker_task.done())
+                self.assertIsNone(active_jobs(root))
+                self.assertFalse(infra.run_lock.owned)
+                client.close.assert_awaited_once()
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    infra.blackboard.count(BlackboardLayer.TASK_STATE)
+                contender.acquire()
+                contender.close()
+                self.assertEqual(read_recovery_view(root / "bb.db")["runs"][0]["status"], "cancelled")
+            finally:
+                release.set()
+                pending = [closing] if other is None else [closing, other]
+                await asyncio.gather(*pending, return_exceptions=True)
+                await infra.close()
+
+    async def test_background_close_error_does_not_skip_connections_or_lock(self) -> None:
+        from spiritscout.config.settings import ModelEntry
+        from spiritscout.runtime import _build_infra
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            auth = Authorization(auth_id="local", mode=RunMode.CTF,
+                                 scope=Scope(local_analysis=True), human_confirmed=True)
+            infra = await _build_infra(self._config(root), [ModelEntry(model="fixture", provider="mock")], auth)
+            client = SimpleNamespace(close=AsyncMock())
+            infra.mcp_clients.append(client)
+            jobs = infra.tools.background_jobs
+            original_close = jobs.aclose
+            jobs.aclose = AsyncMock(side_effect=RuntimeError("background close failed"))
+            try:
+                for _ in range(2):
+                    with self.assertRaisesRegex(RuntimeError, "background close failed"):
+                        await infra.close()
+                jobs.aclose.assert_awaited_once()
+                client.close.assert_awaited_once()
+                self.assertFalse(infra.run_lock.owned)
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    infra.blackboard.count(BlackboardLayer.TASK_STATE)
+            finally:
+                await original_close()
+
+    async def test_early_initialization_errors_close_open_knowledge(self) -> None:
+        from spiritscout.config.settings import ModelEntry
+        from spiritscout.knowledge import KnowledgeStore
+        from spiritscout.runtime import _build_infra
+
+        for stage in ("resources", "vault", "mcp_config"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                cfg = self._config(root)
+                auth = Authorization(auth_id="local", mode=RunMode.CTF,
+                                     scope=Scope(local_analysis=True), human_confirmed=True)
+                knowledge = KnowledgeStore(cfg.knowledge.sqlite_path, auto_seed=False)
+                if stage == "resources":
+                    (root / "resources").write_text("not a directory")
+                    failure = nullcontext()
+                else:
+                    target = ("spiritscout.web.vault.configure" if stage == "vault" else
+                              "spiritscout.resources.store.ResourceStore.effective_mcp")
+                    failure = patch(target, side_effect=OSError("initialization failed"))
+                try:
+                    with patch("spiritscout.infrastructure.KnowledgeStore", return_value=knowledge), failure:
+                        with self.assertRaises(OSError):
+                            await _build_infra(cfg, [ModelEntry(model="fixture", provider="mock")], auth)
+                    with self.assertRaises(sqlite3.ProgrammingError):
+                        knowledge._conn.execute("SELECT 1")
+                finally:
+                    knowledge.close()
+
     async def test_concurrent_runtime_start_is_rejected_and_clean_close_releases_owner(self) -> None:
         from spiritscout.config.settings import (
             ModelEntry,

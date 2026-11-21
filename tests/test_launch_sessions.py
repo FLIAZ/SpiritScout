@@ -153,8 +153,16 @@ class LaunchRoutingTests(unittest.TestCase):
         self.assertEqual(plan.target, "https://vulbox.com")
         self.assertIn("*.vulbox.com", plan.authorization.scope.allowed_domains)
         guard = ScopeGuard(plan.authorization.scope)
-        self.assertTrue(guard.is_allowed("https://vulbox.com/"))
+        self.assertFalse(guard.is_allowed("https://vulbox.com/"))
         self.assertTrue(guard.is_allowed("https://www.vulbox.com/"))
+
+    def test_src_wildcard_url_is_normalized_to_subdomain_only_scope(self) -> None:
+        plan = prepare_launch(LaunchRequest(
+            mode=RunMode.SRC, target="https://*.example.test"))
+
+        self.assertEqual(plan.target, "https://example.test")
+        self.assertEqual(plan.authorization.scope.allowed_urls, [])
+        self.assertEqual(plan.authorization.scope.allowed_domains, ["*.example.test"])
 
     def test_excluded_domains_in_mission_do_not_become_authorized_scope(self) -> None:
         plan = prepare_launch(LaunchRequest(
@@ -207,7 +215,7 @@ class ModeRouterPromptTests(unittest.IsolatedAsyncioTestCase):
                 "contest_type": "jeopardy",
                 "rationale": "智能体靶场测试是多题竞赛"},
                 ensure_ascii=False))
-            with patch("spiritscout.web.sessions._conversation_gateway",
+            with patch("spiritscout.web.session_assistant._conversation_gateway",
                        return_value=gateway):
                 mode, intent, contest_type = await _llm_route_mode(
                     cfg, models, "智能体靶场测试，多题拿分",
@@ -224,6 +232,42 @@ class ModeRouterPromptTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_delete_restores_metadata_and_can_be_retried(self) -> None:
+        from spiritscout.core.exceptions import SpiritScoutError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = SystemConfig(workspace=WorkspaceConfig(root=tmp))
+            manager = SessionManager(cfg, [])
+            workspace = manager.root / "sess-delete-retry"
+            workspace.mkdir()
+            session = Session(session_id=workspace.name, mode="ctf", target="local",
+                              workspace=workspace, status="completed", title="保留的会话")
+            manager._sessions[session.session_id] = session
+            manager._persist(session)
+            evidence = workspace / "evidence.txt"
+            evidence.write_text("private evidence")
+            resources = manager._resources()
+
+            def partial_delete(path):
+                self.assertEqual(path, workspace)
+                session.meta_path.unlink()
+                raise PermissionError("evidence is read-only")
+
+            with patch.object(resources, "remove_session", wraps=resources.remove_session) as remove:
+                with patch("spiritscout.web.sessions.shutil.rmtree", side_effect=partial_delete):
+                    with self.assertRaisesRegex(SpiritScoutError, "工作区未完成"):
+                        await manager.delete(session.session_id, confirm=True)
+                self.assertIs(manager.get(session.session_id), session)
+                self.assertTrue(evidence.is_file())
+                remove.assert_not_called()
+                restored = SessionManager(cfg, []).get(session.session_id)
+                self.assertIsNotNone(restored, "部分删除后仍能重启并重试")
+                self.assertEqual(restored.title, session.title)
+                self.assertIs(await manager.delete(session.session_id, confirm=True), session)
+                remove.assert_called_once_with(session.session_id)
+            self.assertIsNone(manager.get(session.session_id))
+            self.assertFalse(workspace.exists())
+
     async def test_pre_runtime_error_cannot_leave_session_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -460,7 +504,7 @@ class PlatformExtractionTests(unittest.IsolatedAsyncioTestCase):
             plan = prepare_launch(LaunchRequest(
                 mode=RunMode.CTF, mission=mission))
             gateway = _FakeChatGateway(reply)
-            with patch("spiritscout.web.sessions._conversation_gateway",
+            with patch("spiritscout.web.session_assistant._conversation_gateway",
                        return_value=gateway), patch(
                     "spiritscout.runtime.run_ctf_engagement",
                     new=AsyncMock(return_value=SimpleNamespace(
@@ -524,7 +568,7 @@ class PlatformExtractionTests(unittest.IsolatedAsyncioTestCase):
                 mode=RunMode.COMPETITION, mission=PLATFORM_DOC_MISSION,
                 rules_yaml="contest_type: jeopardy\n"))
             gateway = _FakeChatGateway(_EXTRACTED_PROFILE)
-            with patch("spiritscout.web.sessions._conversation_gateway",
+            with patch("spiritscout.web.session_assistant._conversation_gateway",
                        return_value=gateway), patch(
                     "spiritscout.runtime.run_competition_engagement",
                     new=AsyncMock(return_value=SimpleNamespace(
@@ -595,7 +639,7 @@ class PlatformExtractionTests(unittest.IsolatedAsyncioTestCase):
                     },
                     "challenge_fields": {"id": "id"},
                 }}), discovered)
-            with patch("spiritscout.web.sessions._conversation_gateway",
+            with patch("spiritscout.web.session_assistant._conversation_gateway",
                        return_value=gateway), patch(
                     "spiritscout.ctf.platform_discovery.discover_platform_documents",
                     new=AsyncMock(return_value=documents)) as discover_mock, patch(
@@ -613,7 +657,7 @@ class PlatformExtractionTests(unittest.IsolatedAsyncioTestCase):
                 ["https://arena.test/contest"], audit=unittest.mock.ANY)
 
     async def test_ctf_does_not_probe_entry_when_platform_doc_is_missing(self) -> None:
-        with patch("spiritscout.web.sessions._llm_discover_platform",
+        with patch("spiritscout.web.session_execution._llm_discover_platform",
                    new=AsyncMock()) as discover_mock:
             await self._run(PLAIN_CTF_MISSION, json.dumps({"platform": None}))
 
@@ -643,7 +687,7 @@ class PlatformExtractionTests(unittest.IsolatedAsyncioTestCase):
                             "contest_type": "jeopardy",
                             "rationale": "多题计分评测"}, ensure_ascii=False),
                 json.dumps({"platform": None}))
-            with patch("spiritscout.web.sessions._conversation_gateway",
+            with patch("spiritscout.web.session_assistant._conversation_gateway",
                        return_value=gateway), patch(
                     "spiritscout.runtime.run_competition_engagement",
                     new=AsyncMock(return_value=SimpleNamespace(
@@ -691,7 +735,7 @@ class SessionUsageTests(unittest.IsolatedAsyncioTestCase):
             plan = prepare_launch(LaunchRequest(
                 mode=RunMode.SRC, mission="你好",
                 target="https://example.com"))
-            with patch("spiritscout.web.sessions._conversation_gateway",
+            with patch("spiritscout.web.session_assistant._conversation_gateway",
                        fake_gateway):
                 session = await manager.create(
                     {"mode": "src", "mission": "你好",
@@ -766,7 +810,7 @@ class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
             models = [ModelEntry(model="mini", api_key="k")]
             gateway = _FakeChatGateway(json.dumps({
                 "name": "BiliBili 越权测试", "campaign": "bilibili src"}))
-            with patch("spiritscout.web.sessions._conversation_gateway",
+            with patch("spiritscout.web.session_assistant._conversation_gateway",
                        lambda *args: gateway):
                 result = await web_sessions._llm_name(
                     cfg, models, AuditLogger(cfg.audit_log_path),
@@ -802,7 +846,7 @@ class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
             agentcfg.set_naming_chain(
                 cfg.agent_models_path, ["mini", "backup"], {"mini", "backup"})
             gateway = _Picky()
-            with patch("spiritscout.web.sessions._conversation_gateway",
+            with patch("spiritscout.web.session_assistant._conversation_gateway",
                        lambda *args: gateway):
                 result = await web_sessions._llm_name(
                     cfg, [ModelEntry(model="mini", api_key="k"),
@@ -839,7 +883,7 @@ class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
             cfg = self._cfg(Path(tmp))
             agentcfg.set_naming_chain(cfg.agent_models_path, ["mini"], {"mini"})
             gateway = _Thinking()
-            with patch("spiritscout.web.sessions._conversation_gateway",
+            with patch("spiritscout.web.session_assistant._conversation_gateway",
                        lambda *args: gateway):
                 result = await web_sessions._llm_name(
                     cfg, [ModelEntry(model="mini", api_key="k")],
@@ -863,7 +907,7 @@ class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
             cfg = self._cfg(Path(tmp))
             agentcfg.set_assignment(cfg.agent_models_path, "master", "big", {"big"})
             gateway = _FakeChatGateway(json.dumps({"name": "跟随指派"}))
-            with patch("spiritscout.web.sessions._conversation_gateway",
+            with patch("spiritscout.web.session_assistant._conversation_gateway",
                        lambda *args: gateway):
                 await web_sessions._llm_name(
                     cfg, [ModelEntry(model="big", api_key="k"),
@@ -882,7 +926,7 @@ class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self._cfg(Path(tmp))
-            with patch("spiritscout.web.sessions._conversation_gateway",
+            with patch("spiritscout.web.session_assistant._conversation_gateway",
                        lambda *args: _Down()):
                 result = await web_sessions._llm_name(
                     cfg, [ModelEntry(model="mini", api_key="k")],
@@ -1037,7 +1081,7 @@ class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
                 target="https://bilibili.com"))
             gateway = _FakeChatGateway(json.dumps({
                 "name": "BiliBili 越权测试"}))
-            with patch("spiritscout.web.sessions._conversation_gateway",
+            with patch("spiritscout.web.session_assistant._conversation_gateway",
                        lambda *args: gateway):
                 session = await manager.create({
                     "mode": "src", "mission": "对 bilibili 做登录越权测试",
@@ -1085,7 +1129,7 @@ class SessionNamingTests(unittest.IsolatedAsyncioTestCase):
                 mode=RunMode.SRC, mission="对 bilibili 做登录越权测试",
                 target="https://bilibili.com"))
             gateway = _Gated()
-            with patch("spiritscout.web.sessions._conversation_gateway",
+            with patch("spiritscout.web.session_assistant._conversation_gateway",
                        lambda *args: gateway):
                 session = await manager.create({
                     "mode": "src", "mission": "对 bilibili 做登录越权测试",

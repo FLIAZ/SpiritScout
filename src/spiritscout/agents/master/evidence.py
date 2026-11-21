@@ -79,3 +79,83 @@ def check_basis(bb: Any, item: dict[str, Any], task_ids: list[str],
     # 暂缓派工允许引用现场摘要；取消／释放须有同题事实或当前平台状态，不凭摘要单独执行。
     critical = item.get('cancel_running') is True or item.get('release_instance') is True
     return snapshot and (not critical or evidence)
+
+
+class SupervisionGate:
+    """按实际结果与显式阻塞触发督导；待执行指令期间保留尚未消费的变化。"""
+
+    def __init__(self) -> None:
+        self.seen: dict[str, dict[str, str]] = {}
+        self.results: dict[tuple[str, Any], str] = {}
+        self.platform = ""
+
+    @staticmethod
+    def _digest(value: Any) -> str:
+        return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
+                                          default=str).encode()).hexdigest()
+
+    @classmethod
+    def _result_signature(cls, row: dict[str, Any], result: Any) -> str:
+        parsed = result.parsed if result is not None else {}
+        if row.get("tool_name") == "http_probe" and (parsed.get("body_sha256") or parsed.get("http_failure")):
+            # 保存路径、调用 ID 和响应 Date 不是新的目标证据；传输失败也不等于业务拒绝。
+            content = {key: parsed.get(key) for key in (
+                "status_code", "body_sha256", "final_url", "redirect_chain", "content_type",
+                "response_source", "http_failure", "download_complete", "body_truncated", "redirects")}
+            content["headers"] = {key: value for key, value in (parsed.get("headers") or {}).items()
+                                  if key.lower() not in {"date", "x-request-id", "x-correlation-id", "traceparent"}}
+        else:
+            content = ((result.stdout, result.stderr, result.error) if result is not None else None)
+        return cls._digest([row.get("execution_status"), content])
+
+    def ready(self, digest: dict[str, Any], journal: Any, ring: Any) -> bool:
+        tasks = {str(task["task_id"]): task for task in digest["tasks"] if task.get("task_id")}
+        self.seen = {key: value for key, value in self.seen.items() if key in tasks}
+        signals: dict[str, dict[str, str]] = {key: {} for key in tasks}
+        records = (journal.list_recent(500) if journal is not None
+                   and callable(getattr(journal, "list_recent", None)) else [])
+        cached = {}
+        # 同一动作重试只比较最新一次结果；不因滚动窗口淘汰旧调用而触发。
+        for row in sorted(records, key=lambda row: row.get("updated_at") or row.get("created_at") or 0):
+            tid = row.get("task_id")
+            if tid not in tasks or row.get("execution_status") not in {"succeeded", "failed", "cancelled", "unknown", "denied"}:
+                continue
+            key = (row["invocation_id"], row.get("updated_at"))
+            signature = self.results.get(key)
+            if signature is None:
+                signature = self._result_signature(row, journal.result(row["invocation_id"]))
+            cached[key] = signature
+            signals[tid][self._digest([row.get("tool_name"), row.get("params_digest"), row.get("identity_id")])] = signature
+        self.results = cached
+        for tid, task in tasks.items():
+            # 轻量部署已提供实际执行摘要，沿用它的结果契约。
+            for row in task.get("executions", []):
+                if row.get("execution_status") not in {"succeeded", "failed", "cancelled", "unknown", "denied"}:
+                    continue
+                signals[tid][self._digest([row.get("tool_name"), row.get("params_digest"), row.get("identity_id")])] = self._digest(
+                    [row.get("execution_status"), row.get("exit_code"), row.get("result_digest")])
+            for route in task.get("_supervision", task.get("routes", [])):
+                payload = {key: route.get(key) for key in ("findings", "blockers")}
+                payload["blocked"] = route.get("status") in {"failed", "blocked"}
+                key = "route:" + str(route.get("route_id") or route.get("route") or "")
+                if any(payload.values()) or key in self.seen.get(tid, {}):
+                    signals[tid][key] = self._digest(payload)
+            for instruction in task.get("steering", []):
+                for route, feedback in (instruction.get("feedback") or {}).items():
+                    if feedback.get("status") == "blocked":
+                        signals[tid]["blocked:" + str(instruction.get("id")) + route] = self._digest(feedback)
+        ready = False
+        available = False
+        for tid, task in tasks.items():
+            if ring is not None and ring.pending_steering(task.get("agent"), task_id=tid) is not None:
+                continue
+            available = True
+            seen = self.seen.setdefault(tid, {})
+            ready |= any(seen.get(key) != value for key, value in signals[tid].items())
+            seen.update(signals[tid])
+        platform = digest.get("platform_progress") or {}
+        if available and platform:
+            fingerprint = self._digest(platform)
+            ready |= fingerprint != self.platform
+            self.platform = fingerprint
+        return ready

@@ -25,6 +25,7 @@ from typing import Any
 
 from spiritscout.core.models import RunMode
 from spiritscout.platform_support import app_root, is_frozen
+from spiritscout.tools.output import command_output
 from spiritscout.tools.sandbox_paths import (
     open_directory,
     sandbox_directory,
@@ -416,7 +417,7 @@ async def _execute_sandbox(code: str, lang: str, timeout: float | None, workspac
     except OSError:
         log_fh = None
         log_path = None
-    observe = background_output.get()
+    observe = background_output.get() or command_output.get()
     streams = {name: {"digest": hashlib.sha256(), "decoder": codecs.getincrementaldecoder('utf-8')('strict'),
                       "lossy": False, "nul": False, "head": bytearray(), "bytes": 0}
                for name in ('stdout', 'stderr')}

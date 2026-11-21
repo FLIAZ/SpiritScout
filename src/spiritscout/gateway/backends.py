@@ -16,6 +16,7 @@ from typing import Any
 from spiritscout.config.settings import ModelEntry
 from spiritscout.gateway.attempts import current_attempt_trace, tracked_request
 from spiritscout.gateway.capabilities import EndpointCapabilities
+from spiritscout.gateway.litellm_runtime import load_litellm
 from spiritscout.gateway.metering import backend_usage, merge_usage, normalize_usage
 
 # 流式增量回调：(kind, text) -> None | Awaitable[None]
@@ -40,7 +41,7 @@ def cache_usage(usage: Any) -> dict[str, int | None]:
 
 async def emit_delta(on_delta: DeltaCallback | None, kind: str, text: str) -> None:
     """投递一个流式增量（回调失败不影响主链——增量只是观感，不是数据）。"""
-    if on_delta is None or not text:
+    if on_delta is None or (not text and kind != "reset"):
         return
     try:
         out = on_delta(kind, text)
@@ -155,22 +156,20 @@ def extract_json(text: str) -> Any:
         pass
     fence = _re.search(r"```(?:json)?\s*([\[{].*?[\]}])\s*```", text, _re.DOTALL)
     candidates = [fence.group(1)] if fence else []
-    for open_ch, close_ch in (("{", "}"), ("[", "]")):
-        start = text.find(open_ch)
-        if start < 0:
-            continue
-        depth = 0
-        for i in range(start, len(text)):
-            if text[i] == open_ch:
-                depth += 1
-            elif text[i] == close_ch:
-                depth -= 1
-                if depth == 0:
-                    candidates.append(text[start:i + 1])
-                    break
     for cand in candidates:
         try:
             return _json.loads(cand)
+        except ValueError:
+            continue
+    decoder = _json.JSONDecoder()
+    # 保留对象优先于数组的兼容顺序；标准解码器正确处理字符串中的括号和转义。
+    for open_ch in ("{", "["):
+        start = text.find(open_ch)
+        if start < 0:
+            continue
+        try:
+            value, _ = decoder.raw_decode(text, start)
+            return value
         except ValueError:
             continue
     raise ValueError(f"模型输出中未找到可解析的 JSON: {text[:160]!r}")
@@ -243,7 +242,7 @@ class LiteLLMBackend(ChatBackend):
         reasoning_effort: str = "",
         _retry_truncated: bool = False,
     ) -> dict[str, Any]:
-        import litellm  # 延迟导入
+        litellm = await load_litellm()
         # litellm 认不出供应商时往终端打红色 Provider List 横幅——纯提示
         # 噪音（真实错误仍会抛 BadRequestError），官方开关一次关掉
         litellm.suppress_debug_info = True
@@ -276,6 +275,7 @@ class LiteLLMBackend(ChatBackend):
             "messages": messages,
             "temperature": temperature,
             "timeout": timeout,
+            "num_retries": 0,  # 由网关统一退避、审计与取消，避免 SDK 叠加隐式重试。
         }
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
@@ -481,7 +481,7 @@ class LiteLLMBackend(ChatBackend):
         tool_choice: str | None = None,
         reasoning_effort: str = "",
     ) -> dict[str, Any]:
-        import litellm  # 延迟导入
+        litellm = await load_litellm()
 
         # messages 协议 → Responses 协议：system 提升为 instructions，其余入
         # input。多轮工具对话必须显式转 function_call / function_call_output
@@ -542,6 +542,7 @@ class LiteLLMBackend(ChatBackend):
             "input": input_items,
             "temperature": temperature,
             "timeout": timeout,
+            "num_retries": 0,
         }
         if max_tokens is not None:
             kwargs["max_output_tokens"] = max_tokens

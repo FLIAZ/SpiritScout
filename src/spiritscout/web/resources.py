@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -51,6 +53,15 @@ class FofaSettingsChange(BaseModel):
     email: SecretStr | None = None
     api_key_value: SecretStr | None = None
     enabled: StrictBool = False
+    clear_credentials: StrictBool = False
+    expected_version: int = Field(default=0, ge=0)
+
+
+class AssetProviderSettingsChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: StrictBool = False
+    api_key_value: SecretStr | None = None
+    cookie_value: SecretStr | None = None
     clear_credentials: StrictBool = False
     expected_version: int = Field(default=0, ge=0)
 
@@ -115,9 +126,6 @@ def mount_resources(
                 "billing_policy": "free_first_paid_only_for_blockers"}
 
     def fofa_settings_view() -> dict[str, Any]:
-        import json
-        import os
-
         from spiritscout.web import vault
 
         row = next((item for item in store.settings("asset_provider")
@@ -140,7 +148,54 @@ def mount_resources(
             "key_source": "saved" if stored else "environment" if environment else "none",
             "provider": "fofa",
             "candidate_policy": "external_candidates_require_scope_dns_http_verification",
+            "scope_policy": {
+                "explicit_targets": "closed_scope_no_domain_expansion",
+                "wildcard_targets": "subdomains_only_excludes_apex",
+                "organization_queries": "only_without_explicit_network_targets",
+                "ownership_rules": "candidate_evidence_requires_verification",
+            },
         }
+
+    def api_provider_view(provider: str) -> dict[str, Any]:
+        from spiritscout.web import vault
+
+        config = getattr(cfg.asset_intelligence, provider)
+        row = store.setting("asset_provider", provider)
+        stored = vault.has_key(config.vault_key_name)
+        environment = bool(os.environ.get(config.api_key_env, "").strip())
+        enabled = bool((row or {}).get("data", {}).get("enabled", config.enabled))
+        return {
+            "provider": provider, "category": "cyberspace", "version": row["version"] if row else 0,
+            "enabled": enabled, "key_configured": stored or environment,
+            "stored_credentials": stored,
+            "key_source": "saved" if stored else "environment" if environment else "none",
+            "candidate_policy": "closed_scope_filter_then_dns_http_verification",
+            "scope_policy": fofa_settings_view()["scope_policy"],
+        }
+
+    def enterprise_provider_view(provider: str) -> dict[str, Any]:
+        from spiritscout.web import vault
+
+        config = getattr(cfg.asset_intelligence, provider)
+        row = store.setting("asset_provider", provider)
+        stored = vault.has_key(config.vault_key_name)
+        environment = bool(os.environ.get(config.cookie_env, "").strip())
+        return {
+            "provider": provider, "category": "enterprise",
+            "version": row["version"] if row else 0,
+            "enabled": bool((row or {}).get("data", {}).get("enabled", config.enabled)),
+            "key_configured": stored or environment,
+            "stored_credentials": stored,
+            "key_source": "saved" if stored else "environment" if environment else "none",
+            "capabilities": ["company_search", "ownership_evidence", "icp_domain_candidates"],
+            "candidate_policy": "organization_only_candidate_evidence_no_automatic_authorization",
+            "scope_policy": fofa_settings_view()["scope_policy"],
+        }
+
+    def asset_provider_views() -> list[dict[str, Any]]:
+        fofa = {**fofa_settings_view(), "category": "cyberspace"}
+        return [fofa, *(api_provider_view(name) for name in ("hunter", "quake", "zoomeye")),
+                *(enterprise_provider_view(name) for name in ("aiqicha", "qichacha"))]
 
     @app.get("/api/resources/search/exa")
     def exa_settings() -> dict[str, Any]:
@@ -201,6 +256,64 @@ def mount_resources(
                               json.dumps({"email": email, "key": key}, allow_nan=False))
             cfg.asset_intelligence.fofa.enabled = payload.enabled
             return fofa_settings_view()
+        except (ValueError, TypeError, SpiritScoutError) as exc:
+            raise fail(exc) from exc
+
+    @app.get("/api/resources/assets/providers")
+    def asset_providers() -> dict[str, Any]:
+        return {"providers": asset_provider_views()}
+
+    @app.get("/api/resources/assets/providers/{provider}")
+    def asset_provider(provider: str) -> dict[str, Any]:
+        if provider == "fofa":
+            return {**fofa_settings_view(), "category": "cyberspace"}
+        if provider in {"hunter", "quake", "zoomeye"}:
+            return api_provider_view(provider)
+        if provider in {"aiqicha", "qichacha"}:
+            return enterprise_provider_view(provider)
+        raise HTTPException(404, "资产情报 Provider 不存在")
+
+    @app.put("/api/resources/assets/providers/{provider}")
+    async def save_asset_provider(provider: str, request: Request) -> dict[str, Any]:
+        from spiritscout.web import vault
+
+        if provider not in {"hunter", "quake", "zoomeye", "aiqicha", "qichacha"}:
+            raise HTTPException(404, "资产情报 Provider 不存在")
+        try:
+            payload = AssetProviderSettingsChange.model_validate(await request.json())
+            api_key = (payload.api_key_value.get_secret_value().strip()
+                       if payload.api_key_value else "")
+            cookie = (payload.cookie_value.get_secret_value().strip()
+                      if payload.cookie_value else "")
+            if any(ord(char) < 32 and char not in "\t" for char in api_key + cookie):
+                raise ValueError("凭据包含无效控制字符")
+            if len(api_key) > 4096 or len(cookie) > 32768:
+                raise ValueError("凭据长度超出限制")
+            if payload.clear_credentials and (api_key or cookie):
+                raise ValueError("清除凭据时不能同时填写新凭据")
+            row = store.setting("asset_provider", provider)
+            data = dict(row["data"] if row else {})
+            data["enabled"] = payload.enabled
+            if provider in {"aiqicha", "qichacha"} and api_key:
+                raise ValueError("企业信息 Provider 使用 Cookie，不接受 API Key")
+            if provider in {"hunter", "quake", "zoomeye"} and cookie:
+                raise ValueError("空间测绘 Provider 使用 API Key，不接受 Cookie")
+            # 先完成版本化配置写入，再修改 Vault；旧页面的 stale 提交不能覆盖新凭据。
+            store.save("asset_provider", provider, data, payload.expected_version)
+            if provider in {"aiqicha", "qichacha"}:
+                config = getattr(cfg.asset_intelligence, provider)
+                if payload.clear_credentials:
+                    vault.drop_key(config.vault_key_name)
+                elif cookie:
+                    vault.set_key(config.vault_key_name, cookie)
+            else:
+                config = getattr(cfg.asset_intelligence, provider)
+                if payload.clear_credentials:
+                    vault.drop_key(config.vault_key_name)
+                elif api_key:
+                    vault.set_key(config.vault_key_name, api_key)
+            return (enterprise_provider_view(provider) if provider in {"aiqicha", "qichacha"}
+                    else api_provider_view(provider))
         except (ValueError, TypeError, SpiritScoutError) as exc:
             raise fail(exc) from exc
 
@@ -385,6 +498,12 @@ def mount_resources(
         except SpiritScoutError as exc:
             raise fail(exc) from exc
 
+    @app.get("/api/resources/vulnerability-taxonomy")
+    def vulnerability_taxonomy() -> dict[str, Any]:
+        from spiritscout.knowledge.vulnerability_taxonomy import catalog
+
+        return catalog()
+
     @app.get("/api/assets")
     def assets(
         q: str = Query("", max_length=200),
@@ -392,15 +511,20 @@ def mount_resources(
         project: str = Query("", max_length=64),
         unclassified: int = Query(0, ge=0, le=1),
         kind: str = Query("", max_length=16),
+        category: str = Query("", max_length=80),
         offset: int = Query(0, ge=0),
         limit: int = Query(40, ge=1, le=100),
     ) -> dict[str, Any]:
+        from spiritscout.knowledge.vulnerability_taxonomy import known_taxonomy_id
+
         if project and unclassified:
             raise HTTPException(422, "project 与 unclassified 互斥")
         if kind not in {"", "asset", "finding"}:
             raise HTTPException(422, "kind 只能是空、asset 或 finding")
+        if category and (kind != "finding" or not known_taxonomy_id(category)):
+            raise HTTPException(422, "漏洞分类仅用于查询发现，须为已知分类")
         return store.assets(q, offset, limit, host=host, project=project,
-                            unclassified=bool(unclassified), kind=kind)
+                            unclassified=bool(unclassified), kind=kind, category=category)
 
     @app.get("/api/assets/{key}/history")
     def asset_history(key: str, offset: int = Query(0, ge=0)) -> dict[str, Any]:

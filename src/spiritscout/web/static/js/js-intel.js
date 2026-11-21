@@ -13,7 +13,7 @@ const AssetSecretViewer = (() => {
     const token = revealGeneration, origin = S.cur;
     const view = document.createElement("dialog");
     dialog = view;
-    view.innerHTML = '<h3>会话秘密明文</h3><p>本次查看会记录审计。关闭后清除显示；不要复制到普通报告。</p><pre role="status">正在读取…</pre><button type="button" class="btn">关闭并清除</button>';
+    view.innerHTML = I18n.html('<h3>会话秘密明文</h3><p>本次查看会记录审计。关闭后清除显示；不要复制到普通报告。</p><pre role="status">正在读取…</pre><button type="button" class="btn">关闭并清除</button>');
     view.querySelector("button").onclick = close;
     view.addEventListener("close", close, {once:true});
     document.body.append(view);

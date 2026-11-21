@@ -1,10 +1,5 @@
 /* 流量以时间、方向和会话归属为主，不复用对话长列表的渲染状态。 */
 .traffic-browser { min-width: 0; }
-.traffic-proxy-controls { margin: 16px 0; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
-.traffic-proxy-controls summary { cursor: pointer; }
-.traffic-proxy-controls label { display: flex; flex-direction: column; gap: 5px; margin-top: 10px; }
-.traffic-proxy-controls input { max-width: 520px; }
-.traffic-proxy-controls pre { padding: 12px; background: var(--surface-2); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 var(--mono); }
 .traffic-original-links { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
 .traffic-global { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 24px; }
 .traffic-main { min-width: 0; }

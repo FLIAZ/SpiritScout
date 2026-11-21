@@ -5,7 +5,8 @@ import asyncio
 import copy
 from typing import Any
 
-from spiritscout.core.models import AgentType, BlackboardLayer
+from spiritscout.agents.scoped_assets import _within
+from spiritscout.core.models import AgentType, BlackboardLayer, RunMode
 from spiritscout.tools.spec import ToolResult
 
 TOOLS = ('nuclei_scan', 'metasploit_scan', 'http_probe', 'asset_discover', 'sandbox_exec')
@@ -18,12 +19,19 @@ SCHEMA = {'type': 'function', 'function': {
         'action': {'type': 'string', 'enum': ['status', 'dispatch', 'stop']},
         'revision': {'type': 'integer'}, 'reason': {'type': 'string'},
         'target': {'type': 'string'}, 'goal': {'type': 'string'},
-        'hypothesis_ref': {'type': 'string', 'description': '定向验证所依据的当前会话漏洞假设引用；Nuclei 必填'},
+        'asset_query': {'type': 'object', 'description': '仅在用户未提供任何明确 URL/域名时使用：organization、regions、ownership_rule、ownership_percent、deep、include_branches'},
+        'hypothesis_ref': {'type': 'string', 'description': '可选，续作已有漏洞假设时引用'},
         'tools': {'type': 'array', 'items': {'type': 'string', 'enum': list(TOOLS)}},
         'constraints': {'type': 'string', 'description': '授权边界、已有证据、不要重复的测试、预期可区分结果'},
     }, 'required': ['action']}}}
+DISCOVERY_GUIDANCE = (
+    '允许只读资产发现时，首轮可派遣 tools:["asset_discover"]；DNS、CT 与已配置的 FOFA/Hunter/Quake/ZoomEye 会并行采集，产出严格限于会话和派遣范围。'
+    '用户已给出明确 URL、域名、子域名或通配符时，必须采用封闭范围，不得借公司关系扩展其他域名。'
+    '只有用户没有给出任何明确网络目标、仅给公司名/省份/控股规则时，才可随 dispatch 提供 asset_query，'
+    '其中 organization 为公司或机构名、regions 为地区列表、ownership_rule/ownership_percent 为控股准入，'
+    'deep 和 include_branches 控制企业关系递归；已配置的爱企查/企查查 Provider 提取企业关系与 ICP 域名，结果只进入待核验候选池。'
+)
 GUIDANCE = (
-    'SRC 允许只读资产发现时，首轮可派遣 tools:["asset_discover"]；DNS 记录、被动子域和 HTTP 基线会并行采集，产出严格限于会话和派遣范围。'
     '扫描者「探微」由你管理，待命不代表获准扫描。结合用户原话和最新规则判断是否允许扫描；'
     '禁止扫描、仅被动分析或范围不明时不要派遣。需要扫描时在既有决策 JSON 中增加 '
     'scan_control:{"action":"dispatch","revision":scanner.revision,"reason":"依据用户规则的派遣理由",'
@@ -31,15 +39,14 @@ GUIDANCE = (
     '"tools":["nuclei_scan"],'
     '"constraints":"目标边界、禁止动作等限制"}，按需选择 nuclei_scan/metasploit_scan/http_probe。'
     '派遣后与其他任务并行，不要重复创建扫描 DAG 节点。工具部署状态见 scanner，未预检不等于可用。'
-    'nuclei_scan 不是固定阶段：只有已有技术栈、CVE 情报或具体漏洞假设，且定向模板能验证该假设时才派遣；'
-    '资产发现完成本身不能自动触发 Nuclei，也不要用全模板扫描代替分析。'
+    '按调查问题决定是否使用 Nuclei 并自主选择模板或标签；不要求预先登记假设，命中仍是待复核线索。'
     'scan_control 的 action 还支持 pause/resume/stop/forbid/allow；每次必须携带最新 revision 和 reason。'
     'pause 撤回在途扫描并保留证据，resume 让扫描者基于原任务与现有证据重新判断，不自动重放工具；'
     'stop 撤回本次派遣；forbid 禁止扫描工具，直到依据用户后续明确许可执行 allow，之后仍须重新 dispatch。'
     '不允许扫描时应明确 forbid，不能仅在回复里说停止。新用户消息会先挂起扫描，必须重新判断：'
     '普通提问且原许可仍有效可 resume，限制变化用 dispatch 更新任务，明确禁止用 forbid。'
     '工具操作仍沿用现有审批，不因派遣而扩围或豁免危险动作审批。'
-    '除显式通配符 SRC 会话首轮自动派发只读 asset_discover 外，遗漏 scan_control 不会自动启动或恢复扫描；'
+    '遗漏 scan_control 不会自动启动或恢复扫描；'
     '控制回执以 scanner.last_result 为准，不声称未执行的操作成功。'
 )
 
@@ -66,17 +73,20 @@ class ScannerController:
 
     def snapshot(self) -> dict[str, Any]:
         worker = self.infra.blackboard.read(BlackboardLayer.TASK_STATE, self.worker_id) if self.worker_id else None
+        src = getattr(self.infra.authorization, 'mode', RunMode.SRC) == RunMode.SRC
         return {'status': self.status, 'revision': self.revision, 'forbidden': self.forbidden,
                 'permitted': self.permitted, 'assignment': copy.deepcopy(self.assignment),
-                'worker': worker or {}, 'available_tools': {'asset_discover': True, 'http_probe': True,
+                'worker': worker or {}, 'available_tools': {**({} if src else {'asset_discover': True}), 'http_probe': True,
                                                           'sandbox_exec': True, **self.available},
                 'capabilities': {'nuclei_scan': '选择本地模板检测，保存原始请求/响应和命中',
-                                 'asset_discover': '并行 DNS、被动子域和 HTTP 基线，范围内资产入册',
+                                 **({} if src else {'asset_discover': '并行 DNS、被动子域和 HTTP 基线，范围内资产入册'}),
                                  'metasploit_scan': '模块 info/check 或辅助模块 run，不执行 exploit',
                                  'http_probe': '按派遣目标补充 HTTP 环境观察',
                                  'sandbox_exec': '沙箱脚本按证据补充路径或参数探测，保留输出与退出码'},
                 'deployment': 'not_checked' if not self.available else 'checked',
-                'last_result': dict(self.last_result), 'guidance': GUIDANCE}
+                'last_result': dict(self.last_result), 'guidance': (
+                    'SRC 全量资产收集已移到专用页面；本会话仅对已选目标测试，不派发 asset_discover。'
+                    if src else DISCOVERY_GUIDANCE) + GUIDANCE}
 
     def _publish(self):
         self.infra.blackboard.write(BlackboardLayer.TASK_STATE, 'scanner-control',
@@ -131,21 +141,34 @@ class ScannerController:
                         or any(tool not in TOOLS for tool in command['tools'])
                         or not isinstance(command.get('constraints', ''), str)):
                     error = '派遣需提供 target、goal、合法 tools 及文字 constraints'
-                elif 'nuclei_scan' in command['tools']:
+                elif ('asset_discover' in command['tools']
+                      and getattr(self.infra.authorization, 'mode', RunMode.SRC) == RunMode.SRC):
+                    error = 'SRC 资产收集已移到专用资产收集页；请带入已收集资产后进行测试'
+                elif 'asset_discover' in command['tools']:
+                    network_scope = self.infra.authorization.scope
+                    has_explicit_targets = bool(
+                        network_scope.allowed_domains or network_scope.allowed_urls
+                        or network_scope.allowed_cidrs)
+                    asset_query = command.get('asset_query')
+                    organization = (str(asset_query.get('organization') or '').strip()
+                                    if isinstance(asset_query, dict) else '')
+                    if _within(command['target'], network_scope):
+                        if asset_query:
+                            error = '已有明确网络目标时禁止附加组织资产查询，避免扩散到其他域名或资产'
+                    elif has_explicit_targets or not organization:
+                        error = ('资产发现目标必须落在用户明确声明的范围内；只有未提供任何明确网络目标时，'
+                                 '才可使用包含 organization 的 asset_query')
+                if not error and action == 'dispatch' and command.get('hypothesis_ref'):
                     from spiritscout.blackboard.hypotheses import resolve
 
                     hypothesis = resolve(self.infra.blackboard, command.get('hypothesis_ref', ''))
                     if hypothesis is None:
-                        error = 'Nuclei 派遣必须引用当前会话已有漏洞假设'
+                        error = 'hypothesis_ref 不是当前会话的有效漏洞假设'
                     else:
                         record_id, data, version = hypothesis
                         normalized_hypothesis_ref = f'topology:{record_id}@{version}'
-                        basis = data.get('technical_basis') if isinstance(
-                            data.get('technical_basis'), dict) else {}
                         if data.get('state') not in {'open', 'investigating', 'blocked'}:
                             error = 'Nuclei 只能验证仍活动的漏洞假设'
-                        elif not any(basis.get(key) for key in ('cve_ids', 'template_ids', 'tags')):
-                            error = 'Nuclei 假设缺少 CVE、模板 ID 或 tags 技术依据'
             if error:
                 result = {'ok': False, 'action': action, 'error': error, 'revision': self.revision}
             else:
@@ -154,7 +177,7 @@ class ScannerController:
                 if action == 'dispatch':
                     self.assignment = {k: copy.deepcopy(command.get(k, ''))
                                        for k in ('target', 'goal', 'hypothesis_ref', 'tools',
-                                                 'constraints', 'reason')}
+                                                 'constraints', 'reason', 'asset_query')}
                     if normalized_hypothesis_ref:
                         self.assignment['hypothesis_ref'] = normalized_hypothesis_ref
                 if action == 'forbid':

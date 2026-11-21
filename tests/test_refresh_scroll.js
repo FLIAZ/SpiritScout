@@ -13,6 +13,8 @@ class Element{
     this.proposals=[...html.matchAll(/<details class="resource-proposal" data-proposal="([^"]*)"([^>]*)>/g)].map(match=>{const box=new Element();box.dataset.proposal=match[1];box.open=match[2].includes('open');return box;});
   }
   get innerHTML(){return this.html||'';}
+  get textContent(){return (this.html||'').replace(/<[^>]*>/g,'');}
+  set textContent(value){this.innerHTML=String(value);}
   querySelector(selector){if(!this.children.has(selector))this.children.set(selector,new Element());return this.children.get(selector);}
   querySelectorAll(selector){
     if(selector==='pre')return this.pre;
@@ -25,24 +27,36 @@ class Element{
 }
 const read=name=>fs.readFileSync(path.join(__dirname,'../src/spiritscout/web/static/js',name),'utf8');
 async function background(){
-  const root=new Element(),S={view:'session',tab:'background',cur:'one'};
-  let data={items:[{job_id:'a',label:'任务 A',status:'running',returncode:null,stdout:'旧输出',stderr:'错误流'},{job_id:'b',label:'任务 B',status:'completed',returncode:0,stdout:'另一任务'}]};
-  const context=vm.createContext(require('./helpers/i18n').context({S,esc,$:()=>root,api:async()=>data,setTimeout:()=>1,clearTimeout(){}}));
+  const root=new Element(),S={view:'session',tab:'background',cur:'one'},calls=[];
+  let texts={a:'旧输出',b:'另一任务'},rows=[{job_id:'a',label:'任务 A',created_at:2,status:'running',archive_state:'complete',stdout_bytes:9,stderr_bytes:0},{job_id:'b',label:'任务 B',created_at:1,status:'completed',archive_state:'complete',stdout_bytes:12,stderr_bytes:0}];
+  let outputReply=null;
+  const context=vm.createContext(require('./helpers/i18n').context({S,esc,$:()=>root,URLSearchParams,FileCards:{sizeText:String},window:{getSelection:()=>null},setTimeout:()=>1,clearTimeout(){},
+    api:async(url)=>{
+      calls.push(url);const parts=url.split('/'),id=parts[5];
+      if(url.includes('/output?'))return outputReply?outputReply(url):{text:url.includes('stream=stderr')?'':texts[id],start:0,end:rows.find(row=>row.job_id===id)?.stdout_bytes||0,total_bytes:rows.find(row=>row.job_id===id)?.stdout_bytes||0,has_earlier:false,match:null,archive_state:'complete'};
+      if(url.includes('?offset='))return {items:rows.map(row=>({...row})),total:rows.length,counts:{running:1,completed:1},stored_bytes:1,limit_bytes:512};
+      return {...rows.find(row=>row.job_id===id),command:'echo original'};
+    }}));
   const api=vm.runInContext(read('background-tasks.js')+'\nBackgroundTasks',context);
-  api.open();await flush();
-  const detail=root.querySelector('[data-background-detail]'),first=detail.pre[0];
-  first.scrollTop=180;first.scrollLeft=65;detail.pre[1].scrollTop=90;
-  await root.querySelector('[data-background-refresh]').onclick();
-  assert.equal(detail.pre[0],first,'相同数据保留后台输出节点');
-  data.items[0].stdout='旧输出\n新增行';
-  await root.querySelector('[data-background-refresh]').onclick();
-  assert.notEqual(detail.pre[0],first);
-  assert.equal(detail.pre[0].scrollTop,180);assert.equal(detail.pre[0].scrollLeft,65);
-  assert.equal(detail.pre[1].scrollTop,90,'stdout 与 stderr 分别保留位置');
-  root.querySelectorAll('[data-background-select]')[1].onclick();await flush();
-  assert.equal(detail.pre[0].scrollTop,0,'切换任务不复用另一条输出的位置');
-  data={items:[]};await root.querySelector('[data-background-refresh]').onclick();
-  assert.equal(detail.hidden,true);assert.equal(detail.pre.length,0);
+  const click=attrs=>{const button={dataset:attrs,disabled:false,hasAttribute:name=>name==='data-background-refresh'&&attrs.refresh};return root.onclick({target:{closest:()=>button}});};
+  api.open();await flush();await flush();
+  const detail=root.querySelector('[data-background-detail]'),stdout=detail.querySelector('[data-stream="stdout"]'),first=stdout.querySelector('pre');
+  first.scrollHeight=1000;first.clientHeight=200;first.scrollTop=180;first.scrollLeft=65;first.onscroll();
+  await click({refresh:true});assert.equal(stdout.querySelector('pre'),first,'相同数据保留后台输出节点');
+  rows[0].stdout_bytes=19;texts.a+='\n新增行';await click({refresh:true});
+  assert.equal(first.textContent,'旧输出','查看历史时不覆盖输出或拉回底部');
+  assert.equal(first.scrollTop,180);assert.equal(first.scrollLeft,65);
+  await click({latest:'stdout'});assert.equal(first.textContent,'旧输出\n新增行');
+  rows[0].stdout_bytes=30;texts.a+='\n继续输出';await click({refresh:true});
+  assert.equal(stdout.querySelector('pre'),first,'实时输出也更新原节点，不破坏输入框或布局');
+  assert.equal(first.textContent,texts.a);
+  click({backgroundSelect:'b'});await flush();await flush();
+  const second=detail.querySelector('[data-stream="stdout"]').querySelector('pre');assert.notEqual(second,first,'切换任务创建自己的输出窗口');
+  assert.equal(second.scrollLeft,0,'滚动位置不跨任务继承');
+  let resolve;outputReply=()=>new Promise(done=>{resolve=done;});const stale=click({latest:'stdout'});
+  outputReply=null;click({backgroundSelect:'a'});await flush();await flush();
+  resolve({text:'旧任务晚到输出',start:0,end:10,total_bytes:10,has_earlier:false});await stale;
+  assert.equal(detail.querySelector('[data-stream="stdout"]').querySelector('pre').textContent,texts.a,'乱序输出不能覆盖新选中的任务');
   api.close();
 }
 async function experience(){

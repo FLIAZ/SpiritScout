@@ -6,7 +6,8 @@ from spiritscout.resources.session_secrets import SessionSecrets, redact_known
 from spiritscout.tools.spec import RiskLevel, ToolKind, ToolResult, ToolSpec
 
 SPEC = ToolSpec(name='js_source_read', kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY,
-                description='按 script_ref 分页读取已保存脚本，识别到的敏感常量保持 secret_ref')
+                description='按 script_ref 分页读取已保存脚本，识别到的敏感常量保持 secret_ref',
+                required_params=('reference', 'target'))
 SCHEMA = {'type': 'function', 'function': {'name': 'js_source_read', 'description': SPEC.description,
     'parameters': {'type': 'object', 'properties': {'reference': {'type': 'string'},
         'target': {'type': 'string'}, 'offset': {'type': 'integer', 'minimum': 0},

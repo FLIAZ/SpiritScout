@@ -36,7 +36,7 @@ def _path(raw, root, challenge):
 
 
 async def inspect(agent, task, route, arguments):
-    from spiritscout.ctf.agents import _ToolOutcome
+    from spiritscout.ctf.contracts import _ToolOutcome
 
     try:
         if not isinstance(arguments, dict) or set(arguments) - set(SCHEMA['function']['parameters']['properties']):

@@ -4,10 +4,17 @@ const AgentWorkbench = (() => {
   const create = () => ({agents: new Map(), selected: "", task: "", follow: true});
   const worker = actor => !!actor && !/^(master(?:-|$)|gateway$|runtime$|system$|user$)/.test(actor);
   const limit = 24000;
+  const taskStatuses={"task.done":"已完成","task.failed":"失败","task.cancelled":"已撤销","task.pruned":"已剪枝"};
   function reduce(store, event) {
-    const actor = String(event.actor || ""), d = event.detail || {}, type = event.type || "";
-    if (!worker(actor) || !/^(agent\.|task\.|model\.)/.test(type)) return;
+    const d = event.detail || {}, type = event.type || "";
+    let actor = String(event.actor || "");
     if (!/^(agent\.(turn|delta|tool_call|tool_result|conclude|note|error|ask_user|ask_answered)|task\.(start|done|failed|cancelled|pruned)|model\.(started|call|failed|cancelled))$/.test(type)) return;
+    // 调度器代专项 Agent 发出的收尾事件按任务归属处理，不能被主 Agent 过滤规则丢弃。
+    if (taskStatuses[type] && d.task_id) {
+      const owner=[...store.agents.values()].find(agent=>agent.tasks.has(d.task_id));
+      if (owner) actor=owner.actor;
+    }
+    if (!worker(actor)) return;
     let agent = store.agents.get(actor);
     if (!agent) {
       agent = {actor, status:"等待事件", turn:0, sequence:0, blocks:[], tools:new Map(), calls:new Set(), machineCalls:new Set(), tasks:new Map(), callTasks:new Map(), taskId:"", updated:event.ts};
@@ -48,7 +55,7 @@ const AgentWorkbench = (() => {
     if (/^model\.(call|failed|cancelled)$/.test(type)) {
       agent.calls.delete(d.call_id);agent.callTasks.delete(d.call_id);
       agent.machineCalls.delete(d.call_id);
-      agent.status=agent.calls.size ? "模型生成中" : type === "model.call" ? "执行中" : "调用异常";
+      agent.status=agent.calls.size ? "模型生成中" : type === "model.call" ? "执行中" : type === "model.cancelled" ? "模型调用已取消" : "调用异常";
       if (d.error) append("错误", d.error);
     }
     if (type === "agent.delta") {
@@ -79,14 +86,14 @@ const AgentWorkbench = (() => {
     if (type === "agent.error") { append("错误",d.error);agent.status="执行异常"; }
     if (type === "agent.ask_user") { append("待回答",d.question);agent.status="等待你的回答"; }
     if (type === "agent.ask_answered") agent.status="执行中";
-    const statuses={"task.done":"已完成","task.failed":"失败","task.cancelled":"已撤销","task.pruned":"已剪枝"};
-    if (statuses[type]) {
-      if(d.task_id && agent.tasks.has(d.task_id)) agent.tasks.get(d.task_id).status=statuses[type];
+    if (taskStatuses[type]) {
+      if (type === "task.failed" && d.error) append("错误",d.error);
+      if(d.task_id && agent.tasks.has(d.task_id)) agent.tasks.get(d.task_id).status=taskStatuses[type];
       for(const id of [...agent.calls]) if(!d.task_id || agent.callTasks.get(id)===d.task_id) {
-        agent.calls.delete(id);agent.callTasks.delete(id);
+        agent.calls.delete(id);agent.callTasks.delete(id);agent.machineCalls.delete(id);
       }
       const active=[...agent.tasks.values()].some(t=>t.status==="执行中");
-      agent.status=agent.calls.size ? "模型生成中" : active ? "执行中" : statuses[type];
+      agent.status=agent.calls.size ? "模型生成中" : active ? "执行中" : taskStatuses[type];
     }
     while (agent.tools.size > 50) agent.tools.delete(agent.tools.keys().next().value);
   }
@@ -111,7 +118,7 @@ const AgentWorkbench = (() => {
     const side=root.querySelector("[data-aw-side]");
     if(side) {
       side.hidden=!session || !["src","ctf"].includes(session.mode);
-      side.disabled=!selected || !(store.task || selected.taskId);
+      side.disabled=!selected;
     }
     if(taskSelect) {
       const taskSignature=JSON.stringify([store.selected,selected ? [...selected.tasks.values()] : []]);
@@ -177,7 +184,7 @@ const AgentWorkbench = (() => {
   }
   function openSide() {
     const selected=store.agents.get(store.selected);
-    if(selected && typeof AgentSideChat!=="undefined") AgentSideChat.select(selected.actor,store.task || selected.taskId);
+    if(selected && typeof AgentSideChat!=="undefined") AgentSideChat.select(selected.actor,store.task);
   }
   return {push,reset,render,init,create,reduce};
 })();

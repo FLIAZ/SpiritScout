@@ -7,26 +7,41 @@ import os
 import re
 import stat
 import uuid
+from collections import deque
 from pathlib import Path
 from typing import Any
 
 from spiritscout.tools.sandbox_paths import open_directory
 
+_FILE_REFS = re.compile(r"[^\s\"'`<>;|(){}=]+\.(?:py|c|h|cpp|js|ts|php|java|rs|go|asm|sh|md)\b")
+
 _SOURCE_EXTENSIONS = {'.py', '.c', '.h', '.cpp', '.js', '.ts', '.php', '.java', '.rs', '.go', '.asm', '.sh'}
 
 
 def collect_evidence(journal: Any = None, workspace: Path | None = None,
-                     task_ids: set[str] | None = None) -> dict[str, Any]:
+                     task_ids: set[str] | None = None, *,
+                     evidence_refs: set[str] | None = None,
+                     challenge_text: str = '') -> dict[str, Any]:
     executions = []
-    budget = 24000
+    challenge_refs = set(_FILE_REFS.findall(challenge_text))
+    important_refs: set[str] = set()
+    references: set[str] = set()
+    budget = 10000
     if journal is not None:
-        for row in journal.list_recent(limit=100):
+        rows = journal.list_recent(limit=100)
+        # 答案引用的验证调用优先，避免较晚的诊断输出占满材料预算。
+        rows.sort(key=lambda row: row["invocation_id"] not in (evidence_refs or set()))
+        for row in rows:
             if task_ids and row.get('task_id') not in task_ids:
                 continue
             result = journal.result(row['invocation_id'])
             if result is None:
                 continue
             parameters = journal.parameters(row['invocation_id']) or {}
+            refs = set(_FILE_REFS.findall(json.dumps(parameters, ensure_ascii=False)))
+            references.update(refs)
+            if row['invocation_id'] in (evidence_refs or set()):
+                important_refs.update(refs)
             item = {key: row.get(key) for key in ('invocation_id', 'task_id', 'route_id', 'tool_name', 'execution_status')}
             encoded = json.dumps(parameters, ensure_ascii=False)
             item.update(parameters=parameters if len(encoded) <= 6000 else {},
@@ -39,40 +54,82 @@ def collect_evidence(journal: Any = None, workspace: Path | None = None,
                 continue
             budget -= size
             executions.append(item)
-    sources = []
-    budget = 20000
+    sources, notes = [], []
+    file_budgets = {'source': 12000, 'note': 8000}
     if workspace is not None:
         workspace = Path(workspace).absolute()
         candidates = []
+        directories = deque(workspace / base for base in ('attachments', 'artifacts', 'sandbox'))
         visited = 0
-        for base in ('artifacts', 'sandbox', 'attachments'):
-            for directory, children, files in os.walk(workspace / base, followlinks=False):
-                children[:] = sorted(c for c in children if c not in {'.git', '.venv', 'node_modules', '__pycache__'})
-                visited += len(files) + 1
-                for name in sorted(files):
-                    path = Path(directory) / name
-                    if path.suffix.lower() in _SOURCE_EXTENSIONS:
-                        candidates.append(path.relative_to(workspace))
-                if visited > 2000:
-                    children.clear()
+        # 按目录层级采集：庞大的依赖源码树不能让并列的题目目录一直轮不到。
+        while directories and visited < 2000:
+            directory = directories.popleft()
+            try:
+                entries = sorted(directory.iterdir())
+            except OSError:
+                continue
+            visited += 1
+            for path in entries:
+                if path.is_symlink():
+                    continue
+                if path.is_dir():
+                    if path.name not in {'.git', '.venv', 'node_modules', '__pycache__'}:
+                        directories.append(path)
+                elif path.suffix.lower() in _SOURCE_EXTENSIONS | {'.md'}:
+                    candidates.append(path.relative_to(workspace))
+                visited += 1
+                if visited >= 2000:
                     break
-        for relative in sorted(candidates, key=lambda p: (p.name != 'exp.py', p.as_posix())):
-            if len(sources) >= 12 or budget <= 0:
-                break
+
+        shallowest: dict[str, int] = {}
+        for relative in candidates:
+            shallowest[relative.name] = min(shallowest.get(relative.name, len(relative.parts)), len(relative.parts))
+
+        def priority(relative: Path) -> tuple:
+            short = Path(*relative.parts[2:]).as_posix() if relative.parts[0] == 'sandbox' else relative.as_posix()
+            aliases = (str(workspace / relative), relative.as_posix(), short, relative.name)
+            referenced = any(ref in references for ref in aliases)
+            important = any(ref in important_refs for ref in aliases)
+            from_challenge = (any(ref in challenge_refs for ref in aliases[:-1])
+                              or relative.name in challenge_refs and len(relative.parts) == shallowest[relative.name])
+            try:
+                modified = (workspace / relative).stat().st_mtime if relative.suffix.lower() == '.md' else 0
+            except OSError:
+                modified = 0
+            # 原附件与明确引用的源码优先；分析文档与依赖源码不互相挤占全部预算。
+            return (not from_challenge, not important, not referenced, relative.parts[0] != 'attachments',
+                    relative.parts[0] != 'artifacts',
+                    -modified,
+                    len(relative.parts), relative.name != 'exp.py', relative.as_posix())
+
+        for relative in sorted(candidates, key=priority):
+            is_note = relative.suffix.lower() == '.md'
+            budget_key = 'note' if is_note else 'source'
+            budget = file_budgets[budget_key]
+            if len(notes if is_note else sources) >= (4 if is_note else 12) or budget <= 0:
+                continue
             try:
                 with open_directory(workspace, relative.parent) as directory:
                     fd = os.open(relative.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
                     with os.fdopen(fd, 'rb') as source:
                         if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
                             continue
-                        data = source.read(min(6000, budget) + 1)
+                        limit = 8000 if is_note else 9000
+                        data = source.read(limit + 1)
                 if b'\0' in data:
                     continue
-                limit = min(6000, budget)
+                cost = min(len(data), limit)
+                if cost > budget:
+                    continue
                 text = data[:limit].decode('utf-8', errors='replace')
             except (OSError, ValueError, UnicodeError):
                 continue
-            budget -= len(data)
+            file_budgets[budget_key] -= cost
+            item = {'path': relative.as_posix(), 'start_line': 1, 'content': text,
+                    'excerpt': len(data) > limit}
+            if is_note:
+                notes.append(item)
+                continue
             symbols = []
             if relative.suffix == '.py' and len(data) <= limit:
                 try:
@@ -81,10 +138,12 @@ def collect_evidence(journal: Any = None, workspace: Path | None = None,
                                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))][:40]
                 except (SyntaxError, ValueError):
                     pass
-            sources.append({'path': relative.as_posix(), 'start_line': 1, 'symbols': symbols,
-                            'content': text, 'excerpt': len(data) > limit})
-    return {'executions': list(reversed(executions)), 'source_files': sources,
-            'limitations': '材料为本会话有界节选；未展示不代表不存在，不能据此补造命令输出、源码行号或函数地址。'}
+            sources.append({**item, 'symbols': symbols})
+    evidence = {'executions': list(reversed(executions)), 'source_files': sources,
+                'limitations': '材料为本会话有界节选；未展示不代表不存在，不能据此补造命令输出、源码行号或函数地址。'}
+    if notes:
+        evidence['analysis_notes'] = notes
+    return evidence
 
 
 def fenced(text: str, language: str = '') -> str:

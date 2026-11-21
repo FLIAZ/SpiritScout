@@ -95,13 +95,14 @@ class BlackboardConfig(ValidatedConfig):
 class StorageConfig(ValidatedConfig):
     """磁盘维护独立于上下文和任务预算；只处理已结束、空闲的会话。"""
 
+    background_archive_max_mb: int = Field(default=512, ge=1, description="每会话后台输出存档配额；超限提示，不停止命令或删除旧证据")
     auto_maintenance: bool = True
     maintenance_interval_seconds: int = Field(default=900, ge=1)
     idle_seconds: int = Field(default=300, ge=0)
 
 
 class GatewayConfig(ValidatedConfig):
-    """多模型网关：预算与协作策略。"""
+    """多模型网关：重试、用量参考与协作策略。"""
 
     budget_tokens: int = Field(default=2_000_000, description="Token 用量参考值，仅计量不熔断")
     budget_usd: float = Field(default=20.0, description="费用参考值，仅计量不熔断")
@@ -114,7 +115,10 @@ class GatewayConfig(ValidatedConfig):
     cascade_confidence_threshold: float = 0.8   # 级联升级阈值（6.10：<0.8 升级旗舰复判）
     vote_min_models: int = 2                    # 投票最少模型数（4.9.3-2：≥2 独立判断）
     request_timeout_seconds: int = Field(default=300, gt=0)  # 重推理模型单次调用可达 3~4 分钟，120s 会中途掐死
-    max_retries: int = 2
+    max_retries: int | None = Field(
+        default=2, ge=0, description="可恢复请求的重试次数；null 仅受请求超时约束，0 关闭重试")
+    retry_initial_seconds: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    retry_max_seconds: float = Field(default=60.0, gt=0, allow_inf_nan=False)
     stable_snapshot_prefix: bool = True  # 新决策段保留稳定事实前缀，历史不重写
     shared_ctf_prefix: bool = False  # 共享布局实验关闭，真实复杂对照尚未证明命中收益
     compact_decision_patches: bool = False  # 无损补丁短编码，真实模型对照通过后再启用
@@ -161,7 +165,8 @@ class WebConfig(ValidatedConfig):
 
     host: str = "127.0.0.1"               # 默认仅回环
     port: int = Field(default=8000, ge=1, le=65535)
-    max_concurrent_sessions: int = Field(default=4, ge=1, description="并发会话上限（信号量）")
+    max_concurrent_sessions: int | None = Field(
+        default=None, ge=1, description="兼容旧配置字段；会话并发数量已不再限制")
     auto_name_sessions: bool = True
     remote_auth_required: bool = Field(
         default=True, description="非回环绑定必须配置管理密码，否则拒绝启动")
@@ -292,6 +297,39 @@ class FofaConfig(ValidatedConfig):
     timeout_seconds: float = Field(default=20, gt=0, le=120)
 
 
+class AssetApiProviderConfig(ValidatedConfig):
+    """单密钥空间测绘来源；密钥只从环境变量或 Vault 读取。"""
+
+    enabled: bool = False
+    api_url: str = Field(pattern=r"^https://")
+    api_key_env: str
+    vault_key_name: str
+    page_size: int = Field(default=100, ge=1, le=1000)
+    timeout_seconds: float = Field(default=20, gt=0, le=120)
+
+
+class EnterpriseProviderConfig(ValidatedConfig):
+    """企业信息来源；Cookie 只从环境变量或 Vault 读取。"""
+
+    enabled: bool = False
+    base_url: str = Field(pattern=r"^https://")
+    cookie_env: str
+    vault_key_name: str
+    timeout_seconds: float = Field(default=20, gt=0, le=120)
+    page_size: int = Field(default=20, ge=1, le=100)
+    max_companies: int = Field(default=40, ge=1, le=500)
+    max_depth: int = Field(default=3, ge=1, le=10)
+
+
+class OneForAllConfig(ValidatedConfig):
+    """OneForAll 被动子域来源；主动模块由适配器固定关闭。"""
+
+    enabled: bool = False
+    path: str = ""
+    python: str = ""
+    timeout_seconds: int = Field(default=600, ge=30, le=3600)
+
+
 class AssetIntelligenceConfig(ValidatedConfig):
     """外部资产情报来源；默认全部关闭，按部署显式启用。"""
 
@@ -301,6 +339,22 @@ class AssetIntelligenceConfig(ValidatedConfig):
     provider_cache_ttl_seconds: int = Field(default=900, ge=0, le=86400)
     provider_cache_max_entries: int = Field(default=256, ge=1, le=10000)
     fofa: FofaConfig = Field(default_factory=FofaConfig)
+    hunter: AssetApiProviderConfig = Field(default_factory=lambda: AssetApiProviderConfig(
+        api_url="https://hunter.qianxin.com/openApi/search",
+        api_key_env="HUNTER_API_KEY", vault_key_name="asset-provider:hunter"))
+    quake: AssetApiProviderConfig = Field(default_factory=lambda: AssetApiProviderConfig(
+        api_url="https://quake.360.net/api/v3/search/quake_service",
+        api_key_env="QUAKE_API_KEY", vault_key_name="asset-provider:quake"))
+    zoomeye: AssetApiProviderConfig = Field(default_factory=lambda: AssetApiProviderConfig(
+        api_url="https://api.zoomeye.hk/host/search",
+        api_key_env="ZOOMEYE_API_KEY", vault_key_name="asset-provider:zoomeye"))
+    oneforall: OneForAllConfig = Field(default_factory=OneForAllConfig)
+    aiqicha: EnterpriseProviderConfig = Field(default_factory=lambda: EnterpriseProviderConfig(
+        base_url="https://aiqicha.baidu.com", cookie_env="AIQICHA_COOKIE",
+        vault_key_name="asset-provider:aiqicha"))
+    qichacha: EnterpriseProviderConfig = Field(default_factory=lambda: EnterpriseProviderConfig(
+        base_url="https://www.qcc.com", cookie_env="QICHACHA_COOKIE",
+        vault_key_name="asset-provider:qichacha"))
 
 
 class SystemConfig(ValidatedConfig):

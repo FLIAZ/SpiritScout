@@ -18,6 +18,8 @@
 
 **收录统计**：严重 {{ severity_counts.critical }} ｜ 高危 {{ severity_counts.high }} ｜ 中危 {{ severity_counts.medium }} ｜ 低危 {{ severity_counts.low }}
 
+**危害证明状态**：已完成 {{ impact_pool | length }} ｜ 仅技术确认 {{ technical_only | length }}
+
 ## 二、资产清单
 
 | 类型 | 标识 | 端口/服务 | 指纹 |
@@ -36,6 +38,7 @@
 - **位置**：`{{ v.endpoint or v.target }}`{% if v.parameter %}，参数 `{{ v.parameter }}`{% endif %}
 {% if v.verification %}
 - **状态**：鉴真独立复测确认，符合用户危害规则
+- **危害证明**：{{ "已完成类型化证明" if v.submission_ready or v.impact_proof else "仅完成技术确认，仍需补充影响证据" }}
 - **用户规则**：{{ v.verification.rule_quote }}
 - **实际危害**：{{ v.verification.harm }}
 - **复测结论**：{{ v.verification.reason }}

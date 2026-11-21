@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-motion="off">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -12,17 +12,22 @@ try {
   if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
 } catch {}
 </script>
-<link rel="stylesheet" href="/static/css/base.css?v=20261107-layout-spacing">
-<link rel="stylesheet" href="/static/css/views.css?v=20261107-layout-spacing">
-<link rel="stylesheet" href="/static/css/login.css?v=20261107-layout-spacing">
+<link rel="stylesheet" href="/static/css/base.css?v=20261119-motion-audit">
+<link rel="stylesheet" href="/static/css/views.css?v=20261119-motion-audit">
+<link rel="stylesheet" href="/static/css/login.css?v=20261119-motion-audit">
 <link rel="stylesheet" href="/static/css/i18n.css?v=20261108-language-icon">
+<link rel="stylesheet" href="/static/css/motion.css?v=20261119-motion-audit">
+<script defer src="/static/js/motion.js?v=20261119-motion-audit"></script>
 </head>
 <body class="login-body">
 <main class="login-wrap">
   <section class="card login-card" aria-labelledby="login-title">
     <div class="login-language"><button class="language-switch" type="button" data-language-toggle lang="en">English</button></div>
     <p class="login-eyebrow">SpiritScout · Access Control</p>
-    <h1 id="login-title" class="login-title"><span data-brand-zh>灵枢<em>·</em></span>SpiritScout</h1>
+    <h1 id="login-title" class="login-title">
+      <svg class="brand-mark" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false"><path d="M27 4H12l-8 8v6h6v-4l4-4h13Z"/><path class="brand-mark-accent" d="M5 28h15l8-8v-6h-6v4l-4 4H5Z"/></svg>
+      <span class="brand-wordmark"><span class="brand-name" data-brand-zh>灵枢</span><span class="brand-caption" lang="en">SpiritScout</span></span>
+    </h1>
     <p class="login-sub">渗透测试智能体集群 · 管理控制台</p>
 
     <form id="login-form" novalidate>

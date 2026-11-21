@@ -31,6 +31,7 @@ from spiritscout.runtime import _build_infra
 from spiritscout.tools.browser_account_access import register_account_access
 from spiritscout.tools.browser_account_auth import fill
 from spiritscout.tools.browser_accounts import account_spec, session_specs
+from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
 from spiritscout.tools.mcp_client import ChromeMcpClient, build_client
 from spiritscout.web.browser_accounts import mount_browser_accounts
 
@@ -237,6 +238,28 @@ class AccountTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(built[1].env['SPIRITSCOUT_BROWSER_ACCOUNT_ORIGIN'], 'https://example.test')
                 self.assertTrue(any(name.endswith('__account_login') for name in result.parsed['tools']))
                 self.assertTrue(all(name in infra.tools.names() for name in result.parsed['tools']))
+                account_tool = next(name for name in result.parsed['tools']
+                                    if name.endswith('__browser_navigate'))
+                observed = []
+
+                async def account_call(*args, **kwargs):
+                    observed.append(current_execution_scope.get().identity_id)
+                    return {'text': 'ok', 'is_error': False}
+
+                built[1]
+                account_client = next(client for client in infra.mcp_clients
+                                      if getattr(client, 'account_id', '') == 'a')
+                account_client.call = AsyncMock(side_effect=account_call)
+                token = current_execution_scope.set(ExecutionScope(
+                    agent_id='business-test', task_id='task-test'))
+                try:
+                    called = await infra.tools.call(account_tool, {
+                        '_safety_action': 'analysis',
+                    }, **infra.builtin_ctx)
+                finally:
+                    current_execution_scope.reset(token)
+                self.assertTrue(called.ok, called.error)
+                self.assertEqual(observed, ['a'])
                 self.assertEqual(self.accounts.selected('session'), [], '本次确认不保存成跨运行绑定')
             finally:
                 await infra.close()

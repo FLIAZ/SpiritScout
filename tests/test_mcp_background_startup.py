@@ -54,6 +54,48 @@ def _auth() -> Authorization:
 
 
 class McpBackgroundStartupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_later_assembly_failure_reaps_clients_and_releases_workspace(self) -> None:
+        from spiritscout.infrastructure import _teardown_infra
+        from spiritscout.tools.run_lock import ExecutionRunLock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            started, cancelled = asyncio.Event(), asyncio.Event()
+            fast, slow = _fake_client(0.0), _fake_client(0.0)
+
+            async def blocked_start():
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+
+            slow.start = blocked_start
+            with (patch("spiritscout.tools.mcp_client.build_client",
+                        side_effect=lambda spec: fast if spec.name == "fast" else slow),
+                  patch("spiritscout.runtime._MCP_STARTUP_GRACE", 0.01),
+                  patch("spiritscout.infrastructure._register_builtin_tools",
+                        side_effect=RuntimeError("builtin registration failed")),
+                  patch("spiritscout.infrastructure._teardown_infra",
+                        wraps=_teardown_infra) as teardown):
+                with self.assertRaisesRegex(RuntimeError, "builtin registration failed"):
+                    await _build_infra(
+                        _cfg(root), [ModelEntry(model="test", provider="mock")], _auth())
+
+            self.assertTrue(started.is_set())
+            self.assertTrue(cancelled.is_set())
+            fast.close.assert_awaited()
+            slow.close.assert_awaited()
+            teardown.assert_awaited_once()
+            for name in ("blackboard", "experience", "knowledge", "bus"):
+                self.assertIsNotNone(teardown.call_args.kwargs[name])
+            # 初始化失败后同一工作区可重新启动，不留下运行锁。
+            lock = ExecutionRunLock(root, root / "bb.db")
+            try:
+                lock.acquire()
+            finally:
+                lock.close()
+
     async def test_slow_server_does_not_block_build(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

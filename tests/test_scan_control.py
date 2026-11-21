@@ -32,7 +32,10 @@ class ScanControlTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.tmp.name)
         self.bb = Blackboard(self.root / 'bb.db')
         self.addAsyncCleanup(self.bb.aclose)
-        self.infra = SimpleNamespace(blackboard=self.bb, audit=Mock(), cfg=SystemConfig())
+        self.infra = SimpleNamespace(
+            blackboard=self.bb, audit=Mock(), cfg=SystemConfig(),
+            authorization=SimpleNamespace(scope=Scope(allowed_urls=['http://fixture.test'])),
+        )
         self.control = ScannerController(self.infra, None, mission='测试任务', standing_rules='用户原始规则')
         self.hypothesis_ref = upsert(
             self.bb, claim='目标可能暴露特定组件漏洞', subject='http://fixture.test',
@@ -46,30 +49,58 @@ class ScanControlTests(unittest.IsolatedAsyncioTestCase):
                 'target': 'http://fixture.test', 'goal': '核实 HTTP 环境',
                 'hypothesis_ref': self.hypothesis_ref, 'tools': ['nuclei_scan'], **changes}
 
-    async def test_nuclei_dispatch_requires_active_hypothesis_and_technical_basis(self):
-        missing = await self.control.apply(
-            self.command(hypothesis_ref=''), actor='master')
-        self.assertFalse(missing['ok'])
-        self.assertIn('漏洞假设', missing['error'])
+    async def test_nuclei_dispatch_can_explore_without_hypothesis_but_validates_supplied_reference(self):
+        with patch('spiritscout.agents.scanner._run', AsyncMock(return_value={})):
+            missing = await self.control.apply(
+                self.command(hypothesis_ref=''), actor='master')
+            self.assertTrue(missing['ok'])
 
-        unsupported = upsert(
-            self.bb, claim='仅有通用存活信息', subject='http://fixture.test',
-            test_type='generic', actor='master', agent_type=AgentType.MASTER,
-        )['hypothesis_ref']
-        no_basis = await self.control.apply(
-            self.command(hypothesis_ref=unsupported), actor='master')
-        self.assertFalse(no_basis['ok'])
-        self.assertIn('技术依据', no_basis['error'])
+            unsupported = upsert(
+                self.bb, claim='仅有通用存活信息', subject='http://fixture.test',
+                test_type='generic', actor='master', agent_type=AgentType.MASTER,
+            )['hypothesis_ref']
+            no_basis = await self.control.apply(
+                self.command(hypothesis_ref=unsupported), actor='master')
+            self.assertTrue(no_basis['ok'])
 
-        from spiritscout.blackboard.hypotheses import transition
+            from spiritscout.blackboard.hypotheses import transition
 
-        transition(
-            self.bb, self.hypothesis_ref, state='exhausted', reason='最小实验已完成',
-            actor='master', agent_type=AgentType.MASTER,
-        )
-        terminal = await self.control.apply(self.command(), actor='master')
-        self.assertFalse(terminal['ok'])
-        self.assertIn('活动', terminal['error'])
+            transition(
+                self.bb, self.hypothesis_ref, state='exhausted', reason='最小实验已完成',
+                actor='master', agent_type=AgentType.MASTER,
+            )
+            terminal = await self.control.apply(self.command(), actor='master')
+            self.assertFalse(terminal['ok'])
+            self.assertIn('活动', terminal['error'])
+
+    async def test_asset_discovery_cannot_expand_beyond_declared_targets(self):
+        self.infra.authorization.mode = RunMode.COMPETITION
+        result = await self.control.apply(self.command(
+            target='*.other.test', hypothesis_ref='', tools=['asset_discover']), actor='master')
+
+        self.assertFalse(result['ok'])
+        self.assertIn('用户明确声明', result['error'])
+
+    async def test_explicit_target_rejects_organization_query_expansion(self):
+        self.infra.authorization.mode = RunMode.COMPETITION
+        result = await self.control.apply(self.command(
+            target='http://fixture.test', hypothesis_ref='', tools=['asset_discover'],
+            asset_query={'organization': 'Other Holdings'}), actor='master')
+
+        self.assertFalse(result['ok'])
+        self.assertIn('禁止附加组织资产查询', result['error'])
+
+    async def test_organization_query_allowed_only_without_network_scope(self):
+        self.infra.authorization.mode = RunMode.COMPETITION
+        self.infra.authorization.scope = Scope(local_analysis=True)
+        result = await self.control.apply(self.command(
+            target='Example Holdings', hypothesis_ref='', tools=['asset_discover'],
+            asset_query={'organization': 'Example Holdings', 'regions': ['Zhejiang'],
+                         'ownership_rule': '控股比例不低于 50%'}), actor='master')
+
+        self.assertTrue(result['ok'], result.get('error'))
+        self.assertEqual(self.control.assignment['asset_query']['organization'],
+                         'Example Holdings')
 
     async def test_idle_does_not_start_worker_or_allow_registered_scanning_tools(self):
         with patch('spiritscout.agents.scanner._run', new_callable=AsyncMock) as worker, \
@@ -224,41 +255,27 @@ class ScanControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result['ok'])
         self.assertIsNone(self.control.task)
 
-    async def test_wildcard_src_starts_readonly_discovery_without_waiting_for_plan(self):
+    async def test_src_wildcard_engagement_does_not_start_collection(self):
+        control = SimpleNamespace(apply=AsyncMock())
         master = object.__new__(MasterAgent)
         master.agent_id = 'master'
-        control = SimpleNamespace(
-            forbidden=False, status='idle', revision=4,
-            apply=AsyncMock(return_value={'ok': True, 'action': 'dispatch'}))
-        master.ctx = SimpleNamespace(extra={'scan_controller': control})
-        authorization = Authorization(
-            auth_id='auth', mode=RunMode.SRC,
-            scope=Scope(allowed_domains=['*.example.test']))
-
-        result = await master._start_wildcard_discovery(
-            authorization, 'https://example.test')
-
-        self.assertTrue(result['ok'])
-        command = control.apply.await_args.args[0]
-        self.assertEqual(command['target'], '*.example.test')
-        self.assertEqual(command['tools'], ['asset_discover'])
-        self.assertNotIn('nuclei_scan', command['tools'])
-
-    async def test_non_wildcard_src_does_not_auto_start_scanner(self):
-        master = object.__new__(MasterAgent)
-        master.agent_id = 'master'
-        control = SimpleNamespace(
-            forbidden=False, status='idle', revision=0, apply=AsyncMock())
-        master.ctx = SimpleNamespace(extra={'scan_controller': control})
-        authorization = Authorization(
-            auth_id='auth', mode=RunMode.SRC,
-            scope=Scope(allowed_domains=['example.test']))
-
-        result = await master._start_wildcard_discovery(
-            authorization, 'https://example.test')
-
-        self.assertIsNone(result)
+        master.ctx = SimpleNamespace(extra={'scan_controller': control}, audit=Mock(),
+                                     blackboard=self.bb, enable_llm_planning=False)
+        async def segment(state):
+            return {**state, 'continue_iteration': False, 'stop_reason': '夹具完成'}
+        master._run_segment = segment
+        authorization = Authorization(auth_id='auth', mode=RunMode.SRC,
+                                      scope=Scope(allowed_domains=['*.example.test']))
+        await master.run(authorization, 'https://example.test')
         control.apply.assert_not_awaited()
+
+    async def test_src_cannot_dispatch_collection_but_can_test_targets(self):
+        result = await self.control.apply(self.command(
+            target='http://fixture.test', hypothesis_ref='', tools=['asset_discover']), actor='master')
+        self.assertFalse(result['ok'])
+        self.assertIn('专用资产收集页', result['error'])
+        self.assertNotIn('asset_discover', self.control.snapshot()['available_tools'])
+        self.assertIn('http_probe', self.control.snapshot()['available_tools'])
 
     async def test_forbid_survives_continuation_without_auto_resuming_old_assignment(self):
         await self.control.apply(self.command('forbid'), actor='master')

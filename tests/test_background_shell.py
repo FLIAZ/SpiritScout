@@ -43,6 +43,7 @@ class BackgroundShellTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.parsed["status"], "running")
         await self.jobs.stop(job)
         self.assertEqual((await self.jobs.status(job)).parsed["status"], "stopped")
+        self.assertEqual(self.jobs.archive.get(job)["archive_state"], "stopped", "停止记录不冒充完整的退出输出")
 
     async def test_stderr_exit_without_match_and_wait_timeout(self):
         job = await self.start("printf SIGNAL >&2; sleep .1; exit 7")
@@ -141,6 +142,55 @@ class BackgroundShellTests(unittest.IsolatedAsyncioTestCase):
                 seconds_until(**args)
 
 
+    async def test_complete_archive_survives_output_rotation_and_keeps_model_tail_contract(self):
+        from spiritscout.tools.background_archive import BackgroundArchive
+        code = "printf ARCHIVE-BEGIN; head -c 23000000 /dev/zero; printf ARCHIVE-END; printf separate-error >&2"
+        job = await self.start(code)
+        await asyncio.wait_for(self.jobs.get(job).task, 15)
+        status = await self.jobs.status(job)
+        self.assertEqual(status.parsed["status"], "completed")
+        self.assertTrue(status.ok)
+        self.assertEqual(status.parsed["output_window_chars"], 65536)
+        self.assertNotIn("command", status.parsed, "完整档案不进入模型状态请求")
+        self.assertLessEqual(len(__import__('json').loads(status.stdout)["stdout"]), 2000)
+        await self.jobs.aclose()
+        archive = BackgroundArchive(self.root)
+        try:
+            item = archive.get(job)
+            self.assertEqual(item["command"], code)
+            self.assertEqual(item["archive_state"], "complete")
+            self.assertIsNotNone(item["finished_at"])
+            self.assertEqual(item["stdout_bytes"], 23000024)
+            chunks = archive.chunks(job, "stdout", end=item["stdout_bytes"])
+            first = next(chunks)
+            self.assertTrue(first.startswith(b"ARCHIVE-BEGIN"))
+            total = len(first)
+            last = first
+            for last in chunks:
+                total += len(last)
+            self.assertEqual(total, item["stdout_bytes"])
+            self.assertTrue(last.endswith(b"ARCHIVE-END"))
+            self.assertEqual(archive.output(job, "stderr")["text"], "separate-error")
+        finally:
+            archive.close()
+
+    async def test_archive_write_failure_does_not_break_output_condition_or_command(self):
+        from unittest.mock import patch
+
+        from spiritscout.tools.background_archive import BackgroundArchive
+        with self.assertLogs("spiritscout.tools.background", level="WARNING"), patch.object(BackgroundArchive, "append", side_effect=OSError("disk full")):
+            job = await self.start("printf READY; sleep .05; printf DONE")
+            waited = await self.jobs.wait(job, contains="READY", timeout=5)
+            self.assertTrue(waited.parsed["matched"])
+            await asyncio.wait_for(self.jobs.get(job).task, 5)
+        status = await self.jobs.status(job)
+        self.assertEqual(status.parsed["status"], "completed")
+        self.assertTrue(status.ok)
+        self.assertIn("READYDONE", status.stdout)
+        self.assertTrue(self.jobs.get(job).archive_error)
+        self.assertEqual(self.jobs.archive.get(job)["archive_state"], "error")
+
+
 @unittest.skipUnless(sandbox_available(), "需要真实 Linux bubblewrap")
 class BackgroundAPITests(unittest.TestCase):
     def test_parallel_task_list_output_stop_and_session_isolation(self):
@@ -218,3 +268,138 @@ class BackgroundAPITests(unittest.TestCase):
                 )
                 self.assertEqual(remaining["status"], "running")
             self.assertTrue(all(row["status"] == "stopped" for row in task_rows(a)))
+
+
+class BackgroundArchiveTests(unittest.TestCase):
+    """档案契约独立于模型尾窗；旧索引、完整输出和损坏状态不混淆。"""
+
+    def setUp(self):
+        from spiritscout.tools.background_archive import BackgroundArchive
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.store = BackgroundArchive(self.root, writable=True)
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    @staticmethod
+    def row(job="one", status="completed"):
+        return {"job_id": job, "created_at": 1.0, "status": status, "command": "printf '原文'", "label": job, "returncode": 0}
+
+    def test_full_history_restart_paging_search_and_exact_download(self):
+        from spiritscout.tools.background_archive import BackgroundArchive
+        stdout = ("起点\n" + "正文🙂\n" * 12000 + "关键内容\n").encode() + b"\x00\xff"
+        stderr = b"separate error\n"
+        self.store.save(self.row(), new=True)
+        # 切分恰好落在字符/搜索词中间，下载仍保持字节原貌。
+        for raw in (stdout[:5], stdout[5:-10], stdout[-10:]):
+            self.store.append("one", "stdout", raw)
+        self.store.append("one", "stderr", stderr)
+        for index in range(60):
+            self.store.save({**self.row(str(index)), "created_at": index + 2}, new=True)
+        self.store.close()
+        self.store = BackgroundArchive(self.root)
+        first = self.store.listing()
+        self.assertEqual(first["total"], 61)
+        self.assertEqual(len(first["items"]), 50)
+        self.assertEqual(len(self.store.listing(50)["items"]), 11)
+        self.assertEqual(self.store.get("one")["command"], self.row()["command"])
+        self.assertEqual(b"".join(self.store.chunks("one", "stdout", end=len(stdout))), stdout)
+        self.assertEqual(b"".join(self.store.chunks("one", "stderr", end=len(stderr))), stderr)
+        tail = self.store.output("one", "stdout", limit=4096)
+        self.assertTrue(tail["has_earlier"])
+        previous = self.store.output("one", "stdout", before=tail["start"], limit=4096)
+        self.assertEqual(previous["end"], tail["start"])
+        self.assertNotIn("�", previous["text"], "分页不破坏正常 UTF-8 字符")
+        match = self.store.output("one", "stdout", query="关键内容")
+        self.assertEqual(match["match"], stdout.find("关键内容".encode()))
+        self.assertIn("关键内容", match["text"])
+        self.assertIsNone(self.store.output("one", "stdout", query="关键内容", after=match["match"] + 1)["match"])
+        self.assertLess(first["stored_bytes"], len(stdout), "压缩存档不重复保存大段文本")
+        self.assertEqual((self.root / 'background-tasks/archive.db').stat().st_mode & 0o777, 0o600)
+
+    def test_quota_and_manual_clear_do_not_delete_other_history_or_replay(self):
+        import os
+
+        from spiritscout.tools.background_archive import BackgroundArchive
+        self.store.close()
+        self.store = BackgroundArchive(self.root, writable=True, limit=4096)
+        self.store.save(self.row(), new=True)
+        self.store.append("one", "stdout", b"preserved")
+        self.store.append("one", "stdout", os.urandom(9000))
+        self.assertEqual(self.store.get("one")["archive_state"], "limited")
+        self.assertEqual(b"".join(self.store.chunks("one", "stdout", end=9)), b"preserved")
+        self.store.save(self.row("active", "running"), new=True)
+        with self.assertRaisesRegex(ValueError, "运行中"):
+            self.store.clear("active")
+        self.store.clear("one")
+        self.store.save(self.row())  # 晚到的状态刷新不能恢复已清理的命令或输出。
+        self.assertEqual(self.store.get("one")["archive_state"], "cleared")
+        self.assertNotIn("command", self.store.get("one"))
+        self.assertEqual(self.store.get("active")["status"], "running")
+        self.store.append("active", "stdout", b"new output")
+        self.assertEqual(self.store.get("active")["stdout_bytes"], 10)
+
+    def test_legacy_and_corrupt_blocks_never_look_like_complete_empty_output(self):
+        import json
+
+        from spiritscout.tools.background_archive import BackgroundArchive
+        self.store.close()
+        folder = self.root / "background-tasks"
+        (folder / "jobs.json").write_text(json.dumps([{**self.row("legacy"), "stdout": "old tail"}]))
+        self.store = BackgroundArchive(self.root, writable=True)
+        self.assertEqual(self.store.get("legacy")["archive_state"], "legacy")
+        self.assertEqual(self.store.get("legacy")["stdout"], "old tail")
+        self.store.save(self.row(), new=True)
+        self.store.append("one", "stdout", b"original")
+        with self.store.conn:
+            self.store.conn.execute("UPDATE chunks SET data=? WHERE job='one'", (b"invalid",))
+        with self.assertRaises((ValueError, __import__('zlib').error)):
+            self.store.output("one", "stdout")
+        self.store.close()
+        (folder / "jobs.json").write_text("broken legacy index")
+        self.store = BackgroundArchive(self.root, writable=True)
+        self.assertEqual(self.store.get("one")["command"], self.row()["command"], "旧副本损坏不能阻止读取已有权威档案")
+
+    def test_archive_paths_cannot_follow_symlinks(self):
+        from spiritscout.tools.background_archive import BackgroundArchive
+        other = self.root / "other"
+        other.mkdir()
+        (other / "background-tasks").symlink_to(self.root / "background-tasks", target_is_directory=True)
+        with self.assertRaises(OSError):
+            BackgroundArchive(other, writable=True)
+
+    def test_api_full_output_is_session_scoped_and_cleanup_is_explicit(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from spiritscout.web.background_tasks import mount_background_tasks
+        self.store.save(self.row(), new=True)
+        stdout = b"original command output\n" * 5000
+        self.store.append("one", "stdout", stdout)
+        self.store.save(self.row("orphan", "running"), new=True)
+        self.store.append("orphan", "stderr", b"before crash")
+        other = self.root / "other"
+        other.mkdir()
+        app = FastAPI()
+        mount_background_tasks(app, SimpleNamespace(get={"a": SimpleNamespace(workspace=self.root), "b": SimpleNamespace(workspace=other)}.get))
+        with TestClient(app) as client:
+            url = "/api/sessions/a/background-tasks"
+            data = client.get(url).json()
+            self.assertEqual(data["counts"].get("running"), 0)
+            self.assertEqual(data["counts"]["interrupted"], 1)
+            self.assertNotIn("command", data["items"][0], "列表轮询不带命令全文")
+            self.assertEqual(client.get(url + "/one").json()["command"], self.row()["command"])
+            output = client.get(url + "/one/output", params={"q": "command output"})
+            self.assertEqual(output.status_code, 200)
+            self.assertIn("command output", output.json()["text"])
+            self.assertEqual(client.get(url + "/one/download").content, stdout)
+            self.assertEqual(client.get(url + "/one/download?stream=command").content.decode(), self.row()["command"])
+            self.assertEqual(client.get("/api/sessions/b/background-tasks/one").status_code, 404)
+            self.assertEqual(client.get("/api/sessions/b/background-tasks/one/download").status_code, 404)
+            self.assertEqual(client.get(url + "/one/output?stream=../../etc/passwd").status_code, 422)
+            self.assertEqual(client.delete(url + "/orphan/archive").status_code, 200, "重启遗留任务可显式清理")
+            self.assertEqual(client.delete(url + "/one/archive").status_code, 200)
+            self.assertEqual(client.get(url + "/one").json()["archive_state"], "cleared")
+            self.assertEqual(client.get(url + "/one/download").status_code, 409)

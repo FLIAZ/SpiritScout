@@ -4,10 +4,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from spiritscout.agents.report.vulnerability import verification_summary
 from spiritscout.blackboard import Blackboard
 from spiritscout.core.audit import tool_preview
 from spiritscout.core.models import BlackboardLayer
-from spiritscout.web.sessions import Session
+from spiritscout.web.session_models import Session
 
 
 def _read_challenge_progress(session: Session) -> dict[str, Any] | None:
@@ -46,7 +47,7 @@ def _read_state(session: Session) -> dict[str, Any]:
     # 实时用量：运行中由网关逐笔持久化（usage.db，兼容旧 usage.json），终态回退运行汇总
     live_usage = session.model_usage()
     state: dict[str, Any] = {
-        "session": session.brief(include_summary=False),
+        "session": session.brief(include_summary=False, usage=live_usage),
         # 附件常驻凭据：滑窗滚出首屏后，界面仍能确认附件已随题交付
         "attachments": [
             {"name": p.name, "size": p.stat().st_size}
@@ -160,12 +161,12 @@ def _read_state(session: Session) -> dict[str, Any]:
             state["vulns"]["items"].append({
                 "vuln_id": d.get("vuln_id"), "title": d.get("title"),
                 "vuln_type": d.get("vuln_type"), "severity": d.get("severity"),
-                "status": status, "cvss_score": d.get("cvss_score"),
+                "status": status, "cvss_score": d.get("cvss_score"), "cvss_version": d.get("cvss_version"),
                 "poc_verified": d.get("poc_verified"),
                 "version": rec["version"], "vulnerability_ids": d.get("vulnerability_ids", []),
                 "hypothesis_ref": d.get("hypothesis_ref", ""),
                 "hypothesis_refs": d.get("hypothesis_refs", []),
-                "verification": d.get("verification", {}),
+                "verification": verification_summary(d.get("verification")),
                 "false_positive_reason": d.get("false_positive_reason"),
                 "endpoint": d.get("endpoint"),
             })

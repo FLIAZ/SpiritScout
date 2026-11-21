@@ -8,6 +8,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -107,6 +108,35 @@ class FofaProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.candidates[0].observation["verification_status"], "unverified")
         self.assertNotIn("secret", json.dumps(result.summary()))
 
+    async def test_organization_query_keeps_region_and_ownership_as_candidate_evidence(self) -> None:
+        captured = {}
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            captured['query'] = base64.b64decode(request.url.params['qbase64']).decode()
+            return httpx.Response(200, json={
+                'error': False, 'size': 1,
+                'results': [[
+                    'https://portal.example.test', '203.0.113.8', '443', 'https',
+                    'Portal', 'portal.example.test', 'Example Holdings', 'CN', 'Zhejiang',
+                ]],
+            })
+
+        provider = FofaProvider(
+            FofaConfig(enabled=True),
+            credentials={'email': 'fixture@example.test', 'key': 'secret'},
+        )
+        result = await provider.search_organization(
+            'Example Holdings', regions=['Zhejiang'], ownership_rule='控股比例不低于 50%',
+            transport=httpx.MockTransport(handle))
+
+        self.assertIn('org="Example Holdings"', captured['query'])
+        self.assertIn('region="Zhejiang"', captured['query'])
+        evidence = result.candidates[0].observation
+        self.assertTrue(result.candidates[0].source_ref.startswith('fofa:organization:'))
+        self.assertEqual(evidence['provider_claim']['org'], 'Example Holdings')
+        self.assertEqual(evidence['ownership_query']['ownership_rule'], '控股比例不低于 50%')
+        self.assertEqual(evidence['verification_status'], 'unverified')
+
     async def test_environment_credentials_override_vault_without_persisting(self) -> None:
         config = FofaConfig(enabled=True)
         with patch.dict(os.environ, {config.email_env: "env@example.test",
@@ -150,7 +180,7 @@ class ProviderCacheTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(cache.get("failed"))
 
             cache.put("expired", ProviderResult("fofa", "ok"))
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db, db:
                 db.execute("UPDATE provider_cache SET created=0 WHERE cache_key='expired'")
             self.assertIsNone(cache.get("expired"))
 

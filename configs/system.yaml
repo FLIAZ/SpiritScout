@@ -27,7 +27,9 @@ gateway:                       # 多模型网关（模型在 models.yaml 注册�
   cascade_confidence_threshold: 0.8
   vote_min_models: 2
   request_timeout_seconds: 300  # 重推理模型单次调用可达数分钟，过短会中途掐死解题环
-  max_retries: 2
+  max_retries: 2               # 每个候选模型最多重试两次，重试包含在请求超时内
+  retry_initial_seconds: 5     # 默认按 5、10、20…秒退避；有 Retry-After 时遵循服务端提示
+  retry_max_seconds: 60        # 本地指数退避的最大间隔
 
 executor:                      # 工具执行器（CLI/Docker/MCP 三态）
   backend: local               # local / docker
@@ -71,7 +73,6 @@ report:
 web:                            # Web 控制台：spiritscout 启动
   host: 127.0.0.1               # 非回环绑定时必须设置下方环境变量对应的管理密码
   port: 8000
-  max_concurrent_sessions: 4    # 并发会话上限
   remote_auth_required: true
   password_env: SPIRITSCOUT_SERVER_PASSWORD
 

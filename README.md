@@ -2,244 +2,159 @@
 
 # 灵枢 · SpiritScout
 
-**面向 SRC、CTF、AWDP 与智能体竞赛的多智能体安全测试工作台**
+**面向授权安全测试与安全竞赛的多智能体工作台**
 
-在网页下达任务，让 Agent 协作执行，查看过程、证据与产物。
+资产收集、任务执行、漏洞复核与证据整理，在统一的 Web 控制台中完成。
 
 **简体中文 · [English](README_EN.md)**
 
-[![Version](https://img.shields.io/badge/version-v0.21.3-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11--3.14-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.22.0-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11--3.14-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
 
-[界面预览](#界面预览) · [快速开始](#快速开始) · [能力与模式](#能力与模式) · [架构](#架构) · [部署指南](docs/部署与配置.md) · [参与贡献](CONTRIBUTING.md)
+[快速开始](#快速开始) · [核心能力](#核心能力) · [使用场景](#使用场景) · [界面预览](#界面预览) · [使用文档](docs/控制台使用.md) · [更新日志](CHANGELOG.md)
 
 </div>
 
-> 用于已获授权的测试目标与赛事。任务范围、审批方式和使用约定见下文及 [安全策略](SECURITY.md)。
+SpiritScout 面向安全研究人员、授权测试团队和安全竞赛参与者，支持 SRC、CTF、智能体竞赛与本地 AWDP 修补工作流。用户通过浏览器创建和管理任务，主 Agent 结合目标与执行结果调整规划，专项 Agent 协作执行，并将发现、验证依据和产物保存在会话中。
+
+项目支持接入不同模型供应商、MCP 服务、Skill 与本地工具。执行过程中可以查看进展、补充要求、管理后台作业，并在任务结束后回看证据与报告。常规部署提供多智能体协作，本地轻量部署提供面向 CTF 和 AWDP 的单执行者路径。
+
+> 仅用于明确授权的测试目标与赛事。测试范围、审批方式和使用约定见下文及 [安全策略](SECURITY.md)。
+
+## 核心能力
+
+### 任务规划与多智能体协作
+
+主 Agent 根据任务目标、用户规则和已有证据安排工作，专项 Agent 分别承担资产发现、业务分析、漏洞测试、逆向分析与复核等职责。任务可以并行推进，执行结果与未解决事项回传主控，后续计划随现场变化调整。
+
+在 SRC 和普通 CTF 会话中，用户可以继续向主 Agent 补充信息，也可以与可用子 Agent 开展独立旁路对话。旁路不要求绑定来源任务，消息与草稿独立保存，不中断父会话正在执行的工作。
+
+### 项目资产收集与目标管理
+
+按项目组织资产、测试会话与发现记录。资产收集支持独立选择模型和主动请求出口，查看实时命令输出、验证状态与用量，并按批次筛选和导出 CSV。
+
+收集完成后可勾选本次测试目标，直接带入 SRC 会话。创建任务时可选择边缘资产优先、核心资产优先或均衡推进；模型结合现场证据调整测试顺序。历史资产和第三方情报作为参考，不自动扩大本次授权范围。
+
+### 执行观察与后台工作
+
+控制台展示任务进展、探索链路、工具调用和返回结果。会话阅读区提供已加载记录搜索、分类目录和长历史浏览，刷新与新增输出保留阅读位置。
+
+耗时命令可以在当前会话后台执行。后台任务页集中展示归属、状态、原始命令与 stdout/stderr 存档，支持搜索、分页回读、下载和单项停止。流量页用于浏览已保存的请求响应及会话交互，离线 PCAP/PCAPNG 通过附件查看器分析。
+
+### 验证证据与交付产物
+
+发现、工具观测、候选漏洞和独立复测结果分别记录。SRC 候选漏洞由独立角色复核，正式报告关联实际验证依据；专项任务报告保留交接摘要、证据引用及未完成事项。
+
+附件、脚本、工具原文与报告在会话中统一查看，可按已有版本预览和下载。CTF 支持题目资料与多答案任务；AWDP 支持源码审计、修改校验和按原始目录结构打包修补提交件。
+
+### 模型、工具与知识扩展
+
+可按角色配置模型，并为会话选择模型覆盖。通过 MCP 和 Skill 扩展浏览器操作、信息检索、源码与二进制分析等能力；本地 shell/Python 工具通过沙箱执行，实际可用能力取决于部署环境与已安装工具。
+
+CVE 情报库支持本地检索与增量维护，可关联 Nuclei 模板，并按配置补充 NVD、KEV、EPSS、OSV 等来源。情报用于辅助判断，不能替代目标现场的验证证据。
+
+### 用量与运行状态
+
+仪表盘按时间范围展示 Token、调用、费用估算、端点返回的输入缓存用量及确认成果，支持按模型、角色和会话查看分组。未定价或未提供的计量显示为未知，不按零消耗处理。
+
+系统资源面板提供主机与应用进程树的 CPU、内存观察。控制台支持简体中文与 English、浅色与深色主题以及动效偏好；项目名称、会话内容和证据原文保持原样。
+
+## 使用场景
+
+| 模式 | 主要用途 | 执行与协作方式 |
+| --- | --- | --- |
+| **SRC** | 已授权资产的安全评估、漏洞验证与渗透报告整理 | 多智能体协作，支持人工补充信息与浏览器接管；危险操作逐次审批 |
+| **CTF** | Web、Pwn、逆向、密码、Misc 等题目分析与答案验证 | 常规部署由专项 Agent 推进，轻量部署由单执行者推进；可上传附件、补充题型提示并处理多答案任务 |
+| **智能体竞赛** | 平台托管的多题调度、实例管理与成果提交 | 根据赛方资料和规则自主规划，无人值守；不向用户提问，不使用公开网页搜索 |
+| **AWDP 修补** | 本地源码审计、漏洞修复与补丁交付 | 轻量控制台提供专用入口，检查源码修改、修补文件清单和提交件结构 |
+
+### 常规部署与本地轻量部署
+
+**常规部署**面向多智能体协作，可连接已配置的云端或兼容模型端点，按角色分配能力，适用于 SRC、CTF 和智能体竞赛。
+
+**本地轻量部署**支持 Ollama 与 llama.cpp，使用独立配置、模型指派和会话目录，提供 CTF 与 AWDP 模式。当前目标由一条持续工具循环推进，按需读取工具契约和历史证据，减少多角色调度对本地资源的占用。
+
+轻量模式不要求云端模型 API。离线运行仍需提前准备模型权重、依赖、知识资料与实际使用的工具；上下文容量、速度及任务效果取决于模型、设备与题目。初始化、参数和交付要求见 [本地轻量配置](docs/Ollama轻量配置.md) 与 [AWDP 源码审计与补丁](docs/AWDP源码审计与补丁.md)。
 
 ## 界面预览
 
-实际界面截图，使用本地演示数据。点击图片查看大图。
+以下为当前版本的真实界面截图，使用演示数据。点击图片可查看原图。
 
 **任务入口**
 
 [![任务入口](docs/images/screenshots/task-entry.png)](docs/images/screenshots/task-entry.png)
 
-<table>
-<tr>
-<td width="33%" align="center" valign="top">
-<a href="docs/images/screenshots/dashboard.png"><img src="docs/images/screenshots/dashboard.png" alt="仪表盘" width="100%"></a><br>
-<b>仪表盘</b>
-</td>
-<td width="33%" align="center" valign="top">
-<a href="docs/images/screenshots/session-workbench.png"><img src="docs/images/screenshots/session-workbench.png" alt="会话协作" width="100%"></a><br>
-<b>会话协作</b>
-</td>
-<td width="33%" align="center" valign="top">
-<a href="docs/images/screenshots/exploration-graph.png"><img src="docs/images/screenshots/exploration-graph.png" alt="探索链路" width="100%"></a><br>
-<b>探索链路</b>
-</td>
-</tr>
-<tr>
-<td width="33%" align="center" valign="top">
-<a href="docs/images/screenshots/agent-team.png"><img src="docs/images/screenshots/agent-team.png" alt="编队管理" width="100%"></a><br>
-<b>编队管理</b>
-</td>
-<td width="33%" align="center" valign="top">
-<a href="docs/images/screenshots/model-settings.png"><img src="docs/images/screenshots/model-settings.png" alt="模型配置" width="100%"></a><br>
-<b>模型配置</b>
-</td>
-<td width="33%" align="center" valign="top">
-<a href="docs/images/screenshots/mcp-tools.png"><img src="docs/images/screenshots/mcp-tools.png" alt="MCP 工具" width="100%"></a><br>
-<b>MCP 工具</b>
-</td>
-</tr>
-<tr>
-<td width="33%" align="center" valign="top">
-<a href="docs/images/screenshots/skills.png"><img src="docs/images/screenshots/skills.png" alt="技能管理" width="100%"></a><br>
-<b>技能管理</b>
-</td>
-<td width="33%" align="center" valign="top">
-<a href="docs/images/screenshots/projects.png"><img src="docs/images/screenshots/projects.png" alt="项目归属" width="100%"></a><br>
-<b>项目归属</b>
-</td>
-<td width="33%" align="center" valign="top">
-<a href="docs/images/screenshots/experience.png"><img src="docs/images/screenshots/experience.png" alt="经验沉淀" width="100%"></a><br>
-<b>经验沉淀</b>
-</td>
-</tr>
-<tr>
-<td width="33%" align="center" valign="top">
-<a href="docs/images/screenshots/assets.png"><img src="docs/images/screenshots/assets.png" alt="资产视图" width="100%"></a><br>
-<b>资产视图</b>
-</td>
-<td width="33%" align="center" valign="top">
-<a href="docs/images/screenshots/vulnerabilities.png"><img src="docs/images/screenshots/vulnerabilities.png" alt="漏洞复核" width="100%"></a><br>
-<b>漏洞复核</b>
-</td>
-<td width="33%" align="center" valign="top">
-<a href="docs/images/screenshots/ctf-writeup.png"><img src="docs/images/screenshots/ctf-writeup.png" alt="CTF 报告" width="100%"></a><br>
-<b>CTF 报告</b>
-</td>
-</tr>
-<tr>
-<td width="33%" align="center" valign="top">
-<a href="docs/images/screenshots/background-tasks.png"><img src="docs/images/screenshots/background-tasks.png" alt="后台任务" width="100%"></a><br>
-<b>后台任务</b>
-</td>
-<td width="33%" align="center" valign="top">
-<a href="docs/images/screenshots/deliverables.png"><img src="docs/images/screenshots/deliverables.png" alt="档案与文件" width="100%"></a><br>
-<b>档案与文件</b>
-</td>
-<td width="33%" align="center" valign="top">
-<a href="docs/images/screenshots/proxy-pool.png"><img src="docs/images/screenshots/proxy-pool.png" alt="代理池" width="100%"></a><br>
-<b>代理池</b>
-</td>
-</tr>
-</table>
+**会话工作台**
 
-## 能力与模式
-
-控制台支持简体中文和 English，可在侧栏底部或登录页切换，浏览器会记住选择。
-界面使用本地语言包，不调用在线翻译服务；会话内容、用户配置、技能说明与证据原文保持原样。
-
-| 模式 | 适用场景 | 协作与审批 |
-| --- | --- | --- |
-| **SRC** | 授权资产分析、漏洞复测、渗透报告 | 支持人工补充信息与浏览器接管；危险操作逐次审批 |
-| **CTF** | Web、Pwn、逆向、密码、Misc 解题 | 常规部署由子 Agent 自主推进，轻量部署由单执行者推进；工具操作预授权并留审计 |
-| **AWDP 修补** | 本地源码审计、最小修复与补丁交付 | 轻量控制台提供专用入口；保留正常功能，按原始目录结构校验修补提交件 |
-| **智能体竞赛** | 平台托管、多题调度与完成回收 | 按用户提供的规则规划，无人值守；不向用户提问，不使用公开网页搜索 |
-
-| 能力 | 可以做什么 |
-| --- | --- |
-| 编队协作 | 主 Agent 拆分任务，子 Agent 派生路线、共享线索，按角色分配模型 |
-| 执行工作台 | 展开任务、路线与推进步骤，查看工具结果及事实／依据黑板图 |
-| 项目与产物 | 保存资产和会话；SRC 候选漏洞由「鉴真」独立复测，生成报告或 WriteUp |
-| 浏览器与工具 | 接入 MCP、Skill 和 shell/Python 沙箱；SRC 与 CTF 执行角色支持本地离线 CyberChef 配方与完整字节结果复用；MCP 与 Skill 以卡片分组管理、组合筛选和启停；SRC 可复用登录态并人工处理验证码 |
-| CVE 情报库 | 官方 CVE List 全量本地收录、增量更新与离线检索，按需补充 NVD、KEV、EPSS、OSV，并关联本地 Nuclei 模板；情报与现场复测证据分开。[建库与维护](docs/部署与配置.md#cve-情报库) |
-| 模型与用量 | 配置供应商、编队与模型，查看费用估算、Token、端点返回的输入缓存用量 |
-
-Skill 管理采用卡片目录，支持启用分组、类型／来源／日期组合筛选、绿色开关和删除；点击卡片浏览技能目录、渲染并直接编辑 Markdown，支持草稿保护和版本校验保存。支持直接多选导入 ZIP、tar.gz 等压缩包，RAR / 7z 通过系统 libarchive 读取；参见[管理与导入说明](docs/部署与配置.md#skill-目录与文件浏览)。
-主 Agent 与子 Agent 可自主发现技能、完整读取 SKILL.md，再按需查阅子目录资料；会话展示实际技能读取，避免重复注入已读正文。
-
-### Ollama 本地小模型优化
-
-**面向低显存、断外网赛事的修补工作流**。灵枢为 Ollama 本地小模型提供独立的 CTF / AWDP 轻量模式：模型在本机分析题目、执行工具并修改源码，通过 `submit_fix` 交付可下载的修补提交件，无需云端模型 API。
-
-- **单执行者持续推进**：一条持久工具循环处理当前目标，不启动主控规划、督导或专项派遣；Ollama 原生工具调用与共享推理槽减少额外调用和显存争用。
-- **针对小模型的上下文处理**：按完整工具往返整理长历史，保留授权、规则与当前证据，原文可分页读回；重复失败和相同观察进入证据复盘，帮助模型重新选择动作。
-- **面向赛事交付**：保留被修改文件的原始相对路径，校验 tar.gz 格式、文件清单和实际字节变化，拒绝目录穿越、链接及跨题路径。归档校验不替代功能与漏洞回归，也不代表比赛平台已接收。
-- **独立部署**：轻量配置、模型指派和会话目录与常规部署分开。默认以 `qwen3.5:9b`、16GB 内存 / 8GB 显存作为适配目标；实际速度与修复效果取决于题目、模型和设备。
-
-先准备项目依赖、运行中的 Ollama、已下载模型与所需工具，再启动：
-
-```bash
-./launch.sh start --offline
-```
-
-Ollama 与 llama.cpp 都使用这一个入口，共用轻量工作区与会话记录；后端在模型配置中选择。
-
-默认控制台为 `http://127.0.0.1:8001`，选择 **AWDP 修补** 后上传题目源码并说明修补要求。赛前准备、参数和提交格式见 [Ollama 轻量配置](docs/Ollama轻量配置.md)；工程取舍与同类工作核对见 [创新点与技术思想](docs/06-创新点与技术思想.md)。
+[![会话工作台](docs/images/screenshots/session-workbench.png)](docs/images/screenshots/session-workbench.png)
 
 <details>
-<summary>历史跑分记录 · tsecbench（2026-10-23）</summary>
+<summary>展开查看所有界面截图</summary>
 
-原记录使用 DeepSeek v4.1 Flash，供参考
-
-<img width="1606" height="838" alt="tsecbench 历史跑分记录" src="https://github.com/user-attachments/assets/f5cea640-aa57-40d2-9d21-919960aadd64" />
+<table>
+<tr>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/task-entry.png"><img src="docs/images/screenshots/task-entry.png" alt="任务入口" width="100%"></a><br><b>任务入口</b></td>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/session-workbench.png"><img src="docs/images/screenshots/session-workbench.png" alt="会话工作台" width="100%"></a><br><b>会话工作台</b></td>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/asset-collection.png"><img src="docs/images/screenshots/asset-collection.png" alt="资产收集" width="100%"></a><br><b>资产收集</b></td>
+</tr>
+<tr>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/asset-intelligence.png"><img src="docs/images/screenshots/asset-intelligence.png" alt="资产情报" width="100%"></a><br><b>资产情报</b></td>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/system-resources.png"><img src="docs/images/screenshots/system-resources.png" alt="系统资源" width="100%"></a><br><b>系统资源</b></td>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/dashboard.png"><img src="docs/images/screenshots/dashboard.png" alt="仪表盘" width="100%"></a><br><b>仪表盘</b></td>
+</tr>
+<tr>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/exploration-graph.png"><img src="docs/images/screenshots/exploration-graph.png" alt="探索链路" width="100%"></a><br><b>探索链路</b></td>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/agent-team.png"><img src="docs/images/screenshots/agent-team.png" alt="编队管理" width="100%"></a><br><b>编队管理</b></td>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/model-settings.png"><img src="docs/images/screenshots/model-settings.png" alt="模型配置" width="100%"></a><br><b>模型配置</b></td>
+</tr>
+<tr>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/mcp-tools.png"><img src="docs/images/screenshots/mcp-tools.png" alt="MCP 工具" width="100%"></a><br><b>MCP 工具</b></td>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/skills.png"><img src="docs/images/screenshots/skills.png" alt="技能管理" width="100%"></a><br><b>技能管理</b></td>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/projects.png"><img src="docs/images/screenshots/projects.png" alt="项目归属" width="100%"></a><br><b>项目归属</b></td>
+</tr>
+<tr>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/experience.png"><img src="docs/images/screenshots/experience.png" alt="经验沉淀" width="100%"></a><br><b>经验沉淀</b></td>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/assets.png"><img src="docs/images/screenshots/assets.png" alt="资产视图" width="100%"></a><br><b>资产视图</b></td>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/vulnerabilities.png"><img src="docs/images/screenshots/vulnerabilities.png" alt="漏洞复核" width="100%"></a><br><b>漏洞复核</b></td>
+</tr>
+<tr>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/ctf-writeup.png"><img src="docs/images/screenshots/ctf-writeup.png" alt="CTF 报告" width="100%"></a><br><b>CTF 报告</b></td>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/background-tasks.png"><img src="docs/images/screenshots/background-tasks.png" alt="后台任务" width="100%"></a><br><b>后台任务</b></td>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/deliverables.png"><img src="docs/images/screenshots/deliverables.png" alt="档案与文件" width="100%"></a><br><b>档案与文件</b></td>
+</tr>
+<tr>
+<td width="33%" align="center" valign="top"><a href="docs/images/screenshots/proxy-pool.png"><img src="docs/images/screenshots/proxy-pool.png" alt="代理池" width="100%"></a><br><b>代理池</b></td>
+</tr>
+</table>
 
 </details>
 
 ## 快速开始
 
-**Windows 用户推荐在 WSL2 内源码部署，Linux 用户推荐直接源码部署。** 项目日常开发采用源码运行，便于检查配置、补装工具和排查问题。已有 Docker 环境或希望统一容器依赖时，也可以选择 Docker。
+### 1. 选择部署方式
 
-### 使用 Agent 部署项目
+| 方式 | 适用情况 | 安装入口 |
+| --- | --- | --- |
+| Linux / WSL2 源码部署 | 需要检查配置、补充工具和进行日常开发 | [安装指南](AGENTINSTALL.md#4-源码安装推荐) |
+| Docker 部署 | 已有容器环境，希望统一服务依赖与数据卷 | [部署与配置](docs/部署与配置.md#docker-构建) |
+| Linux 安装包或独立程序 | 希望使用预构建产物运行控制台 | [Linux 打包与发行](docs/Linux打包与发行.md) |
+| 本地轻量部署 | 使用 Ollama / llama.cpp 执行 CTF 与 AWDP | [本地轻量配置](docs/Ollama轻量配置.md) |
 
-在准备安装的电脑上打开能读写文件、执行终端命令的编程 Agent，将下面内容发给它。
-已有仓库时，让 Agent 在该目录工作；选择 WSL2 后，让 Agent 在 WSL 的 Linux 环境中执行安装。
+Windows 完整工具执行推荐使用 WSL2。Windows 原生控制台、可选浏览器、远程访问和数据迁移的具体范围见安装与部署指南。需要编程 Agent 协助安装时，可让其先阅读仓库中的 `AGENTS.md` 与 `AGENTINSTALL.md`，再按所选运行环境执行。
 
-```text
-请帮我部署灵枢（SpiritScout），项目仓库：https://github.com/FLIAZ/SpiritScout.git
-先阅读仓库根目录的 AGENTS.md 和 AGENTINSTALL.md；没有本地仓库时先获取这两份指南。
-检查操作系统、CPU 架构、依赖、端口和已有配置，再确认安装方式；我已经选定的方式直接采用。
-Windows 优先推荐 WSL2 内源码部署，Linux 优先推荐源码部署，Docker 和 Linux 安装包作为可选方式。
-选择 WSL2 后，在 /home 下存放项目、虚拟环境和数据；已有仓库先检查位置，不覆盖配置或混用 Windows 的 .venv。
-没有仓库时，克隆到选定运行环境中的安装目录。
-确认我要常规多 Agent 部署还是本地模型轻量部署，以及是否需要远程访问和 SRC 可操作浏览器。
-按我选择的方式安装，保留已有配置和数据，遇到报错按指南排查。
-完成后给出访问地址、启动和停止命令、配置与数据位置，并说明哪些检查已通过、哪些还没验证。
-```
+### 2. 安装并启动控制台
 
-环境检查、安装步骤和常见报错处理见 [Agent 安装指南](AGENTINSTALL.md)。
-模型 API Key 在部署后的本机控制台填写。
-
-### Linux / WSL2 源码部署 · 推荐
-
-需要 Python 3.11–3.14、Git 和 bubblewrap。以下命令用于首次安装；已有仓库和虚拟环境时先检查并复用，升级前保留配置与数据。
-
-**Windows 先准备 WSL2**
-
-在 PowerShell 查看已安装的发行版，确认使用的发行版 `VERSION` 为 `2`：
-
-```powershell
-wsl --list --verbose
-```
-
-没有发行版时，先用 `wsl --list --online` 查看可安装名称，再在管理员 PowerShell 安装，例如 `wsl --install -d Ubuntu-24.04`。按提示重启、创建 Linux 用户，进入该发行版的终端。已有 WSL1 的转换和常见问题见 [Agent 安装指南](AGENTINSTALL.md#4-源码安装推荐)；WSL 安装要求见 [微软说明](https://learn.microsoft.com/en-us/windows/wsl/install)。Linux 用户直接继续下面步骤。
-
-**以下命令在 Linux / WSL2 终端执行**
-
-Debian / Ubuntu 安装基础依赖，并确认系统 Python 为 3.11+：
+以下为 Linux / WSL2 的首次源码安装路径。先准备 Python 3.11–3.14、Git、bubblewrap 和系统基础依赖；已有仓库或工作区时，请按升级说明复用配置与数据。
 
 ```bash
-sudo apt update
-sudo apt install git python3 python3-venv bubblewrap
-/usr/bin/python3 --version
-```
-
-Fedora 使用 `sudo dnf install git python3 python3-pip bubblewrap`。系统 Python 版本不足时先安装合适版本，再创建虚拟环境。
-
-项目、`.venv` 和 `.spiritscout/` 放在 Linux 文件系统中，例如 `~/projects/SpiritScout`。WSL2 下避免放在 `/mnt/c`、`/mnt/d`，不要复用 Windows 创建的虚拟环境。[微软文件存储建议](https://learn.microsoft.com/en-us/windows/wsl/filesystems)
-
-```bash
-mkdir -p ~/projects
-cd ~/projects
 git clone https://github.com/FLIAZ/SpiritScout.git
 cd SpiritScout
 ./install.sh
 ./launch.sh
 ```
 
-`install.sh` 自动创建或复用 `.venv`，安装并检查核心依赖，补齐缺失配置；已有配置和数据保留。
+访问 **http://127.0.0.1:8000**。`install.sh` 创建或复用虚拟环境并准备核心依赖；浏览器工具、CTF 工具箱等按实际需要配置。首次安装与工具可用性检查见 [Agent 安装指南](AGENTINSTALL.md)。
 
-访问 <http://127.0.0.1:8000>，WSL2 用户可从 Windows 浏览器打开。按 `Ctrl+C` 停止，换端口用 `./launch.sh --port 8100`。需要登录时，先运行 `python3 deploy.py init` 创建管理员凭据；该命令不启动 Docker。远程访问另行配置管理员凭据和 HTTPS。
-
-浏览器工具另需 Node.js 22+ 和 Chromium/Chrome；CyberChef 需要 Node.js 24–26。CTF 工具箱、MCP、沙箱验证及 WSL 访问 Windows 模型服务的方法见 [Agent 安装指南](AGENTINSTALL.md)。控制台能打开后，还需验证实际使用的 shell/Python、模型和浏览器工具。
-
-<details>
-<summary>Windows 原生运行：仅需控制台和 MCP 时使用</summary>
-
-Windows 原生需要 Python 3.11–3.14，不提供本项目的 Linux shell/Python 沙箱。需要完整工具执行时优先使用上面的 WSL2 部署。
-
-在仓库根目录的 PowerShell 中执行：
-
-```powershell
-py -3 -m venv .venv
-.venv\Scripts\python.exe -m pip install -e .
-if (-not (Test-Path configs/system.yaml)) { Copy-Item configs/system.example.yaml configs/system.yaml }
-if (-not (Test-Path configs/models.yaml)) { Set-Content -Path configs/models.yaml -Value "providers: []`nmodels: []" -Encoding utf8 }
-.\launch.ps1
-```
-
-访问 <http://127.0.0.1:8000>，按 `Ctrl+C` 停止，参数传给 `launch.ps1`。Windows 与 WSL 必须使用各自的 `.venv`。
-
-</details>
-
-也可使用 `uv sync` 按 `uv.lock` 建立环境，然后运行 `./launch.sh`；Windows 原生使用 `uv sync` 和 `launch.ps1`。构建独立可执行文件见 [免安装可执行文件](docs/部署与配置.md#免安装可执行文件)。
-
-### Docker 部署 · 可选
-
-适合已有 Docker 环境、希望统一依赖或运行多个独立实例的用户。需要 **Linux 容器模式**和 **Docker Compose 2.20+**。Windows 使用 Docker Desktop，Linux 使用 Docker Engine；macOS/ARM64 尚未完成完整实测。
+已有 Docker 环境也可使用部署助手：
 
 ```bash
 git clone https://github.com/FLIAZ/SpiritScout.git
@@ -247,64 +162,32 @@ cd SpiritScout
 python deploy.py up
 ```
 
-Windows 可将 `python` 换成 `py -3`，Linux/macOS 可换成 `python3`。
-首次运行会创建 `.env`、生成随机管理员密码，构建镜像并等待服务健康。
+Docker 控制台默认位于 **http://127.0.0.1:10010**，管理员凭据保存在本机 `.env`。可选浏览器、数据卷、镜像更新和停服方式见 [部署与配置](docs/部署与配置.md)。
 
-| 入口 | 地址与说明 |
-| --- | --- |
-| **控制台** | <http://127.0.0.1:10010>；用户名和密码见项目 `.env` |
-| **SRC 浏览器** | 执行 `python deploy.py up --browser` 后访问 <http://127.0.0.1:10011>；凭据与控制台一致 |
+### 3. 配置模型与工具
 
-```bash
-python deploy.py status   # 查看状态
-python deploy.py logs     # 跟踪日志
-python deploy.py down     # 停服，保留数据卷
-```
+1. 在「模型」页添加供应商地址、API Key 和模型 ID，检查所需模型端点是否可用。
+2. 在「编队」页为主 Agent 与专项角色分配模型，也可将一个模型应用到所有可指派角色。
+3. 根据任务需要，在 MCP 和 Skill 页面配置工具与参考资料。需要浏览器、命令行或专业分析工具时，同时核对服务端运行环境。
 
-镜像包含 Chromium 和 bubblewrap。CTF 工具箱按需在 `.env` 设置 `INSTALL_TOOLKIT=1` 后重建。
-默认使用镜像源码及独立数据卷；旧版挂载部署升级前先停服迁移，不要直接删除数据卷。
+本地轻量模式在准备好模型服务与工具后，通过 `./launch.sh start --offline` 启动，默认访问 **http://127.0.0.1:8001**。Ollama 与 llama.cpp 共用该入口，后端在轻量模型配置中选择。
 
+### 4. 创建第一个任务
 
-### Docker Compose部署
-<details>
- <summary> 点击展开 </summary>
+- **SRC**：填写已授权目标、规则与预期结果，或从项目资产库勾选测试目标；选择优先策略与本次会话出口。
+- **CTF**：在题目资料卡填写名称、地址、描述、提示和题型，上传附件；任务输入框可补充已有思路与额外要求。
+- **智能体竞赛**：提供平台入口、赛方规则与任务资料，由系统结合真实平台信息安排执行。
+- **AWDP**：在轻量模式下上传源码或服务附件，说明修补目标与验证要求。
 
+任务模式由用户明确选择。提交前确认目标范围与资料，在会话中查看执行进展；信息缺失、工具不可用或执行失败时，依据实际提示补充或调整。
 
-复制 `.env.example` 为 `.env`，设置管理员用户名和强密码，再启动：
+### 5. 跟踪进展与查看结果
 
-```bash
-docker compose up -d --build --wait
-```
+会话输入区支持发送补充消息、暂停和继续任务；SRC 与普通 CTF 还可展开「实况」与子 Agent 独立对话。文件与报告、资产与情报、后台任务和流量分别通过会话功能入口访问。
 
-源码开发覆盖、管理员恢复、反向代理、数据迁移与备份见 [部署与配置](docs/部署与配置.md)。
-</details>
+需要查看当前会话状态或常用操作时，在输入框输入 `/` 打开命令菜单；查看完整功能、报告入口和用量解释，请阅读 [控制台使用](docs/控制台使用.md)。
 
-
-
-### 配置模型并开始任务
-
-1. 在「模型」页添加供应商地址、API Key 和模型 ID。
-2. 在「编队」页为灵枢和各子 Agent 指派模型，修改后自动保存；也可选择一个模型，一键应用到所有可指派角色。新指派对新任务生效。
-3. 返回首页，选择 SRC、CTF 或智能体竞赛，填写目标、规则与附件，点击「开始执行」。
-
-侧栏底部或会话详情的「清理存储」可查看占用、精简数据库及清理下载缓存，保留会话与成果；查看范围并确认后执行。
-
-输入框右侧的圆形按钮可暂停或继续当前任务；输入消息时切换为发送。暂停保留原任务进度，“结束任务”位于更多操作菜单。
-
-在输入框输入 `/` 可筛选 Agent 命令，↑↓ 选择、Tab 或 Enter 补全，再按 Enter 执行。主任务会话支持 `/compact` 手动整理上下文、`/status` 查看任务与压缩结果、`/pause` 暂停、`/resume` 继续、`/model` 选模、`/files` 查看产物、`/report` 查看已有报告、`/help` 帮助。`/compact` 在各上下文下一次模型调用前处理一次，不额外调用模型；保留用户原话、当前授权、最近四轮执行回复及完整历史，短历史可能无需缩小。暂停或结束的任务不会因此自动启动。命令不接受附件或额外参数；以 `//` 开头可发送以 `/` 开头的原文。首页可用 `/help` 和 `/model`，其他命令需先打开任务会话。
-
-发送按钮左侧的模型按钮用于本会话选模，默认“自动”跟随编队。选择按供应商与模型区分并随会话保存；后续调用生效，不中断正在返回的请求，也不覆盖子 Agent 的显式指派。选择“自动”可撤销会话覆盖。
-
-会话的「经验」页可查看产出和提炼结果，停止后可补提炼一次；「经验提炼」页可按字符相似度找候选，预览并确认整理，保留原件、质量状态和来源，支持撤销。字符相似不是语义相同，超长合并稿会被拒绝而不是截断。
-
-「用量」页按供应商和模型汇总共享及会话账本，未定价和不完整用量单独说明；「通知」页可开启已确认解题结果与待答提醒。浏览器须保持打开，系统通知不可用时退化为页面提示，关闭浏览器后不会推送。
-
-任务模式由用户选择；项目历史资产不会自动成为本次测试的授权目标。
-CTF/智能体模式使用会话独立的无头浏览器，SRC 可连接已有浏览器或启用人工接管窗口。
-
-**模型连通性正常，任务却立即失败？** 连通性测试只要求回复 `ok`，不覆盖完整的流式
-工具请求。项目已固定兼容的 LiteLLM/MCP 版本；更新依赖后应重新构建镜像，
-不要单独升级 LiteLLM。排查方法见 [模型调用与依赖兼容](docs/部署与配置.md#模型调用与依赖兼容)。
+模型连通性测试只验证基础应答，完整工具执行还依赖模型协议、沙箱与外部工具配置。出现“连通但任务失败”等问题时，参见 [模型调用与依赖兼容](docs/部署与配置.md#模型调用与依赖兼容)。
 
 ## 架构
 
@@ -332,7 +215,7 @@ CTF/智能体模式使用会话独立的无头浏览器，SRC 可连接已有浏
 
 智能体模式默认保留未完成题的运行现场；暂缓派工、取消在途工作与释放实例分别由模型明确决策，不按固定耗时强制切题。
 
-当前代码版本 **v0.21.3**。版本唯一来源、递增规则和历史版本说明见 [版本管理](CONTRIBUTING.md#版本管理)。
+当前代码版本 **v0.22.0**。版本唯一来源、递增规则和历史版本说明见 [版本管理](CONTRIBUTING.md#版本管理)。
 
 贡献时按 [Agent 工作约定](AGENTS.md) 执行：同期功能共用一个版本，调整版本号和推送远端须先取得用户明确同意。
 

@@ -108,7 +108,7 @@ except (ImportError, AttributeError) as error:
 
 
 async def lookup(agent, task, route, state, args):
-    from spiritscout.ctf.agents import _ToolOutcome
+    from spiritscout.ctf.contracts import _ToolOutcome
 
     name, kind = args.get('name'), args.get('kind')
     if not isinstance(name, str) or len(name) > 200:

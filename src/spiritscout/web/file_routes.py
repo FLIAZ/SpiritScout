@@ -7,7 +7,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -64,11 +64,29 @@ def resolve_staged_uploads(cfg: SystemConfig, payload: dict[str, Any]) -> list[P
 
 def mount_artifact_routes(app: FastAPI, _require: Callable[[str], Session]) -> None:
     """挂载产物下载；会话查找沿用主应用的统一入口。"""
+    @app.get("/api/sessions/{session_id}/task-reports")
+    def session_task_reports(session_id: str) -> dict[str, Any]:
+        from spiritscout.agents.report.task_reports import list_task_reports
+
+        return {"items": list_task_reports(_require(session_id).workspace)}
+
+    @app.post("/api/sessions/{session_id}/task-reports/recover")
+    def recover_session_task_reports(session_id: str) -> dict[str, Any]:
+        from spiritscout.agents.report.task_reports import recover_task_reports
+        from spiritscout.core.models import RunMode
+
+        session = _require(session_id)
+        if session.mode != RunMode.SRC:
+            raise HTTPException(409, "仅 SRC 会话需要补齐子任务报告")
+        return {"recovered": recover_task_reports(session.workspace)}
+
     @app.get('/api/sessions/{session_id}/vulnerabilities/{vuln_id}')
-    def vulnerability_detail(session_id: str, vuln_id: str):
+    def vulnerability_detail(session_id: str, vuln_id: str,
+                             view: Literal["evidence", "report"] = "evidence"):
         from spiritscout.web.deliverables import read_vulnerability_detail
 
-        detail = read_vulnerability_detail(_require(session_id).workspace, vuln_id)
+        detail = read_vulnerability_detail(_require(session_id).workspace, vuln_id,
+                                           report=view == "report")
         if detail is None:
             raise HTTPException(404, '漏洞记录不存在')
         from fastapi.responses import JSONResponse
@@ -115,6 +133,36 @@ def mount_artifact_routes(app: FastAPI, _require: Callable[[str], Session]) -> N
                     yield chunk
 
         return StreamingResponse(chunks(), media_type="application/octet-stream", headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(Path(path).name)}"})
+
+    @app.get("/api/sessions/{session_id}/tool-output/{cursor}")
+    def session_command_log(session_id: str, cursor: int) -> StreamingResponse:
+        from spiritscout.web.deliverables import open_command_log
+        from spiritscout.web.events import read_audit_page
+
+        session = _require(session_id)
+        items = read_audit_page(session.audit_path, before=cursor, limit=1)["items"]
+        event = items[0]["event"] if items and items[0]["id"] == cursor else {}
+        detail = event.get("detail")
+        if (event.get("type") != "agent.tool_result" or not isinstance(detail, dict)
+                or (detail.get("invoked_tool") or detail.get("name")) not in ("shell", "python")):
+            raise HTTPException(404, "此工具回执没有原始日志")
+        path = detail.get("output_file")
+        if not isinstance(path, str) or not path:
+            raise HTTPException(404, "此工具回执没有原始日志")
+        try:
+            file = open_command_log(session.workspace, path)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(404, "原始日志不存在或已清理") from exc
+
+        def chunks() -> Iterator[bytes]:
+            with file:
+                while chunk := file.read(65536):
+                    yield chunk
+
+        return StreamingResponse(chunks(), media_type="application/octet-stream", headers={
+            "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",
             "Content-Disposition": f"attachment; filename*=UTF-8''{quote(Path(path).name)}"})
 
@@ -254,6 +302,7 @@ def mount_collaboration_routes(app: FastAPI, cfg: SystemConfig, manager: Session
                     503, f"续传未完成：{type(exc).__name__}: {exc}") from exc
         statement = session.user_statement(message_id) or {}
         return {"queued": pending, "resumed": resumed, "message_id": message_id,
+                "waiting_for_slot": pending and session.status == "running" and session.phase == "queued",
                 "attachments": statement.get("attachments", [])}
 
     @app.post("/api/sessions/{session_id}/attachments")

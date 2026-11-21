@@ -33,10 +33,35 @@ class ScopeGuardTests(unittest.TestCase):
             "https://example.test/admin",
         )
 
+    def test_wildcard_domain_scope_excludes_apex_and_other_domains(self) -> None:
+        guard = ScopeGuard(Scope(allowed_domains=["*.example.test"]))
+
+        self.assertTrue(guard.is_allowed("https://api.example.test/"))
+        self.assertFalse(guard.is_allowed("https://example.test/"))
+        self.assertFalse(guard.is_allowed("https://example.test.evil.invalid/"))
+
     def test_url_origin_includes_port(self) -> None:
         guard = ScopeGuard(Scope(allowed_urls=["http://127.0.0.1:8000/app"]))
         with self.assertRaises(ScopeViolation):
             guard.check_url("http://127.0.0.1:8001/app")
+
+    def test_page_referenced_resource_gets_only_exact_readonly_identity(self) -> None:
+        guard = ScopeGuard(Scope(allowed_urls=["https://app.example.test/"]))
+
+        entry = guard.approve_derived_resource(
+            "https://cdn.example.test/static/app.js?v=42",
+            "https://app.example.test/",
+        )
+
+        self.assertEqual(entry, "https://cdn.example.test/static/app.js")
+        self.assertTrue(guard.is_derived_resource(
+            "https://cdn.example.test/static/app.js?cache=other"))
+        self.assertFalse(guard.is_derived_resource(
+            "https://cdn.example.test/static/other.js"))
+        self.assertFalse(guard.is_allowed("https://cdn.example.test/"))
+        with self.assertRaises(ScopeViolation):
+            guard.approve_derived_resource(
+                "https://cdn.example.test/other.js", "https://untrusted.test/")
 
     def test_encoded_parent_path_cannot_escape_prefix(self) -> None:
         guard = ScopeGuard(Scope(allowed_urls=["https://example.test/app"]))

@@ -1,7 +1,7 @@
 """控制台 HTTP 请求模型；校验规则与路由装配分离。"""
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import (
     BaseModel,
@@ -63,7 +63,7 @@ class QuestionAnswerPayload(BaseModel):
 class AgentSideSessionPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     actor: str = Field(min_length=1, max_length=120)
-    task_id: str = Field(min_length=1, max_length=120)
+    task_id: str = Field(default="", max_length=120)
     mission: str = Field(min_length=1, max_length=4000)
 
 
@@ -73,13 +73,18 @@ class SessionCreatePayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: str | None = None
+    asset_campaign_id: str = Field(default="", max_length=64)
+    asset_values: list[Annotated[str, Field(min_length=1, max_length=2000)]] = Field(default_factory=list, max_length=10000)
+    asset_strategy: Literal["edge_first", "core_first", "balanced"] = "edge_first"
     mission: str | None = None
     target: str | None = None
     scope: list[str] = Field(default_factory=list)
+    excluded_assets: list[Annotated[str, Field(min_length=1, max_length=300)]] = Field(default_factory=list, max_length=500)
     proxy_plan_id: str = Field(default='direct', pattern=r'^(direct|proxy-[a-f0-9]{12})$')
     upload_ids: list[str] = Field(default_factory=list, max_length=20)
     platform: str | None = None
     flag_format: str | None = None
+    generate_wp: StrictBool = False
     multiple_answers: StrictBool = False
     ctf_type_hints: list[Annotated[str, Field(min_length=1, max_length=80)]] = Field(default_factory=list, max_length=20)
     ctf_type_note: str = Field(default="", max_length=2000)

@@ -12,6 +12,11 @@ from spiritscout.core.ids import new_id
 from spiritscout.core.models import Scope
 from spiritscout.resources.store import ResourceStore
 
+MAX_SECRET_BYTES = 2 * 1024 * 1024
+# 脚本视图含 2 MiB 前缀和最多 80 段约 6 KiB 摘录；无效 UTF-8
+# 替换为 U+FFFD 后最多膨胀三倍，8 MiB 覆盖该有界表示。
+MAX_JS_SOURCE_BYTES = 8 * 1024 * 1024
+
 
 class SessionSecrets:
     def __init__(self, workspace):
@@ -26,7 +31,8 @@ class SessionSecrets:
                 self._values[data['value']] = row['id']
 
     def save(self, value: str, *, source: str, kind: str):
-        if not isinstance(value, str) or not value or len(value.encode()) > 2 * 1024 * 1024:
+        limit = MAX_JS_SOURCE_BYTES if kind == 'js_source' else MAX_SECRET_BYTES
+        if not isinstance(value, str) or not value or len(value.encode()) > limit:
             raise ValueError('秘密值为空或超过保存上限')
         digest = hashlib.sha256(value.encode()).hexdigest()
         key = (digest, source, kind)

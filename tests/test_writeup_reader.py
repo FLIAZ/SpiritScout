@@ -53,6 +53,22 @@ class WriteupReaderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(digest, original)
         self.assertEqual(gateway.chat.await_count, 1, '不为润色额外调用模型')
 
+    async def test_answer_review_and_analysis_notes_remain_drafts_linked_to_real_evidence(self):
+        digest = self.digest()
+        digest['flags'][0].update(evidence_refs=['inv-private', 'inv-missing'], answer_review={
+            'derivation': '依据数据推导答案', 'validation': '该调用输出为 1',
+            'validation_evidence_refs': ['inv-private']})
+        digest['technical_evidence']['analysis_notes'] = [
+            {'path': 'artifacts/analysis.md', 'content': '解题链草稿', 'excerpt': False}]
+        original = copy.deepcopy(digest)
+        material = json.loads(_writer_material(digest))
+        answer = material['answers'][0]
+        self.assertEqual(answer['验证证据'], ['E1'], '缺失证据不能生成虚假的编号')
+        self.assertEqual(answer['解答审查（草稿，以实际证据为准）']['derivation'], '依据数据推导答案')
+        self.assertNotIn('validation_evidence_refs', answer['解答审查（草稿，以实际证据为准）'])
+        self.assertEqual(material['technical_evidence']['analysis_notes'][0]['source_ref'], 'N1')
+        self.assertEqual(digest, original)
+
     async def test_fallback_does_not_present_module_notes_as_solution(self):
         body = fallback_writeup(self.digest())
         prose = body.split('## 技术证据与源码附录')[0]

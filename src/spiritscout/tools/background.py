@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import codecs
 import json
+import logging
 import math
 import os
+import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -14,8 +16,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from spiritscout.tools.background_archive import DEFAULT_LIMIT, BackgroundArchive
 from spiritscout.tools.invocation import current_execution_scope
 from spiritscout.tools.sandbox import background_output, sandbox_exec
+from spiritscout.tools.sandbox_paths import sandbox_directory
 from spiritscout.tools.spec import (
     ActionCategory,
     RiskLevel,
@@ -99,6 +103,9 @@ class Job:
     created_at: float = field(default_factory=time.time)
     watchers: list[dict[str, Any]] = field(default_factory=list)
     on_output: Any = None
+    command: str = ""
+    finished_at: float | None = None
+    archive_error: str = ""
 
     def emit(self, stream: str, text: str) -> None:
         previous = self.output[stream]
@@ -120,6 +127,7 @@ class ShellJobs:
         audit: Any,
         guard_root: str = "",
         pause_gate: Any = None,
+        archive_limit: int = DEFAULT_LIMIT,
     ):
         self.workspace, self.audit, self.guard_root, self.pause_gate = (
             workspace,
@@ -127,6 +135,8 @@ class ShellJobs:
             guard_root,
             pause_gate,
         )
+        self.archive_limit = archive_limit
+        self.archive: BackgroundArchive | None = None
         self.jobs: dict[str, Job] = {}
         self.closed = False
         self.notifications: list[dict[str, Any]] = []
@@ -149,7 +159,29 @@ class ShellJobs:
             )[:50]
         ]
 
-    def persist(self):
+    def archive_row(self, job: Job):
+        return {**self.snapshot(job).parsed, "command": job.command,
+                "workdir": str(Path(self.workspace) / sandbox_directory(job.scope)),
+                "finished_at": job.finished_at, "error": job.error,
+                "watches": [{key: value for key, value in watch.items() if key != "owner"} for watch in job.watchers]}
+
+    def archive_failed(self, job: Job, exc: Exception):
+        if not job.archive_error:
+            logging.getLogger(__name__).warning("后台任务存档失败 job=%s error=%s", job.job_id, type(exc).__name__, exc_info=(type(exc), exc, exc.__traceback__))
+        job.archive_error = "后台任务存档写入失败；命令继续执行，但存档可能不完整"
+        if self.archive is not None:
+            try:
+                self.archive.fail(job.job_id)
+            except (OSError, sqlite3.Error):
+                pass  # 原始错误已留日志，不能让证据写入失败中止正在执行的命令。
+
+    def persist(self, job: Job | None = None):
+        if self.archive is not None:
+            for current in ([job] if job else self.jobs.values()):
+                try:
+                    self.archive.save(self.archive_row(current))
+                except (OSError, sqlite3.Error, ValueError) as exc:
+                    self.archive_failed(current, exc)
         try:
             folder = Path(self.workspace) / "background-tasks"
             if folder.is_symlink():
@@ -205,7 +237,7 @@ class ShellJobs:
                 )
                 changed = True
         if changed:
-            self.persist()
+            self.persist(job)
 
     def drain(self, owner, scope=""):
         ready = [
@@ -271,10 +303,17 @@ class ShellJobs:
             )
         job = Job(uuid.uuid4().hex, str(workspace_scope or ""))
         job.label = str(label or "后台 Shell")[:100]
+        job.command = str(code)
         scope = current_execution_scope.get()
         job.owner = scope.agent_id if scope else ""
         job.on_output = lambda: self.check_watches(job)
         self.jobs[job.job_id] = job
+        try:
+            if self.archive is None:
+                self.archive = BackgroundArchive(self.workspace, writable=True, limit=self.archive_limit)
+            self.archive.save(self.archive_row(job), new=True)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            self.archive_failed(job, exc)
 
         async def run():
             decoders = {
@@ -286,6 +325,11 @@ class ShellJobs:
                 if stream == "started":
                     job.pid = data
                     return
+                if self.archive is not None and not job.archive_error:
+                    try:
+                        self.archive.append(job.job_id, stream, data)
+                    except (OSError, sqlite3.Error, ValueError) as exc:
+                        self.archive_failed(job, exc)
                 job.emit(stream, decoders[stream].decode(data))
 
             token = background_output.set(emit)
@@ -302,10 +346,19 @@ class ShellJobs:
                 job.error = job.result.error
             except asyncio.CancelledError:
                 job.status = "stopped"
+                if self.archive is not None:
+                    try:
+                        self.archive.fail(job.job_id, "stopped")
+                    except (OSError, sqlite3.Error) as exc:
+                        self.archive_failed(job, exc)
                 raise
             except Exception as exc:  # noqa: BLE001 — 后台异常必须唤醒等待者
                 job.status, job.error = "failed", type(exc).__name__
+                self.archive_failed(job, exc)
             finally:
+                job.finished_at = time.time()
+                if job.result and any(job.result.parsed.get(name + "_capture", {}).get("complete") is False for name in ("stdout", "stderr")):
+                    self.archive_failed(job, ValueError("输出捕获未完成"))
                 for name, decoder in decoders.items():
                     job.emit(name, decoder.decode(b"", final=True))
                 background_output.reset(token)
@@ -326,7 +379,7 @@ class ShellJobs:
                     job.owner,
                     returncode=job.result.returncode if job.result else None,
                 )
-                self.persist()
+                self.persist(job)
 
         job.task = asyncio.create_task(run(), name="shell-" + job.job_id)
         self.audit.log(
@@ -335,7 +388,7 @@ class ShellJobs:
             {"job_id": job.job_id, "workspace_scope": job.scope},
         )
         result = self.snapshot(job)
-        self.persist()
+        self.persist(job)
         result.tool = "shell_start"
         return result
 
@@ -381,7 +434,7 @@ class ShellJobs:
         }
         job.watchers.append(watch)
         self.check_watches(job)
-        self.persist()
+        self.persist(job)
         return ToolResult(
             "shell_watch",
             True,
@@ -514,8 +567,17 @@ class ShellJobs:
         for job in self.jobs.values():
             if job.status == "running":
                 job.status = "stopped"
+                job.finished_at = time.time()
+                if self.archive is not None:
+                    try:
+                        self.archive.fail(job.job_id, "stopped")
+                    except (OSError, sqlite3.Error) as exc:
+                        self.archive_failed(job, exc)
                 job.changed.set()
         self.persist()
+        if self.archive is not None:
+            self.archive.close()
+            self.archive = None
         if active_jobs(self.workspace) is self:
             _ACTIVE.pop(str(Path(self.workspace).resolve()), None)
 

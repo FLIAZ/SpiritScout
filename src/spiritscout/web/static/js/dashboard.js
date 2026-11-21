@@ -8,7 +8,13 @@ const Dashboard = (() => {
   const num=n=>Number(n || 0).toLocaleString(I18n.dateLocale);
   const compact=n=>n>=1e6 ? (n/1e6).toFixed(2)+"M" : n>=1000 ? (n/1000).toFixed(1)+"k" : num(n);
   const percent=n=>n == null ? I18n.t("未提供") : (n*100).toFixed(1)+"%";
-  const clock=(ts,day=false)=>ts ? new Intl.DateTimeFormat(I18n.dateLocale,{timeZone:"Asia/Shanghai",year:"numeric",month:"2-digit",day:"2-digit",...(day ? {} : {hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false})}).format(new Date(ts*1000)) : I18n.t("未记录");
+  const clockFormats=[false,true].map(day=>new Intl.DateTimeFormat(I18n.dateLocale,{timeZone:"Asia/Shanghai",year:"numeric",month:"2-digit",day:"2-digit",...(day ? {} : {hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false})}));
+  const clock=(ts,day=false)=>ts ? clockFormats[Number(day)].format(new Date(ts*1000)) : I18n.t("未记录");
+  function updateTable(box, signature, html) {
+    if(box.dataset.signature===signature)return;
+    box.dataset.signature=signature;
+    box.innerHTML=html();
+  }
   const money=(c,precise=false)=>{
     if(!c) return I18n.t("未知");
     const parts=[], amount=(n,digits)=>precise ? n.toLocaleString(I18n.dateLocale,{minimumFractionDigits:2,maximumFractionDigits:8}) : n.toFixed(digits);
@@ -156,13 +162,13 @@ const Dashboard = (() => {
   function sessionTable() {
     const box=root?.querySelector(".dash-sessions-table");if(!box || !current)return;
     const rows=filteredSessions(current.sessions);
-    box.innerHTML=rows.length ? I18n.html`<table class="list dash-session-list"><thead><tr><th>会话与成果</th><th>模式 / 状态</th><th>最近活动（北京）</th><th>最近成果（北京）</th><th>本时段 Token</th><th>本时段费用估算</th><th>输入缓存命中率</th><th>最近一小时费用</th></tr></thead><tbody>${rows.map(s=>`<tr><td>${jump(s,s.title)}<small>${esc(outcome(s.outcomes))}</small>${s.data_note ? `<small>${esc(s.data_note)}</small>` : ""}</td><td>${esc(MODE_CN[s.mode] || s.mode)}<small>${esc(s.paused ? I18n.t("已暂停") : STATUS_CN[s.status] || s.status)}</small></td><td>${clock(s.latest_activity)}</td><td>${clock(s.last_result)}${!s.history_complete && !s.last_result ? I18n.html('<small>旧记录未提供</small>') : ""}</td><td>${compact(s.selected?.tokens || 0)}</td><td>${money(s.selected?.cost)}</td><td>${percent(s.selected?.cache?.hit_rate)}</td><td>${money(s.recent_hour?.cost)}</td></tr>`).join("")}</tbody></table>` : empty(I18n.t("没有符合当前筛选的会话"));
+    updateTable(box,JSON.stringify(rows),()=>rows.length ? I18n.html`<table class="list dash-session-list"><thead><tr><th>会话与成果</th><th>模式 / 状态</th><th>最近活动（北京）</th><th>最近成果（北京）</th><th>本时段 Token</th><th>本时段费用估算</th><th>输入缓存命中率</th><th>最近一小时费用</th></tr></thead><tbody>${rows.map(s=>`<tr><td>${jump(s,s.title)}<small>${esc(outcome(s.outcomes))}</small>${s.data_note ? `<small>${esc(s.data_note)}</small>` : ""}</td><td>${esc(MODE_CN[s.mode] || s.mode)}<small>${esc(s.paused ? I18n.t("已暂停") : STATUS_CN[s.status] || s.status)}</small></td><td>${clock(s.latest_activity)}</td><td>${clock(s.last_result)}${!s.history_complete && !s.last_result ? I18n.html('<small>旧记录未提供</small>') : ""}</td><td>${compact(s.selected?.tokens || 0)}</td><td>${money(s.selected?.cost)}</td><td>${percent(s.selected?.cache?.hit_rate)}</td><td>${money(s.recent_hour?.cost)}</td></tr>`).join("")}</tbody></table>` : empty(I18n.t("没有符合当前筛选的会话")));
   }
   function cacheTable() {
     const box=root?.querySelector(".dash-cache-table");if(!box || !current)return;
     const byId=new Map(current.sessions.map(s=>[s.session_id,s]));
     const rows=(current.cache_groups[state.dimension] || []).map(r=>({...r,label:state.dimension === "session_id" ? byId.get(r.name)?.title || r.name : state.dimension === "actor" && typeof actorName === "function" ? actorName(r.name) : state.dimension === "model" ? modelDisplayName(r.name) : r.name})).filter(r=>r.label.toLowerCase().includes(state.cacheQuery.toLowerCase()));
-    box.innerHTML=rows.length ? I18n.html`<table class="list"><thead><tr><th>${({model:I18n.t("模型"),actor:I18n.t("角色"),session_id:I18n.t("会话")})[state.dimension]}</th><th>输入缓存命中率</th><th>命中 / 未命中输入</th><th>输出 Token</th><th>用量完整性</th><th>费用估算</th></tr></thead><tbody>${rows.sort((a,b)=>b.tokens-a.tokens).map(r=>I18n.html`<tr><td>${state.dimension === "session_id" ? jump({session_id:r.name},r.label) : esc(r.label)}<small>${num(r.calls)} 次调用 · ${compact(r.tokens)} Token</small></td><td><span class="dash-rate">${percent(r.cache?.hit_rate)}</span></td><td>${compact(r.cache?.cached_input_tokens || 0)} / ${compact(r.cache?.uncached_input_tokens || 0)}<small>未测量的输入不计入这两项</small></td><td>${compact(r.cache?.output_tokens || 0)}</td><td>${num(r.cache?.measured_calls || 0)} 次已测量<small>${num(r.cache?.unmeasured_calls || 0)} 次未提供缓存计量</small></td><td>${money(r.cost)}<small>${coverage(r)}</small></td></tr>`).join("")}</tbody></table>` : empty(I18n.t("当前范围没有符合条件的用量分组"));
+    updateTable(box,JSON.stringify([state.dimension,rows]),()=>rows.length ? I18n.html`<table class="list"><thead><tr><th>${({model:I18n.t("模型"),actor:I18n.t("角色"),session_id:I18n.t("会话")})[state.dimension]}</th><th>输入缓存命中率</th><th>命中 / 未命中输入</th><th>输出 Token</th><th>用量完整性</th><th>费用估算</th></tr></thead><tbody>${rows.sort((a,b)=>b.tokens-a.tokens).map(r=>I18n.html`<tr><td>${state.dimension === "session_id" ? jump({session_id:r.name},r.label) : esc(r.label)}<small>${num(r.calls)} 次调用 · ${compact(r.tokens)} Token</small></td><td><span class="dash-rate">${percent(r.cache?.hit_rate)}</span></td><td>${compact(r.cache?.cached_input_tokens || 0)} / ${compact(r.cache?.uncached_input_tokens || 0)}<small>未测量的输入不计入这两项</small></td><td>${compact(r.cache?.output_tokens || 0)}</td><td>${num(r.cache?.measured_calls || 0)} 次已测量<small>${num(r.cache?.unmeasured_calls || 0)} 次未提供缓存计量</small></td><td>${money(r.cost)}<small>${coverage(r)}</small></td></tr>`).join("")}</tbody></table>` : empty(I18n.t("当前范围没有符合条件的用量分组")));
   }
   function usageBreakdown(summary) {
     const c=summary.cache || {}, input=summary.input_tokens ?? c.total_input_tokens ?? 0, output=summary.output_tokens ?? c.output_tokens ?? 0;
@@ -219,6 +225,12 @@ const Dashboard = (() => {
     root.querySelector(".dash-experience").innerHTML=exps.length ? exps.map(e=>`<article class="dash-finding"><p>${esc(e.insight || "")}</p><small>${esc((e.tags || []).join(" · "))}</small></article>`).join("") : empty(I18n.t("尚无跨会话经验"));
     sessionTable();cacheTable();
   }
+  function loading(box) {
+    root=box;
+    if(!box.querySelector(".dash-console")) scaffold(box);
+    if(!current) root.querySelector(".dash-updated").textContent=I18n.t("正在读取…");
+    root.querySelectorAll("[data-dash-period]").forEach(b=>b.setAttribute("aria-pressed",String(b.dataset.dashPeriod===state.period)));
+  }
   function render(box,data) {
     root=box;current=normalize(data);
     if(!box.querySelector(".dash-console")) scaffold(box);
@@ -226,8 +238,8 @@ const Dashboard = (() => {
   }
   function error(box,message) {
     const note=box.querySelector(".dash-notice");
-    if(note){note.hidden=false;note.textContent=I18n.t`刷新失败：${message}。保留上次数据，时间以最后更新为准。`;}
+    if(note){note.hidden=false;note.textContent=current ? I18n.t`刷新失败：${message}。保留上次数据，时间以最后更新为准。` : I18n.t`仪表盘读取失败：${message}`;}
     else box.innerHTML=empty(I18n.t`仪表盘读取失败：${message}`);
   }
-  return {render,error,get period(){return state.period;},clock,money,percent,normalize,filteredSessions,trendChart,tooltipContent};
+  return {render,loading,error,get period(){return state.period;},clock,money,percent,normalize,filteredSessions,trendChart,tooltipContent};
 })();

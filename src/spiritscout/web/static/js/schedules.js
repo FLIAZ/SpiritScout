@@ -27,7 +27,7 @@ const SchedulePage = (() => {
         <p class="muted">${item.interval_seconds?I18n.t`每 ${item.interval_seconds/60} 分钟`:I18n.t('单次任务')} · ${item.enabled?I18n.t('下次触发'):I18n.t('计划时间')}：${clock(item.next_run)}（北京）</p><pre>${esc(item.message)}</pre>
         ${item.error?`<p class="traffic-error">${esc(item.error)}</p>`:''}
         <details ${item.runs?.length?'open':''}><summary>运行记录（最近 ${item.runs?.length||0} 次）</summary>${(item.runs||[]).map(run=>`<p class="schedule-run">${clock(run.created_at)} · ${esc(runNames[run.status]||run.status)} ${run.session_id?I18n.html`<button class="traffic-link" data-schedule-session="${esc(run.session_id)}">查看本次结果</button>`:''}${run.error?`<span class="traffic-error">${esc(run.error)}</span>`:''}</p>`).join('')||I18n.html('<p class="muted">到达计划时间后，每次执行会在这里单独留存。</p>')}</details>
-        <footer><button class="btn sm" data-schedule-toggle="${esc(item.id)}" data-enabled="${!item.enabled}">${item.enabled?I18n.t('停用'):I18n.t('启用')}</button><button class="btn sm" data-schedule-delete="${esc(item.id)}">删除计划</button></footer></article>`).join(''):I18n.html('<p class="muted">还没有自动任务。直接描述要自动完成的工作，无需先创建会话。</p>');
+        <footer><button class="btn sm" data-schedule-toggle="${esc(item.id)}" data-enabled="${!item.enabled}">${item.enabled?I18n.t('停用'):I18n.t('启用')}</button><button class="btn sm" data-schedule-delete="${esc(item.id)}">删除计划</button></footer></article>`).join(''):I18n.html('<div class="empty-state"><span class="empty-state-symbol" aria-hidden="true">◷</span><h3>让工作按时发生</h3><p>还没有自动任务。直接描述要自动完成的工作，无需先创建会话。</p></div>');
       if(list._content!==html){
         const expanded=new Map([...list.querySelectorAll('[data-schedule-id]')].map(card=>[card.dataset.scheduleId,card.querySelector('details').open]));
         const focused=document.activeElement,card=focused?.closest('[data-schedule-id]');
@@ -52,12 +52,12 @@ const SchedulePage = (() => {
   function open(){
     close();root=$('#view-schedules');
     root.innerHTML=I18n.html`<section class="schedule-page"><header class="traffic-head"><div><h2>自动任务</h2><p class="muted">描述工作并设置时间，每次自动创建新的执行会话，在这里查看结果。</p></div><button class="btn sm" data-schedule-refresh>刷新</button></header><p data-schedule-notice role="status"></p>
-      <div class="schedule-layout"><form class="schedule-form"><h3>新建自动任务</h3><label>任务名称<input name="name" required maxlength="100" placeholder="例如：每日项目风险摘要"></label>
-      <label>任务内容<textarea name="message" required maxlength="4000" rows="5" placeholder="描述希望自动完成的工作、输入资料和结果要求"></textarea></label>
+      <div class="schedule-layout"><form class="schedule-form"><h3>新建自动任务</h3><label class="schedule-wide">任务名称<input name="name" required maxlength="100" placeholder="例如：每日项目风险摘要"></label>
+      <label class="schedule-wide">任务内容<textarea name="message" required maxlength="4000" rows="5" placeholder="描述希望自动完成的工作、输入资料和结果要求"></textarea></label>
       <label>执行模式<select name="mode"><option value="src">SRC</option><option value="ctf">CTF</option><option value="competition">智能体</option></select></label>
       <label>所属项目（可选）<select name="project_id"></select></label><label>模型<select name="model"></select></label>
-      <label>目标（可选）<input name="target" maxlength="2000" placeholder="按任务需要填写目标地址"></label><label>范围说明（可选，每行一项）<textarea name="scope" rows="2"></textarea></label>
-      <label>首次执行时间（本地时间）<input name="run_at" type="datetime-local" required></label><label>重复频率<select name="interval"><option value="">只执行一次</option><option value="3600">每小时</option><option value="86400">每天（间隔 24 小时）</option><option value="604800">每周</option></select></label><button class="btn" type="submit">创建自动任务</button></form>
+      <label>目标（可选）<input name="target" maxlength="2000" placeholder="按任务需要填写目标地址"></label><label class="schedule-wide">范围说明（可选，每行一项）<textarea name="scope" rows="2"></textarea></label>
+      <label>首次执行时间（本地时间）<input name="run_at" type="datetime-local" required></label><label>重复频率<select name="interval"><option value="">只执行一次</option><option value="3600">每小时</option><option value="86400">每天（间隔 24 小时）</option><option value="604800">每周</option></select></label><button class="btn primary" type="submit">创建自动任务</button></form>
       <section data-schedule-list aria-label="自动任务与运行记录"></section></div></section>`;
     const date=new Date(Date.now()+300000);date.setMinutes(date.getMinutes()-date.getTimezoneOffset());root.querySelector('[name="run_at"]').value=date.toISOString().slice(0,16);
     root.querySelector('[data-schedule-refresh]').onclick=refresh;

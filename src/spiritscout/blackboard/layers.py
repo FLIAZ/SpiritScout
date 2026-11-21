@@ -68,6 +68,8 @@ LAYER_WRITE_PERMISSIONS: dict[AgentType, set[BlackboardLayer]] = {
 
 # 执行角色可在拓扑层发布带依据的共享事实；规则仍由用户上下文写入。
 for _agent, _layers in LAYER_WRITE_PERMISSIONS.items():
+    if BlackboardLayer.TASK_STATE in _layers:
+        _layers.add(BlackboardLayer.TASK_REPORT)
     if _agent not in {AgentType.REPORT, AgentType.VERIFIER}:
         _layers.add(BlackboardLayer.TOPOLOGY)
 

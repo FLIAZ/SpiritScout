@@ -3,17 +3,55 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from spiritscout.agents.business.agent import BusinessContextAgent
+from spiritscout.blackboard import Blackboard, ConvergenceEngine
+from spiritscout.blackboard.hypotheses import summary as hypothesis_summary
 from spiritscout.core.audit import NullAuditLogger
-from spiritscout.core.models import AgentType, BlackboardLayer, Task
+from spiritscout.core.exceptions import SpiritScoutError
+from spiritscout.core.models import AgentType, Asset, BlackboardLayer, Task, TaskStatus
 from spiritscout.tools.spec import ToolResult
 
 
 class BusinessToolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_model_failure_after_tool_turn_does_not_complete_business_task(self):
+        from spiritscout.agents.sub.base import RoutePlan
+
+        self.agent.ctx.ring = None
+        self.agent.ctx.pause_gate = None
+        self.agent.ctx.blackboard = None
+        self.agent._world_state = lambda: {}
+        self.agent._system_prompt = lambda: "业务走访"
+        self.agent._explore_brief = lambda task: "核对状态转换"
+        self.agent._tool_schemas = lambda **kwargs: []
+        self.agent._run_tool_call = AsyncMock(return_value="已记录页面观察")
+        self.agent.health_mgr = Mock()
+        self.agent.cache = SimpleNamespace(stats=lambda: {})
+        self.agent._report = AsyncMock()
+        self.agent._live_report = AsyncMock()
+        self.agent.plan_routes = AsyncMock(return_value=[RoutePlan(
+            name="explore", strategy="", steps=[{"action": "explore"}])])
+        self.agent.ctx.gateway = SimpleNamespace(chat=AsyncMock(side_effect=[
+            SimpleNamespace(content="", tool_calls=[{
+                "id": "read", "name": "http_probe", "arguments": {}}]),
+            SpiritScoutError("Upstream dependency unavailable"),
+        ]))
+
+        summary = await self.agent._run_task(self.task)
+
+        self.assertEqual(self.task.status, TaskStatus.FAILED)
+        self.assertEqual(summary["status"], "failed")
+        self.assertEqual(summary["routes_done"], 0)
+        self.assertEqual(summary["routes_failed"], 1)
+        self.assertEqual(summary["handoff"]["blockers"][0]["type"], "model_unavailable")
+        self.assertEqual(self.agent.ctx.gateway.chat.await_count, 2)
+        self.agent._run_tool_call.assert_awaited_once()
+
     async def test_exploration_streams_public_scene_with_semantics_on_existing_tool_turn(self):
         from spiritscout.agents.sub.base import RoutePlan
         from spiritscout.gateway.progress import (
@@ -96,8 +134,9 @@ class BusinessToolTests(unittest.IsolatedAsyncioTestCase):
         }
         self.agent.ctx.blackboard = SimpleNamespace(
             read=lambda layer, key: records.get((layer, key)),
-            query=lambda *args, **kwargs: [{"record_id": "a", "version": 1,
-                "updated_at": "now", "data": {"asset_type": "url", "value": "https://a.test"}}],
+            query=lambda layer, **kwargs: ([{"record_id": "a", "version": 1,
+                "updated_at": "now", "data": {"asset_type": "url", "value": "https://a.test"}}]
+                if layer == BlackboardLayer.ASSET else []),
         )
         state = self.agent._world_state()
         self.assertEqual(state["user_context"]["mission"], "只验证公开业务流程")
@@ -148,6 +187,52 @@ class BusinessToolTests(unittest.IsolatedAsyncioTestCase):
             "alternative_capabilities": ["script_and_api_extraction"],
             "evidence_refs": ["E1"],
         }])
+
+    async def test_business_context_writes_only_evidence_backed_versioned_hypotheses(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bb = Blackboard(Path(tmp) / "bb.db")
+            self.addCleanup(bb.close)
+            convergence = ConvergenceEngine(bb)
+            asset_id, _created = convergence.merge_asset(Asset(
+                asset_id="endpoint-orders", asset_type="endpoint",
+                value="https://example.test/api/orders/42",
+                attrs={"method": "GET", "params": ["id"], "source": "model_observed"},
+                source_agent="business-test",
+            ), AgentType.BUSINESS_CONTEXT)
+            agent = object.__new__(BusinessContextAgent)
+            agent.agent_id = "business-test"
+            agent.agent_type = AgentType.BUSINESS_CONTEXT
+            agent.ctx = SimpleNamespace(blackboard=bb)
+            agent._llm_chat_json = AsyncMock(return_value={
+                "surface_assessment": {"type": "account_workflow", "business_complexity": "medium",
+                                       "rationale": "订单属于账号对象", "evidence_refs": ["E1"]},
+                "roles": [], "objects": [], "workflows": [], "trust_boundaries": [], "facts": [],
+                "hypotheses": [{
+                    "statement": "订单归属校验缺失可能导致跨账号越权",
+                    "expected_signal": "第二账号得到第一账号订单",
+                    "counter_signal": "服务端返回 403",
+                    "next_minimal_experiment": "比较同一订单的双身份真实请求",
+                    "stop_condition": "缺少第二身份时阻塞",
+                    "evidence_refs": ["E1"],
+                }, {
+                    "statement": "没有证据支撑的隐藏管理员入口",
+                    "evidence_refs": ["unknown"],
+                }],
+                "blockers": [], "unknowns": [],
+            })
+            task = Task(task_id="business-hypothesis", task_type="business_context",
+                        agent_type=AgentType.BUSINESS_CONTEXT, target="https://example.test")
+
+            result = await agent._build_context(task)
+            rows = hypothesis_summary(bb)["active"]
+
+            self.assertTrue(result.ok)
+            self.assertEqual(len(rows), 1)
+            hypothesis = bb.read_versioned(
+                BlackboardLayer.TOPOLOGY, rows[0]["hypothesis_ref"].split(":", 1)[1].rsplit("@", 1)[0])[0]
+            endpoint_version = bb.read_versioned(BlackboardLayer.ASSET, asset_id)[1]
+            self.assertEqual(hypothesis["evidence_refs"], [f"asset:{asset_id}@{endpoint_version}"])
+            self.assertEqual(hypothesis["test_type"], "idor")
 
     def test_only_latest_steering_is_exposed_and_feedback_is_available(self) -> None:
         from spiritscout.agents.ring import RingLedger

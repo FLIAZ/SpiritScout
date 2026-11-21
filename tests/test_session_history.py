@@ -1,12 +1,14 @@
 """长会话历史按字节分页，首次加载和 SSE 续传不需要全量回放。"""
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from spiritscout.core.audit import AuditLogger, _watchers
 from spiritscout.web.events import read_audit_page, read_typed_page, stream_audit
 
 
@@ -17,6 +19,67 @@ def line(index: int) -> bytes:
 
 
 class AuditHistoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_writes_wake_all_subscribers_without_poll_delay(self) -> None:
+        for exists in (False, True):
+            with self.subTest(exists=exists), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / 'audit.jsonl'
+                if exists:
+                    path.touch()
+                streams = [stream_audit(path, byte_offset=0, poll=10) for _ in range(2)]
+                tasks = [asyncio.create_task(anext(stream)) for stream in streams]
+                # 等待生成器注册订阅；缺失日志时首先返回保活帧。
+                await asyncio.sleep(0)
+                if not exists:
+                    await asyncio.gather(*tasks)
+                    tasks = [asyncio.create_task(anext(stream)) for stream in streams]
+                    await asyncio.sleep(0)
+                try:
+                    logger = AuditLogger(path)
+                    await asyncio.to_thread(logger.log, 'master.reply', 'master', {'text': '即时输出'})
+                    frames = await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
+                    self.assertEqual(frames[0], frames[1])
+                    self.assertIn('即时输出', frames[0])
+                    cursor = path.stat().st_size
+                    self.assertTrue(frames[0].startswith(f'id: {cursor}\n'))
+                    for stream in streams:
+                        await stream.aclose()
+                    self.assertNotIn(str(path.resolve()), _watchers)
+                    replay = [frame async for frame in stream_audit(
+                        path, byte_offset=cursor, is_terminal=lambda: True)]
+                    self.assertEqual(replay, ['event: done\ndata: {}\n\n'])
+                finally:
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    for stream in streams:
+                        await stream.aclose()
+
+    async def test_cancelled_wait_removes_subscription(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'audit.jsonl'
+            path.touch()
+            stream = stream_audit(path, poll=10)
+            task = asyncio.create_task(anext(stream))
+            await asyncio.sleep(0)
+            self.assertIn(str(path.resolve()), _watchers)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertNotIn(str(path.resolve()), _watchers)
+
+    async def test_external_writes_still_arrive_through_poll_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'audit.jsonl'
+            path.touch()
+            stream = stream_audit(path, poll=.01, max_frames=1)
+            task = asyncio.create_task(anext(stream))
+            await asyncio.sleep(0)
+            path.write_bytes(line(1))
+            try:
+                self.assertIn('中文记录 1', await asyncio.wait_for(task, timeout=1))
+            finally:
+                await stream.aclose()
+
     async def test_typed_page_stops_when_recent_page_has_enough_matches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'audit.jsonl'

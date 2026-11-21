@@ -30,7 +30,10 @@ vm.runInContext(fs.readFileSync(path.join(__dirname,"../src/spiritscout/web/stat
 vm.runInContext(renderer, context);
 
 (async () => {
-  await vm.runInContext("renderDash()", context);
+  const firstRender = vm.runInContext("renderDash()", context);
+  assert.match(box.innerHTML, /dash-console/, "请求返回前先显示页面结构");
+  assert.equal(node(".dash-updated").textContent, "正在读取…");
+  await firstRender;
   assert.match(html(), /audit-model/);
   assert.match(html(), /2026-10-15/);
   assert.match(html(), /\$0\.250/);
@@ -39,17 +42,17 @@ vm.runInContext(renderer, context);
   context.api = () => new Promise(resolve => pending.push(resolve));
   const older = vm.runInContext("renderDash()", context);
   const newer = vm.runInContext("renderDash()", context);
-  pending[1]({ ...metrics, per_model: { "latest-model": 456 } });
+  assert.equal(pending.length, 1, "同一时段的并发刷新共用一个请求");
+  pending[0]({ ...metrics, per_model: { "latest-model": 456 } });
   await newer;
   const latest = html();
-  pending[0]({ ...metrics, per_model: { "stale-model": 10 } });
   await older;
   assert.equal(html(), latest, "迟到的旧响应不能覆盖新统计");
   assert.match(latest, /latest-model/);
 
   const abandoned = vm.runInContext("renderDash()", context);
   state.view = "home";
-  pending[2](metrics);
+  pending[1](metrics);
   await abandoned;
   assert.equal(html(), latest, "离开页面后不再绘制旧请求");
   assert.equal(vm.runInContext("Dashboard.clock(1792944000)",context).includes("2026"),true);

@@ -126,6 +126,7 @@ def _ingest(workspace: Path, run: str, event: dict[str, Any]) -> None:
         "duration_ms": event["duration_ms"], "request_bytes": event["request"]["total"],
         "response_bytes": event["response"]["total"], "agent_id": context.get("agent_id", ""),
         "task_id": context.get("task_id", ""), "invocation_id": context.get("invocation_id", ""),
+        "identity_id": context.get("identity_id", ""),
         "detail": {"source": "session_proxy", "tool_call_id": context.get("tool_call_id", ""),
             "request_headers": recorder._headers(req_headers), "response_headers": recorder._headers(res_headers),
             "request_body": bodies["request"], "response_body": bodies["response"],
@@ -183,6 +184,7 @@ class SessionProxy:
             await wait_io(_context, self.workspace, identifier, {
                 "invocation_id": invocation.invocation_id if invocation else "",
                 "agent_id": scope.agent_id if scope else "", "task_id": scope.task_id if scope else "",
+                "identity_id": scope.identity_id if scope else "",
                 "tool_call_id": scope.tool_call_id if scope else ""})
         except (OSError, sqlite3.Error):
             identifier = ""

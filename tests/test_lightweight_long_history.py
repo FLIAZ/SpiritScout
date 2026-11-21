@@ -199,23 +199,27 @@ class SupervisionTests(unittest.IsolatedAsyncioTestCase):
                                       ring=RingLedger(), audit=Mock())
         return master
 
-    def test_exact_pending_instruction_reuses_existing_target_but_other_modes_do_not(self):
+    def test_pending_instructions_are_not_reissued_in_any_mode(self):
         tasks = [{"agent": "ctf_misc", "task_id": "one"}]
         proposal = [{"agent": "ctf_misc", "task_id": "one", "hint": "inspect classes", "rationale": "new wording"}]
         for mode, light in ((RunMode.AWDP, True), (RunMode.SRC, True), (RunMode.CTF, False)):
             master = self.master(mode, light)
             master.ctx.ring.steer("ctf_misc", "inspect classes", task_id="one")
             result = master._target_steering(proposal, tasks)
-            self.assertEqual(len(result), 0 if mode == RunMode.AWDP and light else 1)
+            self.assertEqual(len(result), 0)
         master = self.master()
         master.ctx.ring.steer("ctf_misc", "old instruction", task_id="one")
+        self.assertEqual(len(master._target_steering(proposal, tasks)), 0)
+        pending = master.ctx.ring.pending_steering("ctf_misc", task_id="one")
+        master.ctx.ring.steering_feedback("ctf_misc", task_id="one", route_id="r",
+            instruction_id=pending["id"], status="blocked", detail="缺少必要输入")
         self.assertEqual(len(master._target_steering(proposal, tasks)), 1)
 
     async def test_identical_execution_with_new_ids_and_round_notes_does_not_retrigger(self):
         master = self.master()
         checked = asyncio.Event()
         reads = 0
-        def digest(ids):
+        def digest(ids, **kwargs):
             nonlocal reads
             reads += 1
             if reads > 5:

@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
-from spiritscout.core.audit import sanitize_record
+from spiritscout.core.audit import sanitize_record, watch_audit
 
 _HEARTBEAT = ": hb\n\n"
 _DONE = "event: done\ndata: {}\n\n"
@@ -191,51 +192,62 @@ async def stream_audit(path: Path, last_event_id: int = 0, *,
     def _done() -> bool:
         return is_terminal is not None and is_terminal()
 
-    _open()
-    idle = 0.0
-    try:
-        while True:
-            if fh is None:                       # 审计文件尚未创建（会话刚启动）
-                _open()
-                if fh is None:
-                    if _done():
+    async def wait_for_write() -> None:
+        if poll <= 0:
+            await asyncio.sleep(0)
+            return
+        try:
+            await asyncio.wait_for(changed.wait(), timeout=poll)
+        except TimeoutError:
+            pass  # 外部进程写入和终态变化仍由轮询兜底。
+
+    with watch_audit(path) as changed:
+        _open()
+        last_activity = time.monotonic()
+        try:
+            while True:
+                # 先清通知再读取，读取期间的新写入会唤醒下一次等待。
+                changed.clear()
+                if fh is None:                       # 审计文件尚未创建（会话刚启动）
+                    _open()
+                    if fh is None:
+                        if _done():
+                            yield _DONE
+                            return
+                        yield _HEARTBEAT
+                        await wait_for_write()
+                        continue
+                fh.seek(offset)
+                data = fh.read()
+                if data:
+                    lines = data.split(b"\n")
+                    if data.endswith(b"\n"):
+                        lines.pop()                  # 完整换行结尾：末元素是空串，不是一行
+                        tail = b""
+                    else:
+                        tail = lines.pop()           # 半行：本轮不发，下轮从行首重读
+                    for line in lines:
+                        cursor += 1
+                        if byte_offset is not None:
+                            offset += len(line) + 1
+                        text = line.decode("utf-8", errors="replace").strip()
+                        if text:
+                            yield _frame(offset if byte_offset is not None else cursor, text)
+                            emitted += 1
+                            if max_frames is not None and emitted >= max_frames:
+                                return
+                            if emitted % 64 == 0:
+                                await asyncio.sleep(0)  # 大量追帧时让出事件循环
+                    offset = fh.tell() - len(tail)   # 回退未消费的半行字节
+                    last_activity = time.monotonic()
+                else:
+                    if _done():                      # 终态且已排空：收尾
                         yield _DONE
                         return
-                    yield _HEARTBEAT
-                    await asyncio.sleep(poll)
-                    continue
-            fh.seek(offset)
-            data = fh.read()
-            if data:
-                lines = data.split(b"\n")
-                if data.endswith(b"\n"):
-                    lines.pop()                  # 完整换行结尾：末元素是空串，不是一行
-                    tail = b""
-                else:
-                    tail = lines.pop()           # 半行：本轮不发，下轮从行首重读
-                for line in lines:
-                    cursor += 1
-                    if byte_offset is not None:
-                        offset += len(line) + 1
-                    text = line.decode("utf-8", errors="replace").strip()
-                    if text:
-                        yield _frame(offset if byte_offset is not None else cursor, text)
-                        emitted += 1
-                        if max_frames is not None and emitted >= max_frames:
-                            return
-                        if emitted % 64 == 0:
-                            await asyncio.sleep(0)  # 大量追帧时让出事件循环
-                offset = fh.tell() - len(tail)   # 回退未消费的半行字节
-                idle = 0.0
-            else:
-                if _done():                      # 终态且已排空：收尾
-                    yield _DONE
-                    return
-                idle += poll
-                if idle >= heartbeat:
-                    idle = 0.0
-                    yield _HEARTBEAT
-            await asyncio.sleep(poll)
-    finally:
-        if fh is not None:
-            fh.close()
+                    if time.monotonic() - last_activity >= heartbeat:
+                        last_activity = time.monotonic()
+                        yield _HEARTBEAT
+                await wait_for_write()
+        finally:
+            if fh is not None:
+                fh.close()

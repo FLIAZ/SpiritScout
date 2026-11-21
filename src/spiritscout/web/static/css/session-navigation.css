@@ -1,0 +1,58 @@
+/* 一层常用导航；低频入口与已有详情页保持稳定，不因轮询重排。 */
+#view-session .session-navigation { display: flex; align-items: center; flex-wrap: nowrap; gap: 16px; margin-bottom: 0; border-bottom: 1px solid var(--line); }
+#view-session .session-navigation #s-tabs { display: flex; flex: 1; flex-wrap: nowrap; align-items: center; gap: clamp(8px, 1.3vw, 20px); min-width: 0; margin: 0; padding: 0; overflow-x: auto; scrollbar-width: thin; }
+#view-session .session-navigation #s-tabs button { position: relative; flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 11px 2px 13px; border: 0; border-radius: 0; color: var(--ink-2); background: transparent; font-size: 13px; font-weight: 500; white-space: nowrap; }
+#view-session .session-navigation #s-tabs button:hover { color: var(--ink); background: transparent; }
+#view-session .session-navigation #s-tabs button.on { color: var(--accent-ink); background: transparent; border: 0; }
+#view-session .session-navigation #s-tabs button::after { content: ""; position: absolute; bottom: 0; left: 2px; right: 2px; height: 2px; background: var(--accent); opacity: 0; transform: scaleX(.55); transform-origin: center; transition: opacity var(--motion-fast), transform var(--motion-base) var(--motion-ease); }
+#view-session .session-navigation #s-tabs button.on::after { opacity: 1; transform: scaleX(1); }
+#view-session #s-tabs .session-common-tab { margin-left: auto; }
+#s-tabs [data-session-count] { padding: 0 5px; border-radius: 4px; background: var(--surface-2); color: var(--ink-2); font: 10px/1.8 var(--mono); font-variant-numeric: tabular-nums; }
+.session-functions-toggle { flex: none; display: inline-flex; align-items: center; gap: 7px; min-height: 36px; padding: 6px 0 6px 8px; color: var(--ink-2); background: transparent; border: 0; font-size: 12px; white-space: nowrap; }
+.session-functions-toggle:hover, .session-functions-toggle[aria-expanded="true"] { color: var(--accent-ink); }
+.session-functions-toggle svg { width: 14px; height: 14px; transition: transform var(--motion-base) var(--motion-ease); }
+.session-functions-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+#session-functions-dot { width: 5px; height: 5px; background: var(--accent); border-radius: 50%; }
+.session-secondary { flex: none; margin: 0 0 10px; border-bottom: 1px solid var(--line); }
+.session-secondary > div { display: flex; align-items: center; gap: 16px; overflow-x: auto; }
+.session-secondary button { position: relative; flex: none; padding: 9px 2px; color: var(--ink-2); background: transparent; border: 0; font-size: 11px; white-space: nowrap; }
+.session-secondary button.on { color: var(--accent-ink); }
+.session-secondary button.on::after { content: ""; position: absolute; bottom: 0; left: 2px; right: 2px; height: 1px; background: var(--accent); }
+.session-secondary button:hover { color: var(--ink); }
+.session-navigation button:focus-visible, .session-secondary button:focus-visible, .session-functions button:focus-visible, .session-hub-link:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.session-functions { position: fixed; inset: 80px auto auto 16px; margin: 0; width: min(620px, calc(100vw - 32px)); max-height: min(820px, calc(100dvh - 32px)); padding: 20px; overflow: auto; border: 1px solid var(--line); border-radius: 12px; color: var(--ink); background: var(--surface); box-shadow: 0 12px 40px color-mix(in srgb, var(--ink) 12%, transparent); }
+.session-functions > header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 20px; }
+.session-functions h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.session-functions header p { margin: 5px 0 0; color: var(--ink-3); font-size: 11px; }
+.session-functions section + section { padding-top: 14px; margin-top: 16px; border-top: 1px solid var(--line); }
+.session-functions h3 { margin: 0 0 8px; color: var(--ink-3); font-size: 11px; font-weight: 500; }
+.session-function-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px 12px; }
+.session-function-grid > button { display: grid; gap: 4px; min-width: 0; padding: 10px; text-align: left; color: var(--ink); background: transparent; border: 1px solid transparent; border-radius: 7px; }
+.session-function-grid > button > span:first-child { display: flex; align-items: center; gap: 7px; }
+.session-function-grid strong { font-size: 12px; font-weight: 500; }
+.session-function-grid [data-function-description] { color: var(--ink-3); font-size: 10px; line-height: 1.6; }
+.session-function-grid [data-function-location] { margin-left: auto; color: var(--ink-3); font-size: 9px; white-space: nowrap; }
+.session-function-grid [data-function-count] { color: var(--accent-ink); font: 10px var(--mono); }
+.session-function-grid > button:hover:not(:disabled) { background: var(--surface-2); }
+.session-function-grid > button[aria-current="page"] { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 25%, var(--line)); }
+.session-function-grid > button:disabled { opacity: .5; cursor: not-allowed; }
+.session-hub { padding: 26px 0; }
+.session-hub-heading { margin-bottom: 24px; }
+.session-hub-eyebrow { color: var(--accent-ink); font-size: 10px; letter-spacing: .08em; }
+.session-hub-heading h3 { margin: 6px 0; font-size: 22px; font-weight: 600; }
+.session-hub-heading p { margin: 0; color: var(--ink-2); font-size: 12px; }
+.session-hub-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 16px; }
+.session-hub-link { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; min-width: 0; padding: 22px; text-align: left; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; transition: border-color var(--motion-fast), background-color var(--motion-fast), transform var(--motion-base) var(--motion-ease); }
+.session-hub-symbol { display: grid; place-items: center; width: 32px; height: 32px; margin-bottom: 4px; color: var(--accent-ink); background: var(--accent-soft); border-radius: 7px; }
+.session-hub-symbol svg { width: 20px; height: 20px; }
+.session-hub-link strong { font-size: 14px; font-weight: 600; }
+.session-hub-link > span:not(.session-hub-symbol) { color: var(--ink-2); font-size: 11px; line-height: 1.8; }
+.session-hub-link small { display: flex; justify-content: space-between; width: 100%; margin-top: auto; padding-top: 14px; color: var(--accent-ink); font-size: 11px; }
+.session-hub-link small b { font-size: 14px; font-weight: 400; }
+.session-hub-link:hover { border-color: var(--line-strong); background: color-mix(in srgb, var(--surface-2) 15%, var(--surface)); }
+.session-hub-note { margin: 20px 0 0; color: var(--ink-3); font-size: 11px; }
+.session-record-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 30px; padding: 0 0 18px; margin-bottom: 20px; border-bottom: 1px solid var(--line); color: var(--ink-2); font-size: 11px; }
+.session-record-summary b { margin-left: 8px; color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums; }
+@media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+  :root:not([data-motion="off"]) .session-hub-link:hover { transform: translateY(-2px); }
+}

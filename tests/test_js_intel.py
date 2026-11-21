@@ -1,11 +1,13 @@
 import asyncio
+import hashlib
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
+import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -13,10 +15,24 @@ from spiritscout.agents.js_reverse import _route_observations, analyze_script
 from spiritscout.blackboard import Blackboard
 from spiritscout.blackboard.hypotheses import upsert
 from spiritscout.core.models import AgentType, BlackboardLayer
-from spiritscout.resources.session_secrets import SessionSecrets
+from spiritscout.resources.session_secrets import (
+    MAX_JS_SOURCE_BYTES,
+    MAX_SECRET_BYTES,
+    SessionSecrets,
+)
 
 
 class JSIntelTests(unittest.TestCase):
+    def test_source_view_capacity_does_not_raise_credential_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = SessionSecrets(tmp)
+            secret = vault.save('x' * MAX_SECRET_BYTES, source='https://fixture.invalid/', kind='token')
+            self.assertTrue(secret['secret_ref'])
+            with self.assertRaises(ValueError):
+                vault.save('x' * (MAX_SECRET_BYTES + 1), source='https://fixture.invalid/', kind='token')
+            with self.assertRaises(ValueError):
+                vault.save('x' * (MAX_JS_SOURCE_BYTES + 1), source='https://fixture.invalid/', kind='js_source')
+
     def test_repeated_hypothesis_merges_into_stable_identity_and_keeps_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
             bb = Blackboard(Path(tmp) / "bb.db")
@@ -107,14 +123,135 @@ class JSIntelTests(unittest.TestCase):
                 ('/api/user', 'GET'), ('/api/user', 'POST'), ('/api/user', 'DELETE'),
             })
 
+    def test_static_media_and_bare_origins_are_not_endpoint_candidates(self):
+        with tempfile.TemporaryDirectory() as root:
+            data = analyze_script(
+                'const logo="https://cdn.example.com/logo.svg"; '
+                'const video="/api/banner.mp4"; const origin="https://api.example.com"; '
+                'fetch("/api/user");',
+                'https://example.com/app.js', SessionSecrets(root))
+
+            observations = _route_observations(data)
+            from spiritscout.agents.js_reverse import _is_api_observation
+
+            accepted = {item['route'] for item in observations
+                        if _is_api_observation(item, data['script_url'])}
+            self.assertEqual(accepted, {'/api/user'})
+
 
 class SecretInjectionTests(unittest.IsolatedAsyncioTestCase):
-    def test_wildcard_scope_accepts_apex_and_subdomain_for_redirects(self):
+    async def _script_projection(self, body, partition):
+        from spiritscout.agents.js_reverse import JSReverseAgent
+        from spiritscout.core.audit import NullAuditLogger
+        from spiritscout.core.models import Scope
+        from spiritscout.policy.scope import ScopeGuard
+
+        class NetworkChunks(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                offset = index = 0
+                while offset < len(self.body):
+                    size = partition[index % len(partition)]
+                    yield self.body[offset:offset + size]
+                    offset += size
+                    index += 1
+
+            def __init__(self, data):
+                self.body = data
+
+        base = 'https://fixture.invalid/'
+        bodies = {'/': b'<script src="/large.js"></script><script src="/small.js"></script>',
+                  '/large.js': body, '/small.js': b'axios.get("/api/small")'}
+        requested = []
+
+        def respond(request):
+            requested.append(request.url.path)
+            data = bodies[request.url.path]
+            return httpx.Response(200, headers={'Content-Length': str(len(data))}, stream=NetworkChunks(data))
+
+        original_client = httpx.AsyncClient
+        with tempfile.TemporaryDirectory() as tmp:
+            bb = Blackboard(Path(tmp) / 'bb.db')
+            try:
+                ctx = SimpleNamespace(shared_cache=None, blackboard=bb,
+                    policy=SimpleNamespace(guard=ScopeGuard(Scope(allowed_urls=[base]))),
+                    builtin_ctx={'workspace_root': tmp}, audit=NullAuditLogger())
+                ctx.for_agent = lambda key: ctx
+                agent = JSReverseAgent(ctx, enable_llm_planning=False)
+                agent._llm_chat_json = AsyncMock(return_value={})
+                with patch('spiritscout.agents.js_reverse.httpx.AsyncClient',
+                           side_effect=lambda **kwargs: original_client(transport=httpx.MockTransport(respond), **kwargs)):
+                    result = await agent.execute_step(SimpleNamespace(target=base), None, None, {'action': 'analyze'})
+                self.assertTrue(result.ok, result.note)
+                self.assertIn('已分析 2 份脚本', result.note)
+                self.assertEqual(requested, ['/', '/large.js', '/small.js'])
+                assets = [row['data'] for row in bb.query(BlackboardLayer.ASSET)]
+                script = next(row for row in assets if row['asset_type'] == 'script' and row['value'] == base + 'large.js')
+                self.assertEqual(script['fingerprint']['sha256'], hashlib.sha256(body).hexdigest())
+                source = SessionSecrets(tmp).resolve(script['attrs']['script_ref'], base)
+                self.assertLessEqual(len(source.encode()), MAX_JS_SOURCE_BYTES)
+                payloads = [call.args[1] for call in agent._llm_chat_json.call_args_list]
+                self.assertEqual(len(payloads), 2)
+                self.assertTrue(all(len(payload['source']) <= 20000 for payload in payloads))
+                # 独立工作区的引用 ID 不同；先证明它确实能读取对应源码，再按内容身份比较请求。
+                for payload in payloads:
+                    source_asset = next(row for row in assets if row['asset_type'] == 'script'
+                                        and row['value'] == payload['script_url'])
+                    self.assertEqual(payload['script_ref'], source_asset['attrs']['script_ref'])
+                    saved = SessionSecrets(tmp).resolve(payload['script_ref'], payload['script_url'])
+                    self.assertTrue(saved)
+                    payload['script_ref'] = 'source-sha256:' + hashlib.sha256(saved.encode()).hexdigest()
+                endpoints = {row['value'] for row in assets if row['asset_type'] == 'endpoint'}
+                self.assertIn(base + 'api/small', endpoints)
+                return source, payloads, endpoints
+            finally:
+                bb.close()
+
+    async def test_network_partitions_preserve_source_and_model_projection(self):
+        cap = 2 * 1024 * 1024
+        tail = b';fetch("/api/edge")'
+        cases = [('unicode', 'const text="汉🙂";fetch("/api/edge")'.encode())]
+        for size in (cap - 1, cap, cap + 1, cap + 4096):
+            cases.append((str(size), b'x' * (size - len(tail)) + tail))
+        # fetch 本身跨越前缀边界，后续 URL 不含 /api/ 等其他锚点。
+        cases.append(('anchor_boundary', b'x' * (cap - 3) + b';fetch("/boundary")'))
+        for name, body in cases:
+            expected = None
+            partitions = ((len(body),), (65536,), (65535,), (1, 2, 3, 4096, 65537))
+            if len(body) < 256:
+                partitions += ((1,),)
+            for partition in partitions:
+                with self.subTest(case=name, partition=partition):
+                    result = await self._script_projection(body, partition)
+                    if expected is None:
+                        expected = result
+                    else:
+                        self.assertEqual(result, expected, '传输分包不应改变源码视图、接口发现或模型请求')
+                    source, _, endpoints = result
+                    self.assertIn('https://fixture.invalid/' + ('boundary' if name == 'anchor_boundary' else 'api/edge'), endpoints)
+                    if len(body) <= cap:
+                        self.assertEqual(source, body.decode(), '未超限脚本必须无损保存')
+
+    async def test_excerpt_limit_applies_across_blocks_with_invalid_utf8(self):
+        # U+FFFD 会增加 UTF-8 存储字节；80 次命中之后的块仍必须计入原文哈希。
+        blocks = [b'\xff' * (2 * 1024 * 1024)]
+        for index in range(120):
+            marker = f'fetch("/api/late/{index}")'.encode()
+            blocks.append(marker + b'\xff' * (8192 - len(marker)))
+        body = b''.join(blocks)
+        first = await self._script_projection(body, (len(body),))
+        second = await self._script_projection(body, (17, 4093, 65537))
+        self.assertEqual(first, second)
+        source, _, _ = first
+        self.assertTrue(source.startswith('\ufffd' * (2 * 1024 * 1024)))
+        self.assertGreater(len(source.encode()), MAX_SECRET_BYTES)
+        self.assertEqual(source.count('fetch('), 80)
+
+    def test_wildcard_scope_accepts_only_subdomains_for_redirects(self):
         from spiritscout.agents.scoped_assets import _within
         from spiritscout.core.models import Scope
 
         scope = Scope(allowed_domains=["*.example.com"])
-        self.assertTrue(_within("https://example.com/", scope))
+        self.assertFalse(_within("https://example.com/", scope))
         self.assertTrue(_within("https://www.example.com/app.js", scope))
 
     async def test_js_role_follows_in_scope_redirect_before_parsing_scripts(self):
@@ -160,6 +297,60 @@ class SecretInjectionTests(unittest.IsolatedAsyncioTestCase):
                         SimpleNamespace(target=base), None, None, {'action': 'analyze'})
                     self.assertTrue(result.ok, result.note)
                     self.assertEqual(requested, ['/', '/home/', '/app.js'])
+                finally:
+                    bb.close()
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_large_script_uses_excerpt_window_and_does_not_block_other_scripts(self):
+        from spiritscout.agents.js_reverse import JSReverseAgent
+        from spiritscout.blackboard.store import Blackboard
+        from spiritscout.core.audit import NullAuditLogger
+        from spiritscout.core.models import BlackboardLayer, Scope
+        from spiritscout.policy.scope import ScopeGuard
+
+        large = b'x' * (2 * 1024 * 1024 + 4096) + b';fetch("/api/large")'
+        bodies = {
+            '/': b'<script src="/large.js"></script><script src="/small.js"></script>',
+            '/large.js': large,
+            '/small.js': b'axios.get("/api/small")',
+        }
+        async def serve(reader, writer):
+            request = await reader.readuntil(b'\r\n\r\n')
+            path = request.split(b' ')[1].decode()
+            body = bodies[path]
+            writer.write(b'HTTP/1.1 200 OK\r\nContent-Length: ' + str(len(body)).encode()
+                         + b'\r\nConnection: close\r\n\r\n' + body)
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_server(serve, '127.0.0.1', 0)
+        base = f'http://127.0.0.1:{server.sockets[0].getsockname()[1]}/'
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                bb = Blackboard(Path(root) / 'bb.db')
+                try:
+                    guard = ScopeGuard(Scope(allowed_urls=[base]))
+                    ctx = SimpleNamespace(
+                        for_agent=lambda key: ctx, shared_cache=None,
+                        policy=SimpleNamespace(guard=guard),
+                        builtin_ctx={'workspace_root': root}, blackboard=bb,
+                        audit=NullAuditLogger(),
+                    )
+                    agent = JSReverseAgent(ctx, enable_llm_planning=False)
+                    agent._llm_chat_json = AsyncMock(return_value={})
+
+                    result = await agent.execute_step(
+                        SimpleNamespace(target=base), None, None, {'action': 'analyze'})
+
+                    self.assertTrue(result.ok, result.note)
+                    self.assertIn('已分析 2 份脚本', result.note)
+                    endpoints = {row['data']['value'] for row in bb.query(BlackboardLayer.ASSET)
+                                 if row['data'].get('asset_type') == 'endpoint'}
+                    self.assertIn(base + 'api/large', endpoints)
+                    self.assertIn(base + 'api/small', endpoints)
                 finally:
                     bb.close()
         finally:

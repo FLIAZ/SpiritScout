@@ -57,7 +57,8 @@ SEARCH_SCHEMA: dict[str, Any] = {"type": "function", "function": {
     }, "required": ["query", "reason"]}}}
 SEARCH_SPEC = ToolSpec(name="web_search", kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY,
     automatic_replay=False, internet_search=True, description="Exa 公开资料检索（格式化、来源/时间、跨会话缓存）",
-    allowed_params=set(SEARCH_SCHEMA["function"]["parameters"]["properties"]))
+    allowed_params=set(SEARCH_SCHEMA["function"]["parameters"]["properties"]),
+    required_params=("query", "reason"))
 
 
 def _failure(message: str, *, timed_out: bool = False) -> ToolResult:

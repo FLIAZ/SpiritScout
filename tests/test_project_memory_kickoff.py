@@ -1,4 +1,4 @@
-"""开工前项目记忆：范围确认必须经用户勾选，记忆本身不构成授权。"""
+"""开工前项目记忆：范围确认必须经用户答复，记忆本身不构成授权。"""
 
 from __future__ import annotations
 
@@ -33,11 +33,11 @@ def _cfg(root: Path) -> SystemConfig:
     return cfg
 
 
-def _fixture(root: Path, assets: list[dict]) -> tuple[
+def _fixture(root: Path, assets: list[dict], *, description: str = "") -> tuple[
         SystemConfig, ResourceStore, SessionManager, Session]:
     cfg = _cfg(root)
     store = ResourceStore(cfg.resources.root)
-    project = store.create_project("BiliBili SRC")
+    project = store.create_project("BiliBili SRC", description)
     store.set_session_project("sess-mem", project["project_id"])
     for index, asset in enumerate(assets):
         store.observe(asset, f"sess-mem:asset:{index}@1")
@@ -72,6 +72,20 @@ class _FakeGateway:
 
 
 class ProjectTargetCandidateTests(unittest.TestCase):
+    def test_candidates_include_project_description_targets_for_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, store, manager, session = _fixture(
+                Path(tmp), [],
+                description="范围：*.fenqile.com、https://www.rhinocloud.com.cn/login")
+            memory = store.project_memory(session.project_id)
+            plan = prepare_launch(LaunchRequest(mode=RunMode.SRC, mission="继续测试"))
+
+            candidates = manager._project_target_candidates(memory, plan)
+
+            self.assertEqual({item["target"] for item in candidates}, {
+                "*.fenqile.com", "https://www.rhinocloud.com.cn"})
+            self.assertTrue(all("需本次确认" in item["why"] for item in candidates))
+
     def test_candidates_include_legacy_excluded_targets_for_user_decision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = _cfg(Path(tmp))
@@ -163,7 +177,7 @@ class ProjectScopeConfirmationTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertTrue(asked)
             self.assertEqual(added, ["https://hg-v1.imou.com/"])
-            self.assertIn("按勾选", answer)
+            self.assertIn("同意测试", answer)
             self.assertIn("范围确认答复",
                           session.dialogue_history[-1]["content"])
             audit_text = Path(cfg.audit_log_path).read_text(encoding="utf-8")
@@ -198,20 +212,36 @@ class ProjectScopeConfirmationTests(unittest.IsolatedAsyncioTestCase):
             cfg, manager, session, plan, memory, audit = \
                 await self._context(Path(tmp))
             plan.authorization.scope.denied.append("blocked.test")
-            task = asyncio.create_task(manager._confirm_project_scope(
-                session, cfg, [], "继续测试", plan, audit, memory,
-                no_llm=True))
-            question = await _wait_question(session)
-            session.questions.answer(
-                question["question_id"],
-                text="换成 https://new.example.test/login 和 https://blocked.test/")
+            from unittest.mock import AsyncMock, patch
+            new_targets = ["https://new.example.test", "https://blocked.test"]
+            with patch("spiritscout.web.session_assistant._llm_answer_scope", AsyncMock(return_value=new_targets)) as resolver:
+                task = asyncio.create_task(manager._confirm_project_scope(
+                    session, cfg, [], "继续测试", plan, audit, memory,
+                    no_llm=True))
+                question = await _wait_question(session)
+                text = "换成 https://new.example.test/login 和 https://blocked.test/"
+                session.questions.answer(question["question_id"], text=text)
+                _, added, _ = await task
+                resolver.assert_awaited_once()
+                self.assertEqual(resolver.call_args.args[-1], text)
+            self.assertEqual(added, new_targets)
 
-            _, added, _ = await task
-
-            self.assertEqual(added, ["https://new.example.test", "https://blocked.test"])
 
 
 class ProjectMemoryKickoffTests(unittest.IsolatedAsyncioTestCase):
+    async def test_src_project_context_does_not_suggest_historical_targets_at_kickoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, store, manager, session = _fixture(Path(tmp), [{
+                "asset_type": "app", "value": "https://old.example.test"}],
+                description="会员系统背景；禁止修改真实订单")
+            memory = manager._project_memory(session)
+            self.assertEqual(memory["description"], "会员系统背景；禁止修改真实订单")
+            self.assertNotIn("assets", memory)
+            self.assertNotIn("findings", memory)
+            plan = prepare_launch(LaunchRequest(mode=RunMode.SRC, mission="开始测试"))
+            self.assertEqual(manager._project_target_candidates(memory, plan), [])
+            self.assertTrue(store.project_memory(session.project_id)["assets"], "原档案仍可查询")
+
     async def test_attachment_only_task_does_not_require_network_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg, _, manager, session = _fixture(Path(tmp), [
@@ -248,9 +278,10 @@ class ProjectMemoryKickoffTests(unittest.IsolatedAsyncioTestCase):
                 "name": "BiliBili SRC",
                 "assets": [{"value": "https://hg-v1.imou.com"}],
                 "findings": [],
+                "history_on_demand": True,
             }
             gateway = _FakeGateway("我记得项目里还有主站资产。")
-            with patch("spiritscout.web.sessions._conversation_gateway",
+            with patch("spiritscout.web.session_assistant._conversation_gateway",
                        return_value=gateway):
                 reply = await _master_reply(
                     cfg, [ModelEntry(model="test-model")], "继续测试", audit,
@@ -258,33 +289,52 @@ class ProjectMemoryKickoffTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(reply, "我记得项目里还有主站资产。")
             messages = gateway.calls[0]["messages"]
-            self.assertEqual(json.loads(messages[1]["content"])["project_memory"], memory)
+            facts = json.loads(messages[1]["content"])["snapshot"]["session_facts"]
+            self.assertEqual(facts["project_context"]["name"], memory["name"])
+            self.assertNotIn("assets", facts["project_context"])
+            self.assertNotIn("hg-v1.imou.com", messages[1]["content"])
             self.assertNotIn("BiliBili SRC", messages[0]["content"])
             self.assertIn("不构成本次会话授权", messages[0]["content"])
 
-    async def test_src_without_target_enters_runtime_without_importing_memory(self) -> None:
-        for assets in ([], [{"asset_type": "url", "value": "https://old.example.test"}]):
-            with self.subTest(assets=assets), tempfile.TemporaryDirectory() as tmp:
-                _, _, manager, session = _fixture(Path(tmp), assets)
-                mission = "审计本地项目，先分析认证设计"
-                session.launch_request.update(mode="src", mission=mission)
-                plan = prepare_launch(LaunchRequest(mode=RunMode.SRC, mission=mission))
-                result = SimpleNamespace(
-                    run_summary={}, verify_stats={}, flag_stats={}, report_path="")
-                with patch("spiritscout.runtime.run_engagement",
-                           new=AsyncMock(return_value=result)) as run_mock, patch.object(
-                               manager, "_confirm_project_scope", new=AsyncMock()) as confirm:
-                    await manager._run(
-                        session, manager._session_cfg(session, None), plan, True, [])
-                confirm.assert_not_awaited()
-                run_mock.assert_awaited_once()
-                self.assertEqual(run_mock.call_args.kwargs["target"], "")
-                scope = run_mock.call_args.kwargs["authorization"].scope
-                self.assertFalse(scope.allowed_urls or scope.allowed_domains or scope.allowed_cidrs)
-                self.assertEqual(session.questions.view(), [])
-                self.assertEqual(session.status, "completed")
-                rebuilt = manager._rebuild_plan(session)
-                self.assertIsNotNone(rebuilt)
-                self.assertEqual(rebuilt.authorization.mode, RunMode.SRC)
-                self.assertEqual(rebuilt.target, "")
-                self.assertEqual(rebuilt.mission, mission)
+    async def test_src_without_target_confirms_project_candidate_before_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, manager, session = _fixture(
+                Path(tmp), [], description="授权范围：*.example.test")
+            mission = "继续进行项目测试"
+            session.launch_request.update(
+                mode="src", mission=mission, asset_strategy="core_first")
+            plan = prepare_launch(LaunchRequest(mode=RunMode.SRC, mission=mission))
+            result = SimpleNamespace(
+                run_summary={}, verify_stats={}, flag_stats={}, report_path="")
+            with patch("spiritscout.runtime.run_engagement",
+                       new=AsyncMock(return_value=result)) as run_mock, patch.object(
+                           manager, "_confirm_project_scope",
+                           new=AsyncMock(return_value=(
+                               True, ["*.example.test"], "已确认"))) as confirm:
+                await manager._run(
+                    session, manager._session_cfg(session, None), plan, True, [])
+
+            confirm.assert_awaited_once()
+            run_mock.assert_awaited_once()
+            scope = run_mock.call_args.kwargs["authorization"].scope
+            self.assertEqual(scope.allowed_domains, ["*.example.test"])
+            self.assertEqual(run_mock.call_args.kwargs["asset_strategy"], "core_first")
+
+    async def test_src_without_confirmed_project_target_does_not_start_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, manager, session = _fixture(
+                Path(tmp), [], description="授权范围：*.example.test")
+            mission = "继续进行项目测试"
+            session.launch_request.update(mode="src", mission=mission)
+            plan = prepare_launch(LaunchRequest(mode=RunMode.SRC, mission=mission))
+            with patch("spiritscout.runtime.run_engagement",
+                       new=AsyncMock()) as run_mock, patch.object(
+                           manager, "_confirm_project_scope",
+                           new=AsyncMock(return_value=(
+                               True, [], "这次先不测"))):
+                await manager._run(
+                    session, manager._session_cfg(session, None), plan, True, [])
+
+            run_mock.assert_not_awaited()
+            self.assertEqual(session.status, "completed")
+            self.assertIn("未获本次授权", session.summary["note"])

@@ -14,7 +14,7 @@ const ResourceConsole = (() => {
     return I18n.html`<div class="skill-status-groups" role="group" aria-label="启用状态">
       <button type="button" data-skill-enabled="true" aria-pressed="true"><span>已启用</span><b data-count-enabled>0</b></button>
       <button type="button" data-skill-enabled="false" aria-pressed="false"><span>未启用</span><b data-count-disabled>0</b></button></div>
-      <div class="skill-filters" aria-label="技能筛选">
+      <details class="resource-filters"><summary>筛选与排序</summary><div class="skill-filters" aria-label="技能筛选">
       <label>类型<select data-skill-filter="domain"><option value="">全部类型</option></select></label>
       ${mcp?'':I18n.html('<label>分级<select data-skill-filter="tier"><option value="">全部分级</option><option value="core">核心技能</option><option value="domain">领域技能</option><option value="reference">参考资料</option></select></label>')}
       <label>来源<select data-skill-filter="source"><option value="">全部来源</option><option value="builtin">内置参考</option><option value="archive">压缩包导入</option><option value="manual">手动／助手添加</option></select></label>
@@ -22,7 +22,7 @@ const ResourceConsole = (() => {
       <label title="按北京时间筛选">起始日期<input type="date" data-skill-filter="added_from"></label>
       <label title="按北京时间筛选">截止日期<input type="date" data-skill-filter="added_to"></label>
       <label>排序<select data-skill-filter="sort">${mcp?'':I18n.html('<option value="relevance">相关性</option>')}<option value="added_desc">最近导入／添加</option><option value="added_asc">最早导入／添加</option><option value="updated_desc">最近修改</option><option value="name_asc">名称 A–Z</option></select></label>
-      </div><div class="skill-filter-footer"><button type="button" class="btn sm" data-skill-reset>清除筛选</button></div>`;
+      </div><div class="skill-filter-footer"><button type="button" class="btn sm" data-skill-reset>清除筛选</button></div></details>`;
   }
   function skillMeta(d) {
     const source=({builtin:I18n.t('内置参考'),archive:I18n.t('压缩包导入'),manual:I18n.t('手动／助手添加')})[d.source_kind]||I18n.t('自定义');
@@ -75,7 +75,7 @@ const ResourceConsole = (() => {
     const [title,description]=titles[kind],el=root(kind);if(el.dataset.ready)return;el.dataset.ready='yes';
     el.innerHTML=I18n.html`<header class="resource-head"><div><h2 title="${description}">${title}</h2></div><div class="resource-head-actions">${kind==='skill'?I18n.html('<button class="btn" data-import>导入压缩包</button><input type="file" data-archives hidden multiple accept=".zip,.tar,.tar.gz,.tgz,.tar.bz2,.tbz2,.tar.xz,.txz,.rar,.7z,.tar.zst,.tzst">'):''}<button class="action-icon" data-refresh title="刷新" aria-label="刷新"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 6.1A8 8 0 0 1 20 12M4 12a8 8 0 0 0 13.9 5.9"/></svg></button><button class="btn primary" data-new>手动添加</button></div></header>
       ${kind==='skill'?I18n.html('<details class="page-details resource-import-help"><summary>导入要求</summary><p id="skill-import-help">支持 ZIP、TAR、RAR、7z 等；可多选，每包最多 20 MiB，须包含 SKILL.md。只导入文本资料。</p></details><p class="resource-import-status" role="status"></p>'):''}
-      <div class="resource-layout"><section class="resource-catalog" aria-label="${title}目录">${kind==='skill'?skillControlsHtml():mcpControlsHtml()}<label class="resource-search"><span class="sr-only">${kind==='skill'?I18n.t('搜索技能'):I18n.t('搜索 MCP')}</span><input type="search" data-search placeholder="搜索名称或内容…" maxlength="200"></label><div class="resource-list-status" role="status"></div><div class="resource-list"></div><button class="btn resource-more" hidden>加载更多</button></section>
+      <div class="resource-layout"><section class="resource-catalog" aria-label="${title}目录"><label class="resource-search"><span class="sr-only">${kind==='skill'?I18n.t('搜索技能'):I18n.t('搜索 MCP')}</span><input type="search" data-search placeholder="搜索名称或内容…" maxlength="200"></label>${kind==='skill'?skillControlsHtml():mcpControlsHtml()}<div class="resource-list-status" role="status"></div><div class="resource-list"></div><button class="btn resource-more" hidden>加载更多</button></section>
       ${kind==='mcp'?I18n.html('<details class="skill-assistant mcp-search-settings"><summary>搜索服务 · Exa 配置</summary><div data-exa-settings></div></details>'):''}<details class="skill-assistant"><summary>资源助手 · 对话添加和管理 ${kind==='skill'?'Skill':'MCP'}</summary><section class="resource-chat" aria-label="${title}专属管理对话"><header><div><b>资源助手</b><small>变更需确认后执行</small></div></header><div class="resource-chat-log" aria-live="polite"></div><div class="resource-proposals"></div><form class="resource-chat-form"><label class="sr-only" for="resource-message-${kind}">向${title}助手描述需求</label><textarea id="resource-message-${kind}" placeholder="${kind==='mcp'?I18n.t('例如：帮我配置一个只读浏览器 MCP，请先给出安装方案'):I18n.t('例如：添加一份关于接口权限边界的参考技能')}" rows="3" maxlength="16000"></textarea><div><small>请勿在聊天中粘贴密钥</small><button class="btn primary" type="submit">发送</button></div><p class="resource-chat-status" role="status"></p></form></section></details></div>`;
     if(kind==='mcp')ExaSettings.mount(el.querySelector('[data-exa-settings]'));
     el.querySelector('[data-refresh]').onclick=()=>{load(kind);loadChat(kind);if(kind==='mcp')ExaSettings.load();};

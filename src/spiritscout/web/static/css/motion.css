@@ -1,5 +1,5 @@
 /* 动效只负责视觉反馈，不延迟操作；节奏集中配置，避免各处各自闪动。 */
-:root {
+:root, dialog::backdrop {
   --motion-fast: 140ms;
   --motion-base: 200ms;
   --motion-enter: 240ms;
@@ -11,7 +11,7 @@
   --motion-pulse: ss-breathe 3.2s ease-in-out infinite;
   --motion-line: ss-line-breathe 4.8s ease-in-out infinite;
 }
-:root[data-motion="soft"] {
+:root[data-motion="soft"], :root[data-motion="soft"] dialog::backdrop {
   --motion-fast: 180ms;
   --motion-base: 280ms;
   --motion-enter: 360ms;
@@ -22,7 +22,7 @@
   --motion-pulse: ss-breathe 4s ease-in-out infinite;
   --motion-line: ss-line-breathe 5.6s ease-in-out infinite;
 }
-:root[data-motion="quick"] {
+:root[data-motion="quick"], :root[data-motion="quick"] dialog::backdrop {
   --motion-fast: 70ms;
   --motion-base: 100ms;
   --motion-enter: 140ms;
@@ -108,16 +108,124 @@ dialog[open]::backdrop { animation: ss-backdrop-in var(--motion-enter) ease-out;
 }
 .toast { animation: ss-enter var(--motion-enter) var(--motion-ease); }
 
+/* 只动画稳定的交互容器，不给轮询记录和流式正文逐项加动效。 */
+:where(button, a, input, textarea, select, summary) {
+  transition: color var(--motion-fast), background-color var(--motion-fast),
+    border-color var(--motion-fast), box-shadow var(--motion-fast), opacity var(--motion-fast);
+}
+.command-menu:not([hidden]), .command-feedback:not([hidden]),
+[popover]:popover-open, #home-drop-status:not([hidden]), #comp-drop-status:not([hidden]) {
+  animation: ss-enter var(--motion-enter) var(--motion-ease);
+}
+:is(.project-detail, .topo-detail, .traffic-detail, .packet-inspector, .exp-merge,
+    .asset-collection-detail, .background-detail, #agent-side-chat, #session-observer):not([hidden]) {
+  animation: ss-fade-in var(--motion-enter) var(--motion-ease);
+}
+:root .reader-outline[data-state="open"] { animation: ss-pop-in var(--motion-enter) var(--motion-ease); }
+:root .reader-outline[data-state="closed"] { animation: ss-pop-out var(--motion-base) var(--motion-ease); }
+#session-rail-toggle svg { transition: transform var(--motion-base) var(--motion-ease); }
+
+/* 页面内容先落标题，再承接工作区；只动画稳定容器，不逐项重播轮询数据。
+   工作区只改变透明度，避免影响下拉浮层、fixed 工具和画布坐标。 */
+main > section:not(#view-home, #view-session, [hidden]) > :is(.resource-head, .models-head, .pool-header, .console-insight-head),
+#view-dash:not([hidden]) .dash-heading,
+#view-asset-intelligence:not([hidden]) .asset-intel-head,
+:is(#view-traffic, #view-schedules):not([hidden]) .traffic-head:has(h2) {
+  animation: ss-enter var(--motion-hero) var(--motion-ease);
+}
+main > section:not(#view-home, #view-session, [hidden]) > :is(.projects-grid, .resource-layout,
+    .asset-collection-workspace, .agrid, .naming-box, .schedule-layout, .pool-layout) {
+  animation: ss-fade-in var(--motion-hero) var(--motion-ease) var(--motion-stagger) backwards;
+}
+#app > main :is(.resource-head, .models-head, .pool-header, .console-insight-head, .dash-heading, .traffic-head, .asset-intel-head) h2::after {
+  animation: ss-content-breathe 5.6s ease-in-out infinite;
+}
+@keyframes ss-content-breathe {
+  0%, 100% { opacity: .35; transform: scaleX(.78); }
+  50% { opacity: .65; transform: scaleX(1); }
+}
+:root[data-motion="quick"] #app > main h2::after { animation: none; }
+
+/* 原生顶层弹层保留关闭后的视觉过渡，但焦点、返回值和模态状态立即交还浏览器。 */
+@supports (transition-behavior: allow-discrete) and (interactivity: inert) {
+  dialog, [popover] {
+    interactivity: inert; pointer-events: none;
+    opacity: 0; transform: translateY(var(--motion-distance)) scale(var(--motion-scale));
+    transition: opacity var(--motion-base) var(--motion-ease), transform var(--motion-base) var(--motion-ease),
+      display var(--motion-base) allow-discrete, overlay var(--motion-base) allow-discrete;
+  }
+  dialog[open], [popover]:popover-open { interactivity: auto; pointer-events: auto; opacity: 1; transform: none; animation: none; }
+  dialog::backdrop {
+    opacity: 0; transition: opacity var(--motion-base), display var(--motion-base) allow-discrete,
+      overlay var(--motion-base) allow-discrete;
+  }
+  dialog[open]::backdrop { opacity: 1; animation: none; }
+  @starting-style {
+    dialog[open], [popover]:popover-open {
+      opacity: 0; transform: translateY(var(--motion-distance)) scale(var(--motion-scale));
+    }
+    dialog[open]::backdrop { opacity: 0; }
+  }
+}
+
+/* auto → auto 不产生动画，已展开的详情刷新正文时不会再次播放或测量高度。 */
+@supports (interpolate-size: allow-keywords) and (interactivity: inert) {
+  details:not(.inline-help, .session-more)::details-content {
+    interpolate-size: allow-keywords; block-size: 0; opacity: 0; overflow: clip; interactivity: inert;
+    transition: block-size var(--motion-base) var(--motion-ease), opacity var(--motion-base),
+      content-visibility var(--motion-base) allow-discrete;
+  }
+  details[open]:not(.inline-help, .session-more)::details-content {
+    block-size: auto; opacity: 1; interactivity: auto; overflow: visible;
+    /* 展开结束后放开裁剪，避免把内部选择器和悬浮菜单裁掉；收起仍立即裁剪。 */
+    transition: block-size var(--motion-base) var(--motion-ease), opacity var(--motion-base),
+      content-visibility var(--motion-base) allow-discrete, overflow var(--motion-base) steps(1, end) allow-discrete;
+  }
+  :root[data-motion="quick"] details::details-content { transition-duration: var(--motion-fast) !important; }
+  :root[data-motion="off"] details::details-content { transition: none !important; }
+  @media (prefers-reduced-motion: reduce) { details::details-content { transition: none !important; } }
+  /* 工具结果容器不参与逐行输出动画，只响应既有 open 状态的切换。 */
+  .tl-act > pre {
+    interpolate-size: allow-keywords; display: block; height: 0; padding-block: 0; border-top-width: 0;
+    opacity: 0; visibility: hidden; overflow: hidden; interactivity: inert;
+    transition: height var(--motion-base) var(--motion-ease), padding-block var(--motion-base) var(--motion-ease),
+      border-top-width var(--motion-base), opacity var(--motion-base), visibility var(--motion-base);
+  }
+  .tl-act.open > pre { height: auto; padding-block: 8px; border-top-width: 1px; opacity: 1; visibility: visible; overflow: auto; interactivity: auto; }
+  .sess-folder > .sess-folder-body {
+    interpolate-size: allow-keywords; height: auto; min-height: 0; flex-shrink: 0; overflow: clip;
+    transition: height var(--motion-base) var(--motion-ease), opacity var(--motion-base), visibility var(--motion-base);
+  }
+  .sess-folder.folded > .sess-folder-body { display: flex; height: 0; opacity: 0; visibility: hidden; }
+}
+
+/* 桌面实况栏只收缩网格轨道，消息和草稿留在原 DOM；窄窗口沿用既有布局。 */
+@media (min-width: 1051px) {
+  #view-session #tab-chat:not([hidden]):has(.session-rail) {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 310px);
+    transition: grid-template-columns var(--motion-base) var(--motion-ease), column-gap var(--motion-base) var(--motion-ease);
+  }
+  #view-session #tab-chat:not([hidden]):has(.session-rail.chat-open) { grid-template-columns: minmax(0, 1fr) minmax(0, 360px); }
+  #view-session #tab-chat:not([hidden]).rail-collapsed:has(.session-rail) {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 0px); grid-template-areas: "timeline observer"; column-gap: 0;
+  }
+  #view-session #tab-chat > .session-rail {
+    display: flex; transition: opacity var(--motion-base), visibility var(--motion-base);
+  }
+  #view-session #tab-chat.rail-collapsed > .session-rail { opacity: 0; visibility: hidden; pointer-events: none; }
+}
+
 /* 少量低频呼吸作为运行信号；侧栏每条记录的圆点和暂停状态保持静止。 */
 .pill.running::before, .sess-folder-head .frun, .tnode .tact .dot.active,
-.tcard .rt-dot.running, .tl-think.live > summary::after { animation: var(--motion-pulse); }
+.tcard .rt-dot.running, .tl-think.live > summary::after, .background-summary-item.is-running i { animation: var(--motion-pulse); }
 .sess-item .pill.running::before, .pill.paused::before { animation: none; }
 :root[data-motion="quick"] .hub.live::before,
 :root[data-motion="quick"] .hub.live::after,
 :root[data-motion="quick"] .led.ok::after,
-:root[data-motion="quick"] .topo svg.edges path.active { animation: none; }
+:root[data-motion="quick"] .topo svg.edges path.active,
+:root[data-motion="quick"] .background-empty-prompt i { animation: none; }
 :root[data-motion="quick"] *, :root[data-motion="quick"] *::before,
-:root[data-motion="quick"] *::after { transition-duration: var(--motion-fast) !important; transition-delay: 0s !important; }
+:root[data-motion="quick"] *::after, :root[data-motion="quick"] dialog::backdrop { transition-duration: var(--motion-fast) !important; transition-delay: 0s !important; }
 
 @keyframes ss-fade-in { from { opacity: .55; } to { opacity: 1; } }
 @keyframes ss-enter {
@@ -128,6 +236,7 @@ dialog[open]::backdrop { animation: ss-backdrop-in var(--motion-enter) ease-out;
   from { opacity: .3; transform: translateY(var(--motion-distance)) scale(var(--motion-scale)); }
   to { opacity: 1; transform: none; }
 }
+@keyframes ss-pop-out { to { opacity: 0; transform: translateY(var(--motion-distance)) scale(var(--motion-scale)); } }
 @keyframes ss-backdrop-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes ss-breathe { 0%, 100% { opacity: .5; } 50% { opacity: 1; } }
 @keyframes ss-line-breathe {
@@ -177,13 +286,13 @@ dialog[open]::backdrop { animation: ss-backdrop-in var(--motion-enter) ease-out;
 
 /* 离开标签页时不继续跑装饰动画；偏好关闭和系统减弱设置始终优先。 */
 :root[data-page-hidden] *, :root[data-page-hidden] *::before,
-:root[data-page-hidden] *::after { animation-play-state: paused !important; }
+:root[data-page-hidden] *::after, :root[data-page-hidden] dialog::backdrop { animation-play-state: paused !important; }
 :root[data-motion="off"] *, :root[data-motion="off"] *::before,
-:root[data-motion="off"] *::after {
+:root[data-motion="off"] *::after, :root[data-motion="off"] dialog::backdrop {
   animation: none !important; transition: none !important; scroll-behavior: auto !important;
 }
-:root[data-motion="off"] :is(.send-btn, .pfolder) { transform: none !important; }
+:root[data-motion="off"] :is(.send-btn, .pfolder, .login-submit) { transform: none !important; }
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
-  :is(.send-btn, .pfolder) { transform: none !important; }
+  *, *::before, *::after, dialog::backdrop { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+  :is(.send-btn, .pfolder, .login-submit) { transform: none !important; }
 }

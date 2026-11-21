@@ -188,10 +188,12 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
 
         summary = _discovery_summary("*.vulbox.test", result)
 
-        self.assertIn("只确认根域，未发现子域", summary)
+        self.assertIn("未发现可验证子域", summary)
         self.assertIn("HTTP 基线存活 0/2", summary)
         self.assertIn("被动子域来源失败", summary)
         self.assertIn("尚未获得可验证的子域候选",
+                      _discovery_unknowns("*.vulbox.test", result))
+        self.assertIn("尚未完成随机不存在子域的通配基线",
                       _discovery_unknowns("*.vulbox.test", result))
         self.assertEqual(_discovery_outcome("*.vulbox.test", result), "incomplete")
 
@@ -246,6 +248,7 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
             "published": ["fixture.test", "api.fixture.test"],
             "observations": {
                 "passive_subdomains": {"candidate_count": 1},
+                "wildcard_baseline": {"wildcard_suspected": False},
                 "http_endpoints": [{"url": "https://api.fixture.test/", "ok": True}],
             },
         }
@@ -253,13 +256,14 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_discovery_outcome("*.fixture.test", result), "done")
 
     async def test_readonly_discovery_publishes_progress_and_completes_controller(self):
-        infra = self.infra(RunMode.SRC)
+        infra = self.infra(RunMode.COMPETITION)
         events = []
         infra.audit = SimpleNamespace(log=lambda kind, actor, detail: events.append((kind, actor, detail)))
         control = SimpleNamespace(worker_id="", _publish=lambda: None, worker_finished=Mock())
         discovery = {
             "published": ["fixture.test", "api.fixture.test"],
             "observations": {"passive_subdomains": {"candidate_count": 1},
+                             "wildcard_baseline": {"wildcard_suspected": False},
                              "http_endpoints": [{"url": "https://api.fixture.test/", "ok": True}]},
         }
         async def discover_with_progress(*args, on_progress=None, **kwargs):
@@ -420,26 +424,27 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(row['data']['hypothesis_ref'].split('@')[0]
                             == hypothesis_ref.split('@')[0] for row in findings))
 
-    async def test_nuclei_selection_must_match_hypothesis_basis(self):
+    async def test_nuclei_model_can_extend_template_selection_from_new_evidence(self):
         infra = self.infra()
         hypothesis_ref = self.hypothesis(tags=['tech'])
-        decisions = [SimpleNamespace(content=json.dumps({"decision": "scan", "reason": "错误泛扫",
+        decisions = [SimpleNamespace(content=json.dumps({"decision": "scan", "reason": "核验新发现的管理入口",
             "arguments": {"targets": ["http://fixture.test"], "tags": ["default-login"],
                           "action": "analysis"}})),
-            SimpleNamespace(content='{"decision":"finish","reason":"无法执行定向实验"}')]
+            SimpleNamespace(content='{"decision":"finish","reason":"本次检查结束"}')]
         control = SimpleNamespace(worker_id='', permitted=True, forbidden=False,
                                   _publish=lambda: None, worker_finished=Mock())
-        infra.tools.call = AsyncMock()
+        infra.tools.call = AsyncMock(return_value=ToolResult(tool="nuclei_scan", ok=True, parsed={"total": 0}))
         with patch.object(NucleiScanner, "preflight", AsyncMock(return_value=ToolResult(tool="preflight", ok=True))), \
              patch("spiritscout.agents.scanner.chat_decision", AsyncMock(side_effect=decisions)):
             await _run(infra, SimpleNamespace(), 'http://fixture.test', mission='测试',
                        standing_rules='', dialogue_history=[], delegation={
                            'target': 'http://fixture.test', 'goal': '验证组件漏洞',
                            'hypothesis_ref': hypothesis_ref, 'tools': ['nuclei_scan'],
-                           'constraints': '仅使用 tech 标签', 'reason': '已有组件指纹',
+                           'constraints': '仅测试派遣目标', 'reason': '已有组件指纹',
                        }, control=control)
-        infra.tools.call.assert_not_awaited()
-        self.assertEqual(resolve_hypothesis(self.bb, hypothesis_ref)[1]['state'], 'blocked')
+        infra.tools.call.assert_awaited_once()
+        self.assertEqual(infra.tools.call.await_args.args[1]["tags"], ["default-login"])
+        self.assertEqual(resolve_hypothesis(self.bb, hypothesis_ref)[1]['state'], 'exhausted')
 
     async def test_nuclei_target_cannot_escape_master_assignment(self):
         infra = self.infra()

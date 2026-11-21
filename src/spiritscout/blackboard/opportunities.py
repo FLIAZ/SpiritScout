@@ -116,7 +116,8 @@ def _finalize_yield(buckets: dict[str, dict[str, Any]]) -> dict[str, dict[str, A
 
 
 def _task_yield(task_rows: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
-    completed = productive = empty_completed = failed = 0
+    completed = productive = vulnerability_productive = empty_completed = failed = 0
+    hypothesis_attempts = 0
     repeated_unknowns: Counter[str] = Counter()
     by_opportunity: dict[str, dict[str, Any]] = defaultdict(_yield_bucket)
     by_opportunity_capability: dict[str, dict[str, Any]] = defaultdict(_yield_bucket)
@@ -144,13 +145,20 @@ def _task_yield(task_rows: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[s
         # 路线结论文本可能只是“已完成”一类自述；收益只认结构化发现或明确消除未知项。
         useful = bool(resolved or findings)
         productive += int(useful)
+        hypothesis = summary.get("hypothesis") if isinstance(summary.get("hypothesis"), dict) else {}
+        contract = task.get("payload", {}).get("investigation_contract", {}) \
+            if isinstance(task.get("payload"), dict) else {}
+        hypothesis_ref = str(hypothesis.get("hypothesis_ref")
+                             or contract.get("hypothesis_ref") or "").strip()
+        hypothesis_attempts += int(bool(hypothesis_ref))
+        vulnerability_useful = bool(
+            hypothesis_ref and (findings or hypothesis.get("state") in {"supported", "refuted"}))
+        vulnerability_productive += int(vulnerability_useful)
         empty_completed += int(status == "done" and not useful)
         for unknown in handoff.get("remaining_unknowns", []):
             text = " ".join(str(unknown).split()).strip().lower()
             if text:
                 repeated_unknowns[text[:300]] += 1
-        contract = task.get("payload", {}).get("investigation_contract", {}) \
-            if isinstance(task.get("payload"), dict) else {}
         blockers = [blocker for blocker in handoff.get("blockers", [])
                     if isinstance(blocker, dict)]
         execution = summary.get("execution_feedback") \
@@ -181,6 +189,13 @@ def _task_yield(task_rows: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[s
         "completed_tasks": completed,
         "productive_tasks": productive,
         "effective_action_rate": round(productive / completed, 3) if completed else None,
+        "intelligence_productive_tasks": productive,
+        "intelligence_effective_rate": round(productive / completed, 3) if completed else None,
+        "hypothesis_attempts": hypothesis_attempts,
+        "vulnerability_productive_tasks": vulnerability_productive,
+        "vulnerability_effective_rate": (
+            round(vulnerability_productive / hypothesis_attempts, 3)
+            if hypothesis_attempts else None),
         "empty_completion_count": empty_completed,
         "failed_or_interrupted_count": failed,
         "repeated_unknowns": repeated,
@@ -193,7 +208,9 @@ def _task_yield(task_rows: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[s
         "detection_signals": sum(int((row.get("data", {}).get("summary", {}).get(
             "execution_feedback", {}) or {}).get("detection_signals") or 0)
                                  for row in task_rows),
-        "note": "有效动作指任务形成结构化发现、既定事实或明确消除未知项；不等于确认漏洞",
+        "note": ("intelligence_effective_rate 只表示情报推进；"
+                 "vulnerability_effective_rate 才表示引用漏洞假设的实验形成支持/反驳结论，"
+                 "二者都不等于漏洞已独立确认"),
     }
     return metrics, {
         "by_opportunity": _finalize_yield(by_opportunity),
@@ -261,9 +278,8 @@ def _opportunity_strategy(item: dict[str, Any], attempt_map: dict[str, Any]) -> 
     productive = any(row["productive"] for row in candidate_yields)
     diminishing = int(attempts.get("consecutive_empty") or 0) >= 2
     user_resolvable = any(blocker.get("user_resolvable") is True for blocker in blockers)
-    exhausted = bool(candidate_yields and not untried and not productive
-                     and all(row["consecutive_empty"] for row in candidate_yields)
-                     and not user_resolvable)
+    # 统计只能提示收益衰减；穷尽由调查结论明确给出，不以尝试次数替模型关闭方向。
+    exhausted = item.get("state") == "exhausted"
     if blockers and not productive:
         direction_state = "blocked"
     elif exhausted:
@@ -285,10 +301,12 @@ def _opportunity_strategy(item: dict[str, Any], attempt_map: dict[str, Any]) -> 
         untried.sort(key=lambda row: (row["capability"] not in alternatives,
                                       alternatives.index(row["capability"])
                                       if row["capability"] in alternatives else len(alternatives)))
-    if untried:
+    if untried and direction_state in {"blocked", "diminishing"}:
         best = untried[0]
-        pivot_parts.append(f"同时改用未尝试能力 {best['capability']}（{best['tactic']}）")
-    elif diminishing and not exhausted:
+        candidate = next((c for c in candidates
+                          if str(c.get("capability") or c.get("tactic") or "unknown") == best["capability"]), {})
+        pivot_parts.append(str(candidate.get("basis") or "评估尚未尝试的能力以解除当前阻塞"))
+    elif diminishing and not exhausted and not untried:
         pivot_parts.append("换到其他资产或独立机会，避免继续投入同质实验")
     elif exhausted:
         pivot_parts = ["关闭当前方向；仅在新证据或阻塞条件变化后重新进入"]
@@ -375,7 +393,7 @@ def _hypothesis_capabilities(sample: dict[str, Any], *, review: bool,
     if dispatch.get("web_vuln_supported"):
         capabilities.append(_capability(
             "web_hypothesis_test", "TA0001",
-            "已有可测试接口、输入或权限边界证据，适合做单变量最小实验",
+            "可围绕假设自主补取证据并选择 Web 实验，不以业务模型完整度为前提",
             preferred=True,
         ))
     if dispatch.get("port_scan_supported"):
@@ -395,6 +413,12 @@ def _hypothesis_capabilities(sample: dict[str, Any], *, review: bool,
             "targeted_template_validation", "SCANNER-CONTROL",
             "存在具体技术栈、版本、CVE 或模板依据；仅可定向验证当前假设",
             execution="scanner_control",
+        ))
+    if sample.get("subject") and not any(item.get("tactic") == "TA0001" for item in capabilities):
+        capabilities.append(_capability(
+            "web_hypothesis_test", "TA0001",
+            "可自主补取请求或页面证据并检验假设，无需先完成业务建模",
+            preferred=not capabilities,
         ))
     if not capabilities:
         capabilities.append(_capability(
@@ -418,12 +442,7 @@ def _lead_capabilities(card: dict[str, Any], state: str,
             "线索仍需真实性消歧或解除前置阻塞，侦察角色负责补最小事实",
             preferred=True,
         ))
-    if source_kind in {"endpoint", "vuln"} and dispatch.get("web_vuln_supported"):
-        capabilities.append(_capability(
-            "web_boundary_test", "TA0001",
-            "线索对应已观测接口或漏洞候选，可构造最小输入/权限对照实验",
-            preferred=state == "actionable" and not capabilities,
-        ))
+    # 普通线索默认推荐补证；能力候选是建议，模型仍可选择其他角色自主调查。
     if source_kind == "service" or dispatch.get("port_scan_supported"):
         capabilities.extend([
             _capability(

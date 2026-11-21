@@ -20,9 +20,10 @@ class _Executor(ToolExecutor):
 class AgentProfileTests(unittest.IsolatedAsyncioTestCase):
     def test_every_agent_type_has_an_explicit_profile(self) -> None:
         self.assertEqual(set(AgentType), set(PROFILE_BY_TYPE))
-        # SRC/渗透链路角色全部可用可指派（听风/贯甲/深耕已实装）
+        # 听风保留开放赛制能力，SRC 的按需服务调查由贯甲承担。
         self.assertTrue(get_profile(AgentType.PORT_SCAN).configurable)
         self.assertEqual(get_profile(AgentType.PORT_SCAN).status, "available")
+        self.assertEqual(get_profile(AgentType.PORT_SCAN).modes, ("competition",))
         self.assertTrue(get_profile(AgentType.HOST_VULN).configurable)
         self.assertTrue(get_profile(AgentType.POST_EXPLOIT).configurable)
         self.assertIn("competition", get_profile(AgentType.SCANNER).modes)
@@ -41,6 +42,15 @@ class AgentProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(denied.returncode, -5)
         self.assertEqual(view.names(), ["http_probe"])
 
+    def test_js_reverse_runtime_view_exposes_http_probe(self) -> None:
+        registry = ToolRegistry(_Executor())
+        registry.register(ToolSpec(name="http_probe", kind=ToolKind.BUILTIN))
+        registry.register(ToolSpec(name="sandbox_exec", kind=ToolKind.BUILTIN))
+
+        view = AgentToolView(registry, AgentType.JS_REVERSE)
+
+        self.assertEqual(view.names(), ["http_probe"])
+
     def test_context_filters_mcp_tools_by_specialty(self) -> None:
         ctx = SubAgentContext(
             bus=SimpleNamespace(), blackboard=SimpleNamespace(),
@@ -57,6 +67,18 @@ class AgentProfileTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(set(pwn.mcp_tools), {"mcp__ida__decompile"})
         self.assertEqual(set(web.mcp_tools), {"mcp__yakit__scan"})
+
+    def test_src_web_and_verifier_can_use_browser_without_cross_specialty_access(self) -> None:
+        ctx = SubAgentContext(
+            bus=None, blackboard=None, convergence=None, gateway=SimpleNamespace(),
+            tools=ToolRegistry(_Executor()), policy=SimpleNamespace(),
+            mcp_tools={"mcp__playwright__browser_evaluate": {}, "mcp__yakit__replay": {},
+                       "mcp__ida__decompile": {}},
+        )
+        for role in (AgentType.WEB_VULN, AgentType.VERIFIER):
+            with self.subTest(role=role):
+                self.assertEqual(set(ctx.for_agent(role.value).mcp_tools),
+                                 {"mcp__playwright__browser_evaluate", "mcp__yakit__replay"})
 
     def test_master_does_not_make_business_context_a_global_src_gate(self) -> None:
         master = object.__new__(MasterAgent)

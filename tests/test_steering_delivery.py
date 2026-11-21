@@ -58,6 +58,45 @@ class SteeringRoutingTests(unittest.TestCase):
         ], tasks)
         self.assertEqual([r['task_id'] for r in result], ['t1', 't2'])
 
+    def test_src_supervision_waits_for_pending_instruction_or_explicitly_supersedes(self) -> None:
+        audit = Mock()
+        ring = RingLedger(audit)
+        old_id = ring.steer('js_reverse', '先提取当前页面脚本', task_id='t1')
+        ring.steering_feedback(
+            'js_reverse', task_id='t1', route_id='r1',
+            instruction_id=old_id, status='accepted', detail='正在提取')
+        master = object.__new__(MasterAgent)
+        master.agent_id = 'master'
+        master.ctx = SimpleNamespace(audit=audit, ring=ring)
+        tasks = [{'agent': 'js_reverse', 'task_id': 't1'}]
+
+        blocked = master._target_steering([{
+            'agent': 'js_reverse', 'task_id': 't1',
+            'hint': '继续分析同一登录页'}], tasks)
+        replaced = master._target_steering([{
+            'agent': 'js_reverse', 'task_id': 't1',
+            'hint': '新证据显示入口变更，改查新脚本',
+            'supersedes': [old_id]}], tasks)
+
+        self.assertEqual(blocked, [])
+        self.assertEqual(replaced[0]['supersedes'], [old_id])
+
+    def test_terminal_steering_feedback_allows_next_instruction(self) -> None:
+        ring = RingLedger()
+        old_id = ring.steer('recon', '确认站点基线', task_id='t1')
+        ring.steering_feedback(
+            'recon', task_id='t1', route_id='r1', instruction_id=old_id,
+            status='blocked', detail='目标不可达')
+        master = object.__new__(MasterAgent)
+        master.agent_id = 'master'
+        master.ctx = SimpleNamespace(audit=Mock(), ring=ring)
+
+        result = master._target_steering([{
+            'agent': 'recon', 'task_id': 't1', 'hint': '改查已保存响应'}],
+            [{'agent': 'recon', 'task_id': 't1'}])
+
+        self.assertEqual(len(result), 1)
+
     def test_context_projection_keeps_all_recipients_and_feedback(self) -> None:
         protected = {
             'active_tasks': [{'task_id': f'task-{i}', 'agent': 'ctf_web'} for i in range(3)],
@@ -206,12 +245,13 @@ class SteeringExecutionTests(unittest.IsolatedAsyncioTestCase):
         checked = asyncio.Event()
         reads = 0
 
-        def digest(ids: list) -> dict:
+        def digest(ids: list, **kwargs) -> dict:
             nonlocal reads
             reads += 1
             if reads > 5:
                 checked.set()
             return {'tasks': [{'agent': 'ctf_web', 'task_id': 't1', 'routes': [],
+                               'executions': [{'tool_name': 'read', 'execution_status': 'succeeded', 'result_digest': 'fresh'}],
                                'steering': master.ctx.ring.steerings_for('ctf_web', task_id='t1')}]}
 
         master._progress_digest = digest

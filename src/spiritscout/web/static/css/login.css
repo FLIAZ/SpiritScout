@@ -7,26 +7,20 @@
 }
 
 .login-wrap {
-  width: min(400px, 100%);
+  width: min(420px, 100%);
   padding: 0;
   position: relative;
   z-index: 1;
 }
 
 .login-card {
-  padding: 34px 30px 26px;
+  padding: 36px 32px 30px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow-raise);
   position: relative;
   overflow: hidden;
 }
-.login-card::before {
-  content: "";
-  position: absolute;
-  inset: 0 0 auto;
-  height: 2px;
-  background: linear-gradient(90deg, var(--accent),
-    color-mix(in srgb, var(--accent) 18%, transparent));
-}
-
 .login-eyebrow {
   margin: 0 0 10px;
   font-family: var(--mono);
@@ -37,15 +31,15 @@
 }
 
 .login-title {
-  margin: 0 0 6px;
-  font-size: 26px;
-  font-weight: 700;
-  line-height: var(--heading-leading);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 18px 0 16px;
 }
-.login-title em {
-  font-style: normal;
-  color: var(--accent);
-}
+.login-title .brand-mark { width: 44px; height: 44px; }
+.login-title .brand-name { font-size: 28px; }
+.login-title .brand-caption { font-size: 12px; }
+html[lang="en"] .login-title .brand-caption { color: var(--ink); font-size: 26px; font-weight: 600; letter-spacing: -.035em; }
 
 .login-sub {
   margin: 0 0 24px;
@@ -70,7 +64,8 @@
   height: 42px;
   padding: 0 12px;
   border-radius: 8px;
-  background: var(--surface-2);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
 }
 
 .login-pw {
@@ -111,10 +106,10 @@
   border: 0;
   border-radius: 8px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   font-weight: 650;
   letter-spacing: .02em;
-  transition: background .15s, transform .1s;
+  transition: background var(--motion-fast), transform var(--motion-fast);
 }
 .login-submit:hover { background: var(--accent-strong); }
 .login-submit:active { transform: translateY(1px); }
@@ -123,3 +118,5 @@
 @media (max-width: 480px) {
   .login-card { padding: 28px 22px 22px; }
 }
+
+.login-card :is(input, button):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }

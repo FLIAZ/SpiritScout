@@ -6,6 +6,7 @@ const ProjectsPage = (() => {
   let current = null;                 // null=总览；""=未分类；"*"=全部；否则项目 ID
   let tab = "assets";                 // assets | findings | sessions
   let detail = { gen: 0, q: "", items: [], shown: 0, total: 0, more: false };
+  let findingCategory = "";
   let poll = null;
 
   const root = () => $("#view-projects");
@@ -87,6 +88,7 @@ const ProjectsPage = (() => {
   function openFolder(id) {
     current = id;
     tab = "assets";
+    findingCategory = "";
     detail = {gen: detail.gen + 1, q: "", items: [], shown: 0, total: 0, more: false};
     renderGrid();
     renderDetail();
@@ -131,11 +133,40 @@ const ProjectsPage = (() => {
       <span class="pd-count" data-pcount role="status"></span>
       <button class="btn sm" type="button" data-refresh>刷新</button>
     </div>
+    ${tab === "findings" ? `<div class="finding-categories" role="group" aria-label="${I18n.t("漏洞分类")}" data-finding-categories></div>` : ""}
     <p class="pd-note">历史记录需复核后使用。点击条目查看来源；项目归属不改变任务授权。</p>
+    ${readonly ? "" : `<section class="pd-campaigns" data-campaigns><div class="resource-empty">正在读取资产收集任务…</div></section>`}
     <div class="pd-body" data-body><div class="resource-empty">正在读取…</div></div>
     <button class="btn resource-more" type="button" data-more hidden>加载更多</button>`;
     bindDetail();
+    if (!readonly) loadCampaigns();
     loadList();
+  }
+
+  async function loadCampaigns() {
+    const box = document.querySelector("#project-detail [data-campaigns]");
+    if (!box || !current || current === ALL) return;
+    try {
+      const data = await api(`/api/projects/${encodeURIComponent(current)}/asset-campaigns`);
+      const rows = data.campaigns || [];
+      box.innerHTML = `<div class="pd-campaign-head"><b>资产收集任务</b><span>${rows.length} 个任务</span></div>`
+        + (rows.length ? `<div class="pd-campaign-list">${rows.map(c => {
+          const s = c.stats || {}, total = Number(s.targets || c.targets?.length || 0), done = Number(s.completed || 0);
+          const progress = total ? Math.min(100, Math.round(done / total * 100)) : 0;
+          const action = c.status === "running" ? `<button class="btn sm" data-campaign-pause="${esc(c.campaign_id)}">暂停</button>`
+            : c.status === "paused" ? `<button class="btn sm" data-campaign-resume="${esc(c.campaign_id)}">恢复</button>`
+            : ["queued", "stopped"].includes(c.status) ? `<button class="btn sm" data-campaign-resume="${esc(c.campaign_id)}">启动</button>` : "";
+          return `<article class="pd-campaign"><div><b>${esc(c.campaign_id)}</b><span>${esc(c.status)} · ${done}/${total} 根目标 · ${Number(s.candidates || 0)} 个候选</span></div><div class="pd-campaign-bar"><i style="width:${progress}%"></i></div><div class="pd-campaign-actions">${action}${["running", "paused"].includes(c.status) ? `<button class="btn sm danger" data-campaign-stop="${esc(c.campaign_id)}">停止</button>` : ""}</div></article>`;
+        }).join("")}</div>` : `<p class="muted">尚未创建资产收集任务。</p>`);
+      box.querySelectorAll("[data-campaign-pause]").forEach(b => b.onclick = () => campaignAction(b.dataset.campaignPause, "pause"));
+      box.querySelectorAll("[data-campaign-resume]").forEach(b => b.onclick = () => campaignAction(b.dataset.campaignResume, "resume"));
+      box.querySelectorAll("[data-campaign-stop]").forEach(b => b.onclick = () => campaignAction(b.dataset.campaignStop, "stop"));
+    } catch (e) { box.textContent = e.message; }
+  }
+
+  async function campaignAction(id, action) {
+    try { await api(`/api/asset-campaigns/${encodeURIComponent(id)}/${action}`, {method: "POST"}); loadCampaigns(); }
+    catch (e) { toast(e.message, true); }
   }
 
   function bindDetail() {
@@ -168,6 +199,36 @@ const ProjectsPage = (() => {
     if (remove) remove.onclick = () => deleteDialog(folder(current));
   }
 
+  function assetCampaignDialog(project) {
+    const dlg = document.createElement("dialog");
+    dlg.className = "project-dlg";
+    dlg.innerHTML = I18n.html`<h3 style="margin:0">项目资产收集</h3>
+      <p class="muted" style="font-size:12px;line-height:1.7;margin:10px 0">任务在后台运行，结果会持续写入本项目资产库。禁打列表只用于收集阶段过滤，后续测试任务仍会再次读取并遵守。</p>
+      <div class="dlg-grid">
+        <label class="wide"><span>根域名或目标（每行一个）</span><textarea data-targets rows="4" placeholder="example.com"></textarea></label>
+        <label class="wide"><span>OneForAll 路径</span><input data-of-path placeholder="/home/.../OneForAll"></label>
+        <label class="wide"><span>禁打资产（每行一个，可用子域/通配）</span><textarea data-excluded rows="3" placeholder="admin.example.com"></textarea></label>
+        <label><input type="checkbox" data-brute> 启用子域爆破</label>
+      </div><div class="pj-error" role="alert"></div>
+      <div class="dlg-ops"><button type="button" class="btn" data-cancel>取消</button><button type="button" class="btn primary" data-ok>开始后台收集</button></div>`;
+    document.body.append(dlg);
+    const close = () => { dlg.close(); dlg.remove(); };
+    dlg.querySelector("[data-cancel]").onclick = close;
+    dlg.addEventListener("cancel", close);
+    dlg.querySelector("[data-ok]").onclick = async () => {
+      const targets = dlg.querySelector("[data-targets]").value.split(/\n|,/) .map(x => x.trim()).filter(Boolean);
+      const excluded = dlg.querySelector("[data-excluded]").value.split(/\n|,/) .map(x => x.trim()).filter(Boolean);
+      if (!targets.length) { dlg.querySelector("[data-targets]").focus(); return; }
+      const button = dlg.querySelector("[data-ok]"); button.disabled = true;
+      try {
+        const campaign = await api(`/api/projects/${encodeURIComponent(project.project_id)}/asset-campaigns`, {method: "POST", body: JSON.stringify({targets, excluded_assets: excluded, oneforall_path: dlg.querySelector("[data-of-path]").value.trim(), brute: dlg.querySelector("[data-brute]").checked})});
+        await api(`/api/asset-campaigns/${encodeURIComponent(campaign.campaign_id)}/start`, {method: "POST"});
+        close(); toast("资产收集已在后台启动");
+      } catch (e) { dlg.querySelector(".pj-error").textContent = e.message; button.disabled = false; }
+    };
+    dlg.showModal(); dlg.querySelector("[data-targets]").focus();
+  }
+
   function updateCount() {
     const el = $("#project-detail [data-pcount]");
     if (!el) return;
@@ -185,12 +246,15 @@ const ProjectsPage = (() => {
     }
     if (!append) {
       detail.items = []; detail.shown = 0; detail.total = 0; detail.more = false;
+      const more = $("#project-detail [data-more]");
+      if (more) more.hidden = true;
       body.innerHTML = I18n.html('<div class="resource-empty">正在读取…</div>');
       updateCount();
     }
     const params = new URLSearchParams({
       q: detail.q, offset: String(append ? detail.items.length : 0), limit: "40",
       kind: tab === "findings" ? "finding" : "asset"});
+    if (tab === "findings" && findingCategory) params.set("category", findingCategory);
     if (current === "") params.set("unclassified", "1");
     else if (current !== ALL) params.set("project", current);
     try {
@@ -199,11 +263,32 @@ const ProjectsPage = (() => {
       detail.items = append ? [...detail.items, ...(data.items || [])] : (data.items || []);
       detail.total = Number(data.total ?? detail.items.length);
       detail.more = !!data.has_more;
+      renderFindingCategories(data.category_counts || []);
       renderList();
     } catch (e) {
       if (generation !== detail.gen) return;
       body.innerHTML = I18n.html`<div class="resource-empty">读取失败：${esc(e.message)}</div>`;
     }
+  }
+
+  function renderFindingCategories(counts) {
+    const group = $("#project-detail [data-finding-categories]");
+    if (!group) return;
+    const html = findingCategoryButtons(counts, findingCategory);
+    if (group._content === html) return;
+    const focused = group.contains(document.activeElement) ? document.activeElement.dataset.findingCategory : null;
+    group._content = html;
+    group.innerHTML = html;
+    group.querySelectorAll("[data-finding-category]").forEach(button => {
+      button.onclick = () => {
+        const category = button.dataset.findingCategory;
+        if (category === findingCategory) return;
+        findingCategory = category;
+        renderFindingCategories(counts);
+        loadList();
+      };
+      if (focused === button.dataset.findingCategory) button.focus({preventScroll: true});
+    });
   }
 
   function assetRow(item, index) {
@@ -212,7 +297,8 @@ const ProjectsPage = (() => {
     const fp = d.fingerprint || {};
     const title = finding ? (fp.title || d.value || item.identity) : (d.value || item.identity);
     const label = finding
-      ? [fp.vuln_type, fp.severity && I18n.t`危害 ${fp.severity}`].filter(Boolean).join(" · ") || I18n.t("历史发现")
+      ? [item.taxonomy_id === "unclassified" ? fp.vuln_type : findingCategoryLabel(item) || fp.vuln_type,
+        fp.severity && I18n.t`危害 ${fp.severity_status !== "assessed" ? I18n.t("待定级") : (SEV_CN[fp.severity]?.[0] || fp.severity)}`].filter(Boolean).join(" · ") || I18n.t("历史发现")
       : (KIND_CN[d.asset_type] || KIND_CN[item.kind] || item.kind || I18n.t("资产"));
     const badge = item.changed ? I18n.t("观测有变化") : item.freshness === "recent" ? I18n.t("近期观测") : I18n.t("建议复核");
     return I18n.html`<button type="button" class="pd-row" data-asset="${index}">
@@ -227,7 +313,7 @@ const ProjectsPage = (() => {
     if (!body) return;
     detail.shown = detail.items.length;
     if (!detail.items.length) {
-      body.innerHTML = `<div class="resource-empty">${detail.q ? I18n.t("没有匹配记录") : I18n.t("这里还没有记录")}`
+      body.innerHTML = `<div class="resource-empty">${detail.q || (tab === "findings" && findingCategory) ? I18n.t("没有匹配记录") : I18n.t("这里还没有记录")}`
         + `<p>${tab === "findings" ? I18n.t("只有通过复核并确认收录的发现才会进入共享目录。") : I18n.t("运行会归入此项目的会话后，记录会自动出现。")}</p></div>`;
     } else {
       body.innerHTML = `<div class="pd-list">${detail.items.map(assetRow).join("")}</div>`;
@@ -326,6 +412,7 @@ const ProjectsPage = (() => {
     }
     select.value = projects.some(p => p.project_id === selected) ? selected : "";
     if (select.closest(".selx")) { selxRebuild(select); selxSync(select); }
+    if (typeof syncAssetPickerVisibility === "function") syncAssetPickerVisibility();
   }
 
   function editDialog(project, focus = "name") {
@@ -453,6 +540,7 @@ const ProjectsPage = (() => {
           if (stats) stats.innerHTML = statsHtml(f);
           const title = $("#project-detail .pd-title h3");
           if (title) title.textContent = (["", ALL].includes(current) ? I18n.t(f.name) : f.name) || I18n.t("未分类");
+          if (!f.read_only) loadCampaigns().catch(() => {});
         }
       }
     }
@@ -470,6 +558,7 @@ const ProjectsPage = (() => {
       loadCatalog(true).catch(() => {});
     }, 6000);
   }
+
 
   function close() {
     if (poll) { clearInterval(poll); poll = null; }

@@ -35,6 +35,27 @@ class ContextProjectionTests(unittest.TestCase):
         payload = {"constraints": "不得丢弃" * 1000}
         self.assertEqual(json.loads(compact_json(payload, max_chars=100)), payload)
 
+    def test_large_asset_context_keeps_chat_messages_and_attachment_paths_exact(self) -> None:
+        mission = "根据已收集资产和我选择的优先策略排序，对本次选定目标开展 SRC 测试，保留可复现证据。"
+        protected = {
+            "instruction": "按任务契约核验，必须输出 status=completed/incomplete 及 evidence_refs，不输出其他协议。",
+            "new_messages": [mission, "优先测试预发环境，不修改真实订单"],
+            "chat_history": [{"role": "user", "content": mission},
+                             {"role": "assistant", "content": "已带入选定的资产清单"}],
+            "attachments": ["/session/attachments/collected-assets.csv"],
+            "world_state": {"assets": [{"value": f"api-{i}.fixture.test"} for i in range(198)]},
+        }
+        payload = {**protected, "observations": "旧输出" * 10000}
+        result = json.loads(compact_json(payload, max_chars=1000))
+        for key, value in protected.items():
+            self.assertEqual(result[key], value)
+        self.assertLess(len(result["observations"]), len(payload["observations"]))
+        self.assertEqual(payload["new_messages"][0], mission)
+        # 不触发投影的请求保持逐字节一致，不扰动已有缓存前缀。
+        small = {key: value for key, value in protected.items() if key != "world_state"}
+        self.assertEqual(compact_json(small), json.dumps(
+            small, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+
     def test_public_exploration_contract_survives_long_observations(self) -> None:
         from spiritscout.gateway.progress import EXPLORATION_PROGRESS_GUIDANCE
 

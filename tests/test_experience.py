@@ -203,12 +203,54 @@ class SharedExperienceRootTests(unittest.TestCase):
 
 
 class DistillTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_runtime_and_distillation_share_foreground_priority(self) -> None:
+        from contextlib import ExitStack
+
+        from spiritscout import runtime
+        from spiritscout.core import background
+        from spiritscout.knowledge import distillation
+
+        first, second = Path("session-one"), Path("session-two")
+        entered = asyncio.Event()
+
+        async def run_background():
+            async with distillation._background_slot():
+                entered.set()
+
+        with (patch.object(background, "_BACKGROUND_COOLDOWN_UNTIL", 0.0),
+              patch.object(background, "_BACKGROUND_COOLDOWN_SECONDS", 0.0)):
+            task = asyncio.create_task(run_background())
+            try:
+                with ExitStack() as cleanup:
+                    for workspace in (first, second):
+                        runtime._foreground_started(workspace)
+                        cleanup.callback(runtime._foreground_finished, workspace)
+                    # 同一工作区可嵌套执行，结束其中一层不能提前让出后台槽。
+                    runtime._foreground_started(first)
+                    try:
+                        await asyncio.sleep(0)
+                        self.assertFalse(entered.is_set())
+                    finally:
+                        runtime._foreground_finished(first)
+                    self.assertTrue(background.workspace_foreground_active(first))
+                    self.assertTrue(runtime.workspace_foreground_active(second))
+                    self.assertFalse(entered.is_set())
+
+                await asyncio.wait_for(task, timeout=2)
+                self.assertTrue(entered.is_set())
+                self.assertFalse(background.workspace_foreground_active(first))
+                self.assertFalse(runtime.workspace_foreground_active(second))
+            finally:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
     async def test_competition_distill_returns_before_background_finishes(self) -> None:
         """主任务拿到后台任务句柄即返回，不为总结模型等待。"""
-        import spiritscout.runtime as runtime
+        import spiritscout.core.background as background
 
         with tempfile.TemporaryDirectory() as tmp:
-            runtime._BACKGROUND_COOLDOWN_UNTIL = 0.0
+            background._BACKGROUND_COOLDOWN_UNTIL = 0.0
             workspace = Path(tmp) / "sess-fast"
             audit = NullAuditLogger()
             store = ExperienceStore(Path(tmp) / "experience.db", audit=audit)
@@ -219,9 +261,9 @@ class DistillTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(3600)
                 return {"result": "empty", "insights": 0}
 
-            with patch("spiritscout.runtime._prepare_distill",
+            with patch("spiritscout.knowledge.distillation._prepare_distill",
                        return_value={"target": "https://a.example"}), patch(
-                    "spiritscout.runtime._distill_run",
+                    "spiritscout.knowledge.distillation._distill_run",
                     new=slow_distill):
                 task = _schedule_background_distill(
                     infra, SimpleNamespace(), store, True, {},
@@ -256,7 +298,7 @@ class DistillTests(unittest.IsolatedAsyncioTestCase):
                 return {"result": "empty", "insights": 0}
 
             try:
-                with patch("spiritscout.runtime._distill_experience", new=fake_distill):
+                with patch("spiritscout.knowledge.distillation._distill_experience", new=fake_distill):
                     task = _schedule_background_distill(
                         infra, SimpleNamespace(), store, True,
                         {"target": "https://a.example", "rounds_executed": 1},

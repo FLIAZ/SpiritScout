@@ -43,6 +43,37 @@ class DashboardMetricsTests(unittest.TestCase):
             "used_tokens": sum(c.get("tokens", 0) for c in calls),
             "call_series": calls, "calls": len(calls)}))
 
+    def test_usage_cache_reuses_unchanged_files_and_recomputes_time_windows(self) -> None:
+        session = self.session()
+        self.usage(session, [{"ts": self.now - 10, "tokens": 100}])
+        first = self.reader.build([session], period="hour", now=self.now)
+        self.assertEqual(first["summary"]["tokens"], 100)
+        with patch("spiritscout.web.dashboard.read_usage", side_effect=AssertionError("不重复复制历史调用")):
+            later = self.reader.build([session], period="hour", now=self.now + 3601)
+        self.assertEqual(later["summary"]["tokens"], 0)
+        self.assertEqual(later["total_tokens"], 100)
+        self.usage(session, [{"ts": self.now - 1, "tokens": 200}])
+        self.assertEqual(self.reader.build([session], now=self.now)["total_tokens"], 200)
+        (session.workspace / "usage.json").write_text("broken")
+        for tokens in (17, 29):
+            session.summary = {"run": {"model_usage": {"used_tokens": tokens}}}
+            self.assertEqual(self.reader.build([session], now=self.now)["total_tokens"], tokens)
+
+    def test_audit_compact_tail_preserves_compressed_records(self) -> None:
+        from spiritscout.core.audit import encode_record
+
+        session = self.session()
+        records = [{"type": "agent.note", "ts": self.now - 100 + i / 10, "actor": "fixture",
+                    "detail": {"text": str(i)}} for i in range(130)]
+        records.append({"type": "agent.note", "ts": self.now, "actor": "fixture",
+                        "detail": {"text": "x" * 2000}})
+        session.audit_path.write_text("".join(encode_record(row) + "\n" for row in records))
+        result = self.reader._audit(session.audit_path)
+        self.assertEqual(len(result["events"]), 120)
+        self.assertEqual(result["events"][0]["text"], "11")
+        self.assertEqual(result["events"][-1]["text"], "x" * 240)
+        self.assertEqual(result["last_activity"], self.now)
+
     def test_beijing_midnight_and_daily_buckets_ignore_host_timezone(self) -> None:
         session = self.session()
         self.usage(session, [

@@ -68,11 +68,23 @@ class Secretary:
 def secretary_snapshot(blackboard: Any, situation: dict[str, Any]) -> dict[str, Any]:
     """记录引用包含层、ID 和版本，意见绑定所见事实。"""
     records = []
+    history_policy = blackboard.read(BlackboardLayer.TOPOLOGY, "history-policy") or {}
     for layer in (BlackboardLayer.TOPOLOGY, BlackboardLayer.VULN, BlackboardLayer.RECON_CLUE,
                   BlackboardLayer.TASK_STATE):
         for row in blackboard.query(layer, limit=20):
             if row["data"].get("kind") == "secretary":
                 continue
+            data = row["data"]
+            if layer == BlackboardLayer.TOPOLOGY and history_policy.get("on_demand"):
+                if row["record_id"] == "historical-assets":
+                    continue
+                if row["record_id"] == "project-memory":
+                    if "project_id" in history_policy and (
+                            not history_policy["project_id"] or data.get("project_id") != history_policy["project_id"]):
+                        continue
+                    from spiritscout.resources.store import project_context
+
+                    data = project_context(data)
             records.append({"ref": f'{layer.value}:{row["record_id"]}@{row["version"]}',
-                            "data": row["data"]})
+                            "data": data})
     return {"situation": situation, "records": records}

@@ -369,8 +369,8 @@ class StorageCleaner:
 
     def blocked_reason(self, session: Session) -> str:
         from spiritscout.ctf.report_jobs import status
-        from spiritscout.runtime import pending_distill_snapshots
-        from spiritscout.web.sessions import TERMINAL_STATES
+        from spiritscout.knowledge.distillation import pending_distill_snapshots
+        from spiritscout.web.session_models import TERMINAL_STATES
         if session.session_id in self.manager.storage_busy:
             return "正在清理存储"
         if session.status not in TERMINAL_STATES or (session.task and not session.task.done()):

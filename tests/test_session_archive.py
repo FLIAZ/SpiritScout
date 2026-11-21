@@ -11,7 +11,14 @@ from fastapi.testclient import TestClient
 
 from spiritscout.blackboard import Blackboard
 from spiritscout.config.settings import SystemConfig, WorkspaceConfig
-from spiritscout.core.models import BlackboardLayer
+from spiritscout.core.audit import AuditLogger
+from spiritscout.core.models import (
+    AgentType,
+    BlackboardLayer,
+    RouteState,
+    Task,
+    TaskStatus,
+)
 from spiritscout.tools.invocation import ExecutionScope
 from spiritscout.tools.journal import ExecutionJournal
 from spiritscout.web.app import create_app
@@ -132,6 +139,100 @@ class SessionArchiveTests(unittest.TestCase):
             self.assertEqual(client.get(prefix + "/artifacts/download",
                                         params={"path": "artifacts/\x00.txt"}).status_code,
                              404)
+            log = self.workspace / "sandbox" / "fixture" / "output.log"
+            log.parent.mkdir(parents=True)
+            log.write_bytes("第一行\n最后一行\n".encode())
+            audit = AuditLogger(session.audit_path)
+            audit.log("agent.tool_result", "worker", {"name": "shell", "output_file": str(log)})
+            cursor = session.audit_path.stat().st_size
+            response = client.get(prefix + f"/tool-output/{cursor}")
+            self.assertEqual(response.content, log.read_bytes())
+            self.assertIn("attachment", response.headers["content-disposition"])
+            self.assertEqual(client.get(prefix + f"/tool-output/{cursor - 1}").status_code, 404)
+            log.unlink()
+            log.symlink_to(self.workspace / "artifacts" / "证据.txt")
+            self.assertEqual(client.get(prefix + f"/tool-output/{cursor}").status_code, 404)
+
+    def test_vulnerability_report_reads_model_content_without_backend_fallback(self) -> None:
+        model_report = {
+            "status": "available", "source": "model", "model": "fixture-model",
+            "summary": "模型确认的摘要", "prerequisites": "测试身份 A 与 B",
+            "steps": [{"action": "使用身份 B 发出实际请求", "expected": "拒绝访问",
+                       "observed": "读取身份 A 的资料", "execution_ids": ["observed"]}],
+            "impact": "仅确认单条测试资料泄露", "limitations": "未验证批量影响",
+            "remediation": "针对该入口根因的模型建议\n" * 100,
+        }
+        self.bb.write(BlackboardLayer.VULN, "test-vuln", {
+            "vuln_type": "DOM-XSS", "status": "accepted", "severity": "high", "poc_code": "fixture raw text",
+            "verification": {
+                "verdict": "confirmed", "reason": "不能拿此字段代写报告", "harm": "不能拿此字段代写影响",
+                "report": model_report,
+                "severity_assessment": {"status": "assessed", "rationale": "按实际影响建议高危"},
+                "cvss": {"status": "assessed", "version": "3.1", "score": 6.5,
+                         "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N"},
+            },
+        })
+        for key, status in (("legacy-vuln", "candidate"), ("legacy-accepted", "accepted")):
+            self.bb.write(BlackboardLayer.VULN, key, {
+                "vuln_type": "DOM-XSS", "status": status, "severity": "high",
+                "verification": {"verdict": "confirmed", "reason": "历史结论", "harm": "历史影响"},
+                "reproductions": [{"method": "http", "ok": True}],
+            })
+        app = create_app(SystemConfig(workspace=WorkspaceConfig(root=str(self.root))), [])
+        session = Session("sess-archive", "src", "archive.test", self.workspace, status="completed")
+        app.state.manager._sessions[session.session_id] = session
+        with TestClient(app, base_url="http://127.0.0.1") as client:
+            prefix = "/api/sessions/sess-archive/vulnerabilities/"
+            response = client.get(prefix + "test-vuln?view=report")
+            self.assertEqual(response.status_code, 200)
+            self.assertNotIn("fixture raw", response.text)
+            report = response.json()["report"]
+            self.assertEqual({key: report[key] for key in model_report}, model_report)
+            self.assertEqual(report["severity"]["level"], "high")
+            self.assertEqual(report["cvss"]["version"], "3.1")
+            for key in ("legacy-vuln", "legacy-accepted"):
+                with self.subTest(key=key):
+                    legacy = client.get(prefix + key + "?view=report").json()["report"]
+                    self.assertEqual(legacy["status"], "unavailable")
+                    self.assertIsNone(legacy["severity"]["level"])
+                    self.assertNotIn("steps", legacy)
+                    self.assertNotIn("remediation", legacy)
+                    self.assertNotIn("impact", legacy)
+            self.assertEqual(client.get(prefix + "test-vuln").json()["data"]["poc_code"], "fixture raw text")
+            self.assertEqual(client.get(prefix + "missing?view=report").status_code, 404)
+
+    def test_historical_src_report_recovery_is_explicit_idempotent_and_scoped(self) -> None:
+        task = Task(task_id="legacy-task", task_type="recon", target="archive.test",
+                    agent_type=AgentType.RECON, status=TaskStatus.FAILED,
+                    result_summary={"incomplete_reason": "缺少认证证据"})
+        route = RouteState(route_id="legacy-route", task_id=task.task_id,
+                           name="入口", status=TaskStatus.FAILED, notes=["| 请求 | 状态 |\n| --- | --- |\n| 基线 | 403 |"])
+        self.bb.write(BlackboardLayer.TASK_STATE, task.task_id,
+                      {"task": task.model_dump(mode="json"), "summary": task.result_summary,
+                       "routes": [route.model_dump(mode="json")]}, updated_by="recon-legacy")
+        cfg = SystemConfig(workspace=WorkspaceConfig(root=str(self.root)),
+                           models_config_path=str(self.root / "models.yaml"))
+        app = create_app(cfg, [])
+        session = Session(session_id="sess-archive", mode="src", target="archive.test",
+                          workspace=self.workspace, status="completed", error="原续传错误")
+        app.state.manager._sessions[session.session_id] = session
+        with TestClient(app, base_url="http://127.0.0.1") as client:
+            prefix = "/api/sessions/sess-archive/task-reports"
+            self.assertEqual(client.get(prefix).json()["items"], [], "读取不自动改写旧会话")
+            self.assertEqual(client.post(prefix + "/recover").json()["recovered"], 1)
+            report = client.get(prefix).json()["items"][0]
+            self.assertEqual(report["status"], "failed")
+            response = client.get("/api/sessions/sess-archive/artifacts/download", params={"path": report["path"]})
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("历史补齐说明", response.text)
+            self.assertIn(route.notes[0], response.text)
+            self.assertEqual(client.post(prefix + "/recover").json()["recovered"], 0)
+            self.assertEqual(len(client.get(prefix).json()["items"]), 1)
+            self.assertEqual(client.get("/api/sessions/missing/task-reports").status_code, 404)
+            session.mode = "ctf"
+            self.assertEqual(client.post(prefix + "/recover").status_code, 409)
+            self.assertEqual(session.error, "原续传错误")
+            self.assertEqual(self.bb.read(BlackboardLayer.TASK_STATE, task.task_id)["task"]["status"], "failed")
 
     def test_share_file_to_chat_and_attachment_serving(self) -> None:
         cfg = SystemConfig(workspace=WorkspaceConfig(root=str(self.root)),

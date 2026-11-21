@@ -4,8 +4,8 @@
 它不替换 `configs/system.yaml`、正常模型注册表或原始 Qwen 模型。
 
 Ollama 与 llama.cpp 统一从 `--offline` 启动，共用 `.spiritscout-ollama/` 中的配置与会话；
-目录沿用旧名，后端由 `models.yaml` 与模型指派决定。Windows Docker 部署见
-[Windows 轻量测试](Windows轻量测试.md)。
+目录沿用旧名，后端由 `models.yaml` 与模型指派决定。部署方式与平台兼容范围见
+[部署与配置](部署与配置.md)。
 
 ## 初始化与启动
 

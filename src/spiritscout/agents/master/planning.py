@@ -30,8 +30,40 @@ from spiritscout.gateway.context import (
 )
 from spiritscout.tools.search_policy import search_allowed
 
+SRC_PLAN_CONTRACT = (
+    '返回 JSON：{analysis:str,reason:str,continue_iteration:bool（复盘时必填）,'
+    'dag_nodes:[{tactic:可用战术,title:要解决的问题或交付目标,target:单个目标（可选）,'
+    'depends_on:[依赖战术名],next_minimal_experiment:当前调查意图（可选）,'
+    'evidence_refs:[已有引用]（可选）,hypothesis_ref:已有假设引用（可选）,'
+    'opportunity_ref:已有机会引用（可选）}],questions:[{question:str,options:[str],targets:[]}]（可选）,'
+    'scan_control:扫描控制指令（可选，按 scanner 中的契约）}。'
+    '按现场自主选择分工、依赖和后续实验，不要求先登记假设或补齐业务模型才能派工。'
+    '已有假设续作时复用引用；机会排序、能力候选和收益统计只辅助判断，不限制探索。'
+    '新节点可用 tactic@序号；不重复在途任务，结合实际证据判断是否续作、换路或收口。'
+    '工具故障、缺少条件和暂时未发现漏洞不代表目标安全。'
+    '仅在需要用户提供关键输入或裁定授权时提问，同时推进不依赖答复的工作。'
+)
+
 
 class MasterPlanning:
+    def _asset_strategy(self) -> dict[str, str]:
+        value = str((getattr(self.ctx, "extra", None) or {}).get(
+            "asset_strategy") or "balanced")
+        descriptions = {
+            "edge_first": (
+                "边缘资产优先：在授权范围内先排序低竞争、低防护、入口暴露且验证成本较低的资产，"
+                "争取更短时间形成可复现、可上报成果；不忽略核心资产，出现高价值证据时可动态切换。"),
+            "core_first": (
+                "核心资产优先：优先高价值核心业务、关键数据与高赏金影响面，允许投入更多时间理解业务"
+                "和绕过防护；若长期低收益，应依据证据转向其他资产。"),
+            "balanced": (
+                "均衡推进：已收集资产的边缘入口验证与核心业务理解并行，根据真实证据、边际收益、"
+                "验证成本和可上报性滚动调整。"),
+        }
+        if value not in descriptions:
+            value = "balanced"
+        return {"value": value, "description": descriptions[value]}
+
     def _scanner_context(self) -> dict[str, Any]:
         control = (getattr(self.ctx, 'extra', None) or {}).get('scan_controller')
         return control.snapshot() if control is not None else {'status': 'unavailable'}
@@ -273,6 +305,8 @@ class MasterPlanning:
             ctx.audit.log("llm.review_failed", self.agent_id, {
                 "round": state["round_no"], "error": "复盘缺少有效的 continue_iteration 布尔值"})
             llm_decision = None
+        if ctx.enable_llm_planning and not stop_reason and not auto_continue and llm_decision is None:
+            raise SpiritScoutError("主控复盘未返回有效决策，本次执行中断；不能判定任务已收敛")
         deferred_replan = False
         if llm_decision and not stop_reason:
             await self._apply_scanner_control(llm_decision)
@@ -289,7 +323,6 @@ class MasterPlanning:
                         node.meta["cancel_reason"] = stop_reason
             elif llm_decision.get("dag_nodes"):
                 nodes = self._filter_plannable(llm_decision["dag_nodes"])
-                nodes = self._apply_src_evidence_gates(nodes)
                 try:
                     result = dag.upsert_from_plan(self._resolve_plan_challenges(nodes), next_round)
                 except SpiritScoutError as exc:
@@ -404,9 +437,16 @@ class MasterPlanning:
         （AGENTS.md 边界）；模式规则派单（plan_override）不再短路模型，
         保留给无模型演练与规划失败两条兜底路径。
         """
-        plan = await self._llm_plan(state) if self.ctx.enable_llm_planning else None
-        if plan is not None:
-            return plan, "llm"
+        while self.ctx.enable_llm_planning:
+            revision = self._user_input_revision()
+            plan = await self._llm_plan(state)
+            if self._user_input_revision() != revision:
+                self.ctx.audit.log("decision.change", self.agent_id, {
+                    "action": "user_input_changed", "phase": "planning", "applied": False})
+                continue
+            if plan is not None:
+                return plan, "llm"
+            break
         return self._non_llm_plan(state)
 
     def _non_llm_plan(self, state: MasterState) -> tuple[dict[str, Any], str]:
@@ -477,11 +517,13 @@ class MasterPlanning:
                 decision_messages(self._system_prompt() + "\nROLE: meta_planner", {
                         "target": state["target"], "round": state["round_no"],
                         "mission": self._mission()[:2000],
+                        "asset_strategy": self._asset_strategy(),
                         "competition_context": self.ctx.extra.get("competition_context", {}),
                         "competition_status": self._competition_status(dag),
                         "queue_refill": bool(state.get("queue_refill")),
                         "planned_challenge_ids": list(self._challenge_states(dag)),
                         "challenge_states": self._challenge_states(dag),
+                        "conversation_refs": self._conversation_refs(dag),
                         "flag_solved_ids": self._flag_solved_ids(),
                         "platform_facts": (self.ctx.extra.get("platform_facts") or [])[-8:],
                         "world_state": self._world_state(),
@@ -499,7 +541,7 @@ class MasterPlanning:
                             for n in self._decision_nodes(dag)],
                         "last_plan_result": self.ctx.extra.get("last_plan_result") or {},
                         "views": state["round_views"][-3:],
-                        "constraints": (
+                        "constraints": SRC_PLAN_CONTRACT if getattr(getattr(self.ctx, "policy", None), "mode", None) == RunMode.SRC else (
                             "返回 JSON：{\"analysis\": str, \"dag_nodes\": [{\"tactic\": "
                             "仅可用战术之一, \"title\": str, \"technique\": str, "
                             "\"target\": str（可选）, \"depends_on\": [依赖战术名，可空；"
@@ -509,7 +551,7 @@ class MasterPlanning:
                             "\"stop_condition\": str, \"unknowns_to_resolve\": [str], "
                             "\"evidence_refs\": [str], \"opportunity_ref\": str（SRC 可选，"
                             "必须引用 world_state.testing_opportunities.prioritized 中的实际机会）, "
-                            "\"hypothesis_ref\": str（可选，"
+                            "\"hypothesis_ref\": str（TA0001/HOST-VULN 必填，其他节点可选；"
                             "必须引用 world_state.vulnerability_hypotheses.active 中的实际假设）, "
                             "\"challenge_id\": str（赛题节点必填，非赛题节点省略）, "
                             "\"continue_from\": {\"task_id\": str, \"route_id\": str}（可选）}], "
@@ -534,7 +576,9 @@ class MasterPlanning:
                             "在途/待发题不重复，已完成题不重建；回访用唯一 tactic@序号，"
                             "暂缓题同时返回 retry_challenges:[{id,reason}] 解除暂缓。"
                             "未完成实例默认跨节点保留；retain_instances 保留旧协议兼容。暂缓默认只停止新增派工，cancel_running=true 才中断在途工作；release_instance=true 才释放实例并结束同题工作。"
+                            "上轮中断的 DAG 是历史，不是仍在运行的任务；依据当前用户目标决定接续或调整。"
                             "若继续既有调查，可从 conversation_refs 选择 continue_from 继承原对话；"
+                            "复核已完成路线时用战术@当前轮次表达新的调查，不把旧完成回执当成本轮目标完成。"
                             "要独立重试则省略。只有同题、同模型协议且实例回执一致的历史可继承，"
                             "历史工具不自动执行，当前任务与授权优先。"
                             "本次无新增节点时，相同现场不会被计时器反复询问；"
@@ -583,9 +627,8 @@ class MasterPlanning:
                             "停止同质登录页走访，转向 JS/API、资产或已观测服务面。"
                             "SRC 模式按可观察交互复杂度决定是否派 BUSINESS-CONTEXT：存在登录后交易、"
                             "多角色权限、对象状态流转或下单/支付等业务机制时深入走访；以公开内容展示"
-                            "或登录入口为主、暂无凭据时，不要让业务走访阻塞 TA0043 与 JS-REVERSE，"
-                            "应让资产侦察、公开脚本和接口提取并行开工。通配符子域范围优先持续发现"
-                            "存活资产并滚动排序，不等待业务走访完成。智能体模式的阶段与依赖按"
+                            "或登录入口为主、暂无凭据时，让公开脚本和接口提取并行开工。"
+                            "SRC 使用专用页面已收集的清单排序与测试，不启动通配符资产枚举。智能体模式的阶段与依赖按"
                             "实际规则理解，独立题目默认遵循列表顺序、卡题留档后跳过，"
                             "首轮扫完再回访；用户明确指令和实际依赖优先。" + ctf_guidance),
                     }, 8000),
@@ -601,7 +644,6 @@ class MasterPlanning:
                 "phase": "planning", "target": state["target"], "mission": self._mission(),
                 "situation": self._situation_digest(), "rules": self._rules()})
             nodes = self._filter_plannable(data.get("dag_nodes", []))
-            nodes = self._apply_src_evidence_gates(nodes)
             if not nodes and data.get("dag_nodes"):
                 return None            # 全部不可调度：视为规划失败，回退规则
             data["dag_nodes"] = nodes
@@ -627,15 +669,33 @@ class MasterPlanning:
             current_session = self.ctx.blackboard.database_path.parent.name
         except (AttributeError, OSError):
             pass
+        opportunity_pool = None
         for spec in nodes:
             node = copy.deepcopy(spec)
+            base_tactic = str(node.get("tactic") or "").split("@", 1)[0]
+            hypothesis_ref = str(node.get("hypothesis_ref") or "").strip()
+            if (getattr(getattr(self.ctx, "policy", None), "mode", None) == RunMode.SRC
+                    and base_tactic in {"TA0001", "HOST-VULN"} and hypothesis_ref):
+                from spiritscout.blackboard.hypotheses import resolve
+
+                hypothesis = resolve(self.ctx.blackboard, hypothesis_ref)
+                if hypothesis is not None:
+                    if opportunity_pool is None:
+                        opportunity_pool = self._world_state().get("testing_opportunities") or {}
+                    canonical = next((item for item in opportunity_pool.get("prioritized", [])
+                                      if item.get("kind") == "vulnerability_hypothesis"
+                                      and str(item.get("hypothesis_ref") or "").rsplit("@", 1)[0]
+                                      == f"topology:{hypothesis[0]}"), None)
+                    if canonical is not None:
+                        node["opportunity_ref"] = canonical["opportunity_ref"]
             opportunity_ref = node.get("opportunity_ref")
+            opportunity: dict[str, Any] | None = None
             if isinstance(opportunity_ref, str) and opportunity_ref.strip():
                 from spiritscout.blackboard.opportunities import find_opportunity
 
-                world = self._world_state()
-                opportunity = find_opportunity(
-                    world.get("testing_opportunities") or {}, opportunity_ref.strip())
+                if opportunity_pool is None:
+                    opportunity_pool = self._world_state().get("testing_opportunities") or {}
+                opportunity = find_opportunity(opportunity_pool, opportunity_ref.strip())
                 if opportunity is None:
                     raise SpiritScoutError(
                         "规划错误：opportunity_ref 不存在或已不在当前测试机会池")
@@ -650,24 +710,9 @@ class MasterPlanning:
                 candidates = [item for item in opportunity.get("capability_candidates", [])
                               if isinstance(item, dict)]
                 node["capability_candidates"] = copy.deepcopy(candidates[:8])
-                base_tactic = str(node.get("tactic") or "").split("@", 1)[0]
-                dag_candidates = [item for item in candidates
-                                  if item.get("execution") == "dag"]
-                if candidates and not dag_candidates:
-                    raise SpiritScoutError(
-                        "规划错误：该机会由独立复核或扫描控制通道接管，"
-                        "不应重复创建 DAG 执行节点")
                 selected = next(
                     (item for item in candidates
                      if str(item.get("tactic") or "") == base_tactic), None)
-                if selected is not None:
-                    yield_info = selected.get("yield") \
-                        if isinstance(selected.get("yield"), dict) else {}
-                    if (int(yield_info.get("consecutive_empty") or 0) >= 2
-                            and not int(yield_info.get("productive") or 0)):
-                        raise SpiritScoutError(
-                            "规划错误：该机会的当前能力在本修订上已连续低收益；"
-                            "请改选未尝试能力、其他资产或等待新证据")
                 if selected is not None:
                     node["selected_capability"] = copy.deepcopy(selected)
                 node.setdefault("target", opportunity.get("subject") or "")
@@ -719,6 +764,8 @@ class MasterPlanning:
                 node["evidence_refs"] = current
                 if historical:
                     node["historical_evidence_refs"] = historical[:20]
+            # ScopeGuard 只标注结构化范围；用户原话里的归属/动态范围由模型判断。
+            # 真正扩围由 ask_user 确认，不能在落图时用字符串白名单替代授权语义。
             meta = node.get("meta") if isinstance(node.get("meta"), dict) else {}
             cid = str(node.get("challenge_id") or meta.get("challenge_id") or "")
             if cid:
@@ -734,7 +781,7 @@ class MasterPlanning:
         return resolved
 
     def _cancel_stale_opportunity_nodes(self, dag: TaskDAG) -> None:
-        """撤销尚未启动且证据修订已过期/停滞的节点；运行中任务不被粗暴打断。"""
+        """撤销尚未启动且证据修订过期或已明确关闭的节点；不按低收益次数取消。"""
         if getattr(getattr(self.ctx, "policy", None), "mode", None) != RunMode.SRC:
             return
         pool = self._situation_digest().get("testing_opportunities") or {}
@@ -756,16 +803,6 @@ class MasterPlanning:
                 reason = "机会证据已更新，旧节点需按新修订重新规划"
             elif item.get("direction_state") == "exhausted":
                 reason = "机会的合理替代能力均已穷尽，等待新证据或阻塞条件变化"
-            else:
-                selected = (contract or {}).get("selected_capability")
-                selected = selected if isinstance(selected, dict) else {}
-                capability = str(selected.get("capability") or "")
-                if not capability and item.get("stalled") is True:
-                    reason = "旧节点缺少能力归因且机会已连续空转，需重新规划具体换路能力"
-                yield_row = next((row for row in item.get("capability_yield", [])
-                                  if row.get("capability") == capability), {})
-                if not reason and int(yield_row.get("consecutive_empty") or 0) >= 2:
-                    reason = "节点所选能力连续低收益，需改用其他能力或资产"
             if not reason:
                 continue
             dag.mark(node.node_id, TaskStatus.CANCELLED)
@@ -799,34 +836,6 @@ class MasterPlanning:
                 "dropped": [str(d) for d in dropped],
                 "reason": "战术不在可用映射内（调度裁决不外包）"})
         return nodes
-
-    def _apply_src_evidence_gates(self, plan_nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """只拦截证据上明显过早的攻击面派工；不替模型判断站点类型或漏洞方向。"""
-        if getattr(getattr(self.ctx, "policy", None), "mode", None) != RunMode.SRC:
-            return plan_nodes
-        signals = (self._situation_digest().get("action_signals") or {})
-        dispatch = signals.get("dispatch_evidence") if isinstance(signals, dict) else {}
-        dispatch = dispatch if isinstance(dispatch, dict) else {}
-        gated = {"BUSINESS-CONTEXT": "business_surface_observed",
-                 "JS-REVERSE": "js_reverse_supported",
-                 "TA0001": "web_vuln_supported", "TA0007": "port_scan_supported",
-                 "HOST-VULN": "port_scan_supported"}
-        kept, dropped = [], []
-        for node in plan_nodes:
-            base = str(node.get("tactic") or "").split("@", 1)[0]
-            required = gated.get(base)
-            if required and not dispatch.get(required):
-                dropped.append(base)
-                continue
-            kept.append(node)
-        if dropped:
-            assert self.ctx.audit is not None
-            self.ctx.audit.log("decision.change", self.agent_id, {
-                "action": "src_plan_nodes_deferred",
-                "dropped": dropped,
-                "reason": "资产或接口证据尚未达到对应角色的最低派工条件",
-            })
-        return kept
 
     @staticmethod
     def _skip_digest(skipped: list[dict[str, str]]) -> list[str]:
@@ -994,7 +1003,7 @@ class MasterPlanning:
                     cid: item.get("defer_reason", "")
                     for cid, item in self._challenge_states(dag_now).items()
                     if item.get("deferred")},
-                "constraints": (
+                "constraints": SRC_PLAN_CONTRACT if getattr(getattr(self.ctx, "policy", None), "mode", None) == RunMode.SRC else (
                             "返回 JSON：{\"continue_iteration\": bool, \"reason\": str, "
                             "\"dag_nodes\": [{\"tactic\": 仅可用战术之一, \"title\": str, "
                             "\"target\": str（可选）, \"depends_on\": [依赖战术名，可空；"
@@ -1065,13 +1074,14 @@ class MasterPlanning:
                             "继续核验资产；登录页停滞时转向 JS/API；没有服务证据不派端口/主机角色，"
                             "没有已验证接口及输入或权限线索不派 Web 漏洞角色。"
                             "没有供应商证据不要断言余额正常。"
-                            "questions 可选（至多 2 条）：仅当继续迭代必须依赖"
+                            "questions 可选（至多 2 条）：问题可带 blocking_task_ids 指定依赖答复的任务，"
+                            "block_all_tasks=true 表示全队等待；独立任务可继续。仅当继续迭代必须依赖"
                             "只有用户能提供的输入（测试账号/凭据、登录后操作的"
                             "请求记录、授权范围裁定）时给出，形如 "
                             "[{\"question\": str, \"options\": [str], "
                             "\"multiple\": bool, "
                             "\"targets\": [{\"target\": str, \"why\": 一句话说明"
-                            "它是什么、为什么需要（面向普通用户）}]}]；multiple "
+                            "它是什么、为什么需要（面向普通用户）, \"approved_by\": [授权选项原文]}]}]；multiple "
                             "仅在选项彼此不互斥、用户可能同时选多项时设 true"
                             "（如还想补充哪些账号/环境、优先推进哪些独立方向），"
                             "「允许/拒绝」这类互斥裁定保持 false，多选选项要写成可"
@@ -1079,8 +1089,8 @@ class MasterPlanning:
                             "Cookie 或请求记录时，问句直接要求用户在当前提问卡输入，"
                             "options 只保留「无法提供/改走其他方案」等即时决策，禁止"
                             "「稍后提供」「注册好再给」「之后发送」这类延迟承诺；targets 仅在"
-                            "需要访问授权范围外的新目标时给出，用户勾选后纳入本次"
-                            "会话范围，不要罗列已在范围内的目标；问句面向普通用户、"
+                            "需要访问授权范围外的新目标时给出；approved_by 对应明确允许该目标的选项原文，拒绝选项不得关联目标。用户只需答复一次，"
+                            "不再额外勾选目标；不要罗列已在范围内的目标；问句面向普通用户、"
                             "用平实中文，不用 HAR、PoC 这类行话缩写（必要处一句话"
                             "解释），后端会挂起等用户作答并把答复并入下一轮"
                             "态势；没有这类需求就不要给。"),
@@ -1102,7 +1112,7 @@ class MasterPlanning:
             assert self.ctx.audit is not None
             self.ctx.audit.log("llm.review_failed", self.agent_id, {
                 "round": state["round_no"], "error": str(exc)[:300]})
-            return None
+            raise SpiritScoutError(f"主控复盘失败，本次执行中断：{exc}") from exc
 
     async def _ask_user_from_review(self, llm_decision: dict[str, Any]) -> None:
         """复盘提问：模型给出 questions 时向用户发问，答复落黑板线索层。
@@ -1133,7 +1143,8 @@ class MasterPlanning:
                     "question": question[:500], "options": options,
                     "multiple": multiple, "targets": targets})
             result = await broker.ask("master", question, options, targets,
-                                      multiple=multiple)
+                                      multiple=multiple, blocking_task_ids=item.get("blocking_task_ids"),
+                                      block_all_tasks=item.get("block_all_tasks", False))
             if result.get("autonomous"):
                 continue   # 系统返回的自主决策提示不是用户答复，不写入用户事实。
             answer = str(result.get("answer") or "").strip()
@@ -1157,11 +1168,19 @@ class MasterPlanning:
         opportunities = (situation.get("testing_opportunities") or {}).get(
             "prioritized", [])
         tactic_map = self.ctx.tactic_map or TACTIC_AGENT_MAP
+        if getattr(getattr(self.ctx, "policy", None), "mode", None) == RunMode.SRC:
+            tactic_map = {t: pair for t, pair in tactic_map.items() if pair[0] not in {AgentType.RECON, AgentType.PORT_SCAN}}
         for opportunity in opportunities:
             if (not isinstance(opportunity, dict)
                     or opportunity.get("direction_state") == "exhausted"):
                 continue
             candidates = opportunity.get("capability_candidates") or []
+            if getattr(getattr(self.ctx, "policy", None), "mode", None) == RunMode.SRC:
+                candidates = [
+                    {**candidate, "tactic": {"TA0043": "BUSINESS-CONTEXT",
+                                            "TA0007": "HOST-VULN"}[candidate["tactic"]]}
+                    if isinstance(candidate, dict) and candidate.get("tactic") in {"TA0043", "TA0007"}
+                    else candidate for candidate in candidates]
             recommended = str(opportunity.get("recommended_capability") or "")
             preferred = [item for item in candidates
                          if isinstance(item, dict) and item.get("preferred") is True]
@@ -1175,6 +1194,10 @@ class MasterPlanning:
             selected = next((item for item in ordered
                              if isinstance(item, dict)
                              and item.get("execution") == "dag"
+                             and (str(item.get("tactic") or "") not in {"TA0001", "HOST-VULN"}
+                                  or opportunity.get("kind") == "vulnerability_hypothesis"
+                                  or (getattr(getattr(self.ctx, "policy", None), "mode", None) == RunMode.SRC
+                                      and item.get("capability") == "service_mapping"))
                              and int((item.get("yield") or {}).get("consecutive_empty") or 0) < 2
                              and str(item.get("tactic") or "") in tactic_map), None)
             if selected is None:
@@ -1194,7 +1217,8 @@ class MasterPlanning:
         dispatch = signals.get("dispatch_evidence") if isinstance(signals, dict) else {}
         dispatch = dispatch if isinstance(dispatch, dict) else {}
         nodes: list[dict[str, Any]] = []
-        if dispatch.get("continue_asset_verification") or not dispatch:
+        src = getattr(getattr(self.ctx, "policy", None), "mode", None) == RunMode.SRC
+        if not src and (dispatch.get("continue_asset_verification") or not dispatch):
             nodes.append({"tactic": "TA0043", "title": "核验范围内资产并建立存活与指纹事实",
                           "depends_on": []})
         if dispatch.get("js_reverse_supported"):
@@ -1204,13 +1228,12 @@ class MasterPlanning:
             nodes.append({"tactic": "BUSINESS-CONTEXT", "title": "建立交易、角色与对象状态流证据",
                           "depends_on": []})
         if dispatch.get("port_scan_supported"):
-            nodes.append({"tactic": "TA0007", "title": "围绕已观测服务补充端口与协议证据",
+            nodes.append({"tactic": "HOST-VULN" if src else "TA0007", "title": "围绕已观测服务补充端口与协议证据",
                           "depends_on": []})
-        if dispatch.get("web_vuln_supported"):
-            nodes.append({"tactic": "TA0001", "title": "验证已观测接口的输入与权限边界",
-                          "depends_on": []})
+        # 没有具体 hypothesis_ref 时不创建通用 Web 漏洞节点；下一轮应先由
+        # JS/业务证据形成可证伪假设，避免恢复全接口 SQLi/XSS 例行扫描。
         if not nodes:
-            nodes.append({"tactic": "TA0043", "title": "建立目标的首批可验证资产事实",
+            nodes.append({"tactic": "BUSINESS-CONTEXT" if src else "TA0043", "title": "从已选测试目标建立业务与入口事实",
                           "depends_on": []})
         return {
             "analysis": "规则规划：仅派当前世界状态已有证据支持的最小调查任务",
@@ -1245,6 +1268,8 @@ class MasterPlanning:
 
     def _recent_experience(self) -> str:
         """全局经验库的近期洞察（跨会话自我进化）。"""
+        if getattr(getattr(self.ctx, "policy", None), "mode", None) == RunMode.SRC:
+            return ""
         exps = self.ctx.extra.get("recent_experience") or []
         if not exps:
             return ""
@@ -1259,6 +1284,8 @@ class MasterPlanning:
 
     def _project_rules(self) -> str:
         """项目说明即用户维护的项目级测试规则，供同项目后续会话直接复用。"""
+        if getattr(getattr(self.ctx, "policy", None), "mode", None) == RunMode.SRC:
+            return ""  # SRC 从 world_state.project_context 读取用户说明，不将背景整体提升为规则。
         blackboard = getattr(self.ctx, "blackboard", None)
         memory = (blackboard.read(BlackboardLayer.TOPOLOGY, "project-memory")
                   if blackboard is not None else None)
@@ -1288,6 +1315,28 @@ class MasterPlanning:
         )
         mode_prompt = str(self.ctx.extra.get("mode_prompt") or "").strip()
         mode_block = f"{mode_prompt}\n" if mode_prompt else ""
+        strategy = self._asset_strategy()
+        strategy_block = (f"用户选择的 SRC 资产优先策略：{strategy['description']}\n"
+                          if getattr(getattr(self.ctx, "policy", None), "mode", None)
+                          == RunMode.SRC else "")
+        if getattr(getattr(self.ctx, "policy", None), "mode", None) == RunMode.SRC:
+            return (
+                agent_system_prompt(AgentType.MASTER, mode=RunMode.SRC,
+                                    allow_search=search_allowed(self.ctx))
+                + f"\n{mission_block}{rules_block}{exp_block}{strategy_block}"
+                + f"实际执行角色：{roster or '无'}。"
+                "你负责判断值得探索的问题、分工、优先级与收敛时机。"
+                "资产全量收集在专用资产收集页完成，本会话不重新做企业/子域枚举或资产情报搜索。"
+                "先依据已带入资产的存活证据、业务价值、防护与验证成本自主排序，再派工测试；"
+                "权重由你结合用户策略和现场判断，不套固定分数。已有标题与存活信息是历史观察，"
+                "不能替代当前验证或视为漏洞证据；缺少清单时请用户先收集或提供具体测试目标。"
+                "测试中的新接口、脚本、服务与关联线索仍可按授权验证，不另起全量收集流程。"
+                "按需要派业务、脚本、Web 或服务角色，"
+                "不以业务完整度或预先证明入口存在作为统一门槛。"
+                "结合现场与用户目标评估收益，必要时换方法，不以固定次数认定穷尽。"
+                "候选交鉴真独立复核，未经复核不得宣称确认。按当前调用契约输出 JSON。"
+                + (SECRETARY_NOTE if self.ctx.extra.get('secretary_enabled', False) else "")
+            )
         if (self.ctx.extra.get("lightweight_local")
                 and getattr(self.ctx.policy, "mode", None) in (RunMode.CTF, RunMode.AWDP)):
             # Ollama 小模型 × CTF 模式：压缩主 Agent 提示（16K ctx 预算紧）；
@@ -1305,6 +1354,7 @@ class MasterPlanning:
             f"{rules_block}"
             f"{exp_block}"
             f"{mode_block}"
+            f"{strategy_block}"
             f"你全权决定：战术拆解（可参考 ATT&CK，也可按目标特点自由组合）、"
             f"任务下发与优先级、子 Agent 分工、迭代节奏与收敛时机。"
             f"本会话实际装配的执行角色只有：{roster or '无'}。不得虚构未装配角色"
@@ -1329,6 +1379,8 @@ class MasterPlanning:
             "direction_state、blockers 和 untried_capabilities，在继续、补条件、换能力、"
             "换资产或关闭方向之间选择；diminishing 不等于整个机会穷尽，exhausted 才关闭。"
             "当前能力连续低收益时不要同质重派；新证据、机会修订或阻塞条件变化后可以重新进入。"
+            "TA0001/HOST-VULN 只执行 vulnerability_hypothesis 机会并必须携带 hypothesis_ref；"
+            "没有假设时先派 JS-REVERSE、BUSINESS-CONTEXT 或 TA0043 补证，禁止全接口例行扫描。"
             "world_state.expert_scorecard 是验收与自我校准事实：结合资产覆盖、有效动作率、"
             "重复实验、工具投入、拦截信号和独立确认状态调整下一步；calibration 只提示"
             "需要复盘的缺口，不是固定阈值、漏洞结论或自动停机条件。"

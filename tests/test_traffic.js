@@ -55,7 +55,7 @@ const roots = new Map(), pending = [], timers = new Map();
 let timerId = 0;
 const S = {view:"session", tab:"traffic", cur:"a"};
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-const context = vm.createContext(require('./helpers/i18n').context({S, esc, URLSearchParams, document:{visibilityState:"visible"},
+const context = vm.createContext(require('./helpers/i18n').context({S, esc, URLSearchParams, TrafficProxy:{mount(){throw Error("流量浏览不应挂载独立代理采集面板");}}, document:{visibilityState:"visible"},
   $: selector => { if (!roots.has(selector)) roots.set(selector, new Element()); return roots.get(selector); },
   api: path => new Promise((resolve, reject) => pending.push({path, resolve, reject})),
   setTimeout: callback => { timers.set(++timerId, callback); return timerId; },
@@ -69,7 +69,8 @@ const result = (id, url) => ({items:[{id, url, method:"GET", status:200, respons
 
 (async () => {
   run("TrafficPage.sessionTab()");
-  assert.match(pending[0].path, /sessions\/a\/traffic/);
+  assert.match(pending[0].path, /sessions\/a\/traffic\?/);
+  assert.doesNotMatch(roots.get("#tab-traffic").innerHTML, /data-proxy-panel|data-proxy-enable/);
   await fireTimer();
   assert.equal(pending.length, 1, "慢请求期间自动刷新不叠加请求");
   S.cur = "b"; run("TrafficPage.sessionTab()");
@@ -166,3 +167,19 @@ const result = (id, url) => ({items:[{id, url, method:"GET", status:200, respons
   S.view = "home"; run('TrafficPage.navigate("home")');
   console.log("traffic: stale responses, isolation, escaping, paging, filters and catalog scroll/focus passed");
 })().catch(error => { console.error(error); process.exitCode = 1; });
+
+{
+  const headerSource=fs.readFileSync(require('node:path').join(__dirname,'../src/spiritscout/web/static/js/views.js'),'utf8');
+  const header={};
+  const headerContext=vm.createContext(require('./helpers/i18n').context({$:()=>header}));
+  const renderRoute=vm.runInContext(`(${headerSource.match(/function renderSessionProxy\(session\) \{[\s\S]*?\n\}/)[0]})`,headerContext);
+  renderRoute({mode:'src',proxy_route:{id:'proxy-fixed',name:'创建时的方案',exit_ip:'8.8.8.8',
+    nodes:[{name:'节点 A',server:'proxy.test',port:8080}]}});
+  assert.equal(header.hidden,false);
+  assert.match(header.textContent,/创建时的方案/);
+  assert.match(header.title,/proxy-fixed/);assert.match(header.title,/proxy.test:8080/);assert.match(header.title,/8\.8\.8\.8/);
+  renderRoute({mode:'src',proxy_route:{id:'direct'}});assert.match(header.textContent,/直连/);
+  renderRoute({mode:'src'});assert.match(header.textContent,/未记录/,'缺少历史快照不能冒充直连');
+  renderRoute({mode:'ctf',proxy_route:{id:'direct'}});assert.equal(header.hidden,true);
+  console.log('SRC route header: saved plan, chain, startup exit IP, direct and missing history passed');
+}

@@ -321,18 +321,19 @@ class ModeAssembler:
     # ------------------------------------------------------------ SRC
 
     def _assemble_src(self) -> ModeAssembly:
+        from spiritscout.agents.master.contracts import TACTIC_AGENT_MAP
+
         return ModeAssembly(
             mode=RunMode.SRC,
             agents={
                 AgentType.BUSINESS_CONTEXT: BusinessContextAgent(self.ctx, **self.kw),
                 AgentType.JS_REVERSE: JSReverseAgent(self.ctx, **self.kw),
-                AgentType.RECON: ReconAgent(self.ctx, **self.kw),
-                AgentType.PORT_SCAN: PortScanAgent(self.ctx, **self.kw),
                 AgentType.WEB_VULN: WebVulnAgent(self.ctx, **self.kw),
                 AgentType.HOST_VULN: HostVulnAgent(self.ctx, **self.kw),
                 AgentType.POST_EXPLOIT: PostExploitAgent(self.ctx, **self.kw),
             },
-            notes=["SRC 模式：业务体验 → 侦察/测绘 → 主机审计 → Web 探测 → 横向 → 全链路核验 → 报告"],
+            tactic_map={t: pair for t, pair in TACTIC_AGENT_MAP.items() if pair[0] not in {AgentType.RECON, AgentType.PORT_SCAN}},
+            notes=["SRC 模式：使用已收集资产，按价值排序并测试；不重复全量资产收集，候选经独立复核后进入报告"],
         )
 
     # ------------------------------------------------------------ CTF
@@ -428,6 +429,9 @@ class ModeAssembler:
         # 赛制名称不裁剪能力、不绑定执行模板；角色与任务依赖由模型选择。
         assembly = self._assemble_src()
         ctf = self._assemble_ctf(challenges, flag_manager, platform=platform)
+        if AgentType.RECON not in assembly.agents:
+            assembly.agents[AgentType.RECON] = ReconAgent(self.ctx, **self.kw)
+        assembly.agents[AgentType.PORT_SCAN] = PortScanAgent(self.ctx, **self.kw)
         assembly.agents.update(ctf.agents)
         assembly.mode = RunMode.COMPETITION
         assembly.tactic_map = {**TACTIC_AGENT_MAP, **CTF_TACTIC_MAP}

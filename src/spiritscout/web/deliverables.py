@@ -10,8 +10,10 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, BinaryIO
 
+from spiritscout.agents.report.vulnerability import verification_summary
 from spiritscout.core.audit import sanitize_record, tool_preview
 from spiritscout.core.storage_codec import unpack_json
+from spiritscout.knowledge.vulnerability_taxonomy import category_label, taxonomy_id
 
 _KINDS = {"fact", "hypothesis", "evidence", "finding", "asset", "file", "outcome"}
 # 可下发的目录：智能体产物、报告、原始附件及 HTTP 复测证据（会话内预览/下载）。
@@ -19,11 +21,27 @@ _SERVED_DIRS = {"artifacts", "reports", "attachments", "http-responses"}
 
 
 def open_artifact(workspace: Path, name: str) -> BinaryIO:
-    """通过目录描述符逐层打开，拒绝检查后被替换为链接的竞态。"""
     parts = Path(name).parts
-    if (Path(name).is_absolute() or not parts or parts[0] not in _SERVED_DIRS
-            or any(p.startswith(".") for p in parts)):
+    if Path(name).is_absolute() or not parts or parts[0] not in _SERVED_DIRS:
         raise FileNotFoundError(name)
+    return _open_workspace_file(workspace, parts)
+
+
+def open_command_log(workspace: Path, name: str) -> BinaryIO:
+    """打开审计中记录的会话沙箱日志路径。"""
+    path = Path(name)
+    if path.is_absolute():
+        path = path.relative_to(workspace.absolute())
+    parts = path.parts
+    if len(parts) < 2 or parts[0] != "sandbox" or path.suffix != ".log":
+        raise FileNotFoundError(name)
+    return _open_workspace_file(workspace, parts)
+
+
+def _open_workspace_file(workspace: Path, parts: tuple[str, ...]) -> BinaryIO:
+    """通过目录描述符逐层打开，拒绝检查后被替换为链接的竞态。"""
+    if any(part.startswith(".") for part in parts):
+        raise FileNotFoundError(str(Path(*parts)))
     directory = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         for part in parts[:-1]:
@@ -33,7 +51,7 @@ def open_artifact(workspace: Path, name: str) -> BinaryIO:
         fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             os.close(fd)
-            raise FileNotFoundError(name)
+            raise FileNotFoundError(str(Path(*parts)))
         return os.fdopen(fd, "rb")
     finally:
         os.close(directory)
@@ -233,25 +251,55 @@ def read_record_history(workspace: Path, layer: str, record_id: str,
             "has_more": len(rows) > limit}
 
 
-def read_vulnerability_page(workspace: Path, offset: int = 0, limit: int = 50) -> dict[str, Any]:
-    """完整漏洞列表按页只读，与状态卡片的全量统计独立。"""
+def read_vulnerability_page(workspace: Path, offset: int = 0, limit: int = 50, *,
+                            category: str = "", confirmed_only: bool = False) -> dict[str, Any]:
+    """在同一快照内统计会话全部漏洞，再按分类与状态分页。"""
+    empty = {"items": [], "total": 0, "category_counts": []}
     db = workspace / "bb.db"
     if not db.is_file():
-        return {"items": [], "total": 0}
+        return empty
     with closing(sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+        conn.execute("BEGIN")
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='bb_records'").fetchone():
-            return {"items": [], "total": 0}
-        total = conn.execute("SELECT COUNT(*) FROM bb_records WHERE layer='vuln'").fetchone()[0]
-        rows = conn.execute("SELECT data,version FROM bb_records WHERE layer='vuln' "
-                            "ORDER BY updated_at DESC,record_id LIMIT ? OFFSET ?", (limit, offset)).fetchall()
-    fields = ("vuln_id", "title", "vuln_type", "severity", "status", "cvss_score",
+            return empty
+        conn.create_function("taxonomy_id", 1, taxonomy_id, deterministic=True)
+        category_sql = "taxonomy_id(json_extract(data,'$.vuln_type'))"
+        accepted_sql = "json_extract(data,'$.status')='accepted'"
+        counts = [
+            {**category_label(key), "count": count, "confirmed_count": confirmed}
+            for key, count, confirmed in conn.execute(
+                f"SELECT {category_sql}, COUNT(*), COUNT(CASE WHEN {accepted_sql} THEN 1 END) "
+                "FROM bb_records WHERE layer='vuln' GROUP BY 1 ORDER BY 2 DESC,1"
+            )
+        ]
+        filters = ["layer='vuln'"]
+        args: list[Any] = []
+        if category:
+            filters.append(f"{category_sql}=?")
+            args.append(category)
+        if confirmed_only:
+            filters.append(accepted_sql)
+        clause = " AND ".join(filters)
+        count_field = "confirmed_count" if confirmed_only else "count"
+        total = sum(row[count_field] for row in counts if not category or row["taxonomy_id"] == category)
+        rows = conn.execute(f"SELECT data,version FROM bb_records WHERE {clause} "
+                            "ORDER BY updated_at DESC,record_id LIMIT ? OFFSET ?",
+                            (*args, limit, offset)).fetchall()
+    fields = ("vuln_id", "title", "vuln_type", "severity", "status", "cvss_score", "cvss_version",
               "poc_verified", "endpoint", "verification", "false_positive_reason",
               "vulnerability_ids", "hypothesis_ref", "hypothesis_refs")
-    items = [{**{key: data.get(key) for key in fields}, "version": row[1]} for row in rows if isinstance(data := json.loads(row[0]), dict)]
-    return {"items": sanitize_record({"detail": {"items": items}})["detail"]["items"], "total": total}
+    items = []
+    for raw, version in rows:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            items.append({**{key: data.get(key) for key in fields}, "version": version,
+                          "verification": verification_summary(data.get("verification")),
+                          **category_label(taxonomy_id(data.get("vuln_type")))})
+    return {"items": sanitize_record({"detail": {"items": items}})["detail"]["items"],
+            "total": total, "category_counts": counts}
 
 
-def read_vulnerability_detail(workspace: Path, vuln_id: str) -> dict | None:
+def read_vulnerability_detail(workspace: Path, vuln_id: str, *, report: bool = False) -> dict | None:
     db = workspace / 'bb.db'
     if not db.is_file():
         return None
@@ -261,4 +309,9 @@ def read_vulnerability_detail(workspace: Path, vuln_id: str) -> dict | None:
         row = conn.execute("SELECT data,version FROM bb_records WHERE layer='vuln' AND record_id=?", (vuln_id,)).fetchone()
     if row is None:
         return None
-    return {'version': row[1], 'data': sanitize_record({'detail': json.loads(row[0])})['detail']}
+    data = json.loads(row[0])
+    if report:
+        from spiritscout.agents.report.vulnerability import vulnerability_report
+
+        return {"version": row[1], "report": sanitize_record({"detail": vulnerability_report(data)})["detail"]}
+    return {"version": row[1], "data": sanitize_record({"detail": data})["detail"]}
