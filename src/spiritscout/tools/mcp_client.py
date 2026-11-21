@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import ssl
 import sys
@@ -19,6 +20,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
+from mcp.shared import session as mcp_session
 from mcp.types import Implementation
 
 from spiritscout import __version__
@@ -27,8 +29,19 @@ from spiritscout.platform_support import app_root, is_frozen
 from spiritscout.tools.spec import RiskLevel
 
 _HANDSHAKE_TIMEOUT = 60.0        # 握手：子进程冷启动 + initialize + tools/list
+_CLOSE_TIMEOUT = 10.0
 _SESSION_READ_TIMEOUT = 3600.0   # 会话级默认读超时（单次调用超时另行覆盖）
 _CLIENT_INFO = Implementation(name="spiritscout", version=__version__)
+
+
+def _redact_notification_warning(record: logging.LogRecord) -> bool:
+    # MCP SDK 通过 root logger 写入验证失败的通知原文，其中可能有请求头或凭据。
+    if (record.pathname == mcp_session.__file__ and isinstance(record.msg, str)
+            and record.msg.startswith("Failed to validate notification:")):
+        record.msg = "MCP 通知校验失败，已忽略该通知"
+        record.args = ()
+        record.exc_info = record.exc_text = None
+    return True
 
 
 def resolve_mcp_risk(server: McpServerConfig, tool: dict[str, Any]) -> RiskLevel:
@@ -99,6 +112,9 @@ class McpClient:
         self._task: asyncio.Task[None] | None = None
         self._ready: asyncio.Future[None] | None = None
         self._fatal: BaseException | None = None
+        self._closing = False
+        self._close_lock = asyncio.Lock()
+        self._inflight: asyncio.Future[dict[str, Any]] | None = None
 
     # ---- 传输（子类实现）：返回官方 SDK 的异步上下文管理器
 
@@ -114,7 +130,10 @@ class McpClient:
 
     async def start(self) -> list[dict[str, Any]]:
         """连接 + 握手 + 拉取工具清单；失败抛 McpError（调用方留痕跳过）。"""
+        logging.getLogger().addFilter(_redact_notification_warning)
         loop = asyncio.get_running_loop()
+        self._closing = False
+        self._fatal = None
         self._ready = loop.create_future()
         self._task = loop.create_task(self._serve(), name=f"mcp[{self.name}]")
         try:
@@ -125,12 +144,14 @@ class McpClient:
                 f"MCP[{self.name}] 握手超时（{_HANDSHAKE_TIMEOUT:.0f}s）") from exc
         if self._fatal is not None:
             raise McpError(f"MCP[{self.name}] 连接失败: {str(self._fatal)[:300]}")
+        if self._closing:
+            raise McpError(f"MCP[{self.name}] 会话已关闭")
         return self.tools
 
     async def call(self, tool: str, arguments: dict[str, Any] | None = None,
                    *, timeout: float | None = None) -> dict[str, Any]:
         """调用远程工具，归一为 {"text": str, "is_error": bool}。"""
-        if self._task is None or self._task.done():
+        if self._closing or self._task is None or self._task.done():
             raise McpError(f"MCP[{self.name}] 会话未建立或已断开")
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
@@ -139,16 +160,29 @@ class McpClient:
         return await future
 
     async def close(self) -> None:
-        if self._task is None:
-            return
-        if not self._task.done():
-            await self._requests.put(None)
+        # 并发关闭只让一个等待方取消连接，避免重复取消打断 SDK 资源回收。
+        async with self._close_lock:
+            task = self._task
+            if task is None:
+                return
+            self._closing = True
             try:
-                await asyncio.wait_for(asyncio.shield(self._task), 10)
-            except TimeoutError:
-                self._task.cancel()
-                await asyncio.gather(self._task, return_exceptions=True)
-        self._task = None
+                if not task.done():
+                    await self._requests.put(None)
+                    try:
+                        settled = asyncio.gather(task, return_exceptions=True)
+                        await asyncio.wait_for(asyncio.shield(settled), _CLOSE_TIMEOUT)
+                    except TimeoutError:
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                    except asyncio.CancelledError:
+                        # 关闭等待被取消，也须先由连接所有者退出 SDK 上下文。
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                        raise
+            finally:
+                if task.done() and self._task is task:
+                    self._task = None
 
     # ---- 常驻会话任务
 
@@ -180,8 +214,14 @@ class McpClient:
         except BaseException as exc:  # noqa: BLE001 —— 连接/会话故障：唤醒等待者
             self._fatal = exc
         finally:
+            self._closing = True
             if self._ready is not None and not self._ready.done():
                 self._ready.set_result(None)   # start() 检查 _fatal
+            # 在途请求已不在队列里；断连/取消后必须单独结算，副作用不可假定未发生。
+            if self._inflight is not None and not self._inflight.done():
+                self._inflight.set_exception(McpError(
+                    f"MCP[{self.name}] 在途调用中断，执行结果未知"))
+            self._inflight = None
             while not self._requests.empty():
                 item = self._requests.get_nowait()
                 if item is None or item[0].done():
@@ -197,6 +237,7 @@ class McpClient:
             future, tool, arguments, timeout = item
             if future.done():
                 continue
+            self._inflight = future
             try:
                 result = await session.call_tool(
                     tool, arguments,
@@ -207,12 +248,14 @@ class McpClient:
                 if not future.done():
                     future.set_exception(McpError(
                         f"MCP[{self.name}].{tool} 调用失败: {str(exc)[:300]}"))
+                self._inflight = None
                 continue
             if not future.done():
                 future.set_result({
                     "text": "\n".join(_content_texts(result))[:16000],
                     "is_error": bool(result.isError),
                 })
+            self._inflight = None
 
 
 class McpStdioClient(McpClient):

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 
 from spiritscout.assets.providers.base import ProviderCandidate, ProviderResult
@@ -21,7 +22,7 @@ class ProviderCache:
         if not self.ttl_seconds or not self.path.exists():
             return None
         try:
-            with sqlite3.connect(self.path) as db:
+            with closing(sqlite3.connect(self.path)) as db, db:
                 row = db.execute(
                     "SELECT body, created FROM provider_cache WHERE cache_key=?", (key,)
                 ).fetchone()
@@ -53,7 +54,7 @@ class ProviderCache:
         }, ensure_ascii=False, separators=(",", ":"))
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            with sqlite3.connect(self.path) as db:
+            with closing(sqlite3.connect(self.path)) as db, db:
                 db.execute("CREATE TABLE IF NOT EXISTS provider_cache ("
                            "cache_key TEXT PRIMARY KEY, body TEXT NOT NULL, created REAL NOT NULL)")
                 db.execute("INSERT OR REPLACE INTO provider_cache VALUES (?, ?, ?)",

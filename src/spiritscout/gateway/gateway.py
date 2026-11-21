@@ -10,17 +10,20 @@ import copy
 import json
 import time
 import uuid
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from spiritscout import __version__
 from spiritscout.config.settings import GatewayConfig, ModelEntry
 from spiritscout.core.audit import AuditLogger, NullAuditLogger
 from spiritscout.core.exceptions import SpiritScoutError
+from spiritscout.core.pause import PauseGate
 from spiritscout.gateway.attempts import AttemptTrace, current_attempt_trace
 from spiritscout.gateway.backends import (
     ChatBackend,
     DeltaCallback,
+    LiteLLMBackend,
     MockBackend,
     backend_for,
     emit_delta,
@@ -30,8 +33,10 @@ from spiritscout.gateway.cache import PrefixTracker, cache_summary
 from spiritscout.gateway.capabilities import EndpointCapabilities
 from spiritscout.gateway.context import DecisionMemory
 from spiritscout.gateway.costs import configured_usd
+from spiritscout.gateway.litellm_runtime import load_litellm
 from spiritscout.gateway.pricing import estimate_deepseek_cny
 from spiritscout.gateway.registry import ModelRegistry
+from spiritscout.gateway.retry import recoverable, retry_delay, status_code
 from spiritscout.gateway.session_model import Selector, model_entries_source, selection
 from spiritscout.tools.invocation import ExecutionScope, current_execution_scope
 
@@ -65,6 +70,7 @@ async def chat_decision(
     audit=None,
     actor: str = "",
     memory: DecisionMemory | None = None,
+    local_tool_handler: Callable[[Any, Any], Awaitable[dict[str, Any] | None]] | None = None,
     **kwargs: Any,
 ) -> ChatResponse:
     """主 Agent 与 JSON 子 Agent 共用按需技能通道；不额外调用路由模型。"""
@@ -82,6 +88,7 @@ async def chat_decision(
         SKILL_SCHEMAS,
         SkillRuntime,
     )
+    from spiritscout.traffic.tools import NAMES as TRAFFIC_NAMES
 
     runtime = getattr(gateway, "skill_runtime", None)
     runtime = runtime if isinstance(runtime, SkillRuntime) else None
@@ -94,6 +101,10 @@ async def chat_decision(
                      and not getattr(getattr(gateway, 'config', None), 'lightweight_local', False))
     original = copy.deepcopy(messages)
     schemas = (SKILL_SCHEMAS if runtime else []) + (SCHEMAS if bb is not None else [])
+    if memory.history_lookup is not None:
+        from spiritscout.tools.history import SCHEMA as HISTORY_SCHEMA
+
+        schemas.append(HISTORY_SCHEMA)
     if getattr(memory.agent_type, "value", "") == "report":
         schemas = [schema for schema in schemas if schema["function"]["name"] not in {"blackboard_write", "exploration_write", "asset_link"}]
     legacy_systems = []
@@ -145,10 +156,29 @@ async def chat_decision(
             detail = {"task_id": scope.task_id, "route_id": scope.route_id}
             if audit is not None:
                 audit.log("agent.tool_call", actor, {**detail, "calls": [
-                    {"id": call_id, "name": name if isinstance(name, str) and name in SKILL_NAMES | NAMES else "resource_request", "arguments": arguments}]})
-            if isinstance(name, str) and name in NAMES:
-                from dataclasses import replace
-
+                    {"id": call_id, "name": name if isinstance(name, str) and name in SKILL_NAMES | NAMES | TRAFFIC_NAMES else "resource_request", "arguments": arguments}]})
+            local_result = None
+            if local_tool_handler is not None:
+                token = current_execution_scope.set(replace(scope, agent_id=actor,
+                    tool_call_id=call_id, tool_name=name))
+                try:
+                    local_result = await local_tool_handler(name, arguments)
+                finally:
+                    current_execution_scope.reset(token)
+            if name == "history_lookup" and memory.history_lookup is not None and local_result is None:
+                if not isinstance(arguments, dict):
+                    local_result = {"ok": False, "error": "history_lookup 参数必须是对象"}
+                else:
+                    token = current_execution_scope.set(replace(scope, agent_id=actor,
+                        tool_call_id=call_id, tool_name=name))
+                    try:
+                        local_result = await memory.history_lookup(arguments)
+                    finally:
+                        current_execution_scope.reset(token)
+            if local_result is not None:
+                result = local_result
+                observations.append({"name": name, **result})
+            elif isinstance(name, str) and name in NAMES:
                 token = current_execution_scope.set(replace(scope, agent_id=actor,
                     step_id=scope.step_id or memory.checkpoint_key, tool_call_id=call_id, tool_name=name))
                 try:
@@ -213,7 +243,17 @@ async def _chat_decision_once(
                 f"decision:{memory.checkpoint_key or actor}",
                 memory.segment_info["estimated_tokens_before"], memory.segment_info["estimated_tokens_after"],
                 audit=audit, actor=actor)
-    resp = await gateway.chat(messages, **kwargs)
+    async def chat(options: dict[str, Any]) -> ChatResponse:
+        # 主控决策不一定处于工具执行上下文；身份仍须传到网关才能启用
+        # 角色流式输出，并保留已有任务、路由和身份边界。
+        scope = current_execution_scope.get() or ExecutionScope()
+        token = current_execution_scope.set(replace(scope, agent_id=actor or scope.agent_id))
+        try:
+            return await gateway.chat(messages, **options)
+        finally:
+            current_execution_scope.reset(token)
+
+    resp = await chat(kwargs)
     if output_lost(resp):
         if audit is not None:
             audit.log("llm.output_retry", actor, {
@@ -222,7 +262,7 @@ async def _chat_decision_once(
                 "content_chars": len(resp.content or "")})
         try:
             retry_kwargs = {**kwargs, "max_tokens": max(32768, (kwargs.get("max_tokens") or 0) * 2)}
-            retried = await gateway.chat(messages, **retry_kwargs)
+            retried = await chat(retry_kwargs)
             if not output_lost(retried):
                 resp = retried
         except Exception:  # noqa: BLE001, S110 —— 重试失败沿用原响应，解析端兜底
@@ -239,7 +279,7 @@ async def _chat_decision_once(
             # 正文完整却不成 JSON（散文式回答）偶有发生，原样重试一次常可
             # 恢复；重试失败沿用原响应，解析兜底交给调用方。
             try:
-                retried = await gateway.chat(messages, **kwargs)
+                retried = await chat(kwargs)
                 try:
                     candidate = extract_json(retried.content)
                 except ValueError:
@@ -347,6 +387,7 @@ class ModelGateway:
         config: GatewayConfig | None = None,
         audit: AuditLogger | None = None,
         mock_backend: MockBackend | None = None,
+        pause_gate: PauseGate | None = None,
     ):
         self.prefix_tracker = PrefixTracker()
         self.registry = registry
@@ -360,6 +401,7 @@ class ModelGateway:
         self._mock = mock_backend or MockBackend()
         self._rate_state: dict[str, list[float]] = {}
         self.skill_runtime: Any = None
+        self.pause_gate = pause_gate
         self._session_model: Selector = selection()
         self._missing_selection = ""
         self._entries_source = model_entries_source()
@@ -423,7 +465,7 @@ class ModelGateway:
     ) -> ChatResponse:
         """统一对话入口：路由 → 限流 → 调用（主备切换）→ 计量 → 审计。
 
-        timeout_seconds：单次后端调用硬超时；缺省用网关配置。重推理角色
+        timeout_seconds：每个候选模型的硬超时，包含重试和退避；缺省用网关配置。重推理角色
         （如解题环）可放宽，避免长链推理被全局默认值中途掐死。
         tools/on_delta：原生工具调用与流式增量（主备切换时若已吐出增量，
         切换前投递 reset 让消费端清屏，避免两次尝试的文本叠加）。
@@ -433,6 +475,10 @@ class ModelGateway:
         由模型档案声明（ModelEntry.max_output_tokens）或端点自定；上限只影响
         生成在哪停，设小了思考型模型会把额度耗在思考上、正文被截成半截。
         小通道（路由/连通性探测）可传定值收紧。"""
+        broker = getattr(self, "questions", None)
+        scope = current_execution_scope.get()
+        if broker is not None and scope is not None:
+            await broker.wait_for_task(scope.task_id)
         entry = self.resolve_model(
             task_type=task_type, model=model,
             required_capability=required_capability,
@@ -592,20 +638,70 @@ class ModelGateway:
 
             stream = AuditStream(self.audit, actor, call)
             on_delta = stream
+        from spiritscout.gateway.streaming import ModelWait
+
+        waiting = ModelWait(self.audit, actor, call) if on_delta is None else None
         attempts = AttemptTrace(self.audit, actor, call)
         attempt_token = current_attempt_trace.set(attempts)
+        timeout = timeout_seconds or self.config.request_timeout_seconds
+        deadline = asyncio.timeout(None)
+        retry_index = 0
+        emitted_attempt = False
+        deliver = on_delta
+
+        def relay(kind: str, text: str) -> Any:
+            nonlocal emitted_attempt
+            if text and kind in {"reasoning", "text", "tool_call"}:
+                deadline.reschedule(asyncio.get_running_loop().time() + timeout)
+            if kind == "reset":
+                emitted_attempt = False
+            elif text:
+                emitted_attempt = True
+            return deliver(kind, text) if deliver is not None else None
+
         try:
+            if isinstance(backend, LiteLLMBackend):
+                # 启动预热尚未完成时，等待本地 SDK 不消耗远端输出的超时窗口。
+                await load_litellm()
+            deadline = asyncio.timeout(timeout)
             backend_options = ({"_lightweight_local": self.config.lightweight_local}
                                if entry.provider == "ollama" else {})
-            raw = await backend.complete(
-                entry, messages,
-                temperature=temperature, max_tokens=max_tokens,
-                timeout=timeout_seconds or self.config.request_timeout_seconds,
-                response_format=response_format,
-                tools=tools, tool_choice=tool_choice, on_delta=on_delta,
-                reasoning_effort=reasoning_effort, **backend_options,
-            )
+            # 首次输出和后续增量共用空闲窗口；只有实际内容能延长等待。
+            # 重试退避和本地等待提示不会刷新计时。
+            async with deadline:
+                while True:
+                    try:
+                        raw = await backend.complete(
+                            entry, messages,
+                            temperature=temperature, max_tokens=max_tokens,
+                            timeout=timeout,
+                            response_format=response_format,
+                            tools=tools, tool_choice=tool_choice,
+                            on_delta=relay if deliver is not None else None,
+                            reasoning_effort=reasoning_effort, **backend_options,
+                        )
+                        break
+                    except Exception as exc:
+                        if (not recoverable(exc) or self.config.max_retries is not None
+                                and retry_index >= self.config.max_retries):
+                            raise
+                        attempts.finish("failed")
+                        delay = retry_delay(exc, retry_index, self.config)
+                        retry_index += 1
+                        self.audit.log("model.retry_scheduled", actor, {
+                            **call, "retry_index": retry_index, "delay_seconds": delay,
+                            "retry_at": time.time() + delay, "status_code": status_code(exc),
+                            "error": str(exc)[:300]})
+                        if emitted_attempt:
+                            await emit_delta(relay, "reset", "")
+                        await asyncio.sleep(delay)
+                        await self._rate_limit(entry)
+                        if self.pause_gate is not None:
+                            await self.pause_gate.wait()
+                        self.audit.log("model.retrying", actor, {**call, "retry_index": retry_index})
         except BaseException as exc:
+            expired = isinstance(exc, TimeoutError) and deadline.expired()
+            error = f"模型连续超过 {timeout} 秒没有新输出，已取消本次请求" if expired else str(exc)
             attempts.finish("cancelled" if isinstance(exc, asyncio.CancelledError) else "failed")
             self._record_usage(entry, attempts.accounted_usage(), attempts, call, actor, wall,
                                "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed")
@@ -613,10 +709,14 @@ class ModelGateway:
                 stream.flush()
             self.audit.log("model.cancelled" if isinstance(exc, asyncio.CancelledError)
                            else "model.failed", actor,
-                           {**call, "error": str(exc)[:300],
+                           {**call, "error": error[:300],
                             "latency_ms": round((time.perf_counter() - started) * 1000, 1)})
+            if expired:
+                raise TimeoutError(error) from exc
             raise
         finally:
+            if waiting is not None:
+                waiting.close()
             current_attempt_trace.reset(attempt_token)
         if stream is not None:
             # 不支持流式的端点至少回放实际返回正文，不能伪造生成中的分析。
@@ -630,7 +730,8 @@ class ModelGateway:
         self.audit.log(
             "model.call", actor,
             {**call, "tokens": total_tokens,
-             "input_tokens": raw["prompt_tokens"], "output_tokens": raw["completion_tokens"],
+             "input_tokens": accounted.get("prompt_tokens", raw["prompt_tokens"]),
+             "output_tokens": accounted.get("completion_tokens", raw["completion_tokens"]),
              "cost_usd": round(cost, 6), "latency_ms": round(latency, 1),
              "effort": reasoning_effort, **metrics,
              "tool_calls": [c.get("name") for c in raw.get("tool_calls", [])]},

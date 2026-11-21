@@ -2,22 +2,30 @@
 /* 整栏只切换可见性，保留所选角色、旁路消息和未发送的草稿。 */
 const SessionRail = (() => {
   const key="ss-session-rail-collapsed";
-  let collapsed=true;
-  function setCollapsed(value) {
+  let collapsed=true, readingSession="";
+  function setCollapsed(value, persist=true) {
     collapsed=!!value;
     const tab=$("#tab-chat"), button=$("#session-rail-toggle");
+    const rail = tab.querySelector(".session-rail");
+    if (collapsed && rail.contains(document.activeElement)) button.focus({preventScroll: true});
+    rail.inert = collapsed;
     tab.classList.toggle("rail-collapsed",collapsed);
     button.setAttribute("aria-expanded",String(!collapsed));
     const label=collapsed ? I18n.t("展开实况与旁路会话") : I18n.t("收起实况与旁路会话");
     button.setAttribute("aria-label",label);button.title=label;
-    try { localStorage.setItem(key,String(collapsed)); } catch {}
+    if (persist) { try { localStorage.setItem(key,String(collapsed)); } catch {} }
   }
   function init() {
     try { collapsed=localStorage.getItem(key)!=="false"; } catch {}
     setCollapsed(collapsed);
     $("#session-rail-toggle").addEventListener("click",()=>setCollapsed(!collapsed));
   }
-  return {init,setCollapsed};
+  function begin(sessionId) {
+    if (readingSession === sessionId) return;
+    readingSession = sessionId;
+    setCollapsed(true, false);
+  }
+  return {init,setCollapsed,begin};
 })();
 /* 旁路有自己的会话与消息历史；切换右栏不触碰主会话的 SSE、轨迹或输入框。 */
 const AgentSideChat = (() => {
@@ -37,14 +45,16 @@ const AgentSideChat = (() => {
   function cancel() { generation++;clearTimeout(timer);timer=null; }
   function sync(nextAgents,nextSession) {
     if(parent!==S.cur) {cancel();parent=S.cur;selected="";}
-    agents=nextAgents;session=nextSession;
+    session=nextSession;
+    const roster=(S.agents?.roster || []).filter(a=>a.status==="available" && a.modes?.includes(session?.mode) && !["master","secretary","report"].includes(a.key));
+    agents=[...nextAgents,...roster.filter(a=>entries.has(`${parent}:${a.key}`) || linked(a.key) || !nextAgents.some(item=>item.actor===a.key || item.actor.replace(/-[0-9a-f]{8,}$/i, "").replace(/-/g, "_")===a.key)).map(a=>({actor:a.key,status:"",tasks:new Map()}))];
     if(!allowed() && selected) {cancel();selected="";}
     renderTabs();
     if(selected) {render();if(timer===null && !current()?.loading) refresh();}
   }
   function renderTabs() {
     const nav=$("#agent-chat-tabs");if(!nav)return;
-    const items=allowed() ? agents.filter(a=>a.taskId) : [];
+    const items=allowed() ? agents : [];
     const signature=JSON.stringify([parent,selected,items.map(a=>[a.actor,a.status])]);
     if(nav.dataset.signature!==signature) {
       nav.dataset.signature=signature;
@@ -57,16 +67,15 @@ const AgentSideChat = (() => {
     $(".session-rail").classList.toggle("chat-open",!!selected);
   }
   function select(actor,task="") {
-    if(actor && (!allowed() || !agents.some(a=>a.actor===actor && a.taskId))) return;
+    if(actor && (!allowed() || !agents.some(a=>a.actor===actor))) return;
     if(actor) SessionRail.setCollapsed(false);
     cancel();selected=actor;renderTabs();if(!actor)return;
-    const e=entry(actor), source=agents.find(a=>a.actor===actor);
+    const e=entry(actor);
     if(!e.child) e.child=linked(actor)?.session_id || "";
     if(!e.child && task) e.task=task;
-    if(!e.task) e.task=source.taskId;
     const box=$("#agent-side-chat");delete box.querySelector(".side-chat-messages").dataset.signature;
     box.querySelector("textarea").value=e.draft;
-    render();refresh();box.querySelector("textarea").focus();
+    render();refresh();
   }
   function render() {
     const e=current(),box=$("#agent-side-chat");if(!e || !box)return;
@@ -76,7 +85,7 @@ const AgentSideChat = (() => {
     const tasks=[...(source?.tasks?.values() || [])];
     if(e.task && !tasks.some(t=>t.id===e.task)) tasks.push({id:e.task});
     const taskSignature=JSON.stringify(tasks);
-    if(task.dataset.signature!==taskSignature) {task.dataset.signature=taskSignature;task.innerHTML=tasks.map(t=>`<option value="${esc(t.id)}">${esc(t.title || t.id)}</option>`).join("");}
+    if(task.dataset.signature!==taskSignature) {task.dataset.signature=taskSignature;task.innerHTML=I18n.html('<option value="">独立对话（不引用任务）</option>')+tasks.map(t=>`<option value="${esc(t.id)}">${esc(t.title || t.id)}</option>`).join("");}
     task.value=e.task;task.disabled=!!e.child || e.busy;
     if(typeof selxSync==="function") selxSync(task);
     const messages=box.querySelector(".side-chat-messages"), signature=JSON.stringify(e.messages);
@@ -85,7 +94,7 @@ const AgentSideChat = (() => {
       const positions=messages.dataset.signature?[...messages.querySelectorAll('.side-message')].map(el=>[...el.querySelectorAll('pre,table')].map(part=>[part.scrollTop,part.scrollLeft])):[];
       const top=messages.scrollTop;
       messages.dataset.signature=signature;
-      messages.innerHTML=e.messages.length ? e.messages.map(m=>`<article class="side-message ${m.role==="user" ? "from-user" : "from-agent"}"><small>${m.role==="user" ? I18n.t("你") : esc(actorName(e.actor))}</small><div class="md">${mdRender(m.content || "")}</div></article>`).join("") : I18n.html('<div class="side-chat-empty"><strong>和子 Agent 直接对话</strong><p>发送第一条消息，开始独立的旁路会话。它会带入所选任务的已有记录。</p></div>');
+      messages.innerHTML=e.messages.length ? e.messages.map(m=>`<article class="side-message ${m.role==="user" ? "from-user" : "from-agent"}"><small>${m.role==="user" ? I18n.t("你") : esc(actorName(e.actor))}</small><div class="md">${mdRender(m.content || "")}</div></article>`).join("") : I18n.html('<div class="side-chat-empty"><strong>和子 Agent 直接对话</strong><p>发送消息即可独立对话，不打断正在进行的任务；也可选择引用任务记录。</p></div>');
       messages.querySelectorAll('.side-message').forEach((el,i)=>el.querySelectorAll('pre,table').forEach((part,j)=>{
         const saved=positions[i]?.[j];if(saved){part.scrollTop=saved[0];part.scrollLeft=saved[1];}
       }));

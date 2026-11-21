@@ -15,11 +15,12 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from spiritscout.agents.profiles import AgentProfile, get_profile
+from spiritscout.agents.profiles import AgentProfile, common_src_tool, get_profile
 from spiritscout.core.attempts import AttemptLedger, exact_key
 from spiritscout.core.audit import AuditLogger, NullAuditLogger
 from spiritscout.core.exceptions import (
     PolicyViolation,
+    ScopeViolation,
     SpiritScoutError,
     ToolExecutionError,
 )
@@ -98,6 +99,10 @@ class ToolRegistry:
 
     async def call(self, name: str, params: dict[str, Any], **builtin_ctx) -> ToolResult:
         """每次调用独立编号，参数快照绑定审批；未决动作只留痕、不自动重放。"""
+        broker = getattr(self, "questions", None)
+        scope = current_execution_scope.get()
+        if broker is not None and scope is not None:
+            await broker.wait_for_task(scope.task_id)
         if self.pause_gate is not None:
             await self.pause_gate.wait()
         spec = self.get(name)
@@ -161,7 +166,13 @@ class ToolRegistry:
                 scope_model = getattr(guard, "scope", None)
                 auth = scope_model.model_dump(mode="json") if callable(getattr(scope_model, "model_dump", None)) else {}
                 approved = guard.approved_targets() if callable(getattr(guard, "approved_targets", None)) else []
-                auth = {**auth, "approved": sorted(approved)} if isinstance(auth, dict) and isinstance(approved, (set, list, tuple)) else {}
+                derived = (guard.derived_readonly_resources()
+                           if callable(getattr(guard, "derived_readonly_resources", None)) else [])
+                auth = ({**auth, "approved": sorted(approved),
+                         "derived_readonly": sorted(derived)}
+                        if isinstance(auth, dict)
+                        and isinstance(approved, (set, frozenset, list, tuple))
+                        and isinstance(derived, (set, frozenset, list, tuple)) else {})
                 key_parameters = {**params, "method": str(params.get("method", "GET")).upper()} if name == "http_probe" else params
                 key = exact_key(name, "", key_parameters, {
                     "identity": scope.identity_id if scope else "",
@@ -242,6 +253,31 @@ class ToolRegistry:
         if action not in (None, ActionCategory.ANALYSIS.value) and self.policy is None:
             return ToolResult(tool=name, ok=False, returncode=-3,
                               error="敏感动作缺少策略与即时审批通道，未执行")
+        missing = [key for key in spec.required_params
+                   if key not in params or params[key] is None
+                   or (isinstance(params[key], str) and not params[key].strip())]
+        if missing:
+            return ToolResult(
+                tool=name, ok=False, returncode=-4,
+                error=f"缺少必填参数: {', '.join(missing)}。请按工具目录补充后重试",
+                parsed={"parameter_error": True, "missing": missing},
+            )
+        guard = getattr(self.policy, "guard", None)
+        scope = getattr(guard, "scope", None)
+        if guard is not None and getattr(scope, "scope_mode", "explicit") != "explicit":
+            for target_param in spec.target_params:
+                target = params.get(target_param)
+                if not isinstance(target, str) or not target.strip():
+                    continue
+                try:
+                    if name == "dns_resolve":
+                        guard.check_discovery_target(target)
+                    else:
+                        guard.check_execution_target(target)
+                except ScopeViolation as exc:
+                    return ToolResult(tool=name, ok=False, returncode=-5,
+                                      error=f"资产范围策略拦截: {exc}",
+                                      parsed={"scope_status": guard.asset_decision(target)})
         if spec.allowed_params or spec.strict_params:
             unknown = set(params) - spec.allowed_params
             if unknown:
@@ -284,6 +320,10 @@ class ToolRegistry:
         replay_safe = self._replay_safe(spec, params)
         retry_limit = self.max_retries if replay_safe else 0
         while attempts <= retry_limit:
+            broker = getattr(self, "questions", None)
+            scope = current_execution_scope.get()
+            if broker is not None and scope is not None:
+                await broker.wait_for_task(scope.task_id)
             if self.pause_gate is not None:
                 await self.pause_gate.wait()
             transition("running")
@@ -341,6 +381,9 @@ class AgentToolView:
             spec = self._registry._specs.get(name)
             if is_search_tool(name) or (spec is not None and spec.internet_search):
                 return False
+        mode = getattr(self._registry.policy, "mode", None)
+        if mode == RunMode.SRC and common_src_tool(name):
+            return True
         if self.profile.allows_tool(name):
             return True
         if self.profile.key in {AgentType.MASTER, AgentType.SECRETARY, AgentType.REPORT}:

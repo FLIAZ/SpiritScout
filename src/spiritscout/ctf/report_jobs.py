@@ -43,7 +43,7 @@ def enqueue(workspace: Path, report_path: Path, digest: dict, gateway: Any, audi
         previous = {}
     if (previous.get('digest') == digest and previous.get('report_path') == str(report_path)
             and previous.get('enabled') == enabled):
-        if previous.get('status') == 'done' and report_path.exists():
+        if previous.get('status') in {'done', 'materials'} and report_path.exists():
             return None
         if previous.get('status') in {'queued', 'running'}:
             return _start(snapshot, previous, gateway, audit)
@@ -89,23 +89,26 @@ async def _run(snapshot: Path, job: dict, gateway: Any, audit: Any) -> None:
     try:
         # 不与本题解题争抢前台（本会话再派新任务时让位）；其他并行
         # 会话的执行不再饿死报告。报告与经验提炼之间没有串行依赖。
-        from spiritscout import runtime
-        while runtime.workspace_foreground_active(snapshot.parent):
+        from spiritscout.core.background import workspace_foreground_active
+
+        while job.get('enabled') and workspace_foreground_active(snapshot.parent):
             await asyncio.sleep(.2)
         job['status'] = 'running'
         _update(snapshot, job)
         digest = job['digest']
         body = await writeup_body(gateway, digest=digest, audit=audit) if job.get('enabled') else None
         if not body:
+            if job.get('enabled'):
+                raise ValueError('模型未生成完整的自然语言 WriteUp；原始证据仍保存在会话中，未将其拼接为成品报告。')
             body = fallback_writeup(digest)
         if json.loads(snapshot.read_text()).get('job_id') != job.get('job_id'):
             return
         path = Path(job['report_path'])
         path.parent.mkdir(parents=True, exist_ok=True)
         save_writeup(path, body)
-        job.update(status='done', error='')
+        job.update(status='done' if job.get('enabled') else 'materials', error='')
         _update(snapshot, job)
-        audit.log('report.ready', 'report', {'path': str(path)})
+        audit.log('report.ready' if job.get('enabled') else 'report.materials', 'report', {'path': str(path)})
     except asyncio.CancelledError:
         job['status'] = 'queued'
         _update(snapshot, job)

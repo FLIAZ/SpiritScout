@@ -17,8 +17,10 @@ class Element {
   focus() { this.focused = true; }
   closest() { return null; }
 }
-const elements = Object.fromEntries(['c-go', 'c-mode', 'c-mode-hint', 'c-mission', 'c-multiple-answers-option', 'c-multiple-answers', 'c-ctf-types', 'c-ctf-type-note', 'c-ctf-challenge', 'c-ctf-name', 'c-ctf-description', 'c-ctf-hint', 'c-ctf-address'].map(id => [`#${id}`, new Element()]));
+const elements = Object.fromEntries(['c-go', 'c-mode', 'c-mode-hint', 'c-mission', 'c-multiple-answers-option', 'c-multiple-answers', 'c-generate-wp-option', 'c-generate-wp', 'c-src-strategy', 'c-ctf-types', 'c-ctf-type-note', 'c-ctf-challenge', 'c-ctf-name', 'c-ctf-description', 'c-ctf-hint', 'c-ctf-address'].map(id => [`#${id}`, new Element()]));
 const radios = ['src', 'ctf', 'competition'].map(mode => new Element(mode));
+const strategies = ['edge_first', 'core_first', 'balanced'].map(value => new Element(value));
+strategies[0].checked = true;
 const examples = ['src', 'ctf', 'competition'].map(mode => {
   const element = new Element();
   element.dataset = { mode, mission: `示例 ${mode}` };
@@ -30,7 +32,8 @@ const home = source.slice(source.indexOf('const autogrow ='), source.indexOf('/*
 let launches = 0, lastLaunch;
 const context=vm.createContext(require('./helpers/i18n').context({
   $: selector => elements[selector],
-  document: { querySelectorAll: selector => selector === '.chip-s' ? examples : selector.includes('home-mode') ? radios : [] },
+  window: {},
+  document: { querySelectorAll: selector => selector === '.chip-s' ? examples : selector.includes('home-mode') ? radios : selector.includes('src-strategy') ? strategies : [] },
   selxSync() {}, toast() {}, S: { homeFiles: [] },
   launchMission(payload, files, draft) { launches++; lastLaunch={payload, files, draft}; },
 }));
@@ -40,6 +43,8 @@ for (const radio of radios) {
   radio.listeners.change();
   assert.equal(elements['#c-mode'].value, radio.value);
   assert.equal(elements['#c-multiple-answers-option'].hidden, radio.value !== 'ctf');
+  assert.equal(elements['#c-src-strategy'].hidden, radio.value !== 'src');
+  assert.equal(elements['#c-generate-wp-option'].hidden, radio.value !== 'competition');
   assert.deepEqual(radios.filter(item => item.checked).map(item => item.value), [radio.value]);
 }
 elements['#c-mission'].value = '实际任务';
@@ -84,7 +89,7 @@ console.log('home composer: mode synchronization, examples, ready state and IME 
   const draft=vm.runInContext('ctfChallengeDraft()',context);
   context.api=async()=>{throw new Error('create failed');};
   context.openSession=()=>{};context.refreshSessions=()=>{};
-  const launchSource=source.slice(source.indexOf('async function launchMission('),source.indexOf('/* 规则冲突即时确认：'));
+  const launchSource=source.slice(source.indexOf('async function launchMission('),source.indexOf('async function openAssetPicker'));
   vm.runInContext(launchSource,context);
   await context.launchMission({mode:'ctf',mission:'fixture'},[],draft);
   assert.equal(elements['#c-ctf-hint'].value,'赛方提示','failed creation preserves all challenge inputs');
@@ -95,5 +100,21 @@ console.log('home composer: mode synchronization, examples, ready state and IME 
   resolveCreate({session_id:'fixture'});await pending;
   assert.equal(elements['#c-ctf-name'].value,'','successful creation clears submitted fields');
   assert.equal(elements['#c-ctf-hint'].value,'提交期间的新提示','new edits survive asynchronous creation');
+  strategies.forEach(item=>{item.checked=item.value==='core_first';});
+  let srcRequest;
+  context.api=async(path,options)=>{srcRequest=JSON.parse(options.body);return {session_id:'src-fixture'};};
+  await context.launchMission({mode:'src',mission:'测试资产'},[],null);
+  assert.equal(srcRequest.asset_strategy,'core_first','SRC strategy reaches the create request');
+  let competitionRequest;
+  context.api=async(path,options)=>{competitionRequest=JSON.parse(options.body);return {session_id:'competition-fixture'};};
+  assert.equal(elements['#c-generate-wp'].checked,false,'WP is disabled by default');
+  await context.launchMission({mode:'competition',mission:'持续解题'},[],null);
+  assert.equal(competitionRequest.generate_wp,false);
+  elements['#c-generate-wp'].checked=true;
+  await context.launchMission({mode:'competition',mission:'赛后需要 WP'},[],null);
+  assert.equal(competitionRequest.generate_wp,true);
+  assert.equal(elements['#c-generate-wp'].checked,false,'each new task starts with WP disabled');
+  await context.launchMission({mode:'ctf',mission:'普通 CTF'},[],null);
+  assert.equal(competitionRequest.generate_wp,undefined,'competition option does not change normal CTF');
   console.log('CTF challenge card: optional fields, complete mission, multi-answer setting, mode isolation and draft lifecycle passed');
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -15,14 +15,14 @@ from spiritscout.core.models import (
     Task,
     TaskStatus,
 )
-from spiritscout.ctf.agents import (
-    CTFBaseAgent,
+from spiritscout.ctf.agents import CTFBaseAgent
+from spiritscout.ctf.binary_tools import SCHEMA as BINARY_SCHEMA
+from spiritscout.ctf.binary_tools import inspect as inspect_binary
+from spiritscout.ctf.conversation import (
     _complete_tool_history,
     _head_tail,
     _model_messages,
 )
-from spiritscout.ctf.binary_tools import SCHEMA as BINARY_SCHEMA
-from spiritscout.ctf.binary_tools import inspect as inspect_binary
 from spiritscout.ctf.evidence_review import observe, result_reference, review_row
 from spiritscout.ctf.light_exploration import (
     refresh_context,
@@ -56,7 +56,6 @@ from spiritscout.gateway.world_state import (
     snapshot,
     sync_user_context,
 )
-from spiritscout.tools.sandbox_paths import sandbox_directory
 
 # 仅替换单执行者的重复说明，保留完整参数结构；新增工具不能挤掉首轮用户契约。
 _TOOL_DESCRIPTIONS = {
@@ -408,16 +407,8 @@ class SingleCTFAgent(CTFBaseAgent):
                         {'task_id': task.task_id, 'route_id': getattr(route, 'route_id', ''), 'source': 'awdp_initial_reference',
                          **{key: value for key, value in loaded.items() if key != 'content'}})
 
-    def _task_execution_environment(self, task):
-        workspace = (getattr(self.ctx, "builtin_ctx", None) or {}).get("workspace_root")
-        if not workspace:
-            return {}
-        return {"default_workdir": str(Path(workspace).resolve() / sandbox_directory(self.challenge_id(task))),
-                "workspace_root_access": "read-only；用来定位附件，不是可写工作目录",
-                "process_state": "shell/python 每次新进程，cd/变量不继承；工作文件及本题 /tmp 持久"}
-
     async def _run_tool_call_inner(self, task, route, state, call):
-        from spiritscout.ctf.agents import _ToolOutcome
+        from spiritscout.ctf.contracts import _ToolOutcome
 
         if call.get('name') == RECOVERY_NAME:
             args = call.get('arguments')
@@ -707,7 +698,7 @@ class SingleCTFAgent(CTFBaseAgent):
         return "取得候选后 record_answer 先复核题面、完整推导与验证证据；复核后携带 review 登记。多答案目标仍须逐个完成。"
 
     async def _review_answer(self, task, route, state, args):
-        from spiritscout.ctf.agents import _ToolOutcome
+        from spiritscout.ctf.contracts import _ToolOutcome
 
         if not isinstance(args, dict):
             return _ToolOutcome(ok=False, text="record_answer 参数必须为 JSON 对象")
@@ -810,7 +801,8 @@ class SingleCTFAgent(CTFBaseAgent):
             state = {**state, 'messages': [*state['messages'], memory]}
         environment = self._task_execution_environment(task)
         frames = [m.get("_light_task_frame") or {} for m in state["messages"] if m.get("_light_task_frame")]
-        if environment and not any(frame.get("execution_environment") == environment for frame in frames):
+        if (environment and state.get("execution_environment") != environment
+                and not any(frame.get("execution_environment") == environment for frame in frames)):
             # 旧检查点只补发送视图，不改写历史或替用户重写命令。
             state = {**state, "messages": state["messages"] + [{"role": "user",
                 "_light_kind": "execution_environment", "_context_contract": True,

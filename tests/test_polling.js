@@ -29,13 +29,14 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/spiritscout/web/sta
   const third=vm.runInContext('refreshSessions()',sandbox);assert.equal(requests,2);resolve({sessions:[]});await third;
   // 发现登记与公开进展在会话仍运行时立即触发状态刷新，不等待 model.call 或 done。
   const views=fs.readFileSync(path.join(__dirname,'../src/spiritscout/web/static/js/views.js'),'utf8');
+  const streams=fs.readFileSync(path.join(__dirname,'../src/spiritscout/web/static/js/session-stream.js'),'utf8');
   let refreshes=0,queued=0;const listeners={};
   const liveState={cur:'live',evSeen:0};
   const live=vm.createContext(require('./helpers/i18n').context({S:liveState,
     stopStreams(){},setInterval(){return 1;},scheduleStateRefresh(){refreshes++;},
-    SessionHistory:{enqueue(){queued++;}},
-    EventSource:class{addEventListener(name,handler){listeners[name]=handler;}}}));
-  vm.runInContext(views.slice(views.indexOf('function startStreams('),views.indexOf('function stopStreams(')),live);
+    SessionHistory:{enqueue(){queued++;},clearLiveQueue(){}},
+    EventSource:class{addEventListener(name,handler){listeners[name]=handler;}close(){}}}));
+  vm.runInContext(streams,live);
   vm.runInContext('startStreams(false)',live);
   for(const [index,type] of ['agent.discovery','agent.progress','agent.tool_result'].entries())
     listeners.audit({data:JSON.stringify({type,detail:{}}),lastEventId:String(index+1)});

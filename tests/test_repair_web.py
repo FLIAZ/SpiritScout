@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -83,7 +84,10 @@ class WebRepairTests(unittest.TestCase):
         dash = self.client.get("/api/dashboard").json()
         self.assertEqual(dash["total_tokens"], 123)
         self.assertEqual(sum(dash["daily"].values()), 123)
-        state = self.client.get("/api/sessions/sess-usage/state").json()
+        with patch.object(sess, 'model_usage', wraps=sess.model_usage) as read_live:
+            state = self.client.get("/api/sessions/sess-usage/state").json()
+            self.assertEqual(read_live.call_count, 1, '状态接口与 brief 共用一次用量读取')
+        self.assertEqual(len(state['model_usage']['call_series']), 1, '状态接口保留逐笔明细')
         self.assertEqual(state["model_usage"]["used_tokens"], 123)
         for bad_content in ["[1]", "{broken", '{"used_tokens": null}',
                             '{"used_tokens": 2, "call_series": 9}',

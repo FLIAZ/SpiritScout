@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from spiritscout.core.audit import AuditLogger
-from spiritscout.web.sessions import TERMINAL_STATES
+from spiritscout.web.session_models import TERMINAL_STATES
 
 
 class ScheduleInput(BaseModel):

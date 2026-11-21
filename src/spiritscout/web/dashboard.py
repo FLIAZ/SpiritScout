@@ -6,21 +6,30 @@ import math
 import sqlite3
 import threading
 import time
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from pydantic_core import from_json
+
 from spiritscout.blackboard import Blackboard
-from spiritscout.core.audit import read_record
+from spiritscout.core.audit import decode_record
 from spiritscout.core.models import BlackboardLayer
 from spiritscout.gateway.cache import cache_summary
 from spiritscout.gateway.costs import cost_summary
-from spiritscout.gateway.usage import file_version
+from spiritscout.gateway.usage import file_version, read_usage
 
 BJT = ZoneInfo("Asia/Shanghai")
 ACTIVE = {"running", "dispatched"}
+# 仪表盘不消费请求正文、前缀组件和重试轨迹，避免每次刷新复制这些大字段。
+CALL_FIELDS = frozenset({
+    "ts", "tokens", "input_tokens", "output_tokens", "cached_input_tokens", "model", "actor",
+    "task_type", "cache_scope", "model_key", "provider_ref", "context_parts", "cache_diagnostics",
+    "estimated_cost_cny_min", "estimated_cost_cny_max", "estimated_cost_usd", "usd_pricing_status",
+    "cost_usd", "usage_status", "sdk_attempts", "unreported_attempts",
+})
 
 
 def timestamp(value: Any) -> float | None:
@@ -94,6 +103,24 @@ class DashboardReader:
         self._lock = threading.Lock()
         self._snapshots: dict[str, tuple[Any, dict[str, Any]]] = {}
         self._audits: dict[str, dict[str, Any]] = {}
+        self._usage_snapshots: dict[str, tuple[Any, dict[str, Any]]] = {}
+
+    def _usage(self, session: Any) -> dict[str, Any]:
+        root = session.workspace
+        key = str(root)
+        ledger = root / "usage.db"
+        version = ((file_version(ledger), file_version(Path(str(ledger) + "-wal")))
+                   if ledger.exists() else (file_version(root / "usage.json"),))
+        old = self._usage_snapshots.get(key)
+        if old and old[0] == version:
+            return old[1]
+        usage = read_usage(root / "usage.json", call_fields=CALL_FIELDS)
+        if usage is None:
+            # 损坏或缺失文件时仍读取会话汇总；该回退可能在内存更新，不按文件版本缓存。
+            self._usage_snapshots.pop(key, None)
+            return session.model_usage(call_fields=CALL_FIELDS)
+        self._usage_snapshots[key] = version, usage
+        return usage
 
     def _audit(self, path: Path) -> dict[str, Any]:
         key = str(path)
@@ -106,6 +133,7 @@ class DashboardReader:
         reset = not previous or previous["version"][:2] != version[:2] or version[2] < previous["offset"]
         state = ({"events": [], "pending": {}, "outcomes": [], "offset": 0, "complete": True,
                   "history_start": None, "last_score": None, "score": None, "accepted_flags": set()} if reset else previous)
+        events = deque(state["events"], maxlen=120)
         with path.open("rb") as stream:
             offset = state["offset"]
             # 巨型历史文件首次只取尾部，未知历史时间不伪装成“没有成果”。
@@ -125,7 +153,7 @@ class DashboardReader:
                 remaining -= len(line)
                 offset = stream.tell()
                 try:
-                    event = read_record(line)
+                    event = decode_record(from_json(line))
                 except (ValueError, UnicodeDecodeError):
                     continue
                 if not isinstance(event, dict):
@@ -143,7 +171,7 @@ class DashboardReader:
                            "task_id": d.get("task_id", ""), "call_id": d.get("call_id", ""),
                            "seq": event.get("seq"), "kind": d.get("kind", ""),
                            "action": d.get("action", ""), "ok": d.get("ok"),
-                           "text": _short(d.get("text") or d.get("summary") or d.get("error") or d.get("note") or d.get("title"))}
+                           "text": d.get("text") or d.get("summary") or d.get("error") or d.get("note") or d.get("title")}
                 if kind == "model.started":
                     state["pending"][str(d.get("call_id"))] = {**compact, "model": d.get("model"),
                                                                "task_type": d.get("task_type")}
@@ -163,8 +191,7 @@ class DashboardReader:
                         state["outcomes"].append({"ts": ts, "kind": "score", "label": f"得分 {d['score']}"})
                 # 思考正文不进入总览，真实模型公开说明保留短片段。
                 if kind != "agent.delta" or d.get("kind") == "text":
-                    state["events"].append(compact)
-                    state["events"] = state["events"][-120:]
+                    events.append(compact)
                 if kind == "platform.fact" and isinstance(d.get("profile"), dict):
                     state["capacity"] = (d["profile"].get("limits") or {}).get("max_active")
                 if kind == "agent.delta" and d.get("kind") == "text":
@@ -173,6 +200,9 @@ class DashboardReader:
                     state["progress"], state["progress_stem"] = text[-1200:], stem
                 state["last_activity"] = ts
             state["offset"] = offset
+        state["events"] = list(events)
+        for event in [*state["events"], *state["pending"].values()]:
+            event["text"] = _short(event["text"])
         state["outcomes"] = state["outcomes"][-2000:]
         state["version"] = version
         self._audits[key] = state
@@ -237,7 +267,7 @@ class DashboardReader:
         total_tokens, total_cost = 0, 0.0
         for session in sessions:
             sid = session.session_id
-            usage = session.model_usage()
+            usage = self._usage(session)
             all_rows = [{**r, "session_id": sid} for r in usage.get("call_series", []) if timestamp(r.get("ts"))]
             calls.extend(all_rows)
             total_tokens += usage.get("used_tokens", 0)
@@ -333,6 +363,7 @@ class DashboardReader:
                 attention("data", "部分会话数据暂不可读", problem)
         valid_keys = {str(s.workspace) for s in sessions}
         self._snapshots = {k: v for k, v in self._snapshots.items() if k in valid_keys}
+        self._usage_snapshots = {k: v for k, v in self._usage_snapshots.items() if k in valid_keys}
         self._audits = {k: v for k, v in self._audits.items() if str(Path(k).parent) in valid_keys}
         selected_calls = [r for r in calls if start <= r["ts"] <= now]
         windows = {str(m): usage_metrics([r for r in calls if now - m * 60 <= r["ts"] <= now]) for m in (5, 30, 60)}

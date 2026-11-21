@@ -146,6 +146,7 @@ class _FileCache:
         self.lock = threading.Lock()
         self.version: tuple[Any, ...] | None = None
         self.snapshot: dict[str, Any] | None = None
+        self.summary: dict[str, Any] | None = None
 
 
 @lru_cache(maxsize=256)
@@ -154,19 +155,23 @@ def _file_cache(path: str, ledger: bool) -> _FileCache:
     return _FileCache()
 
 
-def _cached_read(path: str, ledger: bool, version: tuple[Any, ...]) -> dict[str, Any]:
+def _cached_read(path: str, ledger: bool, version: tuple[Any, ...], *,
+                 include_calls: bool = True) -> dict[str, Any]:
     cache = _file_cache(path, ledger)
     with cache.lock:
         if cache.version != version or cache.snapshot is None:
             snapshot = (_load_ledger(Path(path)) if ledger else
                         UsageSnapshot.model_validate_json(Path(path).read_bytes()).model_dump())
             snapshot["cache"] = cache_summary(snapshot["call_series"])
+            cache.summary = {key: value for key, value in snapshot.items() if key != "call_series"}
             cache.snapshot, cache.version = snapshot, version
-        return cache.snapshot
+        return cache.snapshot if include_calls else cache.summary
 
 
-def read_usage(legacy: Path, *, ledger: Path | None = None) -> dict[str, Any] | None:
-    """原子替换、WAL 追加和同长度改写都会失效；不让调用方修改缓存本体。"""
+def read_usage(legacy: Path, *, ledger: Path | None = None,
+               include_calls: bool = True,
+               call_fields: frozenset[str] | None = None) -> dict[str, Any] | None:
+    """返回独立快照；列表可省略明细，统计页可只复制所需的调用字段。"""
     ledger = ledger or legacy.with_suffix(".db")
     if ledger.is_file():
         path = ledger
@@ -177,7 +182,13 @@ def read_usage(legacy: Path, *, ledger: Path | None = None) -> dict[str, Any] | 
     else:
         return None
     try:
-        return copy.deepcopy(_cached_read(str(path.resolve()), is_ledger, version))
+        snapshot = _cached_read(str(path.resolve()), is_ledger, version, include_calls=include_calls)
+        if include_calls and call_fields is not None:
+            result = copy.deepcopy({key: value for key, value in snapshot.items() if key != "call_series"})
+            result["call_series"] = [copy.deepcopy({key: value for key, value in row.items() if key in call_fields})
+                                     for row in snapshot.get("call_series", [])]
+            return result
+        return copy.deepcopy(snapshot)
     except (OSError, ValueError, sqlite3.Error, TypeError):
         return None
 

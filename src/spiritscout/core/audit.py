@@ -4,15 +4,50 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import threading
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from spiritscout.core.storage_codec import compress_bytes, unpack_json
+
+_watch_lock = threading.Lock()
+_watchers: dict[str, dict[asyncio.Event, asyncio.AbstractEventLoop]] = {}
+
+
+@contextmanager
+def watch_audit(path: Path):
+    """通知只用于唤醒读取；磁盘字节游标始终是事件交付的事实源。"""
+    key = str(path.resolve())
+    event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    with _watch_lock:
+        _watchers.setdefault(key, {})[event] = loop
+    try:
+        yield event
+    finally:
+        with _watch_lock:
+            watchers = _watchers[key]
+            del watchers[event]
+            if not watchers:
+                del _watchers[key]
+
+
+def _notify_audit(key: str) -> None:
+    with _watch_lock:
+        watchers = list(_watchers.get(key, {}).items())
+    for event, loop in watchers:
+        try:
+            loop.call_soon_threadsafe(event.set)
+        except RuntimeError:
+            # 连接所属循环已关闭，不影响已成功落盘的审计记录。
+            if not loop.is_closed():
+                raise
 
 
 def encode_record(record: dict[str, Any]) -> str:
@@ -148,6 +183,7 @@ class AuditLogger:
             try:
                 with self._path.open("a", encoding="utf-8") as fh:
                     fh.write(encode_record(record) + "\n")
+                _notify_audit(self._key)
             except FileNotFoundError:
                 # 会话目录已被删除（删除会话时后台任务仍持引用）：会话事实
                 # 已随目录移除，丢弃这条记录而不是把目录复活成僵尸

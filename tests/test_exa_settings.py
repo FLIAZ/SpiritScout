@@ -136,7 +136,7 @@ class CompetitionSearchTests(unittest.IsolatedAsyncioTestCase):
             registry = ToolRegistry(SimpleNamespace(), policy=self.policy(mode))
             fn = AsyncMock(return_value=ToolResult(tool='web_search', ok=True))
             registry.register_builtin('web_search', fn, SEARCH_SPEC)
-            result = await registry.call('web_search', {'query': 'test'})
+            result = await registry.call('web_search', {'query': 'test', 'reason': '检查检索可用性'})
             self.assertTrue(result.ok)
             fn.assert_awaited_once()
 

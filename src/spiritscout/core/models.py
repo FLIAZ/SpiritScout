@@ -58,6 +58,9 @@ class VulnStatus(str, enum.Enum):
     FP_CHECKED = "fp_checked"                # 误报排查通过
     COMPLIANCE_CHECKED = "compliance_checked"  # SRC 合规判定通过
     ACCEPTED = "accepted"                    # 终审收录（中危及以上且可利用）
+    TECHNICAL_CONFIRMED = "technical_confirmed"  # 技术缺陷已确认，危害证据仍需补齐
+    IMPACT_PROVEN = "impact_proven"          # 已完成类型化实际危害证明
+    SUBMISSION_READY = "submission_ready"    # 满足平台报告与复现材料要求
     REJECTED_SCREEN = "rejected_screen"      # 初筛淘汰
     REJECTED_UNREPRO = "rejected_unreproducible"  # 复现失败判误报
     REJECTED_FP = "rejected_false_positive"  # 误报排查淘汰
@@ -98,6 +101,7 @@ class BlackboardLayer(str, enum.Enum):
     CREDENTIAL = "credential"      # 凭据层
     TOPOLOGY = "topology"          # 拓扑层
     TASK_STATE = "task_state"      # 任务状态层
+    TASK_REPORT = "task_report"    # 子任务报告引用（不混入事实/模型上下文）
     EXPERIENCE = "experience"      # 经验反馈层
 
 
@@ -105,14 +109,22 @@ class BlackboardLayer(str, enum.Enum):
 
 
 class Scope(BaseModel):
-    """用户授权事实（模型上下文与范围标注，不作为运行期目标围栏）。"""
+    """用户授权事实与 SRC 混合范围策略。"""
 
+    scope_mode: Literal["explicit", "hybrid", "organization"] = "explicit"
+    organization: str = Field(default="", description="授权组织主体名称，仅用于归属候选说明")
+    organization_domains: list[str] = Field(default_factory=list, description="组织归属域名候选规则")
     allowed_domains: list[str] = Field(default_factory=list, description="允许的域名（含子域通配 *.example.com）")
     allowed_cidrs: list[str] = Field(default_factory=list, description="允许的网段（CIDR）")
     allowed_urls: list[str] = Field(default_factory=list, description="允许的 URL 前缀")
     denied: list[str] = Field(
         default_factory=list,
-        description="兼容旧配置的排除目标声明，仅注入模型上下文，不由后端匹配或拦截",
+        description="明确排除的域名、URL 或资产模式，混合模式下由后端阻断",
+    )
+    excluded_assets: list[str] = Field(default_factory=list, description="明确排除的资产模式")
+    asset_rules: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="资产级规则，字段可包含 pattern/status/reason/evidence",
     )
     testing_rules: str = Field(default="", description="用户原始测试规则，完整传入模型上下文")
     time_window_start: datetime | None = None
@@ -162,6 +174,9 @@ class Asset(BaseModel):
     fingerprint: dict[str, Any] = Field(default_factory=dict)
     attrs: dict[str, Any] = Field(default_factory=dict)
     source_agent: str = ""
+    scope_status: Literal["candidate_only", "needs_review", "report_only", "allowed_test", "blocked"] = "candidate_only"
+    ownership_evidence: list[str] = Field(default_factory=list)
+    scope_reason: str = ""
     first_seen: datetime = Field(default_factory=utcnow)
 
     def dedup_key(self) -> str:
@@ -170,6 +185,32 @@ class Asset(BaseModel):
             method = str(self.attrs.get("method") or "UNKNOWN").upper()
             return f"endpoint|{method}|{self.value}"
         return f"{self.asset_type}|{self.value}|{self.port or ''}"
+
+
+class ImpactProof(BaseModel):
+    """漏洞类型化实际危害证明的通用载体。
+
+    具体漏洞类型的必填字段由 ``agents.impact`` 中的验证器判定，模型只负责
+    保存可追溯的身份、执行引用、状态变化和影响摘要。
+    """
+
+    proof_type: str = ""
+    verified: bool = False
+    execution_ref: str = ""
+    evidence_ref: str = ""
+    control_ref: str = ""
+    variant_ref: str = ""
+    callback_ref: str = ""
+    identity_a: str = ""
+    identity_b: str = ""
+    object_owner: str = ""
+    context: str = ""
+    proof_kind: str = ""
+    execution_marker: str = ""
+    invariant: str = ""
+    impact: str = ""
+    before_state: dict[str, Any] = Field(default_factory=dict)
+    after_state: dict[str, Any] = Field(default_factory=dict)
 
 
 class Vulnerability(BaseModel):
@@ -184,6 +225,7 @@ class Vulnerability(BaseModel):
     severity: Severity = Severity.INFO
     cvss_score: float | None = None
     cvss_vector: str | None = None
+    cvss_version: str | None = None
     status: VulnStatus = VulnStatus.CANDIDATE
     confidence: float = 0.0            # 0~1，随核验阶段提升
     evidence: list[dict[str, Any]] = Field(default_factory=list, description="证据链（请求/响应/回显）")
@@ -192,6 +234,14 @@ class Vulnerability(BaseModel):
     poc_verified: bool = False         # PoC 实际运行通过（AWE/MAPTA 证据门控）
     reproductions: list[dict[str, Any]] = Field(default_factory=list, description="复现记录（≥2 种方式）")
     verification: dict[str, Any] = Field(default_factory=dict, description="独立复测裁决、规则引用与实际执行证据")
+    impact_proof: dict[str, Any] = Field(
+        default_factory=dict,
+        description="类型化实际危害证明。由对应验证器生成，不接受模型文字单独充当证明",
+    )
+    submission_ready: bool = Field(
+        default=False,
+        description="是否已满足平台报告所需的危害证据与复现材料",
+    )
     false_positive_reason: str | None = None
     compliance: dict[str, Any] = Field(default_factory=dict, description="合规判定：platform/decision/reason")
     found_by: str = ""
@@ -275,6 +325,8 @@ class RouteState(BaseModel):
     step_times: list[float] = Field(default_factory=list)  # 近期步骤时间戳（monotonic，探测频率依据，上限 60 条）
     health: float = 1.0                # 健康度（6.5 公式计算结果）
     notes: list[str] = Field(default_factory=list)
+    # 文件正文使用完整输出；不序列化进检查点/模型请求，保留原上下文与缓存契约。
+    report_notes: list[str] = Field(default_factory=list, exclude=True)
     findings: list[dict[str, Any]] = Field(default_factory=list)
     blockers: list[dict[str, Any]] = Field(default_factory=list)
     # 路线已单独发过 agent.conclude（如 CTF 解题环收尾）——任务级收尾

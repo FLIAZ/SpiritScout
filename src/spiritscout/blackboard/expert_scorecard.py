@@ -39,11 +39,17 @@ def build_scorecard(*, asset_count: int, asset_rows: list[dict[str, Any]],
     signals = int(action.get("detection_signals") or 0)
     tool_calls = int(action.get("tool_calls") or 0)
     productive = int(action.get("productive_tasks") or 0)
+    vuln_effective = action.get("vulnerability_effective_rate")
+    hypothesis_attempts = int(action.get("hypothesis_attempts") or 0)
     calibration = []
     if formal_assets and attempted_targets < formal_assets:
         calibration.append("仍有已确认资产未形成测试机会或任务，应优先解释未覆盖原因")
     if effective is not None and effective < 0.35:
         calibration.append("有效动作率偏低，应减少同质实验并转向能改变决策的最小验证")
+    if productive and not hypothesis_attempts:
+        calibration.append("当前产出仍停留在情报层，下一轮必须把证据转成可证伪漏洞假设")
+    elif vuln_effective is not None and vuln_effective < 0.25:
+        calibration.append("漏洞假设实验转化率偏低，应减少继续枚举并优先完成支持/反驳判定")
     if repeat_rate is not None and repeat_rate > 0.35:
         calibration.append("假设重复实验比例偏高，下一轮应要求新身份、变量或证据版本")
     if signals:
@@ -55,6 +61,10 @@ def build_scorecard(*, asset_count: int, asset_rows: list[dict[str, Any]],
         "formal_assets": formal_assets,
         "attempted_targets": attempted_targets,
         "effective_action_rate": effective,
+        "intelligence_effective_rate": action.get("intelligence_effective_rate", effective),
+        "vulnerability_effective_rate": vuln_effective,
+        "hypothesis_attempts": hypothesis_attempts,
+        "vulnerability_productive_tasks": int(action.get("vulnerability_productive_tasks") or 0),
         "productive_per_100_tool_calls": (
             round(productive * 100 / tool_calls, 3) if tool_calls else None),
         "repeat_attempt_rate": repeat_rate,

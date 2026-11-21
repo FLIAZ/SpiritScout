@@ -1,6 +1,6 @@
 """端口测绘、服务审计与横向线索分析。
 
-基于已观测服务执行只读探测；凭据只记录位置和类型。CTF 模式不装配这些角色。"""
+SRC 按任务自主调查并保留证据；凭据通过秘密引用复用。CTF 模式不装配这些角色。"""
 
 from __future__ import annotations
 
@@ -85,7 +85,7 @@ class PortScanAgent(SubAgent):
         return [self._route(host, evidence)] if evidence else [self._no_scan_route(host)]
 
     async def plan_routes(self, task: Task) -> list[RoutePlan]:
-        """先读取现场，再让模型裁定有限端口；模型失败时保留可证明的显式端口。"""
+        """提供已有观察，由模型选择探索端口；模型不可用时保留显式端口。"""
         host, observed = self._observed_port_evidence(task)
         context = {
             "host": host,
@@ -96,8 +96,8 @@ class PortScanAgent(SubAgent):
             "task_goal": task.payload.get("mission") or task.payload.get("node_title") or "",
             "investigation_contract": task.payload.get("investigation_contract") or {},
             "rule": (
-                "只选择能由当前任务目标、显式 URL/服务、技术栈或接口证据解释的端口。"
-                "不要补常用端口清单，不要因为某端口常见就选择它。没有充分依据时 ports 返回空数组。"
+                "依据任务目标、现场线索和技术常识自主选择本次探索的端口，并说明理由。"
+                "无需预先证明服务存在；不扫描时 ports 返回空数组。"
                 "返回 JSON：{\"ports\":[{\"port\":443,\"basis\":[\"具体现场依据\"]}],"
                 "\"reason\":\"本轮选择或不扫描的原因\",\"stop_condition\":\"何时停止扩展\"}。"
             ),
@@ -260,7 +260,7 @@ class PortScanAgent(SubAgent):
 
 
 class HostVulnAgent(SubAgent):
-    """贯甲：对已观测服务做管理面/调试面暴露核验与指纹弱项登记。"""
+    """贯甲：SRC 按需调查端口与协议，衔接服务暴露核验与指纹审计。"""
 
     agent_type = AgentType.HOST_VULN
     route_namespace = "host_vuln"
@@ -282,6 +282,12 @@ class HostVulnAgent(SubAgent):
         return urls[:16]
 
     def route_templates(self, task: Task) -> list[RoutePlan]:
+        if getattr(getattr(self.ctx, "policy", None), "mode", None) == RunMode.SRC:
+            return [RoutePlan(
+                name="service_investigation",
+                strategy="围绕任务自主发现服务、检验假设并交付可核对证据",
+                steps=[{"action": "investigate"}],
+            )]
         services = self._services(task)
         if not services:
             return [RoutePlan(
@@ -297,7 +303,8 @@ class HostVulnAgent(SubAgent):
         )]
 
     async def execute_step(self, task, route, plan, step) -> StepResult:
-        handler = {"audit_service": self._step_audit,
+        handler = {"investigate": self._step_investigate,
+                   "audit_service": self._step_audit,
                    "coverage_gap": self._step_gap}.get(step["action"])
         if handler is None:
             return StepResult(ok=False, note=f"未知步骤动作: {step['action']}")
@@ -364,12 +371,18 @@ class HostVulnAgent(SubAgent):
 
 
 class PostExploitAgent(SubAgent):
-    """深耕：凭据线索汇总（值打码）与授权范围内相邻主机测绘。"""
+    """深耕：授权范围内的凭据线索、访问关系调查与相邻服务测绘。"""
 
     agent_type = AgentType.POST_EXPLOIT
     route_namespace = "post_exploit"
 
     def route_templates(self, task: Task) -> list[RoutePlan]:
+        if getattr(getattr(self.ctx, "policy", None), "mode", None) == RunMode.SRC:
+            return [RoutePlan(
+                name="authorized_access_investigation",
+                strategy="结合已有身份和线索自主验证授权范围内的访问与信任关系",
+                steps=[{"action": "investigate"}],
+            )]
         routes = [RoutePlan(
             name="credential_survey",
             strategy="交付可核验结果：凭据类线索台账（只记位置与类型，值打码）",
@@ -394,7 +407,8 @@ class PostExploitAgent(SubAgent):
         return peers if self.ctx.policy.mode != RunMode.CTF else []
 
     async def execute_step(self, task, route, plan, step) -> StepResult:
-        handler = {"credential_survey": self._step_credential,
+        handler = {"investigate": self._step_investigate,
+                   "credential_survey": self._step_credential,
                    "lateral_probe": self._step_lateral}.get(step["action"])
         if handler is None:
             return StepResult(ok=False, note=f"未知步骤动作: {step['action']}")

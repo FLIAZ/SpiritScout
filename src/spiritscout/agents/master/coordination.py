@@ -154,6 +154,21 @@ class MasterCoordination:
                 "skip_reason": meta.get("skip_reason", "")})
         return states
 
+    def _conversation_refs(self, dag: TaskDAG) -> list[dict[str, Any]]:
+        """普通会话也向模型提供既有路线引用；状态/派发查询不承担数据库扫描。"""
+        bb = getattr(self.ctx, "blackboard", None)
+        platform = self.ctx.extra.get("platform")
+        if bb is None or platform is not None and getattr(platform, "continuous", False):
+            return []  # 连续比赛的路线引用已包含在 competition_status 各题节点内。
+        refs = []
+        for node in dag.all_nodes():
+            for tid in node.task_ids:
+                task_state = bb.read(BlackboardLayer.TASK_STATE, tid) or {}
+                refs.extend({"node_id": node.node_id, "challenge_id": (node.meta.get("challenge") or {}).get("id"),
+                             "task_id": tid, "route_id": route["route_id"], "name": route.get("name", "")}
+                            for route in task_state.get("routes", []) if route.get("route_id"))
+        return refs
+
     def _competition_status(self, dag: TaskDAG) -> dict[str, Any]:
         """完整保留短小的调度事实；流式观察可裁剪，完成态和取消原因不可裁剪。"""
         platform = self.ctx.extra.get("platform")

@@ -275,3 +275,26 @@ api.reduce(fragmentStore,{actor:'web-fragment',type:'agent.progress',seq:50,deta
 assert.deepEqual(Array.from(api.updatesOf(fragment),n=>n.text),['完整公开观察。'],'完整持久正文替换分页边界的协议残片');
 assert.ok([...fragment.segments.values()].every(s=>![...s.texts.values()].some(raw=>raw.includes('PRIVATE_PROTOCOL_TAIL'))));
 console.log('intent lifecycle: streamed intent changes, master cancellation and partial-page reconciliation passed');
+
+context.S={state:{session:{mode:'src'}}};
+const srcStore=api.create();
+const srcTask=api.reduce(srcStore,{actor:'recon-src',type:'task.start',detail:{task_id:'src-file',title:'报告文件化'}});
+api.reduce(srcStore,{actor:'recon-src',type:'agent.conclude',detail:{task_id:'src-file',summary:'LEGACY_REPORT_BODY'}});
+api.reduce(srcStore,{actor:'recon-src',type:'task.done',detail:{task_id:'src-file',conclusions:[{route:'r',text:'LEGACY_REPORT_BODY'}]}});
+assert.equal(srcTask.conclusions.size,0,'SRC 收尾正文不再灌入会话页面');
+assert.ok(!api.summaryOf(srcTask).includes('LEGACY_REPORT_BODY'));
+context.S.state.session.mode='ctf';
+api.reduce(srcStore,{actor:'recon-src',type:'agent.conclude',detail:{task_id:'src-file',summary:'CTF_EXISTING_OUTPUT'}});
+assert.ok(api.summaryOf(srcTask).includes('CTF_EXISTING_OUTPUT'),'普通 CTF 保留既有结论行为');
+console.log('SRC task reports: file-only conclusion display and CTF compatibility passed');
+
+const longStore=api.create();let longSeq=0;
+const longScope={task_id:"long-output",route_id:"r",call_id:"long-call",turn:1};
+const longText="已验证的公开结果。\n".repeat(3600)+"它的完整后续。";
+const longFeed=(type,detail)=>api.reduce(longStore,{actor:"fixture",type,seq:++longSeq,detail:{...longScope,...detail}});
+longFeed("agent.delta",{kind:"text",text:longText});
+let longTask=longFeed("agent.progress",{text:longText.slice(0,2400),streamed:true});
+assert.equal(api.narrativeOf(longTask,[...longTask.segments.values()][0]).notes.map(note=>note.text).join("\n"),longText.trim(),"旧 2400 字符持久前缀不能覆盖完整流");
+longTask=longFeed("agent.progress",{text:longText,streamed:true});
+assert.equal(api.narrativeOf(longTask,[...longTask.segments.values()][0]).notes.map(note=>note.text).join("\n"),longText.trim(),"长正文不能静默剪掉开头或重复显示");
+console.log("long public progress retained across live and legacy final events");

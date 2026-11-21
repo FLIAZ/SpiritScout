@@ -57,6 +57,8 @@ class ReportAgent:
             not policy.get("independent_retest_required") or (
                 v.verification.get("verdict") == "confirmed" and v.poc_verified and v.exploitable))]
         pool.sort(key=lambda v: (-v.severity.rank, v.vuln_type))
+        impact_pool = [v for v in pool if v.submission_ready or v.impact_proof]
+        technical_only = [v for v in pool if v not in impact_pool]
         rejected_stats: dict[str, int] = {}
         for v in vulns:
             if v.status != VulnStatus.ACCEPTED:
@@ -71,6 +73,8 @@ class ReportAgent:
             "independent_retest": bool(policy.get("independent_retest_required")),
             "assets": assets,
             "pool": pool,
+            "impact_pool": impact_pool,
+            "technical_only": technical_only,
             "rejected_stats": rejected_stats,
             "task_count": len(tasks),
             "clue_count": len(clues),

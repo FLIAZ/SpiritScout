@@ -5,7 +5,7 @@
   const root = document.documentElement, dialog = document.getElementById("motion-dlg");
   const button = document.getElementById("btn-motion"), sample = document.getElementById("motion-sample");
   const media = window.matchMedia("(prefers-reduced-motion: reduce)");
-  const inputs = [...dialog.querySelectorAll('input[name="motion"]')];
+  const inputs = [...(dialog?.querySelectorAll('input[name="motion"]') || [])];
   let preference = "auto", storage = null, saved = true, preview = null;
   const normalize = value => Object.hasOwn(labels, value) ? value : "auto";
   try { storage = window.localStorage; preference = normalize(storage.getItem(key)); }
@@ -13,7 +13,7 @@
 
   function replay() {
     preview?.cancel(); preview = null;
-    if (!dialog.open || preference === "off" || media.matches || document.hidden || !sample.animate) return;
+    if (!dialog?.open || preference === "off" || media.matches || document.hidden || !sample.animate) return;
     const style = getComputedStyle(root);
     preview = sample.animate([
       {opacity: .35, transform: `translateY(${style.getPropertyValue("--motion-distance").trim()})`},
@@ -23,6 +23,7 @@
   }
   function render() {
     root.dataset.motion = preference;
+    if (!dialog) return;
     for (const input of inputs) input.checked = input.value === preference;
     document.getElementById("motion-current").textContent = labels[preference];
     document.getElementById("motion-system-note").hidden = !media.matches;
@@ -39,19 +40,21 @@
     catch { saved = false; }
     render();
   }
-  button.onclick = () => {
-    if (!dialog.open) dialog.showModal();
-    button.setAttribute("aria-expanded", "true");
-    inputs.find(input => input.checked)?.focus({preventScroll: true});
-    replay();
-  };
-  document.getElementById("motion-close").onclick = () => dialog.close();
-  document.getElementById("motion-replay").onclick = replay;
-  for (const input of inputs) input.addEventListener("change", () => { if (input.checked) choose(input.value); });
-  dialog.addEventListener("close", () => {
-    preview?.cancel(); preview = null;
-    button.setAttribute("aria-expanded", "false");
-  });
+  if (dialog) {
+    button.onclick = () => {
+      if (!dialog.open) dialog.showModal();
+      button.setAttribute("aria-expanded", "true");
+      inputs.find(input => input.checked)?.focus({preventScroll: true});
+      replay();
+    };
+    document.getElementById("motion-close").onclick = () => dialog.close();
+    document.getElementById("motion-replay").onclick = replay;
+    for (const input of inputs) input.addEventListener("change", () => { if (input.checked) choose(input.value); });
+    dialog.addEventListener("close", () => {
+      preview?.cancel(); preview = null;
+      button.setAttribute("aria-expanded", "false");
+    });
+  }
   media.addEventListener("change", render);
   window.addEventListener("storage", event => {
     if (event.storageArea !== storage || (event.key !== key && event.key !== null)) return;

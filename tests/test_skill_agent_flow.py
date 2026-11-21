@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock
 import test_steering_delivery
 
 from spiritscout.agents.recon.agent import ReconAgent
-from spiritscout.core.models import AgentType
+from spiritscout.core.models import AgentType, RunMode, Vulnerability
 from spiritscout.gateway.context import (
     DecisionMemory,
     compact_history_tokens,
@@ -90,6 +90,30 @@ class SkillAgentFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['rationale'], '已核对参考')
         self.assertIn('完整原文保留', str(gateway.chat.call_args.args[0]))
 
+    async def test_src_traffic_skill_request_uses_local_reader_without_contract_change(self) -> None:
+        from spiritscout.tools.spec import ToolResult
+
+        agent = object.__new__(ReconAgent)
+        agent.agent_id, agent.agent_type = 'recon-fixture', AgentType.RECON
+        agent.enable_llm_planning = True
+        agent._world_state = Mock(return_value={})
+        agent._system_prompt = Mock(return_value='侦察职责')
+        evidence = {"items": [{"status": None, "error": "UpstreamRequestError"}]}
+        gateway = SimpleNamespace(skill_runtime=self.runtime, chat=AsyncMock(side_effect=[
+            reply(request('traffic_search', limit=1)), reply({'paths': [], 'rationale': '代理失败，不能判断目标站状态'})]))
+        tools = SimpleNamespace(call=AsyncMock(return_value=ToolResult(tool='traffic_search', ok=True,
+            stdout=json.dumps(evidence), parsed=evidence)))
+        agent.ctx = SimpleNamespace(audit=Mock(), ring=None, blackboard=None, gateway=gateway,
+                                    tools=tools, builtin_ctx={'workspace_root': self.tmp.name})
+        result = await agent._llm_chat_json('path_planner', {'mission': '核对失败来源'}, _allow_ask=False)
+        self.assertIn('代理失败', result['rationale'])
+        tools.call.assert_awaited_once_with('traffic_search', {'limit': 1}, workspace_root=self.tmp.name)
+        self.assertEqual(gateway.chat.await_count, 2, '一次读取后直接完成决策，没有技能错误修复轮次')
+        first, second = [call.args[0] for call in gateway.chat.call_args_list]
+        self.assertEqual(first[0], second[0], '只修分发，不改写 system 工具契约和缓存前缀')
+        self.assertNotIn('local_tool_handler', gateway.chat.call_args.kwargs, '内部派发钩子不下发模型端点')
+        self.assertIn('UpstreamRequestError', str(second))
+
     async def test_native_ctf_result_is_complete_protected_and_route_local(self) -> None:
         agent, state, task, route, plan = test_steering_delivery.SteeringExecutionTests()._solver()
         agent.ctx.gateway.skill_runtime = self.runtime
@@ -149,13 +173,14 @@ class SkillAgentFlowTests(unittest.IsolatedAsyncioTestCase):
         verifier = object.__new__(VerifierAgent)
         verifier.agent_id = 'verifier'
         verifier.rule_context = Mock(return_value={'world_state': {}})
-        verifier.ctx = SimpleNamespace(audit=Mock(), pause_gate=None, mcp_tools={},
+        verifier.ctx = SimpleNamespace(audit=Mock(), pause_gate=None, mcp_tools={}, mode=RunMode.CTF,
             gateway=SimpleNamespace(skill_runtime=self.runtime, chat=AsyncMock(side_effect=[
-                SimpleNamespace(content='先读参考', tool_calls=[{'id': 'skill-only', 'name': 'skill_open',
+                SimpleNamespace(model='fixture', content='先读参考', tool_calls=[{'id': 'skill-only', 'name': 'skill_open',
                     'arguments': {'skill_id': 'flow-skill'}}]),
-                SimpleNamespace(content=json.dumps({'verdict': 'confirmed', 'harm': '试图将参考当证据',
+                SimpleNamespace(model='fixture', content=json.dumps({'verdict': 'confirmed', 'harm': '试图将参考当证据',
                     'evidence': [{'execution_id': 'skill-only', 'quote': '完整原文保留'}]}), tool_calls=[])])))
-        candidate = SimpleNamespace(vuln_id='v1', model_dump=lambda **kwargs: {'id': 'v1'})
+        candidate = Vulnerability(vuln_id='v1', title='测试候选', vuln_type='other',
+                                  target='https://fixture.test')
         result = await verifier.review(candidate, {})
         self.assertEqual(result['verdict'], 'inconclusive')
         self.assertIn('完整原文保留', str(verifier.ctx.gateway.chat.call_args.args[0]))

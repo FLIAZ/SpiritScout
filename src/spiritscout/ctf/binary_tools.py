@@ -106,7 +106,7 @@ except (OSError, ValueError, TypeError, subprocess.TimeoutExpired) as error:
 
 
 async def inspect(agent, task, route, arguments: dict[str, Any]):
-    from spiritscout.ctf.agents import _ToolOutcome
+    from spiritscout.ctf.contracts import _ToolOutcome
 
     operation = arguments.get("operation")
     if operation not in {"info", "functions", "strings", "xrefs", "disasm"}:

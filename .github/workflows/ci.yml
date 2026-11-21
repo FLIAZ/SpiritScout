@@ -35,6 +35,13 @@ jobs:
       - run: uv run --no-sync python -m ruff check src/spiritscout tests deploy.py deploy
       - run: uv run --no-sync python -m compileall -q src/spiritscout tests
       - run: uv run --no-sync python -m unittest discover -s tests -v
+      - name: Check frontend types
+        if: matrix.python == '3.11'
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run typecheck
+          npm run test:frontend
+          npm run build
       - name: Check browser scripts
         run: |
           for file in src/spiritscout/web/static/js/*.js; do node --check "$file" || exit; done

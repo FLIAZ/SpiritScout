@@ -556,6 +556,12 @@ class SingleContextTests(unittest.IsolatedAsyncioTestCase):
     def test_tool_prefix_reduces_further_when_user_contract_needs_more_space(self):
         state = {"messages": [{"role": "system", "content": "rules"},
             {"role": "user", "content": "完整用户契约" + "x" * 26000}]}
+        # 工具提示会演进；夹具须能放入最小工具视图，同时确实撑破常规视图。
+        self.agent._minimal_tool_view = True
+        while estimate_input_tokens(state["messages"], self.agent._model_tool_schemas()) > 10650:
+            state["messages"][-1]["content"] = state["messages"][-1]["content"][:-256]
+        self.agent._minimal_tool_view = False
+        self.assertGreater(estimate_input_tokens(state["messages"], self.agent._model_tool_schemas()), 10650)
         original = copy.deepcopy(state)
         sent = self.agent._light_model_messages(self.task, self.route, state)
         self.assertTrue(self.agent._minimal_tool_view)

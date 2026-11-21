@@ -111,6 +111,37 @@ class CloudFailureEvidenceTests(unittest.IsolatedAsyncioTestCase):
             {'observations': [], 'messages': []}, 'python',
             {'code': code, 'action': 'analysis', 'timeout': timeout})
 
+    async def test_permission_failures_keep_isolation_and_expose_writable_workdir(self):
+        workdir = Path(self.agent._task_execution_environment(self.task)['default_workdir'])
+        workdir.mkdir(parents=True)
+        protected = workdir / 'protected.bin'
+        protected.write_bytes(b'original')
+        protected.chmod(0o444)
+        cases = [(self.root / 'work', 'Read-only file system'),
+                 (workdir.parent / 'another-work', 'Read-only file system'),
+                 (protected, 'Permission denied')]
+        for path, diagnostic in cases:
+            with self.subTest(path=path.name):
+                command = (f"open({str(path)!r}, 'wb').write(b'overwrite')" if path == protected
+                           else f"import os; os.mkdir({str(path)!r})")
+                result = await self.run_code(command)
+                self.assertFalse(result.ok)
+                self.assertIn(diagnostic, result.text)
+                self.assertIn(str(workdir), result.text)
+                self.assertIn('属主或模式', result.text)
+        self.assertEqual(protected.read_bytes(), b'original')
+        self.assertEqual(protected.stat().st_mode & 0o777, 0o444, '不会自动改权限或重试写入')
+        self.assertFalse((self.root / 'work').exists())
+        self.assertFalse((workdir.parent / 'another-work').exists())
+        valid = await self.run_code("from pathlib import Path; "
+            "Path('analysis.txt').write_text('valid'); "
+            f"Path({str(self.root / 'artifacts' / 'report.txt')!r}).write_text('evidence'); "
+            "print(Path.cwd())")
+        self.assertTrue(valid.ok, valid.text)
+        self.assertEqual((workdir / 'analysis.txt').read_text(), 'valid')
+        self.assertEqual((self.root / 'artifacts' / 'report.txt').read_text(), 'evidence')
+        self.assertIn(str(workdir), valid.text)
+
     async def test_unresolved_callback_keeps_stage_log_and_traceback_without_environment_verdict(self):
         result = await self.run_code(
             'import asyncio\n'

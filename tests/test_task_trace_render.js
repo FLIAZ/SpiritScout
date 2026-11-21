@@ -13,6 +13,8 @@ class FakeEl {
       add:c=>{if(!this.classList.contains(c))this.className=`${this.className} ${c}`.trim();}};
     this._q=new Map();
   }
+  set textContent(value){this._textContent=value;this.textWrites=(this.textWrites || 0)+1;}
+  get textContent(){return this._textContent || "";}
   get lastElementChild(){return this.children[this.children.length-1]||null;}
   get innerHTML(){return this.children.length ? this.children.map(el=>el.html.replace('</div>',`${el.innerHTML}</div>`)).join('') : this._innerHTML || '';}
   set innerHTML(value){this._innerHTML=value;for(const child of this.children)child.isConnected=false;this.children=[];}
@@ -30,18 +32,20 @@ class FakeEl {
 }
 const appended=[],topLevel=[];
 const traceAppend=(event,html,cls="")=>{const row=new FakeEl(html);row.className=`tl ${cls}`;row.dataset.agent=event.actor;row.dataset.eventTs=event.ts;topLevel.push(row);return row;};
-const S={tab:"chat",think:new Map()};
+const S={tab:"chat",cur:"sess-fixture",think:new Map()};
 const ctx=vm.createContext(require('./helpers/i18n').context({
   SessionObserver:{toolName:n=>n||"工具",cleanText:v=>String(v),resultSummary:d=>d.note||d.error||"返回结果"},
-  traceAppend,traceScroll(){},mdRender:t=>String(t),esc:s=>String(s),actorName:a=>String(a||""),
+  traceAppend,traceScroll(){},esc:s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])),actorName:a=>String(a||""),
   argBrief:()=>"",ToolParameters:{attach(){}},S,setTimeout,clearTimeout,
 }));
+vm.runInContext(fs.readFileSync(path.join(__dirname,"../src/spiritscout/web/static/js/markdown.js"),"utf8"),ctx);
+ctx.mdRender=t=>String(t);
 vm.runInContext(fs.readFileSync(path.join(__dirname,"../src/spiritscout/web/static/js/task-trace.js"),"utf8"),ctx);
 const api=vm.runInContext("TaskTrace",ctx);
 let seq=0;
 const event=(type,detail={},actor="web-one")=>({type,detail,actor,seq:++seq,ts:String(seq)});
 const push=(type,detail,actor)=>api.push(event(type,detail,actor));
-const external=(type,label,actor)=>{const e=event(type,{},actor);assert.equal(api.push(e),false);traceAppend(e,label,type.startsWith("user.")?"tl-user":"tl-master");};
+const external=(type,label,actor)=>{const e=event(type,type==="user.answered"?{answer:label}:{},actor);assert.equal(api.push(e),false);traceAppend(e,label,type.startsWith("user.")?"tl-user":"tl-master");};
 
 push("task.start",{task_id:"t1",title:"验证越权"});
 push("agent.turn",{task_id:"t1",route_id:"r1",turn:1,angle:"确认注入点"});
@@ -92,12 +96,48 @@ assert.ok(srcOutcome,"统计型 summary 之外仍有未展示结论时应生成�
 assert.equal(srcOutcome.querySelector(".task-thread").querySelector(".task-summary").innerHTML,"B 路线确认存在未授权读取。");
 
 api.reset();topLevel.length=0;appended.length=0;
+const handoffTitle="fenqile.com 入口基线：存活入口、指纹与公开 JS/API 线索清单（交付可追溯清单，含登录/注册入口）";
+const handoffBody="资产发现契约不能由页面路径侦察代替；本路线未发送 HTTP、DNS 或端口请求，等待探微完成 CT、通配基线与具体 hostname 核验后再继续侦察。";
+push("task.start",{task_id:"handoff",title:handoffTitle},"recon-handoff");
+push("agent.turn",{task_id:"handoff",turn:1,angle:handoffTitle},"recon-handoff");
+push("agent.tool_call",{task_id:"handoff",route_id:"route-handoff",calls:[
+  {id:"handoff:wildcard_asset_handoff:0",name:"asset_discovery_required",arguments:{}},
+]},"recon-handoff");
+push("agent.tool_result",{task_id:"handoff",route_id:"route-handoff",id:"handoff:wildcard_asset_handoff:0",ok:true,note:handoffBody},"recon-handoff");
+push("agent.conclude",{task_id:"handoff",summary:`wildcard_asset_handoff：${handoffBody}`},"recon-handoff");
+push("task.done",{task_id:"handoff",summary:{routes_total:1,routes_done:1},conclusions:[
+  {route:"wildcard_asset_handoff",text:handoffBody},
+]},"recon-handoff");
+api.flush();
+const handoffVisible=topLevel.filter(row=>!row.hidden);
+assert.deepEqual(handoffVisible.map(kind),["continuation"],
+  "无 route_id 的开场、首次带路线的工具与同义结论合并为一个正文块");
+const handoffStage=stageOf(handoffVisible[0]);
+assert.equal(handoffStage.querySelector(".task-heading > strong").innerHTML,handoffTitle);
+assert.match(handoffStage.querySelector(".task-stage-summary").innerHTML,/wildcard_asset_handoff/);
+assert.equal(topLevel.filter(row=>kind(row)==="outcome").length,0,"路线前缀不同不应再生成重复结论卡");
+assert.equal(topLevel.filter(row=>kind(row)==="dispatch").length,1,"执行明细仍保留在同一任务记录中");
+assert.ok(topLevel.find(row=>kind(row)==="dispatch").hidden,"已有正文承载工具明细时隐藏重复派发标题");
+
+api.reset();topLevel.length=0;appended.length=0;
+push("task.start",{task_id:"same-body",title:"核对两个入口"},"recon-prefix");
+push("agent.turn",{task_id:"same-body",route_id:"front-route",route:"前台",turn:1},"recon-prefix");
+push("agent.conclude",{task_id:"same-body",route_id:"front-route",summary:"前台：可访问"},"recon-prefix");
+push("task.done",{task_id:"same-body",summary:{routes_total:2,routes_done:2},conclusions:[
+  {route:"前台",text:"前台：可访问"},{route:"后台",text:"后台：可访问"},
+]},"recon-prefix");
+api.flush();
+const prefixOutcome=topLevel.find(row=>!row.hidden && kind(row)==="outcome");
+assert.ok(prefixOutcome,"不同路线即使正文相同也必须保留独立结论");
+assert.equal(prefixOutcome.querySelector(".task-thread").querySelector(".task-summary").innerHTML,"后台：可访问");
+
+api.reset();topLevel.length=0;appended.length=0;
 push("task.start",{task_id:"intent",title:"分析权限"});
 for(let i=1;i<=50;i++) {
   push("agent.turn",{task_id:"intent",route_id:"r",turn:i});
   push("model.started",{task_id:"intent",route_id:"r",turn:i,call_id:`model-${i}`});
   if(i===1 || i===50) push("agent.progress",{task_id:"intent",route_id:"r",turn:i,
-    exploration:{intent:"核对权限边界",attempt:"对照成员权限"},text:i===1?"先确认成员能访问哪些数据。":"已找到一个跨成员访问入口。"});
+    exploration:{intent:"核对 `profile` 的 **权限边界** <示例>",attempt:"对照成员权限"},text:i===1?"先确认成员能访问哪些数据。":"已找到一个跨成员访问入口。"});
   push("agent.tool_call",{task_id:"intent",route_id:"r",turn:i,calls:[{id:`cmd-${i}`,name:"shell",arguments:{command:"fixture"}}]});
   push("agent.tool_result",{task_id:"intent",route_id:"r",turn:i,id:`cmd-${i}`,ok:true,result:"fixture result"});
 }
@@ -106,7 +146,7 @@ api.flush();api.flush();
 const intents=topLevel.filter(row=>!row.hidden && kind(row)==="continuation");
 assert.equal(intents.length,1,"同一意图的50轮调用不生成50张卡");
 const intent=stageOf(intents[0]);
-assert.equal(intent.querySelector(".task-heading strong").textContent,"核对权限边界");
+assert.equal(intent.querySelector(".task-heading > strong").innerHTML,"核对 <code>profile</code> 的 <b>权限边界</b> &lt;示例&gt;");
 assert.match(intent.querySelector(".task-stage-summary").innerHTML,/先确认成员/);
 assert.match(intent.querySelector(".task-stage-summary").innerHTML,/跨成员访问入口/);
 assert.equal((intent.querySelector(".task-stage-summary").innerHTML.match(/class="task-narrative-turn"/g)||[]).length,2,
@@ -186,3 +226,101 @@ assert.equal(prose.children.length,1,"撤回重试中的流片段");
 assert.equal(prose.children[0],originalNode,"重试不撤回更早的完整输出");
 api.reset();
 console.log("stream narratives: stable DOM, repeated-prefix suppression, repeat counts and retry isolation passed");
+
+// 新阶段到来时，旧阶段不应重复写入 DOM；完成与撤回仍须更新旧卡。
+api.reset();topLevel.length=0;
+push("task.start",{task_id:"render-cost",title:"长会话"});
+push("agent.turn",{task_id:"render-cost",route_id:"r",turn:1,angle:"第一阶段"});
+push("agent.delta",{task_id:"render-cost",route_id:"r",turn:1,kind:"text",text:"第一段"});api.flush();
+const firstStage=topLevel.find(row=>kind(row)==="continuation");
+const firstContext=stageOf(firstStage).querySelector(".task-context");
+const initialWrites=firstContext.textWrites;
+for(let turn=2;turn<=30;turn++) {
+  push("agent.turn",{task_id:"render-cost",route_id:"r",turn,angle:`阶段 ${turn}`});
+  push("agent.delta",{task_id:"render-cost",route_id:"r",turn,kind:"text",text:`进展 ${turn}`});api.flush();
+}
+assert.equal(firstContext.textWrites,initialWrites,"换轮和流式输出不重写未变化的旧阶段");
+push("agent.delta",{task_id:"render-cost",route_id:"r",turn:1,kind:"reset",text:""});api.flush();
+assert.equal(stageOf(firstStage).querySelector(".task-stage-summary").children.length,0,"重试撤回仍更新旧阶段");
+push("task.done",{task_id:"render-cost",summary:"执行完成"});api.flush();
+assert.equal(stageOf(firstStage).dataset.status,"done","任务完成仍更新全部阶段状态");
+api.reset();
+console.log("render cost: unchanged historical stages skip DOM writes; reset and completion invalidate them");
+
+// 历史重放复用已连接的节点后，后续片段必须更新复用节点，而非暂存节点。
+api.reset();topLevel.length=0;
+const replayEvents=[event('task.start',{task_id:'reuse',title:'复用窗口'}),
+  event('agent.turn',{task_id:'reuse',route_id:'r',turn:1,angle:'保留阶段'}),
+  event('agent.delta',{task_id:'reuse',route_id:'r',turn:1,kind:'text',text:'已保留正文'})];
+for(const e of replayEvents)api.push(e);api.flush();
+const retainedRows=[...topLevel];
+api.reset();topLevel.length=0;
+for(const e of replayEvents)api.push(e);api.flush();
+const stagedRows=[...topLevel];
+api.adoptRows(new Map(stagedRows.map((row,index)=>[row,retainedRows[index]])));
+for(const row of stagedRows)row.isConnected=false;
+const rowCount=topLevel.length;
+push('agent.delta',{task_id:'reuse',route_id:'r',turn:1,kind:'text',text:'，继续更新'});api.flush();
+assert.equal(topLevel.length,rowCount,'复用后不创建重复阶段');
+const retainedStage=retainedRows.find(row=>kind(row)==='continuation');
+assert.match(stageOf(retainedStage).querySelector('.task-stage-summary').innerHTML,/已保留正文，继续更新/);
+api.reset();
+console.log('window reuse: continued output updates retained nodes without duplicate rows');
+
+
+api.reset();topLevel.length=0;appended.length=0;
+push("task.start",{task_id:"shared-src",title:"核对接口原始证据"},"recon-shared");
+push("agent.turn",{task_id:"shared-src",angle:"核对接口原始证据"},"recon-shared");
+for(const route of ["route-a","route-b"]) {
+  push("agent.tool_call",{task_id:"shared-src",route_id:route,calls:[{id:route,name:"http_probe",arguments:{url:"https://fixture.test/"}}]},"recon-shared");
+}
+api.flush();
+const sharedCards=topLevel.filter(row=>!row.hidden);
+assert.equal(sharedCards.length,1,"同一任务级意图的多条路线不拆成重复任务消息");
+const sharedRow=sharedCards[0], sharedDetails=stageOf(sharedRow).querySelector(".task-step");
+sharedDetails.open=true;
+push("agent.tool_result",{task_id:"shared-src",route_id:"route-b",id:"route-b",ok:true,note:"第二条返回"},"recon-shared");
+api.flush();
+assert.equal(topLevel.filter(row=>!row.hidden).length,1);
+assert.equal(topLevel.find(row=>!row.hidden),sharedRow,"路线返回复用原 DOM");
+assert.equal(sharedDetails.open,true,"更新路线保留展开状态");
+assert.equal(appended.filter(el=>el.html.includes('class="tl-act"')).length,2,"两条路线工具明细均保留");
+push("agent.progress",{task_id:"shared-src",route_id:"route-b",text:"发现另一个入口",exploration:{intent:"验证独立入口"}},"recon-shared");
+api.flush();
+assert.equal(topLevel.filter(row=>!row.hidden && kind(row)==="continuation").length,2,"不同路线的新公开意图不按标题误删");
+console.log("parallel SRC routes: one task message, complete tools and stable expanded DOM");
+
+// 较新页先出现结果，补读较早页再得到调用；补齐参数不得回退返回状态或替换原节点。
+api.reset();topLevel.length=0;appended.length=0;
+api.push({type:'agent.tool_result',actor:'worker',seq:80,ts:'80',detail:{task_id:'cross-page',route_id:'route',id:'call',name:'shell',ok:true,result:'completed response'}},80);
+api.flush();
+const returned=appended.find(el=>el.html.includes('class="tl-act"'));
+assert.equal(returned.querySelector('.ar').textContent,'调用参数见更早记录');
+const restore=api.capture();api.reset({preserveTools:true});
+api.push({type:'agent.tool_call',actor:'worker',seq:10,ts:'10',detail:{task_id:'cross-page',route_id:'route',calls:[{id:'call',name:'shell',preview:'complete arguments',arguments:{command:'fixture'}}]}},10);
+api.flush();restore();
+assert.equal(returned.querySelector('.ar').textContent,'complete arguments');
+assert.equal(returned.querySelector('.tl-output').textContent,'completed response');
+assert.equal(returned.querySelector('.st').textContent,'已返回');
+const previousCount=topLevel.length;
+for(const row of topLevel){row.isConnected=false;row.logical=true;}
+ctx.traceIsPresent=row=>!!row&&(row.isConnected||row.logical);
+api.push({type:'agent.tool_result',actor:'worker',seq:90,ts:'90',detail:{task_id:'cross-page',route_id:'route',id:'call',name:'shell',ok:true,result:'updated response',
+  result_truncated:true,output_file:'sandbox/fixture/output.log',output_complete:true,same_raw_output:true}},90);
+api.flush();
+assert.equal(topLevel.length,previousCount,'虚拟卸载的消息仍有逻辑身份，不得创建副本');
+assert.match(returned.querySelector('.tl-output').textContent,/updated response[\s\S]*只显示部分回执[\s\S]*原始日志已完整记录[\s\S]*与此前一次调用相同/);
+assert.equal(returned.querySelector('.tl-output-log').href,'/api/sessions/sess-fixture/tool-output/90');
+api.reset();
+console.log('cross-page tools: backwards parameter backfill, result ordering and detached-row identity passed');
+
+// 用户答复是对话边界，后续正文不得写回答复前的消息。
+api.reset();topLevel.length=0;
+push("agent.delta",{task_id:"answer-boundary",route_id:"r",turn:1,kind:"text",text:"答复前的进展"});api.flush();
+external("user.answered","只允许测试 A","web");
+push("agent.delta",{task_id:"answer-boundary",route_id:"r",turn:1,kind:"text",text:"按用户答复继续"});api.flush();
+assert.equal(topLevel.length,3);
+assert.equal(topLevel[1].className,"tl tl-user");
+assert.match(stageOf(topLevel[0]).querySelector(".task-stage-summary").innerHTML,/答复前/);
+assert.doesNotMatch(stageOf(topLevel[0]).querySelector(".task-stage-summary").innerHTML,/按用户答复继续/);
+console.log("user answers form stable conversation boundaries");

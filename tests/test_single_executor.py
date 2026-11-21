@@ -9,12 +9,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from spiritscout.agents.sub.base import RoutePlan
+from spiritscout.blackboard import Blackboard
 from spiritscout.config.settings import GatewayConfig, ModelEntry
 from spiritscout.core.audit import NullAuditLogger
 from spiritscout.core.models import AgentType, RunMode, Task, TaskStatus
 from spiritscout.ctf.agents import CTFBaseAgent
 from spiritscout.ctf.flags import FlagManager
 from spiritscout.ctf.single import SingleCTFAgent, run_single
+from spiritscout.ctf.solver import SolverTurn
 from spiritscout.gateway.context import estimate_input_tokens
 from spiritscout.gateway.gateway import AgentBoundGateway, ModelGateway
 from spiritscout.gateway.light_context import project_context
@@ -53,21 +55,44 @@ class AssemblyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._recovery_tool_choice(), 'auto')
 
     @unittest.skipUnless(sandbox_available(), '需要现有 Linux/bwrap')
-    async def test_initial_workdir_fact_matches_actual_sandbox_for_non_ascii_challenge_id(self):
-        with tempfile.TemporaryDirectory() as folder:
-            ctx = context(RunMode.AWDP)
-            ctx.builtin_ctx = {'workspace_root': folder, '_run_mode': RunMode.AWDP, '_lightweight_local': True}
-            agent = SingleCTFAgent(ctx, flag_manager=FlagManager(local_only=True, fix_mode=True))
-            task = Task(task_id='workdir-fixture', agent_type=agent.agent_type, task_type='ctf_single', target='',
-                        payload={'challenge': {'id': '题目 / 路径'}})
-            state = {'seed': []}
-            agent._seed_messages(task, None, None, state)
-            advertised = state['messages'][1]['_light_task_frame']['execution_environment']['default_workdir']
-            observed = await sandbox_exec('pwd', **agent._tool_ctx(task))
-            self.assertTrue(observed.ok, observed.error)
-            self.assertEqual(observed.returncode, 0, observed.stderr)
-            self.assertEqual(observed.parsed['workdir'], advertised)
-            self.assertEqual(observed.stdout.strip(), advertised)
+    async def test_initial_and_restored_workdir_match_actual_sandbox_for_all_executors(self):
+        for agent_type, mode, light in ((SingleCTFAgent, RunMode.AWDP, True), (CTFBaseAgent, RunMode.CTF, False)):
+            with self.subTest(executor=agent_type.__name__), tempfile.TemporaryDirectory() as folder:
+                ctx = context(mode, light=light)
+                ctx.blackboard = Blackboard(Path(folder) / 'bb.db')
+                self.addCleanup(ctx.blackboard.close)
+                ctx.builtin_ctx = {'workspace_root': folder, '_run_mode': mode, '_lightweight_local': light}
+                agent = agent_type(ctx, flag_manager=FlagManager(local_only=True, fix_mode=mode == RunMode.AWDP))
+                agent._inv_bootstrap = AsyncMock(return_value=(0, ''))
+                task = Task(task_id='workdir-fixture', agent_type=agent.agent_type, task_type='ctf_single', target='',
+                            payload={'challenge': {'id': '题目 / 路径'}})
+                turn = SolverTurn(agent, task, SimpleNamespace(name='solve', route_id='r'), RoutePlan('solve', ''))
+                turn.state = {'messages': [], 'seed': [], 'stall': '', 'flags': []}
+                self.assertIsNone(await turn._prepare(''))
+                environment = turn.state['execution_environment']
+                advertised = environment['default_workdir']
+                self.assertIn(advertised, str(turn.state['messages']), '生成首条命令前已提供真实路径')
+                observed = await sandbox_exec('pwd', **agent._tool_ctx(task))
+                self.assertTrue(observed.ok, observed.error)
+                self.assertEqual(observed.returncode, 0, observed.stderr)
+                self.assertEqual(observed.parsed['workdir'], advertised)
+                self.assertEqual(observed.stdout.strip(), advertised)
+                self.assertEqual(observed.parsed['tmp_persistent'], light)
+                prefix = copy.deepcopy(turn.state['messages'])
+                turn.state = copy.deepcopy(turn.state)  # 已保存状态重开，不重复追加环境或改写缓存前缀。
+                self.assertIsNone(await turn._prepare(''))
+                self.assertEqual(turn.state['messages'][:len(prefix)], prefix)
+                self.assertEqual(sum(message.get('_light_kind') == 'execution_environment'
+                                     for message in turn.state['messages']), 0 if light else 1)
+                old = [{'role': 'system', 'content': '原角色约束'},
+                       {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 'saved', 'type': 'function',
+                        'function': {'name': 'shell', 'arguments': '{}'}}]},
+                       {'role': 'tool', 'tool_call_id': 'saved', 'content': '旧工具的完整回执'}]
+                turn.state = {'messages': copy.deepcopy(old), 'seed': [], 'stall': '', 'flags': []}
+                self.assertIsNone(await turn._prepare(''))
+                self.assertEqual(turn.state['messages'][:len(old)], old, '旧检查点升级只追加，不重放工具')
+                self.assertIn(advertised, turn.state['messages'][len(old)]['content'])
+                agent._inv_bootstrap.assert_awaited_once()
 
     def test_first_request_fits_small_window_with_runtime_state_and_original_contract(self):
         for mode in (RunMode.CTF, RunMode.AWDP):

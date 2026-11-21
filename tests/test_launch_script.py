@@ -1,8 +1,10 @@
 """启动脚本参数分发、会话保护与服务退出回归，不调用模型。"""
 from __future__ import annotations
 
+import io
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -11,8 +13,102 @@ import sys
 import tempfile
 import textwrap
 import time
+import unicodedata
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+
+class StartupDisplayTests(unittest.TestCase):
+    def test_logo_colors_and_redirected_logs(self) -> None:
+        from spiritscout import __version__
+        from spiritscout.startup import StartupDisplay
+
+        cases = (
+            (True, False, 80, "xterm", ""),
+            (True, False, 80, "xterm-256color", "truecolor"),
+            (True, True, 80, "xterm-256color", "truecolor"),
+            (False, False, 80, "xterm", ""),
+            (True, False, 40, "xterm", ""),
+            (True, False, 68, "xterm", ""),
+            (True, False, 69, "xterm", ""),
+            (True, False, 80, "dumb", "truecolor"),
+        )
+        for terminal, no_color, width, term, colorterm in cases:
+            with self.subTest(terminal=terminal, no_color=no_color, width=width,
+                              term=term, colorterm=colorterm):
+                stream = io.StringIO()
+                stream.isatty = lambda: terminal
+                env = {"TERM": term, "COLORTERM": colorterm, "WT_SESSION": "fixture"}
+                if no_color:
+                    env["NO_COLOR"] = "1"
+                with patch.dict(os.environ, env, clear=True), patch(
+                        "shutil.get_terminal_size", return_value=os.terminal_size((width, 24))):
+                    display = StartupDisplay(stream)
+                    display.start()
+                    header = re.sub(r"\033\[[0-9;]*m", "", stream.getvalue())
+                    for line in header.splitlines():
+                        columns = sum(2 if unicodedata.east_asian_width(c) in "WF" else 1
+                                      for c in line)
+                        self.assertLessEqual(columns, width)
+                    display.phase("读取配置")
+                    display.phase("启动 HTTP 服务")
+                    display.ready("127.0.0.1", 8000, auth_enabled=False)
+                output = stream.getvalue()
+                colored = terminal and not no_color and term != "dumb"
+                self.assertIn(__version__, output)
+                self.assertIn("http://127.0.0.1:8000", output)
+                self.assertNotIn("█", output)
+                self.assertNotIn("─", header)
+                compact = not terminal or width < 69 or term == "dumb"
+                self.assertEqual("SPIRITSCOUT" in header, compact)
+                self.assertEqual("\033[" in output, colored)
+                self.assertEqual("38;2;" in output, colored and colorterm == "truecolor")
+                self.assertEqual(output.count("\r\033[2K"), 2 if colored else 0)
+                if not colored:
+                    self.assertNotIn("\r", output)
+                    self.assertIn("读取配置…\n", output)
+                    self.assertIn("启动 HTTP 服务…\n", output)
+
+    def test_occupied_port_is_not_reported_as_ready_or_cleanly_stopped(self) -> None:
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            port = listener.getsockname()[1]
+            script = textwrap.dedent("""\
+                import sys
+                from fastapi import FastAPI
+                from spiritscout.startup import StartupDisplay, serve
+                app = FastAPI()
+                app.state.auth_enabled = False
+                display = StartupDisplay()
+                display.start()
+                display.phase("启动 HTTP 服务")
+                serve(app, display=display, host="127.0.0.1", port=int(sys.argv[1]),
+                      log_level="warning")
+            """)
+            result = subprocess.run([sys.executable, "-c", script, str(port)],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("HTTP 服务已监听", result.stdout)
+            self.assertNotIn("控制台已停止", result.stdout)
+            self.assertIn("[错误]", result.stderr)
+
+    def test_actual_binding_and_access_policy_are_not_misrepresented(self) -> None:
+        from spiritscout.startup import StartupDisplay
+
+        for host, address, auth in (("::1", "[::1]", False),
+                                    ("0.0.0.0", "127.0.0.1", False),
+                                    ("127.0.0.1", "127.0.0.1", True)):
+            with self.subTest(host=host, auth=auth):
+                stream = io.StringIO()
+                StartupDisplay(stream).ready(host, 8012, auth_enabled=auth, warming=True)
+                output = stream.getvalue()
+                self.assertIn(f"http://{address}:8012", output)
+                self.assertIn("首次任务会等待预热完成", output)
+                self.assertIn("Ctrl+C 安全停止控制台", output)
+                if auth or host == "0.0.0.0":
+                    self.assertNotIn("仅本机", output)
 
 
 @unittest.skipUnless(shutil.which('bash'), '需要 Bash')
@@ -198,7 +294,6 @@ class ServerShutdownTests(unittest.TestCase):
                 from pathlib import Path
                 from types import SimpleNamespace
                 from unittest.mock import patch
-                import uvicorn
                 from fastapi import FastAPI
                 from fastapi.responses import StreamingResponse
                 from spiritscout import __main__ as entry
@@ -221,7 +316,7 @@ class ServerShutdownTests(unittest.TestCase):
                                              media_type='text/event-stream')
                 cfg = SimpleNamespace(models_config_path='unused', web=SimpleNamespace(
                     host='127.0.0.1', port=0, max_concurrent_sessions=1))
-                run = uvicorn.run
+                from spiritscout.startup import serve as run
                 def serve(app, **kwargs):
                     return run(app, fd=fd, **kwargs)
                 # 隔离配置和模型预热，HTTP 服务、信号和事件流均使用真实实现。
@@ -229,7 +324,7 @@ class ServerShutdownTests(unittest.TestCase):
                      patch.object(entry, 'load_system_config', return_value=cfg), \
                      patch.object(entry, 'load_model_config', return_value=[]), \
                      patch('spiritscout.web.create_app', return_value=app), \
-                     patch('uvicorn.run', side_effect=serve), \
+                     patch('spiritscout.startup.serve', side_effect=serve), \
                      patch.dict(sys.modules, {'litellm': SimpleNamespace()}):
                     entry.main([])
                 ''')
@@ -247,6 +342,10 @@ class ServerShutdownTests(unittest.TestCase):
                         self.assertTrue(chunk, 'SSE 未成功建立')
                         response += chunk
                     self.assertIn(b'200 OK', response)
+                    output.seek(0)
+                    banner = output.read()
+                    self.assertIn(f'http://127.0.0.1:{port}', banner)
+                    self.assertIn('HTTP 服务已监听', banner)
                     started = time.monotonic()
                     process.send_signal(signal.SIGINT)
                     process.wait(timeout=12)
@@ -260,6 +359,9 @@ class ServerShutdownTests(unittest.TestCase):
                     output.seek(0)
                     if not marker.exists():
                         self.fail('服务未执行退出清理：' + output.read())
+                    self.assertEqual(process.returncode, 0)
+                    output.seek(0)
+                    self.assertNotIn('KeyboardInterrupt', output.read())
 
 
 if __name__ == '__main__':

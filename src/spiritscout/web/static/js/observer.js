@@ -1,5 +1,5 @@
 "use strict";
-/* 会话实况：只展示真实事件与已持久化证据，不推测模型的内部思考。 */
+/* 会话实况：保留当前状态与用量；发现和执行明细由对应视图展示。 */
 const SessionObserver = (() => {
   let events = [], scheduled = false;
   const number = n => Number.isFinite(Number(n)) ? Number(n).toLocaleString(I18n.dateLocale) : "—";
@@ -65,28 +65,15 @@ const SessionObserver = (() => {
     const box = $("#session-observer"), state = S.state;
     if (!box || !state || state.session?.session_id !== S.cur) return;
     const v = derive(state), paused = state.session.paused, terminal = TERMINAL.has(state.session.status);
-    const tasks = state.tasks || [], running = tasks.filter(t => t.status === "running");
     const latest = events[events.length - 1];
     const active = v.task ? (TASK_CN[v.task.task_type] || agentName(v.task.agent_type)) : I18n.t("灵枢");
     const current = paused ? I18n.t("已暂停") : terminal ? (STATUS_CN[state.session.status] || I18n.t("已结束"))
       : v.pending.length ? I18n.t("模型正在生成") : I18n.t("任务执行中");
     const routes = (v.task?.routes || []).filter(r => r.status === "running");
     const note = routes.map(r => r.note).filter(Boolean).join("；");
-    const facts = v.business.facts || [], gaps = v.business.gaps || v.business.unknowns || [];
-    const evidenceCount = v.evidence.length || v.business.observed_endpoints || 0;
-    const vulnCount = state.vulns?.total ?? state.vulns?.items?.length ?? 0;
-    const assets = state.layers?.asset || 0;
-    const hasFindings = evidenceCount || vulnCount || assets || facts.length || gaps.length || v.business.coverage;
     const cost = v.cache.priced_calls ? `¥${Number(v.cache.estimated_cost_cny_min).toFixed(4)}${v.cache.estimated_cost_cny_max > v.cache.estimated_cost_cny_min ? `–¥${Number(v.cache.estimated_cost_cny_max).toFixed(4)}` : ""}` : "";
-    const taskNotes = t => [...new Set((t.routes || []).map(r => r.note?.trim()).filter(Boolean))].join("；");
-    const seen = new Set([note, ...tasks.map(taskNotes)].filter(Boolean));
-    const recent = v.recent.filter(e => {
-      const text = resultSummary(e.detail || {});
-      if (seen.has(text)) return false;
-      seen.add(text); return true;
-    });
     const signature = JSON.stringify([current, active, note, v.tokens, v.callCount, v.recentTokens,
-      v.cache, v.evidence, assets, evidenceCount, vulnCount, v.business, v.usage.per_model_tokens, v.failed, v.recent, tasks, v.pending, latest?.ts,
+      v.cache, v.usage.per_model_tokens, v.pending, latest?.ts,
       Math.floor(Date.now() / 60000)]);
     if (box.dataset.signature === signature) return;
     const opened = new Set([...box.querySelectorAll("details[open]")].map(x => x.dataset.section));
@@ -110,28 +97,8 @@ const SessionObserver = (() => {
           const n = usageFor(e, state), d = e.detail || {};
           return I18n.html`<div class="obs-call"><span>${esc(modelDisplayName(d.model_key || d.model || I18n.t("模型"), d.provider_ref))}</span><b>${n === null ? I18n.t("未保留单次用量") : `${number(n)} token`}</b><small>${esc(names[d.task_type] || d.task_type || I18n.t("历史调用未记录用途"))} · ${(Number(d.latency_ms || 0) / 1000).toFixed(1)} 秒${d.first_delta_ms == null ? "" : I18n.t` · 首次响应 ${(d.first_delta_ms / 1000).toFixed(1)} 秒`} · 缓存 ${typeof d.cached_input_tokens === "number" ? number(d.cached_input_tokens) : I18n.t("未提供")}${typeof d.reused_prefix_bytes === "number" ? I18n.t` · 与前次重复前缀 ${number(d.reused_prefix_bytes)} 字节（本地比较）` : ""}</small></div>`;
         }).join("") || I18n.html('<p>尚无已返回的模型调用事件</p>')}</details></details></section>
-      ${hasFindings ? I18n.html`<details class="obs-section obs-details" data-section="findings"><summary>发现与记录 <span>${[vulnCount ? I18n.t`${number(vulnCount)} 个漏洞` : "", evidenceCount ? I18n.t`${number(evidenceCount)} 条证据` : "", assets ? I18n.t`${number(assets)} 条资产` : ""].filter(Boolean).join(" · ")}</span></summary>
-        <div class="obs-counts">${evidenceCount ? I18n.html`<span><b>${number(evidenceCount)}</b> 接口 / 页面</span>` : ""}
-        ${vulnCount ? I18n.html`<span><b>${number(vulnCount)}</b> 漏洞</span>` : ""}${assets ? I18n.html`<span><b>${number(assets)}</b> 资产</span>` : ""}</div>
-        ${v.business.coverage ? `<p>${esc(v.business.coverage)}</p>` : ""}
-        ${v.evidence.length ? I18n.html`<details data-section="evidence"><summary>接口与页面 · ${number(v.evidence.length)}</summary>${v.evidence.map(e => `<div class="obs-evidence"><strong>${esc(e.method || "GET")} <span>${esc(e.status_code ?? I18n.t("未记录状态"))}</span></strong><code>${esc(e.url || "")}</code><p>${esc(e.note || "")}</p></div>`).join("")}</details>` : ""}
-        ${facts.length ? I18n.html`<details data-section="facts"><summary>已知事实 · ${facts.length}</summary>${facts.map(f => `<p>${esc(typeof f === "string" ? f : f.statement || f.note || "")}</p>`).join("")}</details>` : ""}
-        ${gaps.length ? I18n.html`<details data-section="unknowns"><summary>待补信息 · ${gaps.length}</summary>${gaps.map(x => `<p>${esc(typeof x === "string" ? x : x.statement || x.note || JSON.stringify(x))}</p>`).join("")}</details>` : ""}</details>` : ""}
-      ${tasks.length || recent.length || v.failed ? I18n.html`<details class="obs-section obs-details" data-section="execution"><summary>执行记录 <span>${!terminal && running.length ? I18n.t`${running.length} 个任务进行中` : tasks.length ? I18n.t`${tasks.length} 个任务` : I18n.t("最近进展")}</span></summary>
-        ${tasks.map(t => `<div class="obs-task"><strong>${esc(TASK_CN[t.task_type] || t.agent_type)}</strong><span>${esc(({running:I18n.t("执行中"),done:I18n.t("已完成"),failed:I18n.t("失败"),cancelled:I18n.t("已撤销"),pruned:I18n.t("已剪枝")})[t.status] || t.status)}</span>${taskNotes(t) ? `<p>${esc(taskNotes(t))}</p>` : ""}</div>`).join("")}
-        ${v.failed ? I18n.html`<button type="button" class="btn sm obs-errors">查看失败原因（${v.failed}）</button>` : ''}
-        ${recent.map(e => `<div class="obs-recent ${e.detail?.ok === false ? "bad" : ""}"><small>${esc(actorName(e.actor))}</small><p>${esc(resultSummary(e.detail || {}))}</p></div>`).join("")}</details>` : ""}`;
+      `;
     for (const el of box.querySelectorAll("details")) if (opened.has(el.dataset.section)) el.open = true;
-    const errors = box.querySelector(".obs-errors");
-    if (errors) errors.onclick = () => {
-      const card = document.querySelector(".tl-act:has(.st.n)");
-      if (card) { card.classList.add("open"); card.querySelector("button.hd").setAttribute("aria-expanded", "true"); card.scrollIntoView({block:"center"}); }
-    };
-    for (const row of document.querySelectorAll(".tl-model[data-call-ts]")) {
-      const e = v.calls.find(x => x.ts === row.dataset.callTs);
-      const n = e && usageFor(e, state);
-      if (n != null) row.querySelector(".model-tokens").textContent = `${number(n)} token`;
-    }
     for (const row of document.querySelectorAll(".tl[data-event-ts]")) {
       const clock = row.querySelector("time.t");
       if (clock) clock.textContent = evElapsed(row.dataset.eventTs);

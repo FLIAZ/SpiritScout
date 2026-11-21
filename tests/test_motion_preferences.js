@@ -2,7 +2,7 @@
 const assert = require("node:assert/strict"), fs = require("node:fs"), path = require("node:path"), vm = require("node:vm");
 const source = fs.readFileSync(path.join(__dirname, "../src/spiritscout/web/static/js/motion.js"), "utf8");
 
-function fixture(stored = null, {readFails = false, writeFails = false, reduced = false} = {}) {
+function fixture(stored = null, {readFails = false, writeFails = false, reduced = false, withoutControls = false} = {}) {
   const nodes = new Map(), writes = [], animations = [], windowEvents = {}, documentEvents = {};
   const make = () => ({dataset: {}, textContent: "", hidden: false, handlers: {},
     setAttribute(key, value) { this[key] = value; },
@@ -23,7 +23,7 @@ function fixture(stored = null, {readFails = false, writeFails = false, reduced 
     setItem(key, value) { if (writeFails) throw Error("full"); writes.push([key, value]); stored = value; },
   };
   const media = {matches: reduced, addEventListener(_name, fn) { this.changed = fn; }};
-  const doc = {documentElement: root, hidden: false, getElementById: node,
+  const doc = {documentElement: root, hidden: false, getElementById: id => withoutControls ? null : node(id),
     addEventListener: (name, fn) => { documentEvents[name] = fn; }};
   const context = {document: doc, window: {localStorage: storage, matchMedia: () => media,
     addEventListener: (name, fn) => { windowEvents[name] = fn; }},
@@ -80,4 +80,11 @@ assert.equal(unavailable.root.dataset.motion, "auto");
 unavailable.choose("quick");
 assert.equal(unavailable.root.dataset.motion, "quick", "存储不可用也立即应用选择");
 assert.match(unavailable.node("motion-save-note").textContent, /暂时无法保存/);
+const login = fixture("soft", {withoutControls: true});
+assert.equal(login.root.dataset.motion, "soft", "登录页没有设置控件也使用已保存的偏好");
+login.otherTab("off"); assert.equal(login.root.dataset.motion, "off");
+login.media.matches = true; login.media.changed();
+login.visibility(true); assert.equal(login.root["data-page-hidden"], true);
+assert.equal(login.animations.length, 0, "没有控件的页面不创建预览或写回设置");
+assert.equal(login.writes.length, 0);
 console.log("motion preferences: persistence, invalid settings, preview cancellation, reduced motion, visibility and cross-tab sync passed");

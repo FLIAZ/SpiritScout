@@ -63,6 +63,8 @@ spiritscout = [
     "web/static/*.html",
     "web/static/js/*.js",
     "web/static/css/*.css",
+    "web/static/app/*.js",
+    "web/static/app/*.css",
     "knowledge/data/*.json",
     "awdp/data/*.json",
     "agents/report/templates/*.j2",

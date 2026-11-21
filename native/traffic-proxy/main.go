@@ -30,6 +30,8 @@ import (
 )
 
 const bodyLimit = 32 << 20
+const proxyErrorHeader = "X-SpiritScout-Proxy-Error"
+const proxyTimeoutHeader = "X-SpiritScout-Proxy-Timeout"
 
 type config struct{ Root, Secret, Upstream string }
 type bodyInfo struct {
@@ -307,9 +309,17 @@ func (e *engine) forward(w http.ResponseWriter, r *http.Request, user, protocol 
 	complete := false
 	if err != nil {
 		meta["error"] = "UpstreamRequestError"
+		w.Header().Set(proxyErrorHeader, "UpstreamRequestError")
+		var networkError net.Error
+		if errors.As(err, &networkError) && networkError.Timeout() {
+			w.Header().Set(proxyTimeoutHeader, "true")
+		}
 		http.Error(w, "Upstream request failed", 502)
 	} else {
 		defer response.Body.Close()
+		// 该标记仅由本代理生成，目标响应不能冒充本地传输故障。
+		response.Header.Del(proxyErrorHeader)
+		response.Header.Del(proxyTimeoutHeader)
 		meta["status"] = response.StatusCode
 		meta["response_headers"] = headers(response.Header, "")
 		if response.StatusCode == 101 && upgrade {

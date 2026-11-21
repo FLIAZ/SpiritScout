@@ -82,10 +82,16 @@ const key=(key,extra={})=>({key,preventDefault(){this.prevented=true;},...extra}
   input.value='/pause';await ctx.compSend();assert.equal(s.paused,true);
   input.value='/resume';await ctx.compSend();assert.equal(s.paused,false);
   input.value='/model';await ctx.compSend();assert.equal($('#comp-model').clicked,true);
-  input.value='/files';await ctx.compSend();assert.equal($('#s-tabs [data-tab="deliverables"]').clicked,true);
-  input.value='/report';await ctx.compSend();assert.equal($('#s-tabs [data-tab="report"]').clicked,true);
+  input.value='/files';await ctx.compSend();assert.equal($('[data-tab="deliverables"]').clicked,true);
+  input.value='/report';await ctx.compSend();assert.equal($('[data-tab="report"]').clicked,true);
+  s.mode='src';
+  input.value='/report';await ctx.compSend();assert.equal($('[data-tab="vulns"]').clicked,true);
   input.value='//compact';await ctx.compSend();assert.equal(requests.at(-1).body.content,'/compact');
   input.value='/tmp/file.txt';await ctx.compSend();assert.equal(requests.at(-1).body.content,'/tmp/file.txt');
+  s.phase='queued';input.value='排队期间的消息';await ctx.compSend();
+  assert.equal(requests.at(-1).body.content,'排队期间的消息');
+  assert.equal(toasts.at(-1)[0],'消息已保存，会话仍在等待调度。');
+  assert.equal(input.value,'');s.phase='executing';
   input.value='/compact';delay=true;const pending=ctx.compSend();
   await ctx.compSend();assert.equal(requests.at(-1).url,'/api/sessions/a/compact');
   S.cur='b';commands.reset();input.value='新会话草稿';resolve();await pending;

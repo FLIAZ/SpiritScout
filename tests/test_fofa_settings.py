@@ -22,6 +22,14 @@ class FofaSettingsTests(unittest.TestCase):
             with TestClient(app, base_url="http://127.0.0.1") as client:
                 initial = client.get(endpoint).json()
                 self.assertFalse(initial["key_configured"])
+                self.assertEqual(
+                    initial["scope_policy"]["explicit_targets"],
+                    "closed_scope_no_domain_expansion",
+                )
+                self.assertEqual(
+                    initial["scope_policy"]["organization_queries"],
+                    "only_without_explicit_network_targets",
+                )
                 response = client.put(endpoint, json={
                     "email": email, "api_key_value": secret,
                     "enabled": True, "expected_version": 0,

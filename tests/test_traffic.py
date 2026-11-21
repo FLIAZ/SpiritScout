@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -71,7 +72,9 @@ class TrafficTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_real_request_redaction_and_context_without_mutating_request(self):
         invocation = current_invocation.set(InvocationContext("inv-fixture", "digest"))
-        scope = current_execution_scope.set(ExecutionScope(agent_id="web-1", task_id="task-1", tool_call_id="call-1"))
+        scope = current_execution_scope.set(ExecutionScope(
+            agent_id="web-1", task_id="task-1", tool_call_id="call-1",
+            identity_id="account-a"))
         try:
             result = await self.fetch("/?token=query-secret&empty=", method="POST",
                 headers={"Authorization": "Bearer header-secret", "Cookie": "session=cookie-secret",
@@ -93,8 +96,66 @@ class TrafficTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("value", row["request_body"]["text"])
         self.assertEqual((row["agent_id"], row["task_id"], row["invocation_id"], row["tool_call_id"]),
                          ("web-1", "task-1", "inv-fixture", "call-1"))
+        self.assertEqual(row["identity_id"], "account-a")
         self.assertTrue(row["response_complete"])
         self.assertEqual(recorder.summary(self.root)["total"], 1)
+
+    async def test_old_readonly_database_projects_missing_identity_column(self):
+        traffic = self.root / "traffic"
+        traffic.mkdir()
+        conn = sqlite3.connect(traffic / "records.db")
+        conn.execute("""CREATE TABLE exchanges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, captured_at REAL NOT NULL,
+            method TEXT NOT NULL, url TEXT NOT NULL, host TEXT NOT NULL,
+            status INTEGER, error TEXT NOT NULL, duration_ms REAL NOT NULL,
+            request_bytes INTEGER NOT NULL, response_bytes INTEGER NOT NULL,
+            agent_id TEXT NOT NULL, task_id TEXT NOT NULL, invocation_id TEXT NOT NULL,
+            detail TEXT NOT NULL)""")
+        conn.execute("""INSERT INTO exchanges
+            (captured_at,method,url,host,status,error,duration_ms,request_bytes,response_bytes,
+             agent_id,task_id,invocation_id,detail) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (time.time(), "GET", "https://fixture.invalid/old", "fixture.invalid", 200,
+             "", 1.0, 0, 2, "", "", "", json.dumps({"response_complete": True})))
+        conn.commit()
+        conn.close()
+
+        item = recorder.page(self.root)["items"][0]
+        detail = recorder.detail(self.root, 1)
+
+        self.assertEqual(item["identity_id"], "")
+        self.assertEqual(detail["identity_id"], "")
+
+    async def test_boundary_fixture_requires_same_readonly_resource_and_two_identities(self):
+        async def capture(identity: str, path: str, payload: dict):
+            token = current_execution_scope.set(ExecutionScope(identity_id=identity))
+            try:
+                request = httpx.Request("GET", "https://fixture.invalid" + path)
+                content = json.dumps(payload).encode()
+                response = httpx.Response(200, headers={"content-type": "application/json"})
+                await recorder.record_http(
+                    str(self.root), request, response, started=time.perf_counter(),
+                    content=content, complete=True)
+            finally:
+                current_execution_scope.reset(token)
+
+        await capture("account-a", "/api/orders/42", {"id": 42, "owner": "a"})
+        await capture("account-b", "/api/orders/42", {"id": 42, "owner": "a"})
+        await capture("account-b", "/api/orders/99", {"id": 99, "owner": "b"})
+
+        fixtures = recorder.boundary_fixtures(
+            self.root, "https://fixture.invalid/api/orders/42")
+        wrong_path = recorder.boundary_fixtures(
+            self.root, "https://fixture.invalid/api/orders/99")
+
+        self.assertEqual(len(fixtures), 1)
+        self.assertEqual(fixtures[0]["method"], "GET")
+        self.assertEqual(len({item["identity_ref"] for item in fixtures[0]["records"]}), 2)
+        self.assertEqual({item["status"] for item in fixtures[0]["records"]}, {200})
+        self.assertEqual(wrong_path, [])
+        serialized = json.dumps(fixtures)
+        self.assertNotIn("account-a", serialized)
+        self.assertNotIn("account-b", serialized)
+        self.assertNotIn("owner\": \"a", serialized)
 
     async def test_redirect_each_hop_once_and_capture_cap_does_not_change_download(self):
         self.assertTrue((await self.fetch("/redirect")).ok)

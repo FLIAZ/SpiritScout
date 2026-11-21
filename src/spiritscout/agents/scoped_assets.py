@@ -27,7 +27,7 @@ def _within(value: str, scope: Scope) -> bool:
             if any(address in ipaddress.ip_network(cidr, strict=False) for cidr in scope.allowed_cidrs):
                 return True
         elif any(host == _host(domain) if not domain.startswith('*.') else
-                 host == _host(domain[2:]) or host.endswith('.' + _host(domain[2:]))
+                 host.endswith('.' + _host(domain[2:]))
                  for domain in scope.allowed_domains):
             return True
         if parsed.scheme not in {'http', 'https'}:
@@ -66,6 +66,23 @@ class ScopedAssetPublisher:
                 return None
         except ValueError:
             return None
-        if not _within(asset.value, self.authorized) or not _within(asset.value, self.delegated):
+        status = self._status(asset.value)
+        if not _within(asset.value, self.delegated) or status == "blocked":
             return None
+        asset.scope_status = status
+        asset.scope_reason = "显式项目范围" if status == "allowed_test" else "组织归属候选待核验"
         return self.convergence.merge_asset(asset, AgentType.SCANNER)
+
+    def _status(self, value: str) -> str:
+        if _within(value, self.authorized):
+            return "allowed_test"
+        if self.authorized.scope_mode != "explicit":
+            try:
+                host = _host(urlsplit(value if "://" in value else "//" + value).hostname or "")
+            except (UnicodeError, ValueError):
+                host = ""
+            if host and any(host == _host(pattern) or (pattern.startswith("*.")
+                                                       and host.endswith("." + _host(pattern[2:])))
+                           for pattern in self.authorized.organization_domains):
+                return "candidate_only"
+        return "blocked"

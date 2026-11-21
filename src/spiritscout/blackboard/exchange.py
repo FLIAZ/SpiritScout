@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Any
 
-from spiritscout.blackboard import exploration
+from spiritscout.blackboard import collaboration, exploration
 from spiritscout.core.exceptions import VersionConflict
 from spiritscout.core.models import AgentType, BlackboardLayer
 
@@ -17,7 +17,7 @@ GUIDANCE = ("用户规则和共享事实保存在黑板。blackboard_ref 是版�
 SCHEMAS = [
     {"type": "function", "function": {"name": "blackboard_read", "description": "按引用读取规则/事实；省略 record_id 列出元数据目录。",
      "parameters": {"type": "object", "properties": {
-         "layer": {"type": "string", "enum": [x.value for x in BlackboardLayer]},
+         "layer": {"type": "string", "enum": [x.value for x in BlackboardLayer if x != BlackboardLayer.TASK_REPORT]},
          "record_id": {"type": "string"}, "projection_digest": {"type": "string", "description": "分段读取时沿用上页摘要，避免拼接来源状态不同的内容"}, "version": {"type": "integer", "minimum": 1}, "offset": {"type": "integer", "minimum": 0},
          "limit": {"type": "integer", "minimum": 1, "maximum": 12000}}, "required": ["layer"]}}},
     {"type": "function", "function": {"name": "blackboard_write", "description": "发布有依据的产出事实，保留来源；不写执行步骤或用户规则。",
@@ -32,6 +32,9 @@ SCHEMAS = [
 NAMES = {s["function"]["name"] for s in SCHEMAS}
 SCHEMAS.extend(exploration.SCHEMAS)
 NAMES.update(exploration.NAMES)
+SCHEMAS.extend(collaboration.SCHEMAS)
+NAMES.update(collaboration.NAMES)
+GUIDANCE += "分工和接力用 team_read/team_message，按任务ID通信；新任务先查看已有分工和未读消息，按引用读取证据后协商复查。"
 GUIDANCE += exploration.GUIDANCE
 
 MEMORY_GUIDANCE = (
@@ -123,6 +126,16 @@ def project_rules(bb: Any, value: Any) -> Any:
             else:
                 digest = hashlib.sha256(json.dumps(item, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:24]
                 out[key] = store_rules(bb, f"rules-{digest}", item)
+        elif key == "project_context" and isinstance(item, dict):
+            out[key] = {**item}
+            description = item.get("description")
+            if isinstance(description, str) and description:
+                digest = hashlib.sha256(description.encode()).hexdigest()[:24]
+                record_id = f"project-context-{digest}"
+                data = {"kind": "project_description", "content": description}
+                if bb.read(BlackboardLayer.TARGET_AUTH, record_id) != data:
+                    bb.write(BlackboardLayer.TARGET_AUTH, record_id, data, updated_by="project-context")
+                out[key]["description"] = reference(bb, BlackboardLayer.TARGET_AUTH, record_id)
         elif key == "project_memory" and isinstance(item, dict):
             out[key] = project_rules(bb, {**item, "project_rules": item.get("description", "")})
             out[key].pop("description", None)
@@ -201,6 +214,9 @@ def execute(bb: Any, name: str, args: dict[str, Any], *, actor: str,
             raise ValueError("黑板工具参数必须为对象")
         if bb is None:
             raise ValueError("当前会话没有黑板")
+        if name in collaboration.NAMES:
+            return collaboration.execute(bb, name, args, actor=actor, agent_type=agent_type,
+                                         source=source or {})
         if name in exploration.NAMES:
             return exploration.execute(bb, name, args, actor=actor, agent_type=agent_type, source=source)
         if name == "blackboard_read":

@@ -12,10 +12,44 @@ from spiritscout.config.settings import ModelEntry, SystemConfig, WorkspaceConfi
 from spiritscout.core.audit import NullAuditLogger
 from spiritscout.core.models import RunMode
 from spiritscout.launch import LaunchRequest, prepare_launch
+from spiritscout.web.api_schemas import SessionCreatePayload
 from spiritscout.web.sessions import Session, SessionManager, _llm_route_intent
 
 
 class SelectedModeTests(unittest.IsolatedAsyncioTestCase):
+    def test_competition_writeup_defaults_and_plan_restore(self) -> None:
+        self.assertFalse(SessionCreatePayload(mode='competition').generate_wp)
+        with self.assertRaises(ValueError):
+            SessionCreatePayload(mode='competition', generate_wp='true')
+        for enabled in (False, True):
+            with self.subTest(generate_wp=enabled), tempfile.TemporaryDirectory() as tmp:
+                payload = SessionCreatePayload(mode='competition', generate_wp=enabled)
+                plan = prepare_launch(LaunchRequest(mode=RunMode.COMPETITION,
+                    mission='持续解题', generate_wp=payload.generate_wp))
+                self.assertEqual(plan.generate_wp, enabled)
+                root = Path(tmp)
+                manager = SessionManager(SystemConfig(workspace=WorkspaceConfig(root=tmp)), [])
+                session = Session(session_id='wp-option', mode='competition', target=plan.target,
+                    workspace=root, plan=plan,
+                    launch_request={'mode': 'competition', 'mission': plan.mission,
+                                    'generate_wp': enabled},
+                    execution_plan=manager._snapshot_plan(plan))
+                self.assertEqual(manager._rebuild_plan(session).generate_wp, enabled)
+                session.execution_plan = {}
+                self.assertEqual(manager._rebuild_plan(session).generate_wp, enabled)
+                session.execution_plan = manager._snapshot_plan(plan)
+                del session.execution_plan['generate_wp']
+                self.assertFalse(manager._rebuild_plan(session).generate_wp,
+                                 'old snapshots keep the default summary behavior')
+
+    def test_src_asset_strategy_is_strict_and_defaults_to_edge_first(self) -> None:
+        self.assertEqual(SessionCreatePayload(mode="src").asset_strategy, "edge_first")
+        self.assertEqual(
+            SessionCreatePayload(mode="src", asset_strategy="core_first").asset_strategy,
+            "core_first")
+        with self.assertRaises(ValueError):
+            SessionCreatePayload(mode="src", asset_strategy="fastest")
+
     def test_explicit_competition_needs_no_yaml_and_ignores_mission_mode_words(self) -> None:
         plan = prepare_launch(LaunchRequest(
             mode=RunMode.COMPETITION, contest_type='jeopardy',
@@ -39,15 +73,15 @@ class SelectedModeTests(unittest.IsolatedAsyncioTestCase):
             cfg.audit_log_path = str(root / 'audit.jsonl')
             models = [ModelEntry(model='test-model')]
             manager = SessionManager(cfg, models)
-            plan = prepare_launch(LaunchRequest(mode=RunMode.COMPETITION,
+            plan = prepare_launch(LaunchRequest(mode=RunMode.COMPETITION, generate_wp=True,
                 contest_type='jeopardy', mission='CTF 靶场 http://contest.test'))
             session = Session(session_id='sess-selected', mode='competition',
                 target=plan.target, workspace=root, launch_request={
                     'mode': 'competition', 'mode_auto': False,
                     'contest_type': 'jeopardy', 'mission': plan.mission})
-            with patch('spiritscout.web.sessions._llm_route_mode', new_callable=AsyncMock) as route, \
-                 patch('spiritscout.web.sessions._llm_route_intent', new_callable=AsyncMock) as intent, \
-                 patch('spiritscout.web.sessions._llm_extract_platform', new=AsyncMock(return_value=None)), \
+            with patch('spiritscout.web.session_execution._llm_route_mode', new_callable=AsyncMock) as route, \
+                 patch('spiritscout.web.session_execution._llm_route_intent', new_callable=AsyncMock) as intent, \
+                 patch('spiritscout.web.session_execution._llm_extract_platform', new=AsyncMock(return_value=None)), \
                  patch('spiritscout.runtime.run_competition_engagement', new=AsyncMock(
                      return_value=SimpleNamespace(run_summary={}, verify_stats={},
                          flag_stats={}, report_path=''))) as runtime:
@@ -55,6 +89,7 @@ class SelectedModeTests(unittest.IsolatedAsyncioTestCase):
                 route.assert_not_awaited()
                 intent.assert_not_awaited()
                 runtime.assert_awaited_once()
+                self.assertTrue(runtime.await_args.kwargs["generate_wp"])
             self.assertEqual(session.mode, 'competition')
             self.assertEqual(session.status, 'completed')
 
@@ -72,9 +107,9 @@ class SelectedModeTests(unittest.IsolatedAsyncioTestCase):
                                                  'mission': mission}, plan=plan,
                 dialogue_history=[{'role': 'user', 'content': mission},
                                   {'role': 'user', 'content': '继续'}])
-            with patch('spiritscout.web.sessions._llm_route_mode', new_callable=AsyncMock) as route, \
-                 patch('spiritscout.web.sessions._llm_route_intent', new=AsyncMock(return_value='task')) as intent, \
-                 patch('spiritscout.web.sessions._llm_extract_platform', new=AsyncMock(return_value=None)), \
+            with patch('spiritscout.web.session_execution._llm_route_mode', new_callable=AsyncMock) as route, \
+                 patch('spiritscout.web.session_execution._llm_route_intent', new=AsyncMock(return_value='task')) as intent, \
+                 patch('spiritscout.web.session_execution._llm_extract_platform', new=AsyncMock(return_value=None)), \
                  patch('spiritscout.runtime.run_engagement', new=AsyncMock(side_effect=AssertionError('不得切换 SRC'))), \
                  patch('spiritscout.runtime.run_ctf_engagement', new=AsyncMock(
                      return_value=SimpleNamespace(run_summary={}, verify_stats={},
@@ -90,7 +125,7 @@ class SelectedModeTests(unittest.IsolatedAsyncioTestCase):
             'intent': 'dialogue', 'mode': 'src', 'contest_type': 'awd'}))))
         with tempfile.TemporaryDirectory() as tmp:
             cfg = SystemConfig(workspace=WorkspaceConfig(root=tmp))
-            with patch('spiritscout.web.sessions._conversation_gateway', return_value=gateway):
+            with patch('spiritscout.web.session_assistant._conversation_gateway', return_value=gateway):
                 intent = await _llm_route_intent(cfg, [ModelEntry(model='test-model')],
                     '解释一下结果', NullAuditLogger())
         self.assertEqual(intent, 'dialogue')

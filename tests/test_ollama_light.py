@@ -120,7 +120,7 @@ class OllamaBackendTests(unittest.IsolatedAsyncioTestCase):
 class OllamaProfileTests(unittest.TestCase):
     def test_light_profile_is_independent_and_normal_defaults_unchanged(self) -> None:
         profile = load_system_config('configs/system.ollama-light.example.yaml')
-        self.assertEqual(profile.web.max_concurrent_sessions, 1)
+        self.assertIsNone(profile.web.max_concurrent_sessions)
         self.assertFalse(profile.web.auto_name_sessions)
         self.assertFalse(profile.gateway.automatic_platform_extraction)
         self.assertFalse(profile.experience.auto_distill)

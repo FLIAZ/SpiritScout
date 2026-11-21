@@ -35,6 +35,58 @@ class CTFAutonomyTests(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn(step, common + role)
                 self.assertEqual(display.public_view()['workflow'], list(display.workflow))
 
+    async def test_default_routes_have_no_synthetic_angle_and_keep_progress(self) -> None:
+        agent = object.__new__(CTFBaseAgent)
+        agent.agent_type = AgentType.CTF_WEB
+        agent.direction = 'web'
+        agent.max_routes = 2
+        agent.flag_manager = None
+        agent.ctx = SimpleNamespace(mode=RunMode.CTF, knowledge=None, journal=None,
+                                    blackboard=SimpleNamespace(read=Mock(return_value=None)))
+        agent._world_snapshot = Mock(return_value={})
+        agent._shared_conclusions = Mock(return_value=['已确认文件读取入口'])
+        agent._shared_notes = Mock(return_value=['已排除目录遍历假设'])
+        agent._shared_site = Mock(return_value={'http://fixture.test/read': '基线响应已保存'})
+        agent._peer_flags = Mock(return_value=[])
+        agent._solver_system_prompt = Mock(return_value='stable-system-prefix')
+        agent._llm_propose_angles = AsyncMock(return_value=[])
+        goal = '复用现有证据，继续验证读取限制'
+        for followup in (False, True):
+            for max_routes in (None, 1, 2):
+                with self.subTest(followup=followup, max_routes=max_routes):
+                    task = Task(task_id='route-task', task_type='ctf_solve', target='http://fixture.test',
+                                agent_type=AgentType.CTF_WEB, max_routes=max_routes,
+                                payload={'challenge': {'id': 'c1', 'description': '附件题面'},
+                                         'node_title': goal, 'mission': goal, 'followup_goal': followup})
+                    plans = await agent.plan_routes(task)
+                    self.assertEqual(len(plans), 2 if max_routes == 2 else 1)
+                    for plan in agent.route_templates(task) + plans:
+                        self.assertEqual(plan.strategy, '')
+                        self.assertEqual(plan.steps, [{'action': 'investigate'}])
+                        state = {'seed': []}
+                        agent._seed_messages(task, SimpleNamespace(route_id='r', name=plan.name), plan, state)
+                        self.assertEqual(state['messages'][0]['content'], 'stable-system-prefix')
+                        body = state['messages'][1]['content']
+                        self.assertNotIn('## 本路线调查角度', body)
+                        for fact in ('附件题面', goal, '已确认文件读取入口', '已排除目录遍历假设',
+                                     'http://fixture.test/read', '基线响应已保存'):
+                            self.assertIn(fact, body)
+        self.assertEqual(agent._llm_propose_angles.await_count, 2)
+
+    async def test_explicit_parallel_angles_are_preserved(self) -> None:
+        agent = object.__new__(CTFBaseAgent)
+        agent.max_routes = 2
+        agent.ctx = SimpleNamespace(knowledge=None)
+        angles = [{'name': 'read', 'angle': '复核已有文件读取证据'},
+                  {'name': 'decode', 'angle': '独立分析附件编码'}]
+        agent._llm_propose_angles = AsyncMock(return_value=angles)
+        task = Task(task_id='parallel-task', task_type='ctf_solve', target='fixture',
+                    agent_type=AgentType.CTF_WEB, max_routes=2)
+        plans = await agent.plan_routes(task)
+        self.assertEqual([(plan.name, plan.strategy) for plan in plans],
+                         [(angle['name'], angle['angle']) for angle in angles])
+        agent._llm_propose_angles.assert_awaited_once_with(task, 2)
+
     async def test_report_is_delivered_without_waiting_for_experience_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

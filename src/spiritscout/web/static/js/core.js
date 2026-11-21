@@ -8,6 +8,18 @@ const S = { view: "home", cur: null, tab: "chat", sessions: [], state: null,
             projects: [] };
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
+function findingCategoryLabel(entry) {
+  return (I18n.locale === "en" && entry.label_en) || entry.label || "";
+}
+
+function findingCategoryButtons(counts, selected, countField = "count") {
+  const total = counts.reduce((sum, row) => sum + Number(row[countField] || 0), 0);
+  if (!total && !selected) return "";
+  const entries = [{taxonomy_id: "", label: I18n.t("全部"), [countField]: total},
+    ...counts.filter(row => row[countField] || row.taxonomy_id === selected)];
+  return entries.map(row => `<button class="btn sm" type="button" data-finding-category="${esc(row.taxonomy_id)}" aria-pressed="${row.taxonomy_id === selected}">${esc(findingCategoryLabel(row))}(${Number(row[countField] || 0)})</button>`).join("");
+}
+
 // 内部模型标识用于路由和统计分组；展示时独立还原，不修改原始主键。
 function modelDisplayName(reference, provider = "") {
   const value = String(reference ?? "");
@@ -135,9 +147,9 @@ $("#btn-logout").onclick = async () => {
 /* ================= 视图切换 ================= */
 const VIEWS = { home: "#view-home", session: "#view-session", dash: "#view-dash",
                 proxy: '#view-proxy',
-                agents: "#view-agents", models: "#view-models", mcp:"#view-mcp", skill:"#view-skill", 'browser-accounts': '#view-browser-accounts', projects:"#view-projects", exp:"#view-exp", traffic:"#view-traffic", schedules:"#view-schedules" };
+                agents: "#view-agents", models: "#view-models", 'asset-intelligence': '#view-asset-intelligence', 'asset-collection': '#view-asset-collection', mcp:"#view-mcp", skill:"#view-skill", 'browser-accounts': '#view-browser-accounts', projects:"#view-projects", exp:"#view-exp", traffic:"#view-traffic", schedules:"#view-schedules" };
 function show(view) {
-  if (typeof ConsoleSidebar !== "undefined") ConsoleSidebar.closeOnMobile();
+  if (typeof ConsoleSidebar !== "undefined") ConsoleSidebar.navigate(view);
   if (typeof ComposerCommands !== "undefined") ComposerCommands.reset();
   if(view!=="mcp" && typeof ExaSettings!=="undefined") ExaSettings.clear();
   S.view = view;
@@ -156,6 +168,9 @@ function show(view) {
   });
   if (view === "agents") loadAgents();
   if (view === "models") loadModels();
+  if (typeof AssetIntelligencePage !== "undefined") AssetIntelligencePage.navigate(view);
+  if (view === "asset-collection" && typeof AssetCollectionPage !== "undefined") AssetCollectionPage.open();
+  else if (typeof AssetCollectionPage !== "undefined") AssetCollectionPage.close();
   if (view === "dash") renderDash();
   if (view === "projects" && typeof ProjectsPage !== "undefined") ProjectsPage.open();
   else if (typeof ProjectsPage !== "undefined") ProjectsPage.close();
@@ -253,9 +268,10 @@ function renderSessions() {
   if (box.querySelector("input.rename, [data-armed]")) return;   // 正在重命名：不打断输入
   const folded = foldedFolders();
   // 轮询中用量等字段会持续变化，只比较侧栏实际显示的数据，保留 DOM、焦点和滚动位置。
-  const signature = JSON.stringify([S.cur,
+  const displayData = [S.cur,
     S.sessions.map(s => [s.session_id, s.project_id, s.status, s.title, s.target]),
-    (S.projects || []).map(p => [p.project_id, p.name]), [...folded].sort()]);
+    (S.projects || []).map(p => [p.project_id, p.name])];
+  const signature = JSON.stringify([...displayData, [...folded].sort()]);
   if (box.dataset.signature === signature) return;
   box.dataset.signature = signature;
   if (!S.sessions.length) {
@@ -273,17 +289,22 @@ function renderSessions() {
       <button class="sess-folder-head" type="button" aria-expanded="${isFolded ? "false" : "true"}" title="${action}项目：${esc(g.name)}">
         ${chev}${folder}<span class="fname">${esc(g.name)}</span>${running ? I18n.html`<span class="frun" title="有会话在运行"></span>` : ""}<span class="fcount">${g.items.length}</span>
       </button>
-      <div class="sess-folder-body">${g.items.map(sessionItemHtml).join("")}</div>
+      <div class="sess-folder-body"${isFolded ? " inert" : ""}>${g.items.map(sessionItemHtml).join("")}</div>
     </section>`;
   }).join("");
   box.querySelectorAll(".sess-folder-head").forEach(head => {
     head.onclick = () => {
       const section = head.closest(".sess-folder");
       const next = !section.classList.contains("folded");
+      const body = section.querySelector(".sess-folder-body");
+      if (next && body.contains(document.activeElement)) head.focus({preventScroll: true});
+      body.inert = next;
       section.classList.toggle("folded", next);
       head.setAttribute("aria-expanded", String(!next));
       head.title = I18n.t`${next ? I18n.t("展开") : I18n.t("折叠")}项目：${section.querySelector(".fname").textContent}`;
       foldFolder(section.dataset.folder, next);
+      // DOM 已完成这次折叠，下一次相同数据的轮询不能重建目录、打断过渡。
+      box.dataset.signature = JSON.stringify([...displayData, [...foldedFolders()].sort()]);
     };
   });
   box.querySelectorAll(".sess-item").forEach(el => {

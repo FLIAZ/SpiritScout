@@ -22,16 +22,23 @@ def reader_digest(digest: dict[str, Any]) -> dict[str, Any]:
                            if completion.get('completed') is True else '尚未在本地确认完成，无平台判定'),
         })
     technical = data.get('technical_evidence') or {}
+    evidence_ids = {row.get('invocation_id'): f'E{index}'
+                    for index, row in enumerate(technical.get('executions', []), 1)}
     for index, row in enumerate(technical.get('executions', []), 1):
         row['source_ref'] = f'E{index}'
         for key in ('invocation_id', 'task_id', 'route_id'):
             row.pop(key, None)
     for index, row in enumerate(technical.get('source_files', []), 1):
         row['source_ref'] = f'S{index}'
+    for index, row in enumerate(technical.get('analysis_notes', []), 1):
+        row['source_ref'] = f'N{index}'
     return {
         'challenges': challenges,
         'answers': [{'value': f.get('value', ''), '平台判定': (
-            '正确' if f.get('accepted') is True else '错误' if f.get('accepted') is False else '无判定')}
+            '正确' if f.get('accepted') is True else '错误' if f.get('accepted') is False else '无判定'),
+            '解答审查（草稿，以实际证据为准）': {
+                k: v for k, v in (f.get('answer_review') or {}).items() if not k.endswith('evidence_refs')},
+            '验证证据': [evidence_ids[ref] for ref in f.get('evidence_refs', []) if ref in evidence_ids]}
             for f in data.get('flags', [])],
         'working_notes': {
             '说明': '执行中的草稿与观察，仅作线索；不能当作已验证事实，也不要照抄系统状态或编排过程。',
@@ -57,6 +64,9 @@ def source_index(digest: dict[str, Any]) -> str:
     for index, row in enumerate(evidence.get('source_files', []), 1):
         entries.append(f"- **S{index}**：`{row.get('path', '')}`，从第 {row.get('start_line', 1)} 行开始"
                        + ('（节选）' if row.get('excerpt') else '（采集到文件末尾）'))
+    for index, row in enumerate(evidence.get('analysis_notes', []), 1):
+        entries.append(f"- **N{index}**：分析草稿 `{row.get('path', '')}`（需与实际证据核对）"
+                       + ('（节选）' if row.get('excerpt') else ''))
     return ('\n\n## 证据索引（供追溯）\n\n以下是原会话的定位信息，不是复现环境要求。\n\n'
             + '\n'.join(entries) + '\n') if entries else ''
 

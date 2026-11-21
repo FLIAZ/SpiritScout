@@ -49,7 +49,7 @@ class SteeringBasisTests(unittest.IsolatedAsyncioTestCase):
             {'blackboard_ref': {'layer': 'topology', 'record_id': 'proof', 'version': 1}}]}
 
     async def decide(self, item, side_effect=None):
-        digest = self.master._progress_digest(['t1'])
+        digest = self.master._progress_digest(['t1'], include_supervision=True)
         queue = asyncio.Queue()
         response = SimpleNamespace(content=json.dumps({'steering': [], 'defer_challenges': [item]}))
         async def reply(*args, **kwargs):
@@ -61,6 +61,7 @@ class SteeringBasisTests(unittest.IsolatedAsyncioTestCase):
         call.assert_awaited_once()
         self.assertTrue(call.call_args.args[1][0]['content'].startswith('稳定系统提示\nROLE: collab_judge\n'))
         self.assertNotIn('basis_refs', call.call_args.args[1][0]['content'], 'basis contract must not rewrite the stable system prefix')
+        self.assertNotIn("_supervision", str(call.call_args.args[1]), "本地去重数据不进入模型请求")
         return queue
 
     async def test_summary_can_defer_new_dispatch_but_cannot_cancel_or_release(self):

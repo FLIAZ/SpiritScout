@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import time
 from typing import Any
-from urllib.parse import urlsplit
 
 from spiritscout.agents.master.contracts import (
     TACTIC_AGENT_MAP,
@@ -22,6 +22,7 @@ from spiritscout.core.models import (
     Authorization,
     BlackboardLayer,
     RunMode,
+    TaskStatus,
 )
 
 __all__ = ["MasterAgent", "MasterContext", "MasterState", "TACTIC_AGENT_MAP"]
@@ -50,40 +51,6 @@ class MasterAgent(MasterCoordination, MasterInteraction, MasterPlanning):
     def __init__(self, ctx: MasterContext):
         self.ctx = ctx
         self.agent_id = new_id("master")
-
-    async def _start_wildcard_discovery(self, authorization: Authorization,
-                                        target: str) -> dict[str, Any] | None:
-        """显式通配符 SRC 首轮立即并行做只读资产发现。
-
-        这是用户授权形态直接表达的信息收集需求，不依赖元规划模型是否恰好
-        生成 scan_control。这里只许可 asset_discover；Nuclei 等验证工具仍须
-        后续基于具体漏洞假设由模型单独派遣。
-        """
-        control = (self.ctx.extra or {}).get("scan_controller")
-        wildcards = [
-            domain.strip().lower().rstrip(".")
-            for domain in authorization.scope.allowed_domains
-            if isinstance(domain, str) and domain.strip().startswith("*.")
-        ]
-        if (authorization.mode != RunMode.SRC or control is None or not wildcards
-                or control.forbidden or control.status != "idle"):
-            return None
-        host = (urlsplit(target).hostname or "").lower().rstrip(".")
-        selected = next(
-            (pattern for pattern in wildcards if host == pattern[2:]), wildcards[0])
-        return await control.apply({
-            "action": "dispatch",
-            "revision": control.revision,
-            "reason": "用户以通配符明确授权子域范围，首轮优先并行收集范围内资产",
-            "target": selected,
-            "goal": "发现范围内子域、存活 Web 入口与基础指纹，供后续按资产价值滚动派工",
-            "tools": ["asset_discover"],
-            "constraints": (
-                "仅做只读 DNS、证书透明度与 HTTP 基线；结果必须同时位于本次通配符授权"
-                "和派遣范围内；不运行 Nuclei、Metasploit、爆破或写入动作"),
-        }, actor=self.agent_id)
-
-    # ------------------------------------------------------------ 分段执行
 
     async def _run_segment(self, state: MasterState) -> MasterState:
         """单段顺序执行：规划→派发→汇总→复盘。
@@ -123,7 +90,6 @@ class MasterAgent(MasterCoordination, MasterInteraction, MasterPlanning):
             agent_type=AgentType.MASTER, updated_by=self.agent_id,
             dedup_key=f"auth|{authorization.auth_id}",
         )
-        await self._start_wildcard_discovery(authorization, target)
         state: MasterState = {
             "target": target,
             "round_no": 0,
@@ -136,6 +102,25 @@ class MasterAgent(MasterCoordination, MasterInteraction, MasterPlanning):
             "last_decision_event": "",
             "replan_requested": False,
         }
+        recovery = self.ctx.extra.get("execution_recovery", {}).get("checkpoint")
+        journal = getattr(self.ctx, "journal", None)
+        if recovery and journal is not None and recovery.get("target") == target:
+            checkpoint = journal.latest_checkpoint("master", "master")
+            saved = checkpoint["state"] if checkpoint is not None else None
+            if not isinstance(saved, dict) or saved.get("target") != target:
+                raise ValueError("主控接续检查点与当前会话目标不一致")
+            if type(saved.get("round_no")) is not int or not isinstance(saved.get("round_views"), list):
+                raise ValueError("主控接续检查点结构无效")
+            dag = TaskDAG.from_dict(saved["dag"])
+            for node in dag.all_nodes():
+                if node.status in {TaskStatus.PENDING, TaskStatus.DISPATCHED, TaskStatus.RUNNING}:
+                    dag.mark(node.node_id, TaskStatus.CANCELLED)
+                    node.meta["cancel_reason"] = "上一轮执行已中断；是否接续由当前用户目标与模型决定"
+            state.update(dag=dag.to_dict(), round_no=saved["round_no"],
+                         round_views=copy.deepcopy(saved["round_views"]), replan_requested=True)
+            self.ctx.audit.log("context.master_restored", self.agent_id, {
+                "round_no": state["round_no"], "nodes": len(dag.all_nodes()),
+                "checkpoint_id": checkpoint["checkpoint_id"], "replay_tools": False})
         # 用户直达通道：与派发/督导隔离，整场运行期间并行消费用户消息
         # （开工时间戳供对话通道回答「跑了多久」类问题，不依赖主循环）
         self.ctx.extra.setdefault("engagement_started_at", time.time())

@@ -324,13 +324,13 @@ class ExperienceStore:
             "insight_id": eid, "insight": text[:200]})
         return eid
 
-    def search(self, query: str, *, limit: int = 5) -> list[dict[str, Any]]:
+    def search(self, query: str, *, limit: int = 5, offset: int = 0) -> list[dict[str, Any]]:
         """关键词检索（简化版 FTS：LIKE 匹配 context + insight + tags）。"""
         q = f"%{query.strip()}%"
         rows = self._conn.execute(
             f"SELECT * FROM insights WHERE {_visible_clause(self._conn)} AND (insight LIKE ? OR context LIKE ? "
-            "OR tags LIKE ?) ORDER BY ts DESC LIMIT ?",
-            (q, q, q, limit)).fetchall()
+            "OR tags LIKE ?) ORDER BY ts DESC,insight_id LIMIT ? OFFSET ?",
+            (q, q, q, limit, max(0, offset))).fetchall()
         return _with_quality(self._conn, rows)
 
     def recent(self, *, limit: int = 10) -> list[dict[str, Any]]:

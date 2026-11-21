@@ -53,9 +53,9 @@
   color: var(--ink-2); font: inherit; font-size: 12px; cursor: pointer; }
 .notify-switch-track { display: inline-flex; align-items: center; flex-shrink: 0;
   width: 32px; height: 18px; padding: 2px; border-radius: 12px; background: var(--line-strong);
-  transition: background .16s; }
+  transition: background var(--motion-base); }
 .notify-switch-track > span { width: 14px; height: 14px; border-radius: 50%;
-  background: var(--surface); box-shadow: 0 1px 2px #0002; transition: transform .16s; }
+  background: var(--surface); box-shadow: 0 1px 2px #0002; transition: transform var(--motion-base); }
 #btn-system-notify[aria-checked="true"] .notify-switch-track { background: var(--accent); }
 #btn-system-notify[aria-checked="true"] .notify-switch-track > span { transform: translateX(14px); }
 @media (prefers-reduced-motion: reduce) { .notify-switch-track, .notify-switch-track > span { transition: none; } }

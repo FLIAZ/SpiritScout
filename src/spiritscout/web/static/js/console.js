@@ -109,7 +109,9 @@ async function compSend() {
       {method:"POST", body:JSON.stringify({content:typeof ComposerCommands !== "undefined" ? ComposerCommands.messageText(text) : text, upload_ids:delivery.uploadIds,
         message_id:delivery.messageId})});
     composerDeliveries.delete(sessionId);
-    toast(I18n.t("消息及附件已送达灵枢"));
+    const current = S.state?.session?.session_id === sessionId ? S.state.session : sess;
+    const waiting = resp.waiting_for_slot ?? (current.status === "running" && current.phase === "queued");
+    toast(waiting ? I18n.t("消息已保存，会话仍在等待调度。") : I18n.t("消息已保存，等待灵枢处理。"));
     if (S.cur === sessionId && resp.resumed) {
       startStreams(false); refreshState(); refreshSessions();
     }
@@ -157,7 +159,9 @@ function ctfTypeHintPayload(mode = $("#c-mode").value) {
 $("#c-mode").onchange = () => {
   if (typeof ProxyPoolPage !== 'undefined') ProxyPoolPage.loadSelector($('#c-mode').value);
   $("#c-ctf-challenge").hidden = $("#c-mode").value !== "ctf";
-  $("#c-mission").placeholder = $("#c-mode").value === "ctf" ? I18n.t("补充解题要求（选填），也可以在下方直接填写题目资料…") : I18n.t("输入目标地址、授权范围、题目描述或测试要求…");
+  $("#c-src-strategy").hidden = $("#c-mode").value !== "src";
+  $("#c-generate-wp-option").hidden = $("#c-mode").value !== "competition";
+  $("#c-mission").placeholder = $("#c-mode").value === "ctf" ? I18n.t("在此输入额外要求、已有思路或需要 Agent 注意的事项（选填）…") : I18n.t("输入目标地址、授权范围、题目描述或测试要求…");
   $("#c-ctf-types").hidden = $("#c-mode").value !== "ctf";
   $("#c-multiple-answers-option").hidden = $("#c-mode").value !== "ctf";
   $("#c-mode-hint").textContent = missionModeHints[$("#c-mode").value] || I18n.t("先选择任务类型，再填写目标与要求。");
@@ -249,8 +253,19 @@ async function launchMission(payload, files = [], challengeDraft = null) {
     }
     payload = { ...payload, mode };
   }
+  if (payload.mode === "competition" && payload.generate_wp === undefined) {
+    payload.generate_wp = $("#c-generate-wp").checked;
+  }
   if (payload.mode === "ctf") payload = {...ctfTypeHintPayload("ctf"), ...payload};
+  if (payload.mode === "src" && payload.asset_strategy === undefined) {
+    payload.asset_strategy = [...document.querySelectorAll('input[name="src-strategy"]')]
+      .find(input => input.checked)?.value || "edge_first";
+  }
   if (payload.mode === 'src' && payload.proxy_plan_id === undefined) payload.proxy_plan_id = $('#c-proxy-plan')?.value || 'direct';
+  if (payload.mode === "src" && window.__srcAssetSelection) {
+    const selected = window.__srcAssetSelection.targets || [];
+    if (selected.length && (!payload.project_id || payload.project_id === window.__srcAssetSelection.project_id)) payload = {...payload, asset_campaign_id: window.__srcAssetSelection.campaign_id, asset_values: selected, target: selected[0], scope: [...new Set([...(payload.scope || []), ...selected])], excluded_assets: [...new Set([...(payload.excluded_assets || []), ...(window.__srcAssetSelection.excluded || [])])]};
+  }
   $("#c-go").disabled = true;
   try {
     if (!payload.project_id) {
@@ -263,10 +278,15 @@ async function launchMission(payload, files = [], challengeDraft = null) {
     const s = await api("/api/sessions", { method: "POST", body: JSON.stringify(payload) });
     toast(files.length ? I18n.t("任务已下达，附件已交给灵枢") : I18n.t("任务已下达，灵枢开始规划"));
     $("#c-mission").value = "";
+    if (payload.asset_campaign_id === window.__srcAssetSelection?.campaign_id) window.__srcAssetSelection = null;
+    syncAssetPickerVisibility();
     if (challengeDraft) {
       for (const [key, selector] of Object.entries(ctfChallengeFields)) {
         if ($(selector).value.trim() === challengeDraft[key]) $(selector).value = "";
       }
+    }
+    if (payload.mode === "competition" && $("#c-generate-wp").checked === payload.generate_wp) {
+      $("#c-generate-wp").checked = false;
     }
     if (payload.mode === "ctf") {
       const current = ctfTypeHintPayload("ctf");
@@ -290,6 +310,76 @@ async function launchMission(payload, files = [], challengeDraft = null) {
     else toast(e.message, true);
   } finally { $("#c-go").disabled = false; }
 }
+
+function syncAssetPickerVisibility() {
+  const button = $("#c-assets-pick"), project = $("#c-project"), mode = $("#c-mode");
+  if (button) { button.hidden = mode?.value !== "src" || !project?.value; button.textContent = window.__srcAssetSelection ? I18n.t`已选 ${window.__srcAssetSelection.targets.length} 个资产（重新选择）` : I18n.t("选择已收集资产"); }
+}
+
+async function openAssetPicker(campaignId = "") {
+  const project = $("#c-project")?.value;
+  if (!project) return;
+  try {
+    const data = await api(`/api/projects/${encodeURIComponent(project)}/asset-campaigns`);
+    if ($("#c-project")?.value !== project || $("#c-mode")?.value !== "src") return;
+    const available = (data.campaigns || []).filter(c => ["completed", "completed_with_errors", "stopped", "failed"].includes(c.status) && Number(c.stats?.candidates));
+    const dlg = document.createElement("dialog"); dlg.className = "project-dlg asset-picker-dialog";
+    dlg.innerHTML = I18n.html`<h3>选择已收集资产</h3><p class="muted">先结束收集，再勾选本次测试目标。将仅附带 CSV 资产清单；SRC 按资产价值排序与测试，不重复全量收集。</p><label>收集批次<select data-batch><option value="">请选择批次</option>${available.map(c => `<option value="${esc(c.campaign_id)}">${esc((c.targets || []).join("、"))} · ${Number(c.stats?.candidates || 0)} 个资产 · ${esc(c.campaign_id)}</option>`).join("")}</select></label><div class="asset-picker-controls"><button class="btn sm" data-all>全选</button><button class="btn sm" data-none>清空选择</button><span data-count>未选择资产</span></div><p class="muted">默认勾选有 HTTP 响应或真实 DNS 解析的资产；待验证与单出口失败的候选仍保留，可按需勾选。创建行为确认本次选定范围，不自动带入关联资产。</p><div class="asset-picker-list" data-targets>请选择一个已结束的收集批次。</div><p class="pj-error" role="alert"></p><div class="dlg-ops"><button type="button" class="btn" data-cancel>取消</button><button type="button" class="btn primary" data-ok disabled>确认资产并带入会话</button></div>`;
+    document.body.append(dlg);
+    let revision = 0, batch = null, closed = false;
+    const close = () => { closed = true; revision++; dlg.close(); dlg.remove(); };
+    dlg.querySelector("[data-cancel]").onclick = close;
+    dlg.addEventListener("cancel", e => { e.preventDefault(); close(); });
+    const choices = () => [...dlg.querySelectorAll("[data-asset]:checked")];
+    const sync = () => { const count = choices().length; dlg.querySelector("[data-count]").textContent = I18n.t`已选 ${count} 个资产`; dlg.querySelector("[data-ok]").disabled = !count; };
+    dlg.querySelector("[data-all]").onclick = () => { dlg.querySelectorAll("[data-asset]").forEach(e => e.checked = true); sync(); };
+    dlg.querySelector("[data-none]").onclick = () => { dlg.querySelectorAll("[data-asset]").forEach(e => e.checked = false); sync(); };
+    const select = dlg.querySelector("[data-batch]");
+    select.onchange = async () => {
+      const stamp = ++revision; batch = null;
+      dlg.querySelector("[data-ok]").disabled = true;
+      dlg.querySelector("[data-count]").textContent = I18n.t("未选择资产");
+      dlg.querySelector("[data-targets]").textContent = I18n.t("正在读取资产…");
+      try {
+        const result = select.value ? await api(`/api/asset-campaigns/${encodeURIComponent(select.value)}/targets`) : null;
+        if (closed || stamp !== revision) return;
+        batch = result;
+        dlg.querySelector("[data-targets]").innerHTML = (result?.targets || []).map((item, i) => `<label><input type="checkbox" data-asset value="${i}" ${["http_responded", "http_verified", "dns_resolved"].includes(item.verification_status) ? "checked" : ""}><span><code>${esc(item.value)}</code>${item.title ? ` · ${esc(item.title)}` : ""}<small>${esc(item.verification_status || "待验证")}${item.http_status ? ` · HTTP ${esc(item.http_status)}` : ""} · ${esc(item.egress_name || "历史出口未知")}</small></span></label>`).join("") || I18n.html("批次暂无可选资产");
+        dlg.querySelectorAll("[data-asset]").forEach(e => e.onchange = sync); sync();
+      } catch (e) { if (!closed && stamp === revision) dlg.querySelector(".pj-error").textContent = e.message; }
+    };
+    dlg.querySelector("[data-ok]").onclick = () => {
+      if (!batch || $("#c-project")?.value !== project || $("#c-mode")?.value !== "src") { close(); return; }
+      const targets = choices().map(e => batch.targets[Number(e.value)].value);
+      if (!targets.length) return;
+      window.__srcAssetSelection = {targets, excluded: batch.excluded_assets || [], campaign_id: batch.campaign_id, project_id: project};
+      if (!$("#c-mission").value.trim()) $("#c-mission").value = "根据已收集资产和我选择的优先策略排序，对本次选定目标开展 SRC 测试，保留可复现证据。";
+      close(); homeSync(); syncAssetPickerVisibility(); toast(I18n.t`已选择 ${targets.length} 个资产，创建会话时仅附带 CSV`);
+    };
+    dlg.showModal();
+    if (campaignId && available.some(c => c.campaign_id === campaignId)) { select.value = campaignId; await select.onchange(); }
+  } catch (e) { toast(e.message, true); }
+}
+
+document.addEventListener("asset-collection:src", async e => {
+  try {
+    const {project_id, campaign_id} = e.detail;
+    show("home");
+    await ProjectsPage.loadCatalog();
+    if (S.view !== "home") return;
+    $("#c-project").value = project_id;
+    $("#c-project").dispatchEvent(new Event("change"));
+    const mode = document.querySelector('input[name="home-mode"][value="src"]');
+    if (mode) { mode.checked = true; mode.dispatchEvent(new Event("change", {bubbles: true})); }
+    $("#c-mode").value = "src"; $("#c-mode").dispatchEvent(new Event("change"));
+    if (typeof selxSync === "function") selxSync($("#c-project"));
+    await openAssetPicker(campaign_id);
+  } catch (error) { toast(error.message, true); }
+});
+
+$("#c-assets-pick")?.addEventListener("click", () => openAssetPicker());
+$("#c-project")?.addEventListener("change", () => { window.__srcAssetSelection = null; syncAssetPickerVisibility(); });
+$("#c-mode")?.addEventListener("change", () => { if ($("#c-mode").value !== "src") window.__srcAssetSelection = null; syncAssetPickerVisibility(); });
 
 /* 规则冲突即时确认：后端给出冲突清单，用户确认风险后带接受标记重发 */
 let rcPayload = null;
@@ -335,7 +425,7 @@ $("#rc-confirm").onclick = async () => {
   S.polling.start();
   api("/api/agents").then(data => { S.agents = data; }).catch(() => {});
   // 目录返回后 loadCatalog 会重新分组；无需让独立请求串行等待。
-  ProjectsPage.loadCatalog().catch(() => {});
+  ProjectsPage.loadCatalog().then(syncAssetPickerVisibility).catch(() => {});
   await refreshSessions();
   // 切换语言后回到原页面；URL 也适用于禁用本地存储的浏览器。
   const navigation = new URLSearchParams(typeof location === "undefined" ? "" : location.search);

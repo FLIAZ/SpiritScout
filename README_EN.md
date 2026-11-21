@@ -8,7 +8,7 @@ Assign tasks in your browser, let agents collaborate, and inspect their progress
 
 **[简体中文](README.md) · English**
 
-[![Version](https://img.shields.io/badge/version-v0.21.3-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11--3.14-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.22.0-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11--3.14-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
 
 [Interface preview](#interface-preview) · [Quick start](#quick-start) · [Capabilities and modes](#capabilities-and-modes) · [Architecture](#architecture) · [Deployment guide (中文)](docs/部署与配置.md) · [Contributing (中文)](CONTRIBUTING.md)
 
@@ -114,7 +114,9 @@ SRC refers to security response center / bug bounty workflows.
 | Capability | What it provides |
 | --- | --- |
 | Agent teams | A lead agent decomposes tasks; sub-agents branch into different approaches, share findings, and use models assigned by role |
-| Execution workbench | Expand tasks, approaches, and execution steps; inspect tool results and a process graph linked to audit records |
+| Execution workbench | Inspect tasks, approaches, tool results, and evidence; search loaded history, use a reading outline, and chat independently with sub-agents |
+| Asset collection | Collect, verify, and export project assets, then select targets for an SRC session |
+| Runtime visibility | Inspect host and application resources, archived background commands, and usage and outcomes by time range |
 | Projects and artifacts | Persist assets and sessions; independently reproduce SRC vulnerability candidates with the verifier agent, Jianzhen, and generate reports or write-ups |
 | Browser and tools | Connect MCP servers, Skills, and shell/Python sandboxes; SRC and CTF execution agents can run offline CyberChef recipes and reuse complete byte outputs; manage MCP and Skill cards with status groups, combined filters, and switches; SRC can reuse authenticated browser sessions and let users handle CAPTCHAs |
 | CVE intelligence | Local official CVE List snapshots, incremental updates and offline search; on-demand NVD, KEV, EPSS and OSV queries plus local Nuclei template links. Intelligence remains separate from reproduced findings. See [setup (中文)](docs/部署与配置.md#cve-情报库). |
@@ -285,6 +287,10 @@ For source development overrides, administrator recovery, reverse proxies, data 
 2. On the Teams page (编队), assign models to Lingshu and each sub-agent. Changes save automatically; you can also apply one model to all configurable roles. New assignments take effect for new tasks.
 3. Return to the home page, select SRC, CTF, or agent competition, enter the target and rules, attach any files, and click Start (开始执行).
 
+CTF categories, challenge details, and multiple-answer settings share one form. Use the task input for additional instructions or existing ideas. SRC sessions can use selected project assets and prioritize edge assets, core assets, or a balanced approach.
+
+In SRC or standard CTF sessions, open the live panel and select a sub-agent to start an independent side chat. Referencing a source task is optional. The traffic page browses saved interactions; select SRC egress when creating the session. See the [console guide (中文)](docs/控制台使用.md) for navigation, asset collection, side chats, background archives, and dashboard behavior.
+
 Use **Clean storage (清理存储)** in the sidebar or session details to inspect sessions sorted by disk usage, compact the database, and remove download caches. Cleanup runs only after confirmation and preserves conversations, results, and the latest recovery chain. Cold archive and restore are not included.
 
 The round button beside the composer pauses or continues the current task when the draft is empty, and sends when a message or attachment is ready. Pause preserves the running task; **End task** is under **More actions**.
@@ -323,7 +329,7 @@ The topology shows persistent blackboard facts, evidence, and user-rule referenc
 
 Agent competition mode preserves unfinished instances across investigation stages. Deferring dispatch, cancelling running work, and releasing an instance are explicit model decisions; elapsed time alone does not force a switch.
 
-Current code version: **v0.21.3**. See [Version management (中文)](CONTRIBUTING.md#版本管理) for the single source of truth, increment rules, and historical version notes.
+Current code version: **v0.22.0**. See [Version management (中文)](CONTRIBUTING.md#版本管理) for the single source of truth, increment rules, and historical version notes.
 
 Follow the [Agent working rules](AGENTS.md): keep changes in the same batch under one version, and obtain explicit user approval before changing the version or pushing to a remote.
 `ctfy-docker/` and `tsecbench-docker/` are local validation projects for the maintainer, are excluded from the repository, and are not required for contributors.

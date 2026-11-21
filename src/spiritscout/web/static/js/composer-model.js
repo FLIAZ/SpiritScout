@@ -56,6 +56,7 @@ const ComposerModels = (() => {
         buttons[(index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length].focus();
       }
     });
+    window.addEventListener("resize", positionMenu);
     sync();
   }
   function close(focus = false) {
@@ -68,11 +69,18 @@ const ComposerModels = (() => {
   }
   function positionMenu() {
     if (!opened) return;
-    const menu = $(`#${opened}-model-menu`), rect = $(`#${opened}-model`).getBoundingClientRect();
+    const menu = $(`#${opened}-model-menu`), button = $(`#${opened}-model`);
+    const rect = button.getBoundingClientRect(), anchor = menu.parentElement.getBoundingClientRect();
     const width = Math.min(340, window.innerWidth - 32);
-    Object.assign(menu.style, {position: "fixed", width: `${width}px`, right: "auto", bottom: "auto"});
-    menu.style.left = `${Math.max(16, Math.min(rect.right - width, window.innerWidth - width - 16))}px`;
-    menu.style.top = `${Math.max(16, Math.min(rect.top - menu.offsetHeight - 8, window.innerHeight - menu.offsetHeight - 16))}px`;
+    const above = Math.max(0, rect.top - 24), below = Math.max(0, window.innerHeight - rect.bottom - 24);
+    // 输入坞的 backdrop-filter 会成为 fixed 的包含块；统一使用按钮容器的局部坐标。
+    Object.assign(menu.style, {position: "absolute", width: `${width}px`, right: "auto", bottom: "auto",
+      maxHeight: `${Math.max(above, below)}px`});
+    const height = menu.offsetHeight;
+    const top = height <= above || above >= below ? rect.top - height - 8 : rect.bottom + 8;
+    const left = Math.max(16, Math.min(rect.right - width, window.innerWidth - width - 16));
+    menu.style.left = `${left - anchor.left}px`;
+    menu.style.top = `${top - anchor.top}px`;
   }
   function sync() {
     if (!controller) return;
@@ -119,6 +127,7 @@ const ComposerModels = (() => {
       if (token !== generation) return;
       menu.innerHTML = I18n.html`<p role="alert">读取失败：${esc(error.message)}</p><button type="button">重试</button>`;
       menu.querySelector("button").onclick = () => open(kind);
+      positionMenu();
     }
   }
   return {options, create, init, sync, close,

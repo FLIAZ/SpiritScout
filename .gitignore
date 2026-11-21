@@ -71,3 +71,6 @@ configs/models.yaml
 
 # 隔离打包环境
 .venv-build/
+
+# 前端开发依赖
+/node_modules/

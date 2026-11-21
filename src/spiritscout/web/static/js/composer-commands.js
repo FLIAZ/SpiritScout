@@ -144,7 +144,8 @@ const ComposerCommands = (() => {
       if (command.name === "help") help(kind);
       else if (command.name === "model") $(`#${kind === "home" ? "home" : "comp"}-model`).click();
       else if (command.name === "files" || command.name === "report") {
-        $(`#s-tabs [data-tab="${command.name === "files" ? "deliverables" : "report"}"]`).click();
+        const destinations = command.name === "files" ? "deliverables" : session()?.mode === "src" ? "vulns" : "report";
+        $(`[data-tab="${destinations}"]`).click();
       } else if (command.name === "compact") {
         let requestId = retries.get(id);
         if (!requestId) {

@@ -315,6 +315,6 @@ def publish_progress(audit: Any, actor: str, content: str, **context: Any) -> di
         return
     if not text:
         return {**detail, 'discovery_key': discovery_key} if discovery_key else None
-    detail = {**detail, 'text': text[:2400], **({'exploration': exploration} if exploration else {})}
+    detail = {**detail, 'text': text, **({'exploration': exploration} if exploration else {})}
     audit.log('agent.progress', actor, detail)
     return {**detail, **({'discovery_key': discovery_key} if discovery_key else {})}

@@ -91,6 +91,8 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
                 path = head.split(b" ")[1].split(b"?", 1)[0]
                 payload, status, extra = b'{"message":"local proxy evidence","password":"response-secret"}', "200 OK", ""
                 content_type = "application/json"
+                if path == b"/origin502":
+                    status, extra, payload = "502 Bad Gateway", "X-SpiritScout-Proxy-Error: UpstreamRequestError\r\n", b"Upstream request failed\n"
                 if path == b"/redirect":
                     status, extra, payload = "302 Found", "Location: /final\r\n", b""
                 if path == b"/large":
@@ -133,6 +135,34 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
                 return recorder.page(self.sessions[sid].workspace)["items"]
             await asyncio.sleep(0.02)
         self.fail(f"代理证据未落盘：{self.manager.status(sid)}")
+
+    async def test_probe_distinguishes_proxy_failure_from_origin_502(self):
+        from spiritscout.core.models import Scope
+        from spiritscout.policy.scope import ScopeGuard
+        from spiritscout.tools.builtin import http_probe
+
+        await self.enable()
+        kwargs = {"guard": ScopeGuard(Scope(local_analysis=True)),
+                  "workspace_root": str(self.sessions["a"].workspace)}
+        original = await http_probe(self.http_url + "/origin502", **kwargs)
+        self.assertTrue(original.ok, "目标确实返回 502，仍是已获得的 HTTP 响应")
+        self.assertEqual(original.parsed["status_code"], 502)
+        self.assertNotIn("http_failure", original.parsed)
+        self.assertNotIn("x-spiritscout-proxy-error", original.parsed["headers"])
+        unused = await asyncio.start_server(lambda r, w: w.close(), "127.0.0.1", 0)
+        port = unused.sockets[0].getsockname()[1]
+        unused.close()
+        await unused.wait_closed()
+        failed = await http_probe(f"http://127.0.0.1:{port}/action", method="POST", data="once", **kwargs)
+        self.assertFalse(failed.ok)
+        self.assertEqual(failed.parsed["response_source"], "session_proxy")
+        failure = failed.parsed["http_failure"]
+        self.assertIsNone(failure["status_code"])
+        self.assertEqual((failure["proxy_status_code"], failure["request_state"]), (502, "unknown"))
+        self.assertTrue(Path(failed.parsed["body_path"]).is_file(), "本地错误响应原文仍完整保留")
+        rows = await self.wait_records(4)
+        raw = [row for row in rows if row["error"] == "UpstreamRequestError"]
+        self.assertEqual(len(raw), 1, "连接失败不自动重发 POST")
 
     async def test_http_auth_context_redaction_and_raw_body(self):
         await self.manager.start("a")

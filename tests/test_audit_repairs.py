@@ -25,7 +25,7 @@ from spiritscout.blackboard import Blackboard, ConvergenceEngine
 from spiritscout.bus.inprocess import InProcessBus
 from spiritscout.config.settings import SystemConfig, WorkspaceConfig
 from spiritscout.core.audit import AuditLogger, NullAuditLogger, sanitize_record
-from spiritscout.core.exceptions import ConfigurationError
+from spiritscout.core.exceptions import ConfigurationError, SpiritScoutError
 from spiritscout.core.models import (
     AgentType,
     BlackboardLayer,
@@ -178,11 +178,13 @@ class AuditTaskTests(unittest.IsolatedAsyncioTestCase):
                                      extra={"user_inbox": []}, pause_gate=None)
         master._final_verdicts = Mock(return_value=[])
         for invalid in ({"reason": "缺少决策"}, {"continue_iteration": "false"}):
-            master._llm_review = AsyncMock(return_value=invalid)
-            result = await master._review({"round_no": 0, "dag": dag.to_dict(),
-                                           "round_views": [{"flags": {}}]})
-            self.assertTrue(result["continue_iteration"])
-            self.assertEqual(TaskDAG.from_dict(result["dag"]).get(node.node_id).status, TaskStatus.PENDING)
+            with self.subTest(invalid=invalid):
+                master._llm_review = AsyncMock(return_value=invalid)
+                with patch.object(TaskDAG, "from_dict", return_value=dag):
+                    with self.assertRaisesRegex(SpiritScoutError, "复盘未返回有效决策"):
+                        await master._review({"round_no": 0, "dag": dag.to_dict(),
+                                              "round_views": [{"flags": {}}]})
+                self.assertEqual(dag.get(node.node_id).status, TaskStatus.PENDING)
 
 
 class AuditProcessTests(unittest.IsolatedAsyncioTestCase):

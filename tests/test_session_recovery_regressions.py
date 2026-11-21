@@ -52,13 +52,70 @@ class SessionRecoveryRegressions(unittest.IsolatedAsyncioTestCase):
         kwargs['execution_request'].update(mission='继续核对本次目标')
         return '执行目标已接收，等待执行'
 
+    async def test_more_than_four_sessions_start_even_with_legacy_limit(self) -> None:
+        manager = SessionManager(self.cfg, [], max_concurrent=1)
+        sessions = [Session(f"parallel-{index}", "ctf", self.plan.target,
+                    self.root / f"parallel-{index}", status="running") for index in range(6)]
+        for session in sessions:
+            session.workspace.mkdir()
+        entered, release = set(), asyncio.Event()
+
+        async def execute(execution):
+            entered.add(execution.session.session_id)
+            await release.wait()
+
+        with patch("spiritscout.web.sessions.SessionExecution.run", new=execute):
+            tasks = [asyncio.create_task(manager._run_once(
+                session, self.cfg, self.plan, False, self.models)) for session in sessions]
+            try:
+                for _ in range(30):
+                    if len(entered) == len(sessions):
+                        break
+                    await asyncio.sleep(.001)
+                self.assertEqual(len(entered), 6)
+                self.assertTrue(all(not task.done() for task in tasks))
+            finally:
+                release.set()
+                await asyncio.gather(*tasks)
+
+    async def test_failed_resume_keeps_prior_report_but_marks_current_execution_interrupted(self) -> None:
+        self.session.resume_prev_status = "completed"
+        self.session.summary = {"run": {"previous_evidence": True}, "report": "reports/previous.md"}
+        previous = dict(self.session.summary)
+        with patch("spiritscout.web.sessions.SessionExecution.run", new=AsyncMock(
+                side_effect=SpiritScoutError("节点目标未在本次授权范围"))):
+            await self.manager._run(self.session, self.cfg, self.plan, False, self.models, True)
+        self.assertEqual(self.session.status, "interrupted")
+        self.assertEqual(self.session.phase, "interrupted")
+        self.assertEqual(self.session.summary, previous)
+        self.assertIn("续传未完成", self.session.error)
+        saved = json.loads((self.session.workspace / "meta.json").read_text())
+        self.assertEqual(saved["status"], "interrupted")
+        self.assertEqual(saved["summary"]["report"], "reports/previous.md")
+
+    async def test_failed_resume_egress_does_not_restore_completed(self) -> None:
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def unavailable(*args):
+            raise SpiritScoutError("会话出口不可用")
+            yield
+
+        self.session.resume_prev_status = "completed"
+        self.session.summary = {"report": "reports/previous.md"}
+        with patch("spiritscout.traffic.egress.session_egress", new=unavailable):
+            await self.manager._run(self.session, self.cfg, self.plan, False, self.models, True)
+        self.assertEqual(self.session.status, "interrupted")
+        self.assertEqual(self.session.summary["report"], "reports/previous.md")
+        self.assertIn("出口不可用", self.session.error)
+
     async def test_light_followup_uses_model_intent_then_execution_only_handoff(self) -> None:
         self.cfg.gateway.lightweight_local = True
         self.session.remember_user_message('继续剩余工具工作', message_id='light-resume', enqueue=True)
         reply = AsyncMock(side_effect=self.request_execution)
         result = SimpleNamespace(run_summary={'answers_complete': True}, verify_stats={}, flag_stats={}, report_path='')
-        with patch('spiritscout.web.sessions._llm_route_intent', new=AsyncMock(return_value='task')) as classify, \
-             patch('spiritscout.web.sessions._master_reply', new=reply), \
+        with patch('spiritscout.web.session_execution._llm_route_intent', new=AsyncMock(return_value='task')) as classify, \
+             patch('spiritscout.web.session_execution._master_reply', new=reply), \
              patch('spiritscout.runtime.run_ctf_engagement', new=AsyncMock(return_value=result)) as runtime:
             await self.manager._run(self.session, self.cfg, self.plan, False, self.models, True)
         classify.assert_awaited_once()
@@ -70,8 +127,8 @@ class SessionRecoveryRegressions(unittest.IsolatedAsyncioTestCase):
     async def test_light_dialogue_keeps_record_tools_and_does_not_dispatch(self) -> None:
         self.cfg.gateway.lightweight_local = True
         self.session.remember_user_message('解释已有结果', message_id='light-question', enqueue=True)
-        with patch('spiritscout.web.sessions._llm_route_intent', new=AsyncMock(return_value='dialogue')), \
-             patch('spiritscout.web.sessions._master_reply', new=AsyncMock(return_value='已有结果的解释')) as reply, \
+        with patch('spiritscout.web.session_execution._llm_route_intent', new=AsyncMock(return_value='dialogue')), \
+             patch('spiritscout.web.session_execution._master_reply', new=AsyncMock(return_value='已有结果的解释')) as reply, \
              patch('spiritscout.runtime.run_ctf_engagement', new=AsyncMock()) as runtime:
             await self.manager._run(self.session, self.cfg, self.plan, False, self.models, True)
         self.assertFalse(reply.call_args.kwargs['execution_only'])
@@ -149,7 +206,7 @@ class SessionRecoveryRegressions(unittest.IsolatedAsyncioTestCase):
     async def test_failed_dispatch_remains_pending_and_same_id_can_retry(self) -> None:
         self.session.remember_user_message('继续检查', message_id='message-retry', enqueue=True)
         self.manager._persist(self.session)
-        with patch('spiritscout.web.sessions._master_reply', new=self.request_execution), \
+        with patch('spiritscout.web.session_execution._master_reply', new=self.request_execution), \
              patch.object(self.manager, '_rebuild_plan', side_effect=RuntimeError('dispatch failed')):
             await self.manager._run(self.session, self.cfg, self.plan, False, self.models, True)
         self.assertEqual(len(self.session.user_inbox), 1)
@@ -164,7 +221,7 @@ class SessionRecoveryRegressions(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.json()['resumed'])
         resume.assert_awaited_once()
         result = SimpleNamespace(run_summary={'answers_complete': True}, verify_stats={}, flag_stats={}, report_path='')
-        with patch('spiritscout.web.sessions._master_reply', new=self.request_execution), \
+        with patch('spiritscout.web.session_execution._master_reply', new=self.request_execution), \
              patch('spiritscout.runtime.run_ctf_engagement', new=AsyncMock(return_value=result)) as runtime:
             await self.manager._run(self.session, self.cfg, self.plan, False, self.models, True)
         runtime.assert_awaited_once()
@@ -173,7 +230,7 @@ class SessionRecoveryRegressions(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancel_before_dispatch_does_not_acknowledge_request(self) -> None:
         self.session.remember_user_message('继续检查', message_id='message-cancel', enqueue=True)
-        with patch('spiritscout.web.sessions._master_reply', new=self.request_execution), \
+        with patch('spiritscout.web.session_execution._master_reply', new=self.request_execution), \
              patch.object(self.manager, '_rebuild_plan', side_effect=asyncio.CancelledError):
             await self.manager._run(self.session, self.cfg, self.plan, False, self.models, True)
         self.assertEqual(self.session.status, 'stopped')
@@ -184,7 +241,7 @@ class SessionRecoveryRegressions(unittest.IsolatedAsyncioTestCase):
         original_mission = self.session.launch_request['mission']
         self.session.remember_user_message('追加 https://b.audit.invalid/ 并核对', message_id='message-b', enqueue=True)
         result = SimpleNamespace(run_summary={'answers_complete': True}, verify_stats={}, flag_stats={}, report_path='')
-        with patch('spiritscout.web.sessions._master_reply', new=self.request_execution), \
+        with patch('spiritscout.web.session_execution._master_reply', new=self.request_execution), \
              patch('spiritscout.runtime.run_ctf_engagement', new=AsyncMock(return_value=result)):
             await self.manager._run(self.session, self.cfg, self.plan, False, self.models, True)
         expected = self.session.plan.authorization.model_dump(mode='json')

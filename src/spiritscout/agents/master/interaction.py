@@ -10,6 +10,7 @@ from typing import Any
 
 from spiritscout.agents.master.contracts import MasterState
 from spiritscout.agents.master.evidence import (
+    SupervisionGate,
     check_basis,
     execution_digest,
     platform_ref,
@@ -33,6 +34,11 @@ from spiritscout.gateway.context import (
 )
 
 
+class _SteeringUnavailable(Exception):
+    def __init__(self, reply: str) -> None:
+        self.reply = reply
+
+
 class MasterInteraction:
     _CHAT_INTERVAL = 1.0      # 消息轮询节拍（秒）——用户消息 1s 内直达灵枢
     _CHAT_HISTORY_MAX = 12    # 单次应答携带的对话窗口（上限；有会话对话史时取史末尾）
@@ -54,55 +60,72 @@ class MasterInteraction:
         if lock is None:
             lock = self._chat_lock = asyncio.Lock()
         async with lock:
-            feed = self._drain_user_feed()
-            if not feed:
+            while True:
+                feed = self._drain_user_feed()
+                if not feed:
+                    return True
+                control = self.ctx.extra.get('scan_controller')
+                if control is not None:
+                    batch = ':'.join(str(item.get('statement_id') or id(item)) for item in feed)
+                    await control.hold_for_user(batch)
+                seed = self.ctx.extra.get("dialogue_history")
+                history = seed if isinstance(seed, list) else getattr(self, "_chat_history", [])
+                self._chat_history = history
+                messages = [str(item.get("text") or "").strip() for item in feed if item.get("text")]
+                attachments = [str(path) for item in feed for attachment in item.get("attachments", [])
+                               if (path := attachment.get("path") if isinstance(attachment, dict) else attachment)]
+                attachments.extend(str(item["path"]) for item in feed if item.get("path"))
+                reply_preview = ""
+                try:
+                    result = await self._llm_user_chat(messages, attachments, history)
+                except _SteeringUnavailable as exc:
+                    reply_preview = exc.reply
+                    result = None
+                if any(item not in feed for item in self.ctx.extra.get("user_inbox", [])):
+                    # 在途回复尚未应用：先合并生成期间的新消息，避免向执行者发送旧指导。
+                    continue
+                if result is None:
+                    batch = (tuple(item.get("statement_id", str(id(item))) for item in feed), bool(reply_preview))
+                    if getattr(self, "_chat_failure_batch", None) != batch:
+                        self._chat_failure_batch = batch
+                        text = ("**指令未送达**。收件任务尚未就绪或已失效，消息保留待重试。\n\n" + reply_preview
+                                if reply_preview else
+                                "消息及附件已保存，当前回复通道未完成处理；尚未确认转达，会继续重试。")
+                        self.ctx.audit.log("master.reply", self.agent_id, {"text": text})
+                    return False
+                reply, steering = result
+                for index, item in enumerate(steering):
+                    source = ":".join(str(record.get("statement_id", id(record))) for record in feed)
+                    self.ctx.ring.steer(item["agent"], item["hint"], rationale=item.get("rationale", ""),
+                        task_id=item.get("task_id", ""), supersedes=item.get("supersedes"),
+                        source_id=f"user:{source}:{index}")
+                if not isinstance(seed, list):
+                    history.extend({"role": "user", "content": message} for message in messages)
+                    if attachments:
+                        history.append({"role": "user", "content": "上传附件：" + json.dumps(attachments, ensure_ascii=False)})
+                history.append({"role": "assistant", "content": reply})
+                self.ctx.audit.log("master.reply", self.agent_id, {"text": reply})
+                with contextlib.suppress(Exception):
+                    self.ctx.blackboard.write(BlackboardLayer.TOPOLOGY, new_id("reply"),
+                        {"kind": "reply", "text": reply, "ts": time.time()},
+                        agent_type=AgentType.MASTER, updated_by=self.agent_id)
+                callback = self.ctx.extra.get("on_user_feed")
+                if callback is not None:
+                    callback(feed)
+                else:
+                    inbox = self.ctx.extra.get("user_inbox") or []
+                    inbox[:] = [item for item in inbox if item not in feed]
+                self._chat_failure_batch = None
+                if steering:
+                    self.ctx.audit.log("decision.change", self.agent_id, {
+                        "action": "user_chat_steering", "count": len(steering)})
                 return True
-            control = self.ctx.extra.get('scan_controller')
-            if control is not None:
-                batch = ':'.join(str(item.get('statement_id') or id(item)) for item in feed)
-                await control.hold_for_user(batch)
-            seed = self.ctx.extra.get("dialogue_history")
-            history = seed if isinstance(seed, list) else getattr(self, "_chat_history", [])
-            self._chat_history = history
-            messages = [str(item.get("text") or "").strip() for item in feed if item.get("text")]
-            attachments = [str(path) for item in feed for attachment in item.get("attachments", [])
-                           if (path := attachment.get("path") if isinstance(attachment, dict) else attachment)]
-            attachments.extend(str(item["path"]) for item in feed if item.get("path"))
-            result = await self._llm_user_chat(messages, attachments, history)
-            if result is None:
-                batch = tuple(item.get("statement_id", str(id(item))) for item in feed)
-                if getattr(self, "_chat_failure_batch", None) != batch:
-                    self._chat_failure_batch = batch
-                    self.ctx.audit.log("master.reply", self.agent_id, {
-                        "text": "消息及附件已保存，当前回复通道未完成处理；尚未确认转达，会继续重试。"})
-                return False
-            reply, steering = result
-            for index, item in enumerate(steering):
-                source = ":".join(str(record.get("statement_id", id(record))) for record in feed)
-                self.ctx.ring.steer(item["agent"], item["hint"], rationale=item.get("rationale", ""),
-                    task_id=item.get("task_id", ""), supersedes=item.get("supersedes"),
-                    source_id=f"user:{source}:{index}")
-            if not isinstance(seed, list):
-                history.extend({"role": "user", "content": message} for message in messages)
-                if attachments:
-                    history.append({"role": "user", "content": "上传附件：" + json.dumps(attachments, ensure_ascii=False)})
-            history.append({"role": "assistant", "content": reply})
-            self.ctx.audit.log("master.reply", self.agent_id, {"text": reply})
-            with contextlib.suppress(Exception):
-                self.ctx.blackboard.write(BlackboardLayer.TOPOLOGY, new_id("reply"),
-                    {"kind": "reply", "text": reply, "ts": time.time()},
-                    agent_type=AgentType.MASTER, updated_by=self.agent_id)
-            callback = self.ctx.extra.get("on_user_feed")
-            if callback is not None:
-                callback(feed)
-            else:
-                inbox = self.ctx.extra.get("user_inbox") or []
-                inbox[:] = [item for item in inbox if item not in feed]
-            self._chat_failure_batch = None
-            if steering:
-                self.ctx.audit.log("decision.change", self.agent_id, {
-                    "action": "user_chat_steering", "count": len(steering)})
-            return True
+
+    def _user_input_revision(self) -> str:
+        context = self.ctx.blackboard.read(BlackboardLayer.TARGET_AUTH, "user-context") or {}
+        statements = [{key: item[key] for key in ("statement_id", "kind", "text", "attachments") if key in item}
+                      for item in context.get("statements", [])]
+        return hashlib.sha256(json.dumps(statements, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
     async def _llm_user_chat(self, messages: list[str], attachments: list[str],
                              history: list[dict[str, str]]
@@ -148,6 +171,7 @@ class MasterInteraction:
                 "\"steering\": [{\"agent\": str, \"task_id\": str, \"broadcast\": bool, \"hint\": str, "
                 "\"rationale\": str}]}"),
         }
+        input_feed = list(getattr(self.ctx, "extra", {}).get("user_inbox", []))
         try:
             resp = await chat_decision(
                 self.ctx.gateway,
@@ -156,6 +180,9 @@ class MasterInteraction:
                 task_type="meta_planning", response_format="json",
                 reasoning_effort="low",   # 对话应答要快，不与重推理抢档
             )
+            if any(item not in input_feed for item in getattr(self.ctx, "extra", {}).get("user_inbox", [])):
+                # 扫描控制也会产生副作用，不能等外层转发指导时才丢弃过时的模型输出。
+                return None
             data = extract_json(resp.content) or {}
             if not isinstance(data, dict) or not isinstance(data.get("reply"), str):
                 raise TypeError("用户对话必须返回 JSON 对象和文字回复")
@@ -166,7 +193,7 @@ class MasterInteraction:
             current = self._engagement_status().get("active_tasks", [])
             steering = self._target_steering(raw, current, allow_broadcast=True)
             if len(steering) != len(raw):
-                raise ValueError("指令收件任务尚未就绪或无效，消息保留待重试")
+                raise _SteeringUnavailable(reply)
             control_result = await self._apply_scanner_control(data)
             if control_result is not None and not control_result['ok']:
                 raise ValueError(control_result['error'])
@@ -214,38 +241,23 @@ class MasterInteraction:
         两条通道并行互不阻塞。
         """
         assert self.ctx.audit is not None
-        last_fingerprint = ""
+        gate = SupervisionGate()
         while True:
             await asyncio.sleep(self._STEER_INTERVAL)
-            digest = self._progress_digest(task_ids)
-            if not digest["tasks"]:
+            digest = self._progress_digest(task_ids, include_supervision=True)
+            if not digest["tasks"] or not gate.ready(
+                    digest, getattr(self.ctx, "journal", None), getattr(self.ctx, "ring", None)):
                 continue
-            # 投递新指令本身不是现场进展，避免“发指令→摘要变化→再发指令”自激循环。
-            facts = {**digest, "tasks": [
-                {**{k: v for k, v in task.items() if k not in {'steering', 'blackboard_ref', 'routes'}},
-                 'routes': [{k: v for k, v in route.items() if k != 'progress'} for route in task.get('routes', [])]}
-                for task in digest['tasks']]}
-            if self._light_supervision():
-                for task in facts["tasks"]:
-                    executions = task.get("executions")
-                    if executions:
-                        task["routes"] = [{k: v for k, v in route.items() if k not in {"notes", "notes_view"}}
-                                          for route in task.get("routes", [])]
-                        signatures = {json.dumps({k: row.get(k) for k in
-                            ("tool_name", "params_digest", "execution_status", "exit_code", "result_digest")},
-                            sort_keys=True) for row in executions}
-                        task["executions"] = sorted(signatures)
-            fingerprint = json.dumps(facts, ensure_ascii=False, sort_keys=True)
-            if fingerprint == last_fingerprint:
-                continue
-            last_fingerprint = fingerprint
             steering = await self._llm_steer(digest, decisions)
             for item in steering:
+                # 用户直达通道可能在模型等待期间发出新指令，投递前再次核对所有权。
+                if self.ctx.ring.pending_steering(item["agent"], task_id=item.get("task_id", "")) is not None:
+                    continue
                 self.ctx.ring.steer(item["agent"], item["hint"],
                                     rationale=item.get("rationale", ""),
                                     task_id=item.get("task_id", ""), supersedes=item.get("supersedes"))
 
-    def _progress_digest(self, task_ids: list[str]) -> dict[str, Any]:
+    def _progress_digest(self, task_ids: list[str], *, include_supervision: bool = False) -> dict[str, Any]:
         """本轮任务的实时进度摘要（子 Agent 随步上报的路线笔记）。"""
         bb = getattr(self.ctx, "blackboard", None)
         tasks: list[dict[str, Any]] = []
@@ -282,6 +294,11 @@ class MasterInteraction:
                               task.get("agent_type"), task_id=tid) if self.ctx.ring else [],
                           "title": str(task.get("title", ""))[:80],
                           "routes": routes})
+            if include_supervision:
+                tasks[-1]["_supervision"] = [
+                    {"route_id": r.get("route_id"), "status": r.get("status"),
+                     "findings": r.get("findings", []), "blockers": r.get("blockers", [])}
+                    for r in data.get("routes", [])]
         if self._light_supervision():
             for task in tasks:
                 task["executions"] = execution_digest(getattr(self.ctx, "journal", None), task["task_id"])
@@ -325,6 +342,9 @@ class MasterInteraction:
             self, digest: dict[str, Any],
             decisions: asyncio.Queue[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         """LLM 判读全局进度，产出需调整方向的子 Agent 建议（白名单校验）。"""
+        # 触发信号只用于本地去重，不改变已经发送过的督导提示词与快照契约。
+        digest = {**digest, "tasks": [{key: value for key, value in task.items() if key != "_supervision"}
+                                     for task in digest["tasks"]]}
         valid_agents = sorted({t["agent"] for t in digest["tasks"]
                                if t.get("agent")})
         if not valid_agents:
@@ -370,14 +390,16 @@ class MasterInteraction:
                             "不要按固定时长或回合数机械跳题。有实质突破可继续。返回 JSON："
                             "{\"steering\": [{\"agent\": 仅 agents 列表之一, "
                             "\"task_id\": active_tasks 中对应任务的 task_id, "
-                            "\"hint\": 下一步指令, \"rationale\": 判断依据}], "
+                            "\"hint\": 下一步指令, \"rationale\": 判断依据, "
+                            "\"supersedes\": [需要明确替代的旧指令ID]}], "
                             "\"defer_challenges\": [{\"id\": 进度中在途赛题ID, \"reason\": str, \"cancel_running\": bool, \"release_instance\": bool}]}"),
             }
             payload["constraints"] += (
                 "每条指令必须指定 task_id，不能把某题指令发给所有同类型任务。"
                 "steering.feedback 中 delivered 仅表示已投递，accepted 仅表示计划执行；"
                 "completed/blocked 是子 Agent 自报，结合后续工具结果判断实际效果。"
-                "若前次指令尚未奏效，结合反馈与新证据纠偏或暂缓，不要重复改写同一建议。"
+                "前次指令未 completed/blocked 时默认不追加普通指令；只有新执行证据改变了"
+                "判断、原方向被证伪或必须纠偏时，才把旧指令 id 放入 supersedes 后替代。"
                 "只引用对应任务的可见事实，不把截断摘要当完整源码，不臆测已经具备的能力；"
                 "以 platform_progress 的已完成题目为准，不能把已完成题当未尝试题。")
             if self._light_supervision():
@@ -480,15 +502,14 @@ class MasterInteraction:
             supersedes = item.get("supersedes") or []
             if not isinstance(supersedes, list) or not all(isinstance(identifier, str) for identifier in supersedes):
                 continue
-            if self._light_supervision() and not allow_broadcast and not supersedes and self.ctx.ring:
-                previous = self.ctx.ring.steerings_for(item["agent"], task_id=tid)
-                if any(record.get("hint", "").strip() == item["hint"].strip()
-                       and not (record.get("feedback") and all(
-                           feedback.get("status") == "completed" for feedback in record["feedback"].values()))
-                       for record in previous):
+            ring = getattr(self.ctx, "ring", None)
+            if not allow_broadcast and ring:
+                pending = ring.pending_steering(item["agent"], task_id=tid)
+                if pending is not None and pending["id"] not in supersedes:
                     self.ctx.audit.log("decision.change", self.agent_id, {
-                        "action": "steering_duplicate", "task_id": tid,
-                        "reason": "同一任务已有相同且未完成的指令，保留原编号供反馈"})
+                        "action": "steering_pending", "task_id": tid,
+                        "instruction_id": pending["id"],
+                        "reason": "同一任务已有未收口指令；等待完成/阻塞反馈，或明确 supersedes 后纠偏"})
                     continue
             out.append({"agent": item["agent"], "task_id": tid,
                         "hint": item["hint"], "rationale": str(item.get("rationale", "")),

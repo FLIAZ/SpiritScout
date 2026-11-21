@@ -4,22 +4,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from contextvars import ContextVar
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from spiritscout.agents.sub.base import RoutePlan, StepResult, SubAgent
+from spiritscout.blackboard.hypotheses import resolve as resolve_hypothesis
 from spiritscout.core.ids import new_id
 from spiritscout.core.models import (
     AgentType,
     BlackboardLayer,
+    RunMode,
     Severity,
     Task,
     Vulnerability,
     VulnStatus,
 )
 from spiritscout.gateway.context import shared_context
+from spiritscout.traffic import recorder as traffic_recorder
 
 # 当前步的防护拦截信号（按步清零；ContextVar 保证并发路线互不污染）
 _STEP_SIGNALS: ContextVar[int] = ContextVar("webvuln_step_signals", default=0)
@@ -66,44 +71,88 @@ class WebVulnAgent(SubAgent):
     # ------------------------------------------------------------ 路线模板
 
     def route_templates(self, task: Task) -> list[RoutePlan]:
+        if getattr(getattr(self.ctx, "policy", None), "mode", None) == RunMode.SRC:
+            return [RoutePlan(
+                name="contract_hypothesis_test",
+                strategy="根据任务与现场自主搜集、提出假设并验证，保留真实请求与可追溯证据",
+                steps=[{"action": "hypothesis_investigate"}],
+            )]
         endpoints = self._collect_endpoints(task)
         business = self._business_context()
         routes: list[RoutePlan] = []
-        if endpoints and business.get("ready_for_testing"):
-            routes.extend((
-                RoutePlan(
-                    name="sqli_pipeline",
-                    strategy="交付可核验结果：每个已观测端点参数的注入判定——"
-                             "报错特征/布尔差异/引用核验信号作证据，无证据即排除"
-                             "（不取数据，G4）",
-                    steps=[{"action": "sqli_probe", "endpoint": ep, "params": ps}
-                           for ep, ps in endpoints],
-                ),
-                RoutePlan(
-                    name="xss_pipeline",
-                    strategy="交付可核验结果：每个端点参数的反射判定——唯一 canary "
-                             "原样反射（附响应片段证据）或排除",
-                    steps=[{"action": "xss_probe", "endpoint": ep, "params": ps}
-                           for ep, ps in endpoints],
-                ),
+        contract = task.payload.get("investigation_contract")
+        contract = contract if isinstance(contract, dict) else {}
+        resolved = resolve_hypothesis(
+            self.ctx.blackboard, str(contract.get("hypothesis_ref") or ""))
+        hypothesis = resolved[1] if resolved else {}
+        test_type = str(hypothesis.get("test_type") or "").strip().lower()
+        subject = str(hypothesis.get("subject") or "").strip()
+        if subject:
+            focused = [(endpoint, params) for endpoint, params in endpoints
+                       if endpoint == subject or endpoint.rstrip("/") == subject.rstrip("/")]
+            endpoints = focused or endpoints
+        fixtures = self._boundary_fixtures(subject) if test_type in {
+            "idor", "authorization", "business_logic", "access_control"} else []
+        if not resolved:
+            routes.append(RoutePlan(
+                name="hypothesis_required",
+                strategy="攻击任务必须引用当前会话可证伪漏洞假设，不执行全接口例行扫描",
+                steps=[{"action": "context_gap", "reason": "missing_hypothesis"}],
             ))
-            ssrf_steps = [
-                {"action": "ssrf_probe", "endpoint": ep, "params": ps}
-                for ep, ps in endpoints
-                if SSRF_PARAM_HINTS & {p.lower() for p in ps}
-            ]
-            if ssrf_steps:
-                routes.append(RoutePlan(
-                    name="ssrf_pipeline",
-                    strategy="交付可核验结果：带取址参数端点的出网判定——"
-                             "授权内 canary 自证（附响应证据）或排除",
-                    steps=ssrf_steps,
-                ))
-        else:
+        elif (str(contract.get("next_minimal_experiment") or "").strip()
+              and test_type not in {"sqli", "xss", "ssrf"} and not fixtures):
+            routes.append(RoutePlan(
+                name="contract_hypothesis_test",
+                strategy="按已引用假设执行具体最小对照；缺合法基线、身份或授权时报告阻塞，不退化为页面走访",
+                steps=[{"action": "hypothesis_investigate"}],
+            ))
+        elif test_type in {"idor", "authorization", "business_logic", "access_control"}:
+            routes.append(RoutePlan(
+                name="business_boundary_hypothesis",
+                strategy="权限假设只比较同一资源的双身份真实只读流量，不重放认证请求或枚举对象",
+                steps=([{"action": "boundary_compare", "fixture": fixture,
+                         "subject": subject, "test_type": test_type}
+                        for fixture in fixtures]
+                       or [{"action": "context_gap", "reason": "missing_boundary_fixture",
+                            "test_type": test_type, "subject": subject}]),
+            ))
+        elif not endpoints or not business.get("ready_for_testing"):
             routes.append(RoutePlan(
                 name="coverage_gap",
-                strategy="业务证据覆盖不足时停止主动猜测，并明确需要补充的流程",
-                steps=[{"action": "context_gap"}],
+                strategy="当前假设缺少真实接口、输入或业务流程证据，停止主动猜测",
+                steps=[{"action": "context_gap", "reason": "missing_surface",
+                        "test_type": test_type}],
+            ))
+        elif test_type in {"sqli", "sql_injection", "sql-injection"}:
+            routes.append(RoutePlan(
+                name="sqli_hypothesis_test",
+                strategy="只验证当前 SQL 注入假设：控制组、变异组和反证条件成对执行",
+                steps=[{"action": "sqli_probe", "endpoint": ep, "params": ps}
+                       for ep, ps in endpoints],
+            ))
+        elif test_type in {"xss", "reflected_xss", "reflected-xss"}:
+            routes.append(RoutePlan(
+                name="xss_hypothesis_test",
+                strategy="只验证当前反射型 XSS 假设，唯一 canary 原样反射才形成支持信号",
+                steps=[{"action": "xss_probe", "endpoint": ep, "params": ps}
+                       for ep, ps in endpoints],
+            ))
+        elif test_type == "ssrf":
+            steps = [{"action": "ssrf_probe", "endpoint": ep, "params": ps}
+                     for ep, ps in endpoints
+                     if SSRF_PARAM_HINTS & {p.lower() for p in ps}]
+            routes.append(RoutePlan(
+                name="ssrf_hypothesis_test",
+                strategy="只验证当前 SSRF 假设，使用授权目标内 canary，不请求第三方地址",
+                steps=steps or [{"action": "context_gap", "reason": "missing_ssrf_parameter",
+                                 "test_type": test_type}],
+            ))
+        else:
+            routes.append(RoutePlan(
+                name="unsupported_hypothesis",
+                strategy="保留当前假设并明确能力缺口，不退化成 SQLi/XSS 全量扫",
+                steps=[{"action": "context_gap", "reason": "unsupported_hypothesis",
+                        "test_type": test_type}],
             ))
         clues = self.ctx.blackboard.query(BlackboardLayer.RECON_CLUE, limit=200)
         hit_clues = [c for c in clues
@@ -124,9 +173,11 @@ class WebVulnAgent(SubAgent):
     async def execute_step(self, task, route, plan, step) -> StepResult:
         action = step["action"]
         handler = {
+            "hypothesis_investigate": self._step_contract_hypothesis,
             "sqli_probe": self._step_sqli,
             "xss_probe": self._step_xss,
             "ssrf_probe": self._step_ssrf,
+            "boundary_compare": self._step_boundary_compare,
             "clue_verify": self._step_clue_verify,
             "context_gap": self._step_context_gap,
         }.get(action)
@@ -141,6 +192,36 @@ class WebVulnAgent(SubAgent):
         return result
 
     # ------------------------------------------------------------ LLM 决策环
+
+    async def _step_contract_hypothesis(self, task: Task, step: dict) -> StepResult:
+        result = await self._step_investigate(task, step)
+        decision = getattr(self, "_completion_assessments", {}).get(task.task_id, {})
+        if decision.get("findings"):
+            return result
+        # 兼容旧会话的双身份 signals；新调查直接交付任意漏洞类型的 findings。
+        signals = decision.get("signals")
+        controls_valid = decision.get("baseline_valid") is True and decision.get("control_valid") is True
+        legacy = []
+        for signal in signals[:8] if isinstance(signals, list) and controls_valid else []:
+            if not isinstance(signal, dict):
+                continue
+            quote = str(signal.get("evidence_quote") or "")[:200]
+            baseline_ref, variant_ref = signal.get("baseline_ref"), signal.get("variant_ref")
+            if not quote or not baseline_ref or baseline_ref == variant_ref:
+                continue
+            legacy.append({"vuln_type": "access_control", "title": "疑似未授权读取受保护内容",
+                           "endpoint": task.target, "severity": "medium", "evidence": [
+                               {"body_ref": ref, "quote": quote} for ref in (baseline_ref, variant_ref)]})
+        if signals is not None:
+            from spiritscout.agents.sub.findings import publish_findings
+
+            decision["findings"] = legacy
+            result.findings = await asyncio.to_thread(
+                publish_findings, self.ctx, task, decision, actor=self.agent_id,
+                agent_type=self.agent_type,
+                observations=getattr(self, "_task_observations", {}).get(task.task_id, []))
+            result.note = str(decision.get("reason") or result.note)
+        return result
 
     async def _llm_decide_payloads(
         self, task: Task, *, vuln_class: str, endpoint: str, param: str,
@@ -404,6 +485,70 @@ class WebVulnAgent(SubAgent):
 
     # ------------------------------------------------------------ 侦察线索跟进
 
+    async def _step_boundary_compare(self, task: Task, step: dict) -> StepResult:
+        """离线比较已采集的双身份响应；仅强一致的越权读取信号进入候选池。"""
+        fixture = step.get("fixture") if isinstance(step.get("fixture"), dict) else {}
+        records = fixture.get("records") if isinstance(fixture.get("records"), list) else []
+        if len(records) != 2:
+            return await self._step_context_gap(task, {
+                "reason": "missing_boundary_fixture", "subject": step.get("subject", "")})
+        first, second = records
+        statuses = [int(item.get("status") or 0) for item in records]
+        record_ids = [int(item.get("record_id") or 0) for item in records]
+        evidence_ref = f"traffic:{record_ids[0]}" if all(record_ids) else ""
+        denied = any(status in {401, 403} for status in statuses)
+        same_body = bool(first.get("response_digest") and
+                         first.get("response_digest") == second.get("response_digest"))
+        meaningful = min(int(item.get("response_bytes") or 0) for item in records) > 0
+        both_success = all(200 <= status < 300 for status in statuses)
+        if denied:
+            return StepResult(
+                ok=True, value=0.2,
+                note=(f"双身份真实流量显示边界生效：记录 {record_ids} 状态 {statuses}；"
+                      "未形成越权支持信号"),
+                final_note=True,
+            )
+        if not (both_success and same_body and meaningful):
+            return StepResult(
+                ok=True, value=0.1,
+                blockers=[{
+                    "type": "boundary_fixture_inconclusive",
+                    "description": "双身份真实响应不足以确定是否读取了同一受保护对象",
+                    "prerequisite": "补充可确认对象归属的合法交易，或经账号浏览器通道执行单变量对照",
+                    "evidence_refs": [f"traffic:{record_id}" for record_id in record_ids if record_id],
+                }],
+                note=f"双身份离线对照不确定：记录 {record_ids} 状态 {statuses}",
+                final_note=True,
+            )
+        evidence = [{
+            "method": "recorded_identity_boundary_compare",
+            "url": fixture.get("url", ""),
+            "http_method": fixture.get("method", "GET"),
+            "record_ids": record_ids,
+            "statuses": statuses,
+            "response_bytes": [int(item.get("response_bytes") or 0) for item in records],
+            "response_digest": first.get("response_digest", ""),
+            "json_shape": first.get("json_shape"),
+            "note": "两个不同采集身份访问同一只读资源并得到相同完整响应；需独立复核对象归属与共享权限",
+        }]
+        vuln = self._new_vuln(
+            task, vuln_type="access_control",
+            title=f"疑似跨身份读取（{fixture.get('path') or step.get('subject') or '/'}）",
+            endpoint=str(fixture.get("url") or step.get("subject") or ""),
+            parameter="", severity=Severity.MEDIUM, confidence=0.6,
+            evidence=evidence,
+        )
+        _, is_new, _ = self.ctx.convergence.merge_vulnerability(vuln, self.agent_type)
+        findings = ([{"type": "access_control_signal", "endpoint": vuln.endpoint,
+                      "evidence_ref": evidence_ref, "record_ids": record_ids}]
+                    if is_new else [])
+        return StepResult(
+            ok=True, value=0.5 if is_new else 0.1, findings=findings,
+            note=(f"双身份同资源响应一致，已形成待独立复核的权限候选：记录 {record_ids}"
+                  if is_new else "相同权限候选已存在，未重复写入"),
+            final_note=True,
+        )
+
     # 内容证据之外的「存在即泄露」归档/备份后缀（200 + 非错误内容即曝光）
     _ARCHIVE_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz", ".sql", ".bak",
                          ".old", ".swp", ".7z", ".rar", ".env", ".log")
@@ -443,14 +588,48 @@ class WebVulnAgent(SubAgent):
     async def _step_context_gap(self, task: Task, step: dict) -> StepResult:
         context = self._business_context()
         gaps = context.get("gaps") or ["未观测到带参数的 GET/HEAD 业务端点"]
+        reason = str(step.get("reason") or "missing_surface")
+        if reason == "missing_hypothesis":
+            description = "任务没有绑定可证伪漏洞假设，已拒绝对所有接口例行扫描"
+            prerequisite = "由源码、真实交易或业务边界证据形成 hypothesis_ref"
+        elif reason == "missing_boundary_fixture":
+            description = "权限/业务逻辑假设缺少合法的身份、对象或状态对照样本"
+            prerequisite = "提供已授权测试账号和已观测对象样本，或录制两组合法请求；不枚举未知对象"
+        elif reason == "missing_ssrf_parameter":
+            description = "当前 SSRF 假设没有真实取址参数，未发送替代猜测请求"
+            prerequisite = "从源码或真实交易确认 URL/回调/导入参数"
+        elif reason == "unsupported_hypothesis":
+            description = "当前漏洞假设尚无对应的确定性最小实验能力"
+            prerequisite = "补充可执行请求样本、预期信号与反证信号"
+        else:
+            description = "业务与接口证据不足，未执行漏洞变异实验"
+            prerequisite = "补充真实页面流程、脚本端点或带参数接口证据"
         return StepResult(
             ok=True,
             value=0.1,
-            findings=[{"type": "coverage_gap", "gaps": gaps[:10]}],
-            note=("未进行接口猜测；业务覆盖不足：" + "；".join(
+            blockers=[{
+                "type": reason,
+                "description": description,
+                "prerequisite": prerequisite,
+                "alternative_capabilities": ["js_reverse", "business_context", "recon"],
+            }],
+            note=(description + "；当前缺口：" + "；".join(
                 str(item) for item in gaps[:5])),
             final_note=True,
         )
+
+    def _contract_incomplete_reason(self, task: Task, summary: dict[str, Any]) -> str:
+        contract = task.payload.get("investigation_contract")
+        contract = contract if isinstance(contract, dict) else {}
+        experiment = str(contract.get("next_minimal_experiment") or "").strip()
+        if not experiment:
+            return ""
+        feedback = summary.get("execution_feedback") or {}
+        evidence = (summary.get("handoff") or {}).get("evidence_refs") or []
+        if int(feedback.get("tool_calls") or 0) == 0 and not evidence:
+            return ("调查契约要求执行最小实验，但本任务没有真实工具调用或本轮证据引用；"
+                    "应标记为未执行/阻塞，并改派具备入口与能力的角色")
+        return ""
 
     def _business_context(self) -> dict[str, Any]:
         return (self.ctx.blackboard.read(
@@ -509,6 +688,16 @@ class WebVulnAgent(SubAgent):
                     endpoints.append((value, query_params))
         return endpoints
 
+    def _boundary_fixtures(self, subject: str) -> list[dict[str, Any]]:
+        workspace = str((getattr(self.ctx, "builtin_ctx", None) or {}).get(
+            "workspace_root") or "")
+        if not workspace or not subject:
+            return []
+        try:
+            return traffic_recorder.boundary_fixtures(Path(workspace), subject)
+        except (OSError, ValueError):
+            return []
+
     @staticmethod
     def _resolve_endpoint(task: Task, endpoint: str) -> str:
         if urlparse(endpoint).scheme in {"http", "https"}:
@@ -529,9 +718,14 @@ class WebVulnAgent(SubAgent):
     def _new_vuln(self, task: Task, *, vuln_type: str, title: str, endpoint: str,
                   parameter: str, severity: Severity, confidence: float,
                   evidence: list[dict[str, Any]]) -> Vulnerability:
+        contract = task.payload.get("investigation_contract")
+        contract = contract if isinstance(contract, dict) else {}
+        hypothesis_ref = str(contract.get("hypothesis_ref") or "")[:200]
         return Vulnerability(
             vuln_id=new_id("vuln"), title=title, vuln_type=vuln_type,
             target=task.target, endpoint=endpoint, parameter=parameter,
             severity=severity, status=VulnStatus.CANDIDATE, confidence=confidence,
             evidence=evidence, found_by=self.agent_id,
+            hypothesis_ref=hypothesis_ref,
+            hypothesis_refs=[hypothesis_ref] if hypothesis_ref else [],
         )

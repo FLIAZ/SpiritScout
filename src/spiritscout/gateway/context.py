@@ -72,7 +72,8 @@ def input_window_budget(context_window: int, reserved_output: int = 0) -> int | 
 # 这些字段可以超过软预算，不能为了缩短输入而丢掉授权、任务或用户回答。
 _PROTECTED = {"constraints", "task_intent", "用户答复", "scope", "rules", "mission",
               "target", "available_tactics", "shared_context", "business_context",
-              "reference_skills", "world_state", "project_rules", "user_context",
+              "new_messages", "chat_history", "attachments", "instruction",
+              "reference_skills", "world_state", "project_rules", "project_context", "user_context",
               "available_skills", "skill_context", "skill_observations",
               "authorization", "testing_rules", "user_replies",
               "competition_context", "platform_facts", "灵枢当前指令",
@@ -214,12 +215,14 @@ def shared_context(blackboard: Any) -> dict[str, Any]:
     out = business_digest(context[0], version=context[1]) if context else {}
     replies = blackboard.query(BlackboardLayer.RECON_CLUE, limit=8,
                                data_filter=("clue_type", "user_reply"))
-    historical = blackboard.read(BlackboardLayer.TOPOLOGY, "historical-assets")
-    if historical:
-        out["historical_assets"] = historical
-    project_memory = blackboard.read(BlackboardLayer.TOPOLOGY, "project-memory")
-    if project_memory:
-        out["project_memory"] = project_memory
+    history_policy = blackboard.read(BlackboardLayer.TOPOLOGY, "history-policy") or {}
+    project_memory = blackboard.read(BlackboardLayer.TOPOLOGY, "project-memory") or {}
+    if not (history_policy.get("on_demand") or project_memory.get("history_on_demand")):
+        historical = blackboard.read(BlackboardLayer.TOPOLOGY, "historical-assets")
+        if historical:
+            out["historical_assets"] = historical
+        if project_memory:
+            out["project_memory"] = project_memory
     if replies:
         out["user_replies"] = [{"record_id": rec["record_id"], "version": rec["version"],
                                 "question": rec["data"].get("detail", ""),
@@ -363,6 +366,7 @@ class DecisionMemory:
         self.blackboard: Any = None
         self.agent_type: Any = None
         self.shared_memory_enabled = False
+        self.history_lookup: Any = None
         self.manual_compaction_id = ""
         self.pending_compaction: dict[str, Any] | None = None
 
@@ -544,6 +548,17 @@ def decision_memory(owner: Any, key: str) -> DecisionMemory:
         memory.blackboard = getattr(getattr(owner, "ctx", None), "blackboard", None)
         memory.agent_type = getattr(owner, "agent_type", None)
         memory.shared_memory_enabled = getattr(getattr(owner, 'ctx', None), 'mode', None) == 'competition'
+        ctx = getattr(owner, "ctx", None)
+        memory.history_lookup = getattr(ctx, "history_lookup", None)
+        if (memory.history_lookup is None
+                and getattr(getattr(ctx, "policy", None), "mode", None) == "src"
+                and getattr(ctx, "tools", None) is not None):
+            async def lookup(arguments: dict[str, Any]) -> dict[str, Any]:
+                result = await ctx.tools.call("history_lookup", arguments, **ctx.builtin_ctx)
+                return {"ok": result.ok, "result": result.stdout or result.failure_reason(),
+                        "invocation_id": result.invocation_id}
+
+            memory.history_lookup = lookup
         if callable(getattr(journal, "latest_checkpoint", None)):
             # 会话数据库隔离会话；类型隔离 Agent，key 已含任务/路线/阶段。
             checkpoint_key = f"{type(owner).__name__}:{key}"

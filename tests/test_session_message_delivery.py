@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import tempfile
@@ -134,6 +135,17 @@ class SessionMessageDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(again.user_inbox, [])
         self.assertIn('message-file', again.handled_user_messages)
 
+    async def test_starting_session_can_save_a_message(self) -> None:
+        self.session.phase = 'queued'
+        with patch.object(self.manager, 'resume', new_callable=AsyncMock) as resume:
+            response = await self.client.post('/api/sessions/sess-messages/messages',
+                json={'content': '启动期间保存的消息', 'message_id': 'waiting-fixture'})
+            resume.assert_not_awaited()
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()['waiting_for_slot'])
+        self.assertFalse(response.json()['resumed'])
+        self.assertEqual(self.session.user_inbox[0]['text'], '启动期间保存的消息')
+
     async def test_attachment_only_reaches_master_without_text(self) -> None:
         uid = await self.upload()
         response = await self.client.post('/api/sessions/sess-messages/messages',
@@ -184,25 +196,64 @@ class SessionMessageDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(inbox, [])
         self.assertEqual(len(master.ctx.ring.steerings_for('ctf_web', task_id='t')), 1)
 
-    async def test_chat_uses_current_task_addresses_after_model_returns(self) -> None:
+    async def test_chat_revalidates_task_addresses_and_new_input_before_controls(self) -> None:
+        for late_input in (False, True):
+            with self.subTest(late_input=late_input):
+                master = object.__new__(MasterAgent)
+                master.agent_id = 'master-fixture'
+                active, inbox = [], []
+                master.ctx = SimpleNamespace(agents={AgentType.CTF_MISC: None}, pause_gate=None, audit=Mock(),
+                                             gateway=SimpleNamespace(), blackboard=None, ring=RingLedger(),
+                                             extra={'user_inbox': inbox})
+                master._mission = lambda: 'fixture'
+                master._world_state = lambda: {}
+                master._system_prompt = lambda: 'fixture'
+                master._engagement_status = lambda: {'active_tasks': copy.deepcopy(active)}
+                master._apply_scanner_control = AsyncMock(return_value=None)
+
+                async def reply(*args, **kwargs):
+                    active.append({'agent': 'ctf_misc', 'task_id': 'new-task'})
+                    if late_input:
+                        inbox.append({'statement_id': 'late-message', 'text': '不要扫描，先解释'})
+                    return SimpleNamespace(content=json.dumps({'reply': '处理附件',
+                        'steering': [{'agent': 'ctf_misc', 'hint': '读取新附件'}],
+                        'scan_control': {'action': 'resume'}}))
+
+                with patch('spiritscout.agents.master.interaction.chat_decision', new=reply):
+                    result = await master._llm_user_chat([], ['evidence.txt'], [])
+                if late_input:
+                    self.assertIsNone(result)
+                    master._apply_scanner_control.assert_not_awaited()
+                    self.assertEqual(len(inbox), 1)
+                else:
+                    self.assertEqual(result[1][0]['task_id'], 'new-task')
+                    master._apply_scanner_control.assert_awaited_once()
+
+    async def test_unavailable_steering_retains_reply_without_dispatching(self) -> None:
         master = object.__new__(MasterAgent)
         master.agent_id = 'master-fixture'
-        active = []
-        master.ctx = SimpleNamespace(agents={AgentType.CTF_MISC: None}, pause_gate=None, audit=Mock(),
-                                     gateway=SimpleNamespace(), blackboard=None, ring=RingLedger())
+        inbox = [{'kind': 'message', 'text': 'fixture', 'statement_id': 'message-1'}]
+        audit, ring = Mock(), RingLedger()
+        master.ctx = SimpleNamespace(agents={AgentType.CTF_MISC: None}, pause_gate=None, audit=audit,
+                                     gateway=SimpleNamespace(), blackboard=None, ring=ring,
+                                     extra={'user_inbox': inbox, 'dialogue_history': []})
         master._mission = lambda: 'fixture'
         master._world_state = lambda: {}
         master._system_prompt = lambda: 'fixture'
-        master._engagement_status = lambda: {'active_tasks': copy.deepcopy(active)}
-
-        async def reply(*args, **kwargs):
-            active.append({'agent': 'ctf_misc', 'task_id': 'new-task'})
-            return SimpleNamespace(content=json.dumps({'reply': '处理附件',
-                'steering': [{'agent': 'ctf_misc', 'hint': '读取新附件'}]}))
-
-        with patch('spiritscout.agents.master.interaction.chat_decision', new=reply):
-            result = await master._llm_user_chat([], ['evidence.txt'], [])
-        self.assertEqual(result[1][0]['task_id'], 'new-task')
+        master._engagement_status = lambda: {'active_tasks': []}
+        reply = SimpleNamespace(content=json.dumps({'reply': '资料已读',
+            'steering': [{'agent': 'ctf_misc', 'task_id': 'ended', 'hint': '查看资料'}]}))
+        with patch('spiritscout.agents.master.interaction.chat_decision', new=AsyncMock(return_value=reply)):
+            self.assertFalse(await master._respond_user_feed())
+            self.assertFalse(await master._respond_user_feed())
+        self.assertEqual(len(inbox), 1)
+        self.assertEqual(ring.steerings_for('ctf_misc', task_id='ended'), [])
+        replies = [entry.args[2]['text'] for entry in audit.log.call_args_list
+                   if entry.args[0] == 'master.reply']
+        self.assertEqual(len(replies), 1)
+        text = replies[0]
+        self.assertIn('资料已读', text)
+        self.assertIn('指令未送达', text)
 
     async def test_terminal_reply_can_read_full_evidence_and_save_full_report(self) -> None:
         self.session.workspace.mkdir(parents=True, exist_ok=True)
@@ -225,7 +276,7 @@ class SessionMessageDeliveryTests(unittest.IsolatedAsyncioTestCase):
             return responses.pop(0)
 
         gateway = SimpleNamespace(chat=chat)
-        with patch('spiritscout.web.sessions._conversation_gateway', return_value=gateway):
+        with patch('spiritscout.web.session_assistant._conversation_gateway', return_value=gateway):
             reply = await _master_reply(self.cfg, [ModelEntry(model='fixture', provider='mock')], '按新要求写报告', Mock(),
                 kind='dialogue', session=self.session, history=[{'role': 'user', 'content': '首轮上下文' * 1000}])
         self.assertEqual(reply, '完整报告已保存')
@@ -250,7 +301,7 @@ class SessionMessageDeliveryTests(unittest.IsolatedAsyncioTestCase):
             return '重新验证'
 
         result = SimpleNamespace(run_summary={'answers_complete': True}, verify_stats={}, flag_stats={}, report_path='')
-        with patch('spiritscout.web.sessions._master_reply', new=reply), \
+        with patch('spiritscout.web.session_execution._master_reply', new=reply), \
              patch('spiritscout.runtime.run_ctf_engagement', new=AsyncMock(return_value=result)) as runtime:
             await self.manager._run(self.session, self.cfg, plan, False, [ModelEntry(model='fixture', provider='mock')], True)
         self.assertEqual(runtime.call_args.kwargs['mission'], goal)
@@ -265,7 +316,7 @@ class SessionMessageDeliveryTests(unittest.IsolatedAsyncioTestCase):
         gateway = SimpleNamespace(chat=AsyncMock(return_value=SimpleNamespace(content='', tool_calls=[
             {'id': 'continue', 'name': 'request_execution', 'arguments': {'mission': '继续原题验证'}}])))
         request = {}
-        with patch('spiritscout.web.sessions._conversation_gateway', return_value=gateway):
+        with patch('spiritscout.web.session_assistant._conversation_gateway', return_value=gateway):
             reply = await _master_reply(self.cfg, [ModelEntry(model='fixture', provider='openai_compatible',
                 local_runtime='llama_cpp')], '继续', Mock(),
                 kind='dialogue', session=self.session, execution_request=request, execution_only=True)
@@ -284,7 +335,7 @@ class SessionMessageDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 gateway = SimpleNamespace(chat=AsyncMock(return_value=SimpleNamespace(content='', tool_calls=[
                     {'id': 'continue', 'name': 'request_execution', 'arguments': {'mission': '继续原题验证'}}])))
                 request = {}
-                with patch('spiritscout.web.sessions._conversation_gateway', return_value=gateway):
+                with patch('spiritscout.web.session_assistant._conversation_gateway', return_value=gateway):
                     await _master_reply(self.cfg, models, '继续', Mock(), kind='dialogue', session=self.session,
                                         execution_request=request, execution_only=True)
                 gateway.chat.assert_awaited_once()
@@ -297,12 +348,190 @@ class SessionMessageDeliveryTests(unittest.IsolatedAsyncioTestCase):
                                                      'arguments': {'mission': ''}}]),
             SimpleNamespace(content='缺少执行目标', tool_calls=[])]))
         request = {}
-        with patch('spiritscout.web.sessions._conversation_gateway', return_value=gateway):
+        with patch('spiritscout.web.session_assistant._conversation_gateway', return_value=gateway):
             reply = await _master_reply(self.cfg, [ModelEntry(model='fixture', provider='mock')], '继续', Mock(),
                 kind='dialogue', session=self.session, execution_request=request)
         self.assertEqual(gateway.chat.await_count, 2)
         self.assertFalse(request)
         self.assertEqual(reply, '缺少执行目标')
+
+    async def test_terminal_conversation_restores_tool_evidence_with_append_only_prefix(self) -> None:
+        reports = self.session.workspace / 'reports'
+        reports.mkdir()
+        evidence = '逐字原始证据，不是摘要。' * 400
+        (reports / 'original.md').write_text(evidence)
+        seen = []
+        replies = [
+            SimpleNamespace(content='', tool_calls=[{'id': 'read-old', 'name': 'session_read',
+                'arguments': {'source': 'file', 'path': 'reports/original.md', 'limit': 12000}}]),
+            SimpleNamespace(content='原始证据已核对', tool_calls=[]),
+            SimpleNamespace(content='继续解释同一份证据', tool_calls=[]),
+        ]
+
+        async def chat(messages, **kwargs):
+            seen.append(copy.deepcopy(messages))
+            return replies.pop(0)
+
+        models = [ModelEntry(model='fixture', provider='mock')]
+        with patch('spiritscout.web.session_assistant._conversation_gateway', return_value=SimpleNamespace(chat=chat)):
+            first = await _master_reply(self.cfg, models, '读取原始证据', Mock(),
+                                        kind='dialogue', session=self.session)
+            reopened = Session(self.session.session_id, self.session.mode, self.session.target,
+                               self.session.workspace, status='stopped')
+            second = await _master_reply(self.cfg, models, '接着解释', Mock(),
+                                         kind='dialogue', session=reopened)
+        self.assertEqual(first, '原始证据已核对')
+        self.assertEqual(second, '继续解释同一份证据')
+        committed = [*seen[1], {'role': 'assistant', 'content': first}]
+        self.assertEqual(seen[2][:len(committed)], committed,
+                         '重开会话只追加新输入，旧请求前缀和原生工具结果不重写')
+        self.assertIn(evidence, json.dumps(seen[2], ensure_ascii=False))
+        self.assertEqual(sum(message.get('role') == 'tool' for message in seen[2]), 1)
+        self.assertNotIn(evidence.encode(), self.session.bb_path.read_bytes(), '对话原文加密持久化')
+
+    async def test_cancelled_generation_retains_completed_tool_without_replaying_it(self) -> None:
+        models = [ModelEntry(model='fixture', provider='mock')]
+        gateway = SimpleNamespace(chat=AsyncMock(side_effect=[
+            SimpleNamespace(content='', tool_calls=[{'id': 'saved', 'name': 'save_report',
+                'arguments': {'name': 'completed.md', 'content': '真实完成的交付'}}]),
+            asyncio.CancelledError(),
+        ]))
+        with patch('spiritscout.web.session_assistant._conversation_gateway', return_value=gateway):
+            with self.assertRaises(asyncio.CancelledError):
+                await _master_reply(self.cfg, models, '保存交付', Mock(), kind='dialogue', session=self.session)
+        report = self.session.workspace / 'reports/completed.md'
+        self.assertEqual(report.read_text(), '真实完成的交付')
+        sent = []
+
+        async def answer(messages, **kwargs):
+            sent.append(copy.deepcopy(messages))
+            return SimpleNamespace(content='交付已保存，无需重复写入', tool_calls=[])
+
+        continued = SimpleNamespace(chat=AsyncMock(side_effect=answer))
+        with patch('spiritscout.web.session_assistant._conversation_gateway', return_value=continued):
+            await _master_reply(self.cfg, models, '接着解释', Mock(), kind='dialogue', session=self.session)
+        resumed = sent[0]
+        outputs = [message for message in resumed if message.get('tool_call_id') == 'saved']
+        self.assertEqual(len(outputs), 1)
+        self.assertTrue(json.loads(outputs[0]['content'])['ok'])
+        self.assertEqual(len(list(report.parent.glob('*.md'))), 1, '恢复不会再次执行已完成写入')
+        self.assertEqual([message.get('role') for message in resumed][-2:], ['tool', 'user'],
+                         '被取消的模型输出没有伪造为成功回复')
+
+    async def test_new_input_during_generation_supersedes_unstarted_handoff(self) -> None:
+        for execution_only in (False, True):
+            with self.subTest(execution_only=execution_only):
+                self.session.user_inbox.clear()
+                self.session.remember_user_message('继续执行', message_id=f'old-{execution_only}', enqueue=True)
+                feed = list(self.session.user_inbox)
+                seen = []
+
+                async def chat(messages, **kwargs):
+                    seen.append((copy.deepcopy(messages), kwargs))
+                    if len(seen) == 1:
+                        self.session.remember_user_message('先不要开工，解释已有结果',
+                            message_id=f'new-{execution_only}', enqueue=True)
+                        return SimpleNamespace(content='准备继续', tool_calls=[{'id': 'pending',
+                            'name': 'request_execution', 'arguments': {'mission': '旧目标'}}])
+                    return SimpleNamespace(content='只解释结果，没有启动新任务', tool_calls=[])
+
+                request = {}
+                with patch('spiritscout.web.session_assistant._conversation_gateway', return_value=SimpleNamespace(chat=chat)):
+                    reply = await _master_reply(self.cfg, [ModelEntry(model='fixture', provider='mock')],
+                        '继续执行', Mock(), kind='dialogue', session=self.session,
+                        execution_request=request, execution_only=execution_only, user_feed=feed)
+                self.assertFalse(request, '过时工具请求不得启动旧任务')
+                self.assertIn('没有启动', reply)
+                self.assertEqual(len(feed), 2, '新旧输入共用消费批次，不丢消息')
+                self.assertIn('先不要开工', json.dumps(seen[1][0], ensure_ascii=False))
+                results = [message for message in seen[1][0] if message.get('tool_call_id') == 'pending']
+                self.assertEqual(json.loads(results[-1]['content'])['state'], 'not_executed')
+                self.assertEqual(seen[1][1]['tool_choice'], 'auto')
+
+    async def test_running_chat_merges_mid_generation_input_before_steering(self) -> None:
+        self.session.remember_user_message('原来的方向', message_id='old-direction', enqueue=True)
+        master = object.__new__(MasterAgent)
+        master.agent_id = 'master-fixture'
+        master.ctx = SimpleNamespace(extra={'user_inbox': self.session.user_inbox, 'dialogue_history': []},
+                                     audit=Mock(), ring=RingLedger(), blackboard=None)
+        observed = []
+
+        async def reply(messages, attachments, history):
+            observed.append(list(messages))
+            if len(observed) == 1:
+                self.session.remember_user_message('改为核对证据', message_id='new-direction', enqueue=True)
+                return '旧建议', [{'agent': 'ctf_web', 'hint': '旧指导', 'task_id': 'old-task'}]
+            return '已结合新指导', []
+
+        master._llm_user_chat = reply
+        self.assertTrue(await master._respond_user_feed())
+        self.assertEqual(observed[-1], ['原来的方向', '改为核对证据'])
+        self.assertEqual(master.ctx.ring.steerings_for('ctf_web', task_id='old-task'), [])
+        self.assertEqual(self.session.user_inbox, [])
+
+    async def test_stop_of_queued_session_retains_input_without_restarting(self) -> None:
+        self.session.phase = 'queued'
+        self.session.remember_user_message('旧输入', message_id='old-queued', enqueue=True)
+        with patch.object(self.manager, 'resume', new=AsyncMock()) as resume:
+            await self.manager.stop(self.session.session_id)
+        resume.assert_not_awaited()
+        self.assertEqual(self.session.status, 'stopped')
+        self.assertEqual(len(self.session.user_inbox), 1)
+
+    async def test_shutdown_does_not_resume_input_received_during_cleanup(self) -> None:
+        stopping, release = asyncio.Event(), asyncio.Event()
+
+        async def running():
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopping.set()
+                await release.wait()
+
+        self.session.task = asyncio.create_task(running())
+        await asyncio.sleep(0)
+        with patch.object(self.manager, 'resume', new=AsyncMock()) as resume:
+            close = asyncio.create_task(self.manager.aclose())
+            await stopping.wait()
+            self.session.remember_user_message('关停期间的新输入', message_id='shutdown-input', enqueue=True)
+            release.set()
+            await close
+        resume.assert_not_awaited()
+        self.assertEqual(self.session.status, 'stopped')
+        self.assertEqual(len(self.session.user_inbox), 1, '关停只保存消息，留到下次用户接续处理')
+
+    async def test_message_during_stop_waits_for_cleanup_then_resumes_once(self) -> None:
+        stopping, release = asyncio.Event(), asyncio.Event()
+        self.session.remember_user_message('停止前尚未处理的输入', message_id='before-stop', enqueue=True)
+
+        async def running():
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopping.set()
+                await release.wait()
+
+        self.session.task = asyncio.create_task(running())
+        await asyncio.sleep(0)
+        resumed = []
+
+        async def resume(session_id):
+            self.assertTrue(self.session.task.done(), '必须等实际资源回收完成')
+            resumed.append(session_id)
+            self.session.status, self.session.phase = 'running', 'queued'
+            return self.session
+
+        with patch.object(self.manager, 'resume', new=resume):
+            first = asyncio.create_task(self.manager.stop(self.session.session_id))
+            await stopping.wait()
+            self.session.remember_user_message('停止后接着聊', message_id='during-stop', enqueue=True)
+            second = asyncio.create_task(self.manager.stop(self.session.session_id))
+            await asyncio.sleep(0)
+            release.set()
+            await asyncio.gather(first, second)
+        self.assertEqual(resumed, [self.session.session_id])
+        self.assertEqual(self.session.status, 'running', '旧停止请求不能覆盖接续状态')
+        self.assertEqual(len(self.session.user_inbox), 2)
 
     def test_initial_attachment_metadata_enriches_one_original_message(self) -> None:
         initial = self.session.remember_user_message('原始任务', message_id='message-initial')
@@ -335,8 +564,8 @@ class SessionMessageDeliveryTests(unittest.IsolatedAsyncioTestCase):
             return result
 
         with patch('spiritscout.runtime.run_ctf_engagement', new=AsyncMock(side_effect=finish)) as runtime, \
-             patch('spiritscout.web.sessions._llm_extract_platform', new=AsyncMock(return_value=None)), \
-             patch('spiritscout.web.sessions._master_reply', new=AsyncMock(return_value='现场结论')) as reply:
+             patch('spiritscout.web.session_execution._llm_extract_platform', new=AsyncMock(return_value=None)), \
+             patch('spiritscout.web.session_execution._master_reply', new=AsyncMock(return_value='现场结论')) as reply:
             await self.manager._run(self.session, self.cfg, plan, False, [ModelEntry(model='fixture', provider='mock')])
         self.assertEqual(runtime.await_count, 1)
         self.assertEqual(reply.await_count, 1)

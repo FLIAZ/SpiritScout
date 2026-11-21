@@ -30,7 +30,8 @@ SCHEMA = {"type": "function", "function": {"name": "cve_lookup", "description": 
     }, "required": ["action"]}}}
 SPEC = ToolSpec(name="cve_lookup", kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY,
                 description=GUIDANCE, automatic_replay=False,
-                allowed_params=set(SCHEMA['function']['parameters']['properties']))
+                allowed_params=set(SCHEMA['function']['parameters']['properties']),
+                required_params=("action",))
 
 
 def _query(service: CVEService, params: dict, online: bool) -> dict:

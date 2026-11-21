@@ -1,7 +1,7 @@
 "use strict";
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), vm = require('node:vm'), path = require('node:path');
-const source = fs.readFileSync(path.join(__dirname, '../src/spiritscout/web/static/js/views.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../src/spiritscout/web/static/js/session-stream.js'), 'utf8');
 let refreshes = 0, closed = 0, cleared = 0;
 class FakeSource {
   constructor() { this.handlers = {}; }
@@ -11,7 +11,7 @@ class FakeSource {
 const sandbox = vm.createContext(require('./helpers/i18n').context({S:{cur:'one',evSeen:0},EventSource:FakeSource,
   SessionHistory:{clearLiveQueue(){},async drain(){}},
   Date, refreshState(){refreshes++;},setInterval(){return 42;},clearInterval(){cleared++;}}));
-vm.runInContext(source.slice(source.indexOf('function startStreams('), source.indexOf('// 唤醒即自救')), sandbox);
+vm.runInContext(source, sandbox);
 (async () => {
 vm.runInContext('startStreams(false)', sandbox);
 const old = sandbox.S.es;

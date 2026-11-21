@@ -8,7 +8,7 @@
 
 **简体中文 · [English](README_EN.md)**
 
-[![Version](https://img.shields.io/badge/version-v0.21.3-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11--3.14-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.22.0-2563eb?style=flat-square)](CHANGELOG.md) [![Python](https://img.shields.io/badge/Python-3.11--3.14-3776ab?style=flat-square)](pyproject.toml) [![CI](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FLIAZ/SpiritScout/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a?style=flat-square)](LICENSE)
 
 [界面预览](#界面预览) · [快速开始](#快速开始) · [能力与模式](#能力与模式) · [架构](#架构) · [部署指南](docs/部署与配置.md) · [参与贡献](CONTRIBUTING.md)
 
@@ -112,7 +112,9 @@
 | 能力 | 可以做什么 |
 | --- | --- |
 | 编队协作 | 主 Agent 拆分任务，子 Agent 派生路线、共享线索，按角色分配模型 |
-| 执行工作台 | 展开任务、路线与推进步骤，查看工具结果及事实／依据黑板图 |
+| 执行工作台 | 查看任务、路线、工具结果与事实／依据；支持会话搜索、阅读目录和子 Agent 独立旁路对话 |
+| 资产收集 | 按项目独立收集、核验和导出资产，选择本批测试目标并带入 SRC 会话 |
+| 运行观察 | 查看主机与应用资源、后台命令存档，以及按时间范围统计的用量和成果 |
 | 项目与产物 | 保存资产和会话；SRC 候选漏洞由「鉴真」独立复测，生成报告或 WriteUp |
 | 浏览器与工具 | 接入 MCP、Skill 和 shell/Python 沙箱；SRC 与 CTF 执行角色支持本地离线 CyberChef 配方与完整字节结果复用；MCP 与 Skill 以卡片分组管理、组合筛选和启停；SRC 可复用登录态并人工处理验证码 |
 | CVE 情报库 | 官方 CVE List 全量本地收录、增量更新与离线检索，按需补充 NVD、KEV、EPSS、OSV，并关联本地 Nuclei 模板；情报与现场复测证据分开。[建库与维护](docs/部署与配置.md#cve-情报库) |
@@ -287,6 +289,10 @@ docker compose up -d --build --wait
 2. 在「编队」页为灵枢和各子 Agent 指派模型，修改后自动保存；也可选择一个模型，一键应用到所有可指派角色。新指派对新任务生效。
 3. 返回首页，选择 SRC、CTF 或智能体竞赛，填写目标、规则与附件，点击「开始执行」。
 
+CTF 的题型、题目名称、描述、提示与地址在同一张题目资料卡中填写；上方任务输入框可补充额外要求、已有思路或注意事项。SRC 可从项目资产库选定测试目标，并选择边缘资产优先、核心资产优先或均衡推进。
+
+在 SRC 或普通 CTF 会话中展开「实况」，选择子 Agent 即可独立对话；引用来源任务是选填项。流量记录页用于查询已保存的交互，SRC 出口在创建会话时统一选择。导航、资产收集、旁路对话、后台存档与仪表盘说明见 [控制台使用](docs/控制台使用.md)。
+
 侧栏底部或会话详情的「清理存储」可查看占用、精简数据库及清理下载缓存，保留会话与成果；查看范围并确认后执行。
 
 输入框右侧的圆形按钮可暂停或继续当前任务；输入消息时切换为发送。暂停保留原任务进度，“结束任务”位于更多操作菜单。
@@ -332,7 +338,7 @@ CTF/智能体模式使用会话独立的无头浏览器，SRC 可连接已有浏
 
 智能体模式默认保留未完成题的运行现场；暂缓派工、取消在途工作与释放实例分别由模型明确决策，不按固定耗时强制切题。
 
-当前代码版本 **v0.21.3**。版本唯一来源、递增规则和历史版本说明见 [版本管理](CONTRIBUTING.md#版本管理)。
+当前代码版本 **v0.22.0**。版本唯一来源、递增规则和历史版本说明见 [版本管理](CONTRIBUTING.md#版本管理)。
 
 贡献时按 [Agent 工作约定](AGENTS.md) 执行：同期功能共用一个版本，调整版本号和推送远端须先取得用户明确同意。
 

@@ -90,7 +90,7 @@ def read_report(root: Path, challenge: str, raw: str, offset: int, limit: int) -
 
 
 async def scan(agent, task, route, arguments):
-    from spiritscout.ctf.agents import _ToolOutcome
+    from spiritscout.ctf.contracts import _ToolOutcome
 
     try:
         if not isinstance(arguments, dict) or set(arguments) - set(SCHEMA['function']['parameters']['properties']):

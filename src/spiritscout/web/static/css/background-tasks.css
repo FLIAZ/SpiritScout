@@ -33,7 +33,7 @@
 .background-queue > header > span { font-size: 12px; font-weight: 650; }
 .background-queue > header small { color: var(--ink-3); font: 9px/1 var(--mono); letter-spacing: .12em; }
 .background-queue-list { max-height: 650px; overflow: auto; }
-.background-job { position: relative; display: grid; grid-template-columns: 18px minmax(0, 1fr); padding: 0 13px 0 10px; border-bottom: 1px solid var(--line); transition: background .14s ease; }
+.background-job { position: relative; display: grid; grid-template-columns: 18px minmax(0, 1fr); padding: 0 13px 0 10px; border-bottom: 1px solid var(--line); transition: background var(--motion-fast) ease; }
 .background-job:hover { background: color-mix(in srgb, var(--accent-soft) 60%, transparent); }
 .background-job.is-selected { background: var(--surface); box-shadow: inset 3px 0 var(--accent); }
 .background-job-track { position: relative; grid-row: 1 / span 2; }
@@ -115,3 +115,29 @@
   :root:not([data-theme="light"]) #tab-background { --process-terminal: #0f1110; --process-terminal-ink: #dedbd2; }
 }
 :root[data-theme="dark"] #tab-background { --process-terminal: #0f1110; --process-terminal-ink: #dedbd2; }
+
+/* 档案延续左队列、右终端的阅读顺序；导航动作轻量，不增加显示模式。 */
+.background-storage-bar { display: flex; justify-content: space-between; gap: 18px; padding-top: 13px; color: var(--ink-3); font-size: 11px; }
+.background-archive-state { padding: 9px 12px; border-radius: 7px; background: color-mix(in srgb, var(--ok-soft) 45%, var(--surface)); color: var(--ink-2); font-size: 11px; line-height: 1.7; }
+.background-archive-state.is-incomplete { background: color-mix(in srgb, var(--warn-soft) 50%, var(--surface)); color: var(--warn); }
+.background-command { margin: 16px 0; padding: 12px; background: color-mix(in srgb, var(--surface-2) 60%, var(--surface)); border-radius: 9px; border: 1px solid color-mix(in srgb, var(--line) 65%, transparent); }
+.background-command > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--ink-2); font-size: 11px; }
+.background-command > header > div { display: flex; gap: 6px; }
+.background-command pre { max-height: 170px; overflow: auto; margin: 10px 0 0; padding: 8px 3px; color: var(--ink); font: 11px/1.7 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.background-terminal-action, .background-output-search button, .background-output-nav button { flex: none; padding: 4px 6px; border: 0; border-radius: 4px; background: transparent; color: var(--process-terminal-ink); font: 10px/1.4 var(--font-body); transition: background-color var(--motion-fast), color var(--motion-fast); }
+.background-terminal-action:hover, .background-output-search button:hover, .background-output-nav button:hover { background: #ffffff12; }
+.background-output-search { display: flex; gap: 4px; align-items: center; padding: 9px 10px 4px; }
+.background-output-search input { min-width: 0; flex: 1; padding: 5px 7px; border: 1px solid #ffffff18; border-radius: 5px; background: #ffffff06; color: var(--process-terminal-ink); font: 10.5px/1.5 var(--font-body); }
+.background-output-search input::placeholder { color: var(--process-terminal-muted); }
+.background-output-nav { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; padding: 4px 8px 7px; border-bottom: 1px solid #ffffff10; }
+.background-output-nav span { flex: 1; min-width: 80px; color: var(--process-terminal-muted); font: 9px/1.6 var(--mono); }
+.background-terminal button:disabled { opacity: .35; cursor: default; }
+.background-terminal :is(button,input,pre):focus-visible, .background-command pre:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.background-more { width: 100%; padding: 13px; border: 0; background: transparent; color: var(--accent-ink); font: 11px/1.6 var(--font-body); transition: background-color var(--motion-fast); }
+.background-more:hover { background: var(--accent-soft); }
+.background-more[hidden] { display: none; }
+.background-detail > :is(.background-command,.background-terminals) { animation: background-archive-arrive var(--motion-base) ease-out both; }
+@keyframes background-archive-arrive { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+@media (prefers-reduced-motion: reduce) { .background-detail > :is(.background-command,.background-terminals) { animation: none; } }
+
+.background-terminal mark { background: #e4bd7255; color: #fff1c9; border-radius: 2px; }

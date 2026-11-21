@@ -78,10 +78,11 @@ class ExecutionRegressionTests(unittest.IsolatedAsyncioTestCase):
         registry = ToolRegistry(LocalExecutor())
         execute = AsyncMock(return_value=ToolResult(tool="http_probe", ok=False))
         registry.register_builtin("http_probe", execute, BUILTIN_SPECS["http_probe"])
-        await registry.call("http_probe", {"method": "POST", "action": "analysis"})
+        target = {"url": "https://audit.test/"}
+        await registry.call("http_probe", {**target, "method": "POST", "action": "analysis"})
         execute.assert_awaited_once()
         execute.reset_mock()
-        self.assertFalse((await registry.call("http_probe", {"method": "DELETE"})).ok)
+        self.assertFalse((await registry.call("http_probe", {**target, "method": "DELETE"})).ok)
         execute.assert_not_awaited()
 
     async def test_readonly_probe_can_retry(self) -> None:
@@ -89,7 +90,7 @@ class ExecutionRegressionTests(unittest.IsolatedAsyncioTestCase):
         execute = AsyncMock(side_effect=[ToolResult(tool="http_probe", ok=False),
                                          ToolResult(tool="http_probe", ok=True)])
         registry.register_builtin("http_probe", execute, BUILTIN_SPECS["http_probe"])
-        self.assertTrue((await registry.call("http_probe", {"method": "GET"})).ok)
+        self.assertTrue((await registry.call("http_probe", {"url": "https://audit.test/", "method": "GET"})).ok)
         self.assertEqual(execute.await_count, 2)
 
     async def test_missing_program_returns_structured_result(self) -> None:

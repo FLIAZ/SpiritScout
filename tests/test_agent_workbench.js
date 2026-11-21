@@ -65,3 +65,40 @@ feed('agent.delta',{task_id:'t1',route_id:'r1',route:'same-route',turn:1,kind:'r
 feed('agent.delta',{task_id:'t2',route_id:'r2',route:'same-route',turn:1,kind:'reasoning',text:'任务二'});
 assert.equal(active.blocks.filter(b=>b.taskId==='t1').at(-1).text,'任务一');
 assert.equal(active.blocks.filter(b=>b.taskId==='t2').at(-1).text,'任务二');
+
+// 重启回收由 master 发出，历史回放必须更新原任务，而不是留下“调用异常”或影响续传新 Agent。
+for(const [type,status] of Object.entries({'task.cancelled':'已撤销','task.failed':'失败','task.pruned':'已剪枝','task.done':'已完成'})) {
+  const recovery=api.create();
+  const emit=(actor,event,detail)=>api.reduce(recovery,{actor,type:event,detail,ts:'now'});
+  emit('ctf-old','task.start',{task_id:'old-1'});
+  emit('ctf-old','model.started',{task_id:'old-1',call_id:'old-c1',response_format:'json'});
+  emit('ctf-old','task.start',{task_id:'old-2'});
+  emit('ctf-old','model.started',{task_id:'old-2',call_id:'old-c2'});
+  emit('ctf-old','model.cancelled',{task_id:'old-1',call_id:'old-c1',error:''});
+  const old=recovery.agents.get('ctf-old');
+  assert.equal(old.status,'模型生成中','取消一个请求不影响另一在途请求');
+  emit('ctf-old','model.cancelled',{task_id:'old-2',call_id:'old-c2',error:''});
+  assert.equal(old.status,'模型调用已取消','取消与接口失败必须区分');
+  emit('ctf-new','task.start',{task_id:'new'});
+  emit('ctf-new','model.started',{task_id:'new',call_id:'new-c'});
+  emit('master-restarted',type,{task_id:'old-1',error:type==='task.failed'?'真实任务错误':''});
+  assert.equal(old.tasks.get('old-1').status,status);
+  assert.equal(old.tasks.get('old-2').status,'执行中');
+  assert.equal(old.status,'执行中');
+  emit('master-restarted',type,{task_id:'old-2'});
+  assert.equal(old.status,status);
+  assert.equal(old.tasks.get('old-2').status,status);
+  assert.equal(old.calls.size,0);
+  assert.equal(old.machineCalls.size,0);
+  const resumed=recovery.agents.get('ctf-new');
+  assert.equal(resumed.status,'模型生成中');
+  assert.ok(resumed.calls.has('new-c'));
+  assert.equal(recovery.agents.size,2,'主 Agent 不成为工作台专项 Agent');
+  emit('master-restarted',type,{task_id:'unknown'});
+  assert.equal(recovery.agents.size,2,'未知任务不能伪造归属');
+  if(type==='task.failed') assert.ok(old.blocks.some(block=>block.kind==='错误' && block.text==='真实任务错误'));
+  emit('ctf-new','model.failed',{task_id:'new',call_id:'new-c',error:'真实接口错误'});
+  assert.equal(resumed.status,'调用异常','真实接口故障仍显示异常');
+  assert.ok(resumed.blocks.some(block=>block.kind==='错误' && block.text==='真实接口错误'));
+}
+console.log('workbench restart cleanup, task-owner routing and cancellation semantics passed');

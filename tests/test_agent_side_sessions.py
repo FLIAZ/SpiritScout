@@ -39,37 +39,68 @@ class SideSessionTests(unittest.TestCase):
             parent.standing_rules='只读核实，不删除文件'
             manager._sessions[parent.session_id]=parent
             bb=Blackboard(parent.bb_path)
-            task={'task_id':'t1','task_type':'recon','agent_type':'recon','target':'https://a.test',
+            task={'task_id':'t1','task_type':'business_context','agent_type':'business_context','target':'https://a.test',
                   'payload':{'rules':'原始约定','node_title':'来源任务'}}
-            bb.write(BlackboardLayer.TASK_STATE,'t1',{'task':task,'routes':[{'name':'路线','notes':['已发现入口']}]},updated_by='recon-real')
+            bb.write(BlackboardLayer.TASK_STATE,'t1',{'task':task,'routes':[{'name':'路线','notes':['已发现入口']}]},updated_by='business-real')
             bb.write(BlackboardLayer.TARGET_AUTH,'user-context',{'statements':[{'text':'不测生产'}]},updated_by='user')
             bb.close()
             created=Session(session_id='sess-child',mode='src',target=parent.target,workspace=root/'child')
             manager.create=AsyncMock(return_value=created)
             with TestClient(app,base_url='http://127.0.0.1') as client:
                 url=f'/api/sessions/{parent.session_id}/agent-sessions'
-                request={'actor':'recon-real','task_id':'t1','mission':'独立核实权限差异'}
+                request={'actor':'business-real','task_id':'t1','mission':'独立核实权限差异'}
                 parent.mode='competition'
                 self.assertEqual(client.post(url,json=request).status_code,422)
                 manager.create.assert_not_awaited()
                 parent.mode='src'
-                self.assertEqual(client.post(url,json={**request,'actor':'recon-forged'}).status_code,422)
+                self.assertEqual(client.post(url,json={**request,'actor':'business-forged'}).status_code,422)
                 self.assertEqual(client.post(url,json={**request,'mode':'competition'}).status_code,422)
                 self.assertEqual(client.post(url,json={**request,'mission':'   '}).status_code,422)
                 result=client.post(url,json=request)
                 self.assertEqual(result.status_code,201,result.text)
                 payload,plan=manager.create.call_args.args
-                self.assertEqual(payload['side_agent'],'recon')
+                self.assertEqual(payload['side_agent'],'business_context')
                 self.assertEqual(payload['standing_rules'],parent.standing_rules)
                 self.assertEqual(payload['side_context']['user_context']['statements'][0]['text'],'不测生产')
                 self.assertEqual(plan.authorization.scope,parent.plan.authorization.scope)
                 self.assertFalse(plan.needs_mode_routing)
                 self.assertEqual(parent.plan.mission,'原任务')
                 self.assertNotEqual(result.json()['session_id'],parent.session_id)
-                self.assertEqual(side_session_source(parent,'recon-real','t1')['agent'],'recon')
+                self.assertEqual(side_session_source(parent,'business-real','t1')['agent'],'business_context')
+                parent_status = parent.status
+                result = client.post(url, json={'actor': 'business-real', 'mission': '只聊已有思路'})
+                self.assertEqual(result.status_code, 201, result.text)
+                independent, _ = manager.create.call_args.args
+                self.assertEqual(independent['side_context']['task_id'], '')
+                self.assertEqual(independent['side_context']['task'], {})
+                self.assertEqual(parent.status, parent_status)
+                self.assertEqual(parent.plan.mission, '原任务')
                 parent.mode='ctf'
                 with self.assertRaises(SpiritScoutError):
-                    side_session_source(parent,'recon-real','t1')  # 角色模式不兼容
+                    side_session_source(parent,'business-real','t1')  # 角色模式不兼容
+
+    def test_optional_task_keeps_role_and_scope_without_injecting_active_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Session(session_id="parent", mode="ctf", target="fixture", workspace=Path(tmp))
+            context = side_session_source(parent, "ctf_web", "")
+            self.assertEqual(context["agent"], "ctf_web")
+            self.assertEqual(context["task"], {})
+            self.assertFalse(parent.bb_path.exists(), "独立聊天不创建或修改父会话数据库")
+            with self.assertRaises(ValueError):
+                side_session_source(parent, "forged", "")
+            bb = Blackboard(parent.bb_path)
+            try:
+                bb.write(BlackboardLayer.TASK_STATE, "active", {"task": {
+                    "agent_type": "ctf_web", "payload": {"mission": "继续原任务"}},
+                    "routes": [{"name": "原路线"}]}, updated_by="ctf-web-real")
+                context = side_session_source(parent, "ctf-web-real", "")
+                self.assertEqual(context["agent"], "ctf_web")
+                self.assertEqual(context["task"], {})
+                self.assertEqual(context["routes"], [])
+                self.assertEqual(context["task_id"], "")
+                self.assertEqual(bb.read(BlackboardLayer.TASK_STATE, "active")["task"]["payload"]["mission"], "继续原任务")
+            finally:
+                bb.close()
 
     def test_ctf_specialist_can_start_side_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -94,17 +125,17 @@ class SideRuntimeTests(unittest.IsolatedAsyncioTestCase):
             gate=AsyncMock()
             infra=SimpleNamespace(blackboard=bb,workspace=Path(tmp),audit=NullAuditLogger(),bus=None,
                                   gateway=SimpleNamespace(usage_report=lambda:{'calls':0}),close=close)
-            agent=SimpleNamespace(agent_id='recon-side',run=AsyncMock(return_value={'done':True}),
+            agent=SimpleNamespace(agent_id='business-side',run=AsyncMock(return_value={'done':True}),
                 _llm_chat_json=AsyncMock(side_effect=[{'reply':'我先核实','execute':True},{'reply':'已核实当前证据'}]))
             source={'task_id':'parent-task','routes':[{'name':'r','notes':['原始证据']}],
-                    'task':{'task_type':'recon','target':'https://a.test',
+                    'task':{'task_type':'business_context','target':'https://a.test',
                             'payload':{'rules':'原约定','continue_from':{'task_id':'old'}}}}
             try:
                 with patch('spiritscout.runtime._build_infra',AsyncMock(return_value=infra)) as build, patch(
-                    'spiritscout.runtime._make_assembler',return_value=SimpleNamespace(assemble=Mock(return_value=SimpleNamespace(agents={AgentType.RECON:agent})))):
+                    'spiritscout.runtime._make_assembler',return_value=SimpleNamespace(assemble=Mock(return_value=SimpleNamespace(agents={AgentType.BUSINESS_CONTEXT:agent})))):
                     result=await run_agent_side_session(cfg=SystemConfig(),models=[],
                         authorization=Authorization(auth_id='auth',mode=RunMode.SRC,scope=Scope()),
-                        agent_key='recon',mission='新任务',context=source,agent_models={},approval_gate=gate,
+                        agent_key='business_context',mission='新任务',context=source,agent_models={},approval_gate=gate,
                         question_broker=None,ring=None,pause_gate=None,dialogue_history=[],standing_rules='只读')
                     self.assertIs(build.call_args.kwargs['approval_gate'],gate)
                     task=agent.run.call_args.args[0]
@@ -113,7 +144,7 @@ class SideRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn('原约定',task.payload['rules'])
                     self.assertIn('只读',task.payload['rules'])
                     self.assertEqual(task.payload['source_context']['routes'][0]['notes'],['原始证据'])
-                    self.assertEqual(result.run_summary['side_agent'],'recon')
+                    self.assertEqual(result.run_summary['side_agent'],'business_context')
                     self.assertEqual(agent._llm_chat_json.await_count,2)
                     close.assert_awaited_once()
             finally:
@@ -134,7 +165,7 @@ class SideConversationTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             bb=Blackboard(Path(tmp)/'bb.db')
             audit=Mock()
-            agent=SimpleNamespace(agent_id='recon-dialogue', run=AsyncMock(),
+            agent=SimpleNamespace(agent_id='business-dialogue', run=AsyncMock(),
                 _llm_chat_json=AsyncMock(return_value={'reply':'我们刚才在核实登录入口，不需要重新扫描。','execute':False}))
             infra=SimpleNamespace(blackboard=bb,workspace=Path(tmp),audit=audit,bus=None,
                 gateway=SimpleNamespace(usage_report=lambda:{}),close=AsyncMock())
@@ -144,10 +175,10 @@ class SideConversationTests(unittest.IsolatedAsyncioTestCase):
             replies=[]
             try:
                 with patch('spiritscout.runtime._build_infra',AsyncMock(return_value=infra)), patch(
-                    'spiritscout.runtime._make_assembler',return_value=SimpleNamespace(assemble=Mock(return_value=SimpleNamespace(agents={AgentType.RECON:agent})))):
+                    'spiritscout.runtime._make_assembler',return_value=SimpleNamespace(assemble=Mock(return_value=SimpleNamespace(agents={AgentType.BUSINESS_CONTEXT:agent})))):
                     await run_agent_side_session(cfg=SystemConfig(),models=[],
                         authorization=Authorization(auth_id='a',mode=RunMode.SRC,scope=Scope()),
-                        agent_key='recon',mission='刚才查到哪里了？',context={},agent_models={},
+                        agent_key='business_context',mission='刚才查到哪里了？',context={},agent_models={},
                         approval_gate=None,question_broker=None,ring=None,pause_gate=None,
                         dialogue_history=history,on_reply=replies.append)
                 agent.run.assert_not_awaited()
@@ -155,7 +186,7 @@ class SideConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(replies),1)
                 self.assertIn('登录入口',replies[0])
                 reply_event=next(call for call in audit.log.call_args_list if call.args[0]=='agent.reply')
-                self.assertEqual(reply_event.args[1],'recon-dialogue')
+                self.assertEqual(reply_event.args[1],'business-dialogue')
                 self.assertTrue(reply_event.args[2]['final'])
                 self.assertTrue(agent._llm_chat_json.call_args.kwargs['_allow_ask'] is False)
             finally:

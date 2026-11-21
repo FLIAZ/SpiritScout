@@ -54,6 +54,47 @@ class InstanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CompetitionRuntimeCleanupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_optional_writeup_uses_ctf_writer_after_solving(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from spiritscout.competition.rules import CompetitionRules
+        from spiritscout.config.settings import (
+            ModelEntry,
+            SystemConfig,
+            WorkspaceConfig,
+        )
+        from spiritscout.core.models import Authorization, RunMode, Scope
+        from spiritscout.runtime import run_competition_engagement
+
+        for enabled in (False, True):
+            with self.subTest(generate_wp=enabled), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                cfg = SystemConfig(workspace=WorkspaceConfig(root=tmp), audit_log_path=str(root / 'audit.jsonl'))
+                cfg.blackboard.sqlite_path = str(root / 'bb.db')
+                cfg.knowledge.sqlite_path = str(root / 'kb.db')
+                cfg.experience.root = str(root / 'experience')
+                report = root / 'writeup.md'
+                writer = AsyncMock(return_value=report)
+                with patch('spiritscout.runtime._run_master', new=AsyncMock(return_value={'dag_nodes': []})), \
+                        patch('spiritscout.runtime._schedule_background_distill', return_value=None), \
+                        patch('spiritscout.runtime._render_writeup', writer):
+                    result = await run_competition_engagement(
+                        cfg=cfg, models=[ModelEntry(model='fixture', provider='mock')],
+                        authorization=Authorization(auth_id='test', mode=RunMode.COMPETITION,
+                            human_confirmed=True, scope=Scope(local_analysis=True)),
+                        rules=CompetitionRules.from_dict({}), challenges=[{'id': 'c1', 'title': 'fixture'}],
+                        generate_wp=enabled, enable_llm_planning=False)
+                if enabled:
+                    writer.assert_awaited_once()
+                    self.assertEqual(writer.await_args.kwargs['contest'], 'ctf')
+                    self.assertFalse(writer.await_args.kwargs['enable_llm'])
+                    self.assertEqual(result.report_path, str(report))
+                else:
+                    writer.assert_not_awaited()
+                    self.assertIn('智能渗透赛结果摘要', Path(result.report_path).read_text())
+
     async def test_continuation_preserves_only_successful_internal_returns(self) -> None:
         import asyncio
         import tempfile

@@ -92,7 +92,9 @@ FUNCTIONS = {fn.__name__: fn for fn in (traffic_search, traffic_get, traffic_bod
 _PARAMS = {"traffic_search": {"query", "body", "method", "status", "before", "limit"},
            "traffic_get": {"record_id"}, "traffic_body_read": {"record_id", "direction", "offset", "limit"}}
 SPECS = {name: ToolSpec(name=name, kind=ToolKind.BUILTIN, risk=RiskLevel.READONLY,
-    allowed_params=_PARAMS[name], description="只读检索/读取当前会话已采集流量，不发送目标网络请求") for name in NAMES}
+    allowed_params=_PARAMS[name],
+    required_params=(("record_id",) if name in {"traffic_get", "traffic_body_read"} else ()),
+    description="只读检索/读取当前会话已采集流量，不发送目标网络请求") for name in NAMES}
 
 
 def _schema(name: str, description: str, properties: dict[str, Any], required: list[str]) -> dict[str, Any]:

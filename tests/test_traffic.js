@@ -55,7 +55,7 @@ const roots = new Map(), pending = [], timers = new Map();
 let timerId = 0;
 const S = {view:"session", tab:"traffic", cur:"a"};
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-const context = vm.createContext(require('./helpers/i18n').context({S, esc, URLSearchParams, document:{visibilityState:"visible"},
+const context = vm.createContext(require('./helpers/i18n').context({S, esc, URLSearchParams, TrafficProxy:{mount(){throw Error("流量浏览不应挂载独立代理采集面板");}}, document:{visibilityState:"visible"},
   $: selector => { if (!roots.has(selector)) roots.set(selector, new Element()); return roots.get(selector); },
   api: path => new Promise((resolve, reject) => pending.push({path, resolve, reject})),
   setTimeout: callback => { timers.set(++timerId, callback); return timerId; },
@@ -69,7 +69,8 @@ const result = (id, url) => ({items:[{id, url, method:"GET", status:200, respons
 
 (async () => {
   run("TrafficPage.sessionTab()");
-  assert.match(pending[0].path, /sessions\/a\/traffic/);
+  assert.match(pending[0].path, /sessions\/a\/traffic\?/);
+  assert.doesNotMatch(roots.get("#tab-traffic").innerHTML, /data-proxy-panel|data-proxy-enable/);
   await fireTimer();
   assert.equal(pending.length, 1, "慢请求期间自动刷新不叠加请求");
   S.cur = "b"; run("TrafficPage.sessionTab()");

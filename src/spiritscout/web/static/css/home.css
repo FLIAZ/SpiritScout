@@ -1,22 +1,22 @@
 /* 首页只保留一个视觉重心：模式选择与任务输入。 */
 #view-home {
-  --home-panel: color-mix(in srgb, var(--surface) 65%, white);
+  --home-panel: var(--surface);
   --home-shadow: 0 20px 65px -35px rgba(75, 57, 29, .26), 0 2px 6px rgba(75, 57, 29, .035);
-  max-width: 900px; min-height: calc(100svh - 62px); padding: clamp(24px, 5.5vh, 72px) 18px 0;
+  max-width: 960px; margin: 0 auto; min-height: calc(100svh - 70px); padding: clamp(12px, 3vh, 36px) 0 0;
   position: relative; isolation: isolate;
 }
 main:has(> #view-home:not([hidden])) {
-  background: radial-gradient(ellipse at 72% 12%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 65%);
+  background: var(--bg);
 }
-#view-home .hero { text-align: left; margin-bottom: 32px; }
+#view-home .hero { text-align: left; margin-bottom: 28px; }
 .home-eyebrow { display: flex; align-items: center; gap: 9px; color: var(--ink-2); margin: 0 0 18px; font-size: 12px; letter-spacing: .1em; }
 .home-eyebrow > span { width: 20px; height: 2px; background: var(--accent); }
 .home-intro { margin: 14px 0 0; color: var(--ink-2); font-size: 14px; line-height: 1.75; }
-#view-home .lead { font-size: clamp(32px, 3.5vw, 48px); line-height: 1.42; font-weight: 650; letter-spacing: 0; }
-#view-home .lead-em { padding: 0 3px; font-family: "STKaiti", "KaiTi", "Kaiti SC", "FangSong", serif; font-weight: 700; font-size: 1.13em; background-image: linear-gradient(115deg, var(--accent-strong), var(--accent) 52%, var(--gold)); }
+#view-home .lead { font-size: clamp(30px, 2.5vw, 38px); line-height: 1.4; font-weight: 650; letter-spacing: 0; }
+#view-home .lead-em { padding: 0 3px; font-family: var(--font-body); font-weight: 650; font-size: 1em; background: none; color: var(--accent-ink); }
 .home-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0 0 18px; padding: 0; border: 0; min-width: 0; }
 .home-modes legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.home-mode-card { position: relative; display: flex; align-items: center; gap: 12px; padding: 19px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--home-panel); cursor: pointer; transition: border-color .16s, background .16s, box-shadow .16s; min-width: 0; }
+.home-mode-card { position: relative; display: flex; align-items: center; gap: 12px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--home-panel); cursor: pointer; transition: border-color var(--motion-base), background var(--motion-base), box-shadow var(--motion-base); min-width: 0; }
 .home-mode-card input { position: absolute; opacity: 0; width: 1px; height: 1px; padding: 0; }
 .home-mode-card:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
 .home-mode-card:has(input:checked) { background: color-mix(in srgb, var(--accent) 7%, var(--home-panel)); border-color: var(--accent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent); }
@@ -27,8 +27,8 @@ main:has(> #view-home:not([hidden])) {
 .mode-copy strong { font-size: 13px; font-weight: 650; }
 .mode-check { margin-left: auto; width: 13px; height: 13px; border: 1px solid var(--line-strong); border-radius: 50%; flex: none; }
 input:checked ~ .mode-check { border: 4px solid var(--accent); background: var(--home-panel); }
-#view-home .composer { padding: 0; border-radius: 17px; border-color: color-mix(in srgb, var(--accent) 16%, var(--line)); background: var(--home-panel); box-shadow: var(--home-shadow); overflow: visible; transition: border-color .16s, box-shadow .16s; }
-#view-home .composer:focus-within { border-color: color-mix(in srgb, var(--accent) 65%, var(--line)); box-shadow: var(--home-shadow), 0 0 0 3px var(--accent-soft); }
+#view-home .composer { padding: 0; border-radius: 12px; border-color: color-mix(in srgb, var(--accent) 16%, var(--line)); background: var(--home-panel); box-shadow: var(--home-shadow); overflow: visible; transition: border-color var(--motion-base), box-shadow var(--motion-base); }
+#view-home .composer:focus-within { border-color: color-mix(in srgb, var(--accent) 16%, var(--line)); }
 #view-home .mission-settings { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: 21px 24px 0; border: 0; gap: 8px 16px; }
 #view-home .home-mission-label { display: flex; align-items: baseline; gap: 10px; color: var(--ink); flex: none; }
 #view-home .home-mission-label > span { color: var(--accent-ink); font: 10px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase; }
@@ -36,8 +36,10 @@ input:checked ~ .mode-check { border: 4px solid var(--accent); background: var(-
 #view-home .mission-settings p { flex: 1 1 240px; text-align: right; color: var(--ink-2); font-size: 11px; }
 #view-home .mission-settings .inline-help { margin-left: auto; }
 #view-home .mission-settings .inline-help > p { text-align: left; font-size: 12px; }
-#view-home .composer textarea { display: block; padding: 18px 24px 24px; min-height: 170px; max-height: 360px; border-radius: 0; font-size: 15px; line-height: 1.85; }
+#view-home .composer textarea { display: block; padding: 18px 24px 24px; min-height: 148px; max-height: 360px; border-radius: 0; font-size: 15px; line-height: 1.85; }
 #view-home .composer textarea::placeholder { color: var(--ink-3); }
+#view-home #c-mission:focus { outline: none; box-shadow: none; }
+#view-home .composer:has(#c-mission:focus-visible) .home-mission-label > strong { color: var(--accent-ink); }
 #view-home .composer-route { position: relative; display: grid; grid-template-columns: 40px minmax(180px, 1fr) minmax(210px, 280px) auto; align-items: center; gap: 14px; margin: 0 18px 16px; padding: 13px 14px; border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line)); border-radius: 12px; background: linear-gradient(105deg, color-mix(in srgb, var(--accent) 7%, var(--surface-2)), var(--surface-2) 62%); }
 #view-home .composer-route[hidden] { display: none; }
 #view-home .composer-route::before { content: ""; position: absolute; left: 0; top: 12px; bottom: 12px; width: 2px; border-radius: 2px; background: var(--accent); }
@@ -51,10 +53,10 @@ input:checked ~ .mode-check { border: 4px solid var(--accent); background: var(-
 #view-home .composer-route-picker > .selx { min-width: 0; }
 #view-home .composer-route-picker .selx-btn { min-height: 38px; border-color: color-mix(in srgb, var(--accent) 22%, var(--line)); background: var(--home-panel); font-size: 12px; }
 #view-home .composer-route-manage { display: inline-flex; align-items: center; gap: 5px; min-height: 36px; padding: 7px 8px; border: 0; border-radius: 8px; background: transparent; color: var(--ink-2); font: inherit; font-size: 11px; white-space: nowrap; }
-#view-home .composer-route-manage svg { width: 17px; height: 17px; transition: transform .16s; }
+#view-home .composer-route-manage svg { width: 17px; height: 17px; transition: transform var(--motion-base); }
 #view-home .composer-route-manage:hover { color: var(--accent-ink); background: var(--accent-soft); }
 #view-home .composer-route-manage:hover svg { transform: translateX(2px); }
-#view-home .answer-option { position: relative; display: grid; grid-template-columns: 32px minmax(0, 1fr) 36px; align-items: center; gap: 12px; margin: 0 24px 16px; padding: 13px 15px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); cursor: pointer; transition: border-color .16s, background .16s; }
+#view-home .answer-option { position: relative; display: grid; grid-template-columns: 32px minmax(0, 1fr) 36px; align-items: center; gap: 12px; margin: 0 24px 16px; padding: 13px 15px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); cursor: pointer; transition: border-color var(--motion-base), background var(--motion-base); }
 #view-home .answer-option[hidden] { display: none; }
 #view-home .answer-option input { position: absolute; width: 1px; height: 1px; opacity: 0; margin: 0; padding: 0; }
 #view-home .answer-option-icon { display: grid; place-items: center; width: 32px; height: 36px; color: var(--ink-2); }
@@ -64,8 +66,8 @@ input:checked ~ .mode-check { border: 4px solid var(--accent); background: var(-
 #view-home .answer-option-heading strong { color: var(--ink); font-size: 12px; font-weight: 600; }
 #view-home .answer-option-status { color: var(--ink-3); font-size: 10px; }
 #view-home .answer-option-copy small { color: var(--ink-2); font-size: 11px; line-height: 1.7; }
-#view-home .answer-option-switch { position: relative; width: 36px; height: 21px; border: 1px solid var(--line); border-radius: 12px; background: var(--line); transition: background .16s, border-color .16s; }
-#view-home .answer-option-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 15px; height: 15px; border-radius: 50%; background: var(--home-panel); box-shadow: 0 1px 3px rgb(0 0 0 / .14); transition: transform .16s; }
+#view-home .answer-option-switch { position: relative; width: 36px; height: 21px; border: 1px solid var(--line); border-radius: 12px; background: var(--line); transition: background var(--motion-base), border-color var(--motion-base); }
+#view-home .answer-option-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 15px; height: 15px; border-radius: 50%; background: var(--home-panel); box-shadow: 0 1px 3px rgb(0 0 0 / .14); transition: transform var(--motion-base); }
 #view-home .answer-option-on { display: none; }
 #view-home .answer-option:hover { border-color: var(--accent); }
 #view-home .answer-option:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
@@ -87,7 +89,7 @@ input:checked ~ .mode-check { border: 4px solid var(--accent); background: var(-
 #view-home #home-attach { width: 34px; height: 34px; border: 0; background: transparent; color: var(--ink-2); border-radius: 8px; }
 #view-home #home-attach:hover { color: var(--accent-ink); background: var(--accent-soft); }
 #view-home #c-go { width: 38px; height: 38px; min-width: 38px; aspect-ratio: 1; flex: 0 0 38px; padding: 0; border-radius: 50%; background: var(--surface-2); color: var(--ink-2); opacity: 1; }
-#view-home #c-go.ready { background: var(--accent-strong); color: #fff; box-shadow: 0 3px 9px color-mix(in srgb, var(--accent) 20%, transparent); }
+#view-home #c-go.ready { background: var(--accent-strong); color: var(--on-accent); box-shadow: 0 3px 9px color-mix(in srgb, var(--accent) 20%, transparent); }
 #view-home #c-go:disabled { opacity: .5; box-shadow: none; }
 #view-home #c-go svg { width: 18px; height: 18px; }
 #view-home .comp-files:not(:empty) { padding: 0 24px 12px; }
@@ -95,7 +97,7 @@ input:checked ~ .mode-check { border: 4px solid var(--accent); background: var(-
 .home-examples > span { color: var(--ink-3); font-size: 11px; flex: none; }
 #view-home .suggestions { justify-content: flex-start; gap: 8px 18px; margin: 0; }
 #view-home .chip-s { display: inline-flex; align-items: center; gap: 12px; padding: 3px 0; font-size: 12px; background: none; border: 0; border-radius: 2px; }
-#view-home .chip-s span { color: var(--ink-3); transition: transform .16s; }
+#view-home .chip-s span { color: var(--ink-3); transition: transform var(--motion-base); }
 #view-home .chip-s:hover span { transform: translate(2px, -2px); color: var(--accent-ink); }
 #view-home .notice { margin: 32px 4px 0; padding: 0; color: var(--ink-3); font-size: 11px; }
 #view-home .resource-shortcuts { margin: auto 0 0; padding: 24px 4px 14px; border: 0; gap: 24px; }
@@ -144,8 +146,8 @@ input:checked ~ .mode-check { border: 4px solid var(--accent); background: var(-
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) #view-home #c-go.ready { background: var(--accent); color: #211b14; } }
 @media (max-width: 860px) { #app { grid-template-rows: auto 1fr; } }
 
-#view-home .ctf-types { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
-  margin: 0 24px 16px; min-width: 0; background: var(--surface-2); }
+#view-home .ctf-types { border: 0; border-radius: 0; padding: 0;
+  margin: 18px 18px 0; min-width: 0; background: transparent; }
 #view-home .ctf-types[hidden] { display: none; }
 #view-home .ctf-types legend { color: var(--ink); font-size: 12px; font-weight: 600; padding: 0 5px; }
 #view-home .ctf-types legend small { color: var(--ink-3); font-size: 10px; font-weight: 400; margin-left: 6px; }

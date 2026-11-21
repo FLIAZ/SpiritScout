@@ -1,11 +1,17 @@
 "use strict";
 /* 公开正文按意图聚合；调用与结果收进对应消息的默认折叠明细。 */
+/** @typedef {import('./frontend-types').AuditEvent} AuditEvent */
+/** @typedef {import('./frontend-types').TraceStore} TraceStore */
+/** @typedef {import('./frontend-types').TraceTask} TraceTask */
+/** @typedef {import('./frontend-types').TraceStep} TraceStep */
+/** @typedef {import('./frontend-types').TraceSegment} TraceSegment */
 const TaskTrace = (() => {
   const terminal = new Set(["done", "failed", "cancelled", "pruned"]);
   const statuses = {running:I18n.t("执行中"), done:I18n.t("已完成"), failed:I18n.t("执行失败"), cancelled:I18n.t("已撤销"), pruned:I18n.t("已暂缓"), waiting:I18n.t("等待返回")};
   const supported = /^(task\.(start|done|failed|cancelled|pruned)|agent\.(turn|delta|tool_call|tool_result|conclude|note|progress|ask_user|ask_answered|blocked|error)|executor\.identity|model\.(started|call|failed|cancelled))$/;
   const wrapper = name => name === "investigate" || name === "explore";
   const worker = actor => !!actor && !/^(master(?:-|$)|gateway$|runtime$|system$|user$)/.test(actor);
+  /** @returns {TraceStore} */
   const create = () => ({tasks:new Map(), routes:new Map(), calls:new Map(), singleActors:new Map(), machineCalls:new Set()});
   const machineScope = scope => new Set([
     "payload_planner", "response_analyst", "business_analyst",
@@ -13,6 +19,9 @@ const TaskTrace = (() => {
   ]).has(String(scope || ""));
   let timelineEpoch = 0, activeIntentKey = null;
   const keyOf = (actor, id) => JSON.stringify([actor, id]);
+  /** @param {TraceSegment} segment */
+  const taskIntent = segment => segment.event.type === "agent.turn" &&
+    !segment.event.detail?.route_id && !segment.event.detail?.route;
   const brief = text => String(text || "").replace(/\s+/g, " ").trim().slice(0, 180);
   const textOf = value => typeof value === "string" ? value : value == null ? "" : JSON.stringify(value, null, 2);
   // 子 Agent 印章：名字首字 + 与时间线竖线同源的槽位色（ag-N），同一 Agent 全会话同色
@@ -27,6 +36,10 @@ const TaskTrace = (() => {
     const name = actorName(actor) || I18n.t("灵");
     return `<i class="task-seal" style="--seal: var(--agent-${agentSlot(actor)})" aria-label="${esc(name)}" title="${esc(name)}">${esc([...name][0])}</i>`;
   };
+  /**
+   * @param {TraceStore} store
+   * @param {AuditEvent} e
+   */
   function resolve(store, e) {
     const d = e.detail || {}, actor = String(e.actor || "");
     if (d.task_id) return keyOf(actor, d.task_id);
@@ -39,7 +52,17 @@ const TaskTrace = (() => {
     const candidates = [...store.tasks].filter(([, t]) => t.actor === actor && !terminal.has(t.status));
     return candidates.length === 1 ? candidates[0][0] : keyOf(actor, "");
   }
+  /**
+   * @param {TraceStore} store
+   * @param {AuditEvent} e
+   * @param {number | null} [eventId]
+   * @returns {TraceTask | null}
+   */
   function reduce(store, e, eventId = null) {
+    if (typeof S !== "undefined" && S.state?.session?.mode === "src") {
+      if (e.type === "agent.conclude") e={...e,detail:{...e.detail,summary:""}};
+      else if (/^task\.(done|failed|cancelled|pruned)$/.test(e.type)) e={...e,detail:{...e.detail,conclusions:[]}};
+    }
     if(e.type==='agent.progress') {
       const parsed=parsePublicProgress(e.detail?.text);
       e={...e,detail:{...e.detail,text:parsed.text,...(!e.detail?.exploration && parsed.exploration ? {exploration:parsed.exploration} : {})}};
@@ -150,15 +173,25 @@ const TaskTrace = (() => {
     const publicMessage=!!(publicText || angle || semantic);
     const segmentable=!/^task\./.test(e.type) && e.type!=="model.call" &&
       !(e.type==="agent.delta" && ["reasoning","tool_call"].includes(d.kind));
+    /** @type {TraceSegment | null} */
     let segment=null;
     if(segmentable) {
       const linked=linkedTool?.intentKey || step?.intentKey;
-      const owner=task.segments.get(linked) || task.activeIntents.get(route);
+      const current=task.segments.get(task.currentSegmentKey);
+      // 旧事件中的 agent.turn 可能没有 route_id，紧随其后的工具调用才带出
+      // 具体路线。首次补齐路线时继续沿用刚创建的公开消息，避免把标题与
+      // 工具明细拆成两个顶层块；已经绑定路线的消息仍保持彼此隔离。
+      // 任务级公开意图可以拥有多条路线的执行明细；路线自身的公开意图仍独立。
+      const taskMessage=task.activeIntents.get("");
+      const sharedIntent=taskMessage && taskIntent(taskMessage) && taskMessage.intent===task.title &&
+        taskMessage.epoch===timelineEpoch ? taskMessage : null;
+      const owner=task.segments.get(linked) || task.activeIntents.get(route) || sharedIntent ||
+        (route && current && !current.route && current.epoch===timelineEpoch ? current : null);
       const intent=semantic || angle || owner?.intent || (publicText ? brief(publicText.split(/\n|[。！？]/)[0]) : "");
       if(publicMessage) {
         const adopt=owner && !owner.intent;
         const same=owner && owner.key===activeIntentKey && owner.epoch===timelineEpoch &&
-          ((!semantic && !angle) || owner.intent===intent || !owner.texts.size);
+          ((!semantic && !angle) || owner.intent===intent || !owner.texts.size && !taskIntent(owner));
         const streamedOwner=e.type==='agent.progress' && d.streamed && owner && step?.intentKey===owner.key
           && (!owner.declaredIntent || !semantic || owner.declaredIntent===semantic);
         if(adopt || same || streamedOwner) {
@@ -221,19 +254,22 @@ const TaskTrace = (() => {
       }
       else if (d.kind !== "reasoning" && d.kind !== "tool_call" && d.text) {
         const text=nextDeltaText;
-        task.texts.set(stem,text.slice(-24000)); task.progress=I18n.t("正在更新进展");
-        if(step) {step.texts.set(stem,text.slice(-24000));step.progress=I18n.t("正在更新进展");}
+        task.texts.set(stem,text); task.progress=I18n.t("正在更新进展");
+        if(step) {step.texts.set(stem,text);step.progress=I18n.t("正在更新进展");}
         if(segment) {
           let segmentText=(segment.texts.get(stem) || "")+d.text;
           // JSON 的公开说明只能在完整解析后提取，不能从跨段的半截协议中提取。
           if(structuredDelta && publicText && !commentaryText(segmentText)) segmentText=text;
-          segment.texts.set(stem,segmentText.slice(-24000));
+          segment.texts.set(stem,segmentText);
         }
       }
     }
     if (e.type === "agent.progress") {
       if(step && d.exploration)step.exploration=d.exploration;
-      const text=commentaryText(d.text);
+      let text=commentaryText(d.text);
+      const streamedText=commentaryText(step?.texts.get(stem) || "");
+      // 兼容旧的短持久事件：同一输出的完整流不能被前缀摘要覆盖。
+      if(d.streamed && text && streamedText.length>text.length && streamedText.startsWith(text)) text=streamedText;
       if(d.streamed && text && step?.texts.has(stem) && commentaryText(step.texts.get(stem))!==text) {
         // 历史分页可能从 JSON 中段开始；完整持久正文到达后撤掉残片，不能并排显示。
         task.texts.set(stem,text);step.texts.set(stem,text);
@@ -272,7 +308,7 @@ const TaskTrace = (() => {
       for (const c of d.calls || []) {
         const toolKey=JSON.stringify([route,c.id || `${e.seq || e.ts}:${task.tools.size}`]);
         task.tools.set(toolKey,{key:toolKey,call:c,route,id:c.id,name:c.name,status:"running",result:"",note:"",version:1,
-          stepKey:wrapper(c.name) ? "" : step?.key || "", intentKey:segment?.key || ""});
+          stepKey:wrapper(c.name) ? "" : step?.key || "", intentKey:segment?.key || "", callCursor:eventId || Number(e.seq) || 0});
         segment?.toolKeys.add(toolKey);
       }
       if(step) {step.status=terminal.has(task.status) ? task.status : "running";step.progress=I18n.t("工具执行中");}
@@ -291,8 +327,16 @@ const TaskTrace = (() => {
         task.tools.set(toolKey,tool);
       }
       tool.status=d.ok === false ? "failed" : "done";tool.version++;
+      tool.resultCursor=eventId || Number(e.seq) || 0;
       const raw=SessionObserver.cleanText(textOf(d.result ?? d.note ?? d.error ?? I18n.t("未记录原始响应")));
       tool.result=raw.slice(0,24000);tool.clipped=raw.length>24000;
+      const executed=d.invoked_tool || d.name;
+      const hasLog=!!d.output_file && (executed === "shell" || executed === "python");
+      tool.output=hasLog || d.result_truncated ? {cursor:hasLog ? eventId : undefined,
+        complete:d.output_complete, truncated:d.result_truncated, same:d.same_raw_output,
+        possiblyTruncated:hasLog && d.result_truncated == null && typeof d.result === "string" && d.result.length === 1200} : undefined;
+      tool.failure=d.ok === false ? (d.parameter_error ? "parameters" :
+        d.failure_evidence?.timed_out ? "timeout" : undefined) : undefined;
       tool.note=SessionObserver.resultSummary(d);
       if(Array.isArray(d.images))tool.images=d.images;
       if(d.ok !== false && d.skill?.skill_id)tool.skill=d.skill;
@@ -324,7 +368,7 @@ const TaskTrace = (() => {
       step.progress=brief(d.error) || task.progress;
     }
     if (/^task\.(done|failed|cancelled|pruned)$/.test(e.type)) {
-      task.endEvent=e;task.status=e.type.slice(5);task.waitingReason="";task.waitingReasons?.clear();
+      task.endEvent=e;task.status=/** @type {import('./frontend-types').TaskStatus} */ (e.type.slice(5));task.waitingReason="";task.waitingReasons?.clear();
       for(const s of task.steps.values()) if(!terminal.has(s.status)) s.status=task.status;
       for(const item of task.segments.values()) if(!terminal.has(item.status)) item.status=task.status;
       if(d.conclusions?.length) task.conclusions.clear();
@@ -344,7 +388,7 @@ const TaskTrace = (() => {
       segment.status=task.waitingReason && !terminal.has(task.status) ? "waiting" : task.status;
       segment.progress=step?.progress || task.progress;
       segment.title=segment.title || step?.title || d.angle || "";
-      segment.route=step?.route || segment.route;
+      if(!taskIntent(segment)) segment.route=step?.route || segment.route;
       segment.turn=step?.turn || segment.turn;
     }
     return task;
@@ -378,7 +422,7 @@ const TaskTrace = (() => {
       if(!value || Array.isArray(value) || typeof value!=='object' ||
           ['intent','attempt'].some(k=>typeof value[k]!=='string' || !value[k].trim() || value[k].length>100))return null;
       const result={intent:value.intent.trim(),attempt:value.attempt.trim()};
-      for(const [key,limit] of [['from',100],['reason',400]])if(typeof value[key]==='string' && value[key].trim())result[key]=value[key].trim().slice(0,limit);
+      for(const [key,limit] of /** @type {[string,number][]} */ ([['from',100],['reason',400]]))if(typeof value[key]==='string' && value[key].trim())result[key]=value[key].trim().slice(0,limit);
       if(['running','blocked','supported','refuted','exhausted','closed'].includes(value.state))result.state=value.state;
       const m=value.milestone ?? milestone;
       if(m && ['discovery','breakthrough','turning_point'].includes(m.kind) &&
@@ -416,6 +460,7 @@ const TaskTrace = (() => {
     return {text,...(exploration ? {exploration} : {})};
   }
   const commentaryText=raw=>parsePublicProgress(raw).text;
+  /** @param {TraceTask} task */
   function updatesOf(task) {
     const seen=new Set(), updates=[];
     for(const [key,raw] of task.texts) {
@@ -425,7 +470,9 @@ const TaskTrace = (() => {
     }
     return updates;
   }
+  /** @param {TraceTask} task */
   function summaryOf(task) {
+    if (typeof S !== "undefined" && S.state?.session?.mode === "src") return I18n.t("完整任务报告见右侧文件区；可预览或下载 Markdown。");
     const label=text=>String(text || "").replace(/[#*_`]/g, "").replace(/\s+/g, "").trim();
     const hasBody=text=>label(text) && label(text)!==label(task.title);
     const conclusions=[...new Set(task.conclusions.values())].filter(hasBody);
@@ -438,17 +485,23 @@ const TaskTrace = (() => {
       (tools.length ? I18n.t`本页记录了 ${tools.length} 次工具调用，${results} 次返回、${failures} 次失败。` : "")+
       I18n.t("当前记录未包含文字结论。");
   }
+  /**
+   * @param {TraceTask} task
+   * @param {TraceStep} step
+   */
   function stageSummary(task, step) {
     const notes=[...new Set([...step.texts.values()].map(commentaryText).filter(Boolean))];
     if(!notes.length && terminal.has(step.status)) return I18n.t`本阶段${statuses[step.status]}，记录中未包含文字总结，可展开执行明细。`;
     return notes.at(-1) || (step.turn ? I18n.t("本阶段尚未收到文字进展，正在执行验证。") : I18n.t("尚未形成阶段结论，执行明细可展开查看。"));
   }
+  /** @param {TraceTask} task */
   function liveSummary(task) {
     const text=updatesOf(task).at(-1)?.text;
     if(terminal.has(task.status)) return summaryOf(task);
     return text || (task.title ? I18n.t`正在处理：${task.title}。尚未收到阶段结论。` : I18n.t("正在准备任务，尚未收到阶段进展。"));
   }
   let store=create();
+  /** @param {TraceTask} task */
   function skillsOf(task) {
     const skills=new Map();
     for(const tool of task.tools.values()) {
@@ -459,9 +512,17 @@ const TaskTrace = (() => {
     }
     return [...skills.values()].map(skill=>({...skill,paths:[...skill.paths]}));
   }
-  const rows=new Map(), segmentRows=new Map(), summaryRows=new Map(), dirty=new Set();
+  let rows=new Map(), segmentRows=new Map(), summaryRows=new Map();
+  const dirty=new Set();
+  const present=row=>typeof traceIsPresent === "function" ? traceIsPresent(row) : !!row?.isConnected;
+  const renderedSegments=new WeakMap();
+  const sharedTools=new Map();
   let timer=null;
   const hasNarrative=segment=>!!segment.intent || [...segment.texts.values()].some(raw=>!!commentaryText(raw));
+  /**
+   * @param {TraceTask} task
+   * @param {TraceSegment} segment
+   */
   function segmentTitle(task,segment) {
     if(segment.intent) return segment.intent;
     const text=[...segment.texts.values()].map(commentaryText).find(Boolean);
@@ -469,6 +530,10 @@ const TaskTrace = (() => {
   }
   const segmentNotes=segment=>[...new Set([...segment.texts.values()].map(commentaryText).filter(Boolean))];
   function segmentSummary(segment) { return segmentNotes(segment).join("\n\n"); }
+  /**
+   * @param {TraceTask} task
+   * @param {TraceSegment} segment
+   */
   function narrativeOf(task, segment) {
     const notes=[], seen=new Set();
     let repeated=0;
@@ -484,7 +549,8 @@ const TaskTrace = (() => {
     }
     return {notes,repeated};
   }
-  function renderNarrative(target, notes) {
+  let animatedSegments = new WeakSet();
+  function renderNarrative(target, notes, animate = false) {
     const keys=new Set(notes.map(note=>note.key));
     for(const child of [...target.children]) if(!keys.has(child.dataset.narrativeKey)) child.remove();
     notes.forEach((note,index)=>{
@@ -495,26 +561,51 @@ const TaskTrace = (() => {
       }
       if(target.children[index]!==child) target.insertBefore(child,target.children[index] || null);
       if(child.dataset.text!==note.text) {
-        child.dataset.text=note.text;child.innerHTML=mdRender(note.text);
+        child.dataset.text=note.text;
+        const html=mdRender(note.text);
+        if(typeof StreamText!=="undefined") StreamText.markdown(child,html,{animate:animate && !note.complete});
+        else child.innerHTML=html;
       }
     });
   }
+  /** @param {TraceTask} task */
   function outcomeText(task) {
     const keyOfText=value=>String(value || "").trim();
-    const shown=new Set();
+    const comparable=value=>keyOfText(value).replace(/[#*_`]/g, "").replace(/\s+/g, "").replace(/[。.!！]+$/u, "");
+    const routePrefixes=new Set([
+      ...task.conclusions.keys(),...task.routeAliases.keys(),...task.steps.values().map(step=>step.route),
+    ].map(comparable).filter(Boolean));
+    const parts=value=>{
+      const text=comparable(value), result={text,prefix:"",body:""};
+      const split=text.search(/[：:]/u);
+      if(split>0 && split<text.length-1 && routePrefixes.has(text.slice(0,split))) {
+        result.prefix=text.slice(0,split);result.body=text.slice(split+1);
+      }
+      return result;
+    };
+    const equivalent=(left,right)=>{
+      const a=parts(left), b=parts(right);
+      if(!a.text || !b.text) return false;
+      if(a.text===b.text) return true;
+      // 路线结论常以“路线名：正文”流式出现，而 task.done 只保留正文；
+      // 只合并这一对形态，不把不同路线的同一句结论误当成一条。
+      return !!a.prefix && !b.prefix && a.body===b.text || !!b.prefix && !a.prefix && b.body===a.text;
+    };
+    const shown=[];
     for(const segment of task.segments.values()) {
       for(const raw of segment.texts.values()) {
         const text=keyOfText(commentaryText(raw));
-        if(text) shown.add(text);
+        if(text) shown.push(text);
       }
       const summary=keyOfText(segmentSummary(segment));
-      if(summary) shown.add(summary);
+      if(summary) shown.push(summary);
     }
-    const seen=new Set(), pending=[];
+    const pending=[];
     for(const raw of [task.summary,...task.conclusions.values()]) {
       const text=keyOfText(raw);
-      if(!text || text===keyOfText(task.title) || seen.has(text) || shown.has(text)) continue;
-      seen.add(text);pending.push(text);
+      if(!text || equivalent(text,task.title) || shown.some(value=>equivalent(text,value)) ||
+          pending.some(value=>equivalent(text,value))) continue;
+      pending.push(text);
     }
     return pending.join("\n\n");
   }
@@ -537,43 +628,109 @@ const TaskTrace = (() => {
     if(titled) return brief(titled.title).slice(0,40);
     return route ? I18n.t`路线 ${String(route).slice(-6)}` : I18n.t("默认路线");
   }
+  /** @param {TraceTask} task */
+  function sharedTool(task,tool) {
+    const scope=JSON.stringify([task.key,tool.id || tool.key]);
+    const key=JSON.stringify([scope,tool.route || ""]);
+    let shared=sharedTools.get(key);
+    if(!shared && !tool.route) {
+      const matches=[...new Set(sharedTools.values())].filter(item=>item.scope===scope);
+      if(matches.length===1) shared=matches[0];
+    }
+    if(!shared && tool.route) {
+      const orphan=sharedTools.get(JSON.stringify([scope,""]));
+      if(orphan && !orphan.route) {shared=orphan;sharedTools.delete(JSON.stringify([scope,""]));}
+    }
+    if(!shared) shared={scope,route:tool.route,data:{},revision:0,versions:new WeakMap(),tools:new Set(),elements:new Map()};
+    sharedTools.set(key,shared);shared.route ||= tool.route;
+    if(shared.versions.get(tool)!==tool.version) {
+      const old=shared.data, next={...tool};
+      if(old.resultCursor && (!tool.resultCursor || old.resultCursor>tool.resultCursor))
+        for(const field of ["status","result","note","images","skill","clipped","output","failure","resultCursor"]) next[field]=old[field];
+      if(!old.missingCall && old.call && (tool.missingCall || (old.callCursor || 0)>(tool.callCursor || 0)))
+        for(const field of ["call","name","missingCall","callCursor"]) next[field]=old[field];
+      shared.data=next;shared.revision++;
+      shared.tools.add(tool);
+      for(const item of shared.tools) {
+        for(const field of ["call","name","missingCall","callCursor","resultCursor","status","result","note","images","skill","clipped","output","failure"]) item[field]=next[field];
+        item.version=shared.revision;shared.versions.set(item,item.version);
+      }
+      for(const [element,item] of shared.elements) paintTool(element,item);
+    }
+    return shared;
+  }
+  function paintTool(el,tool) {
+    if(el.dataset.version === String(tool.version)) return;
+    el.dataset.version=String(tool.version);
+    if(!tool.missingCall && !el.querySelector(".tl-parameters")) ToolParameters.attach(el,tool.call);
+    el.querySelector(".nm").textContent=SessionObserver.toolName(tool.name);
+    el.querySelector(".ar").textContent=tool.missingCall ? I18n.t("调用参数见更早记录") : tool.call.preview || argBrief(tool.name || "",tool.call.arguments);
+    el.querySelector(".st").textContent=tool.status === "running" ? I18n.t("进行中") :
+      tool.failure === "parameters" ? I18n.t("参数校验失败") : tool.failure === "timeout" ? I18n.t("执行超时") :
+      tool.status === "failed" ? I18n.t("失败") : I18n.t("已返回");
+    el.querySelector(".st").className=`st ${tool.status === "failed" ? "n" : tool.status === "done" ? "y" : ""}`;
+    el.dataset.toolStatus=tool.status || "running";
+    el.querySelector(".nt").textContent=tool.note || "";
+    const images=el.querySelector(".tl-images");
+    images.innerHTML=typeof FileCards!=="undefined" ? (tool.images || []).map(image=>FileCards.imageCard(image)).join("") : "";
+    images.hidden=!images.innerHTML;
+    const notices=[];
+    if (tool.clipped || tool.output?.truncated) notices.push(I18n.t("此处只显示部分回执。"));
+    else if (tool.output?.possiblyTruncated) notices.push(I18n.t("旧回执可能已截断。"));
+    if (tool.output?.cursor) notices.push(tool.output.complete === true ? I18n.t("原始日志已完整记录。") :
+      tool.output.complete === false ? I18n.t("原始日志仅保留部分输出。") : I18n.t("原始日志完整性未知。"));
+    if (tool.output?.same) notices.push(I18n.t("完整输出与此前一次调用相同。"));
+    const result=tool.result || (tool.status === "running" ? I18n.t("等待工具返回") : I18n.t("未记录原始响应"));
+    el.querySelector(".tl-output").textContent=[result,...notices].join("\n\n");
+    const log=el.querySelector(".tl-output-log");
+    log.hidden=!tool.output?.cursor || !S.cur;
+    if(!log.hidden) log.href=`/api/sessions/${encodeURIComponent(S.cur)}/tool-output/${tool.output.cursor}`;
+    const list=el.parentElement, group=list?.closest?.(".task-step"), count=group?.querySelector(".task-tool-count");
+    if(count) {
+      const items=[...list.children].filter(item=>item.classList.contains("tl-act"));
+      count.textContent=I18n.t`· ${items.filter(item=>item.dataset.toolStatus!=="running").length}/${items.length} 次返回`;
+    }
+  }
   function renderTools(task,tools,list) {
     for(const tool of tools) {
+      const shared=sharedTool(task,tool);
       let el=[...list.children].find(child=>child.dataset.toolKey === tool.key);
       if(!el) {
-        list.insertAdjacentHTML("beforeend",`<div class="tl-act"><button class="hd" type="button" aria-expanded="false"><span class="nm"></span><span class="ar"></span><span class="st"></span><span class="cv" aria-hidden="true">⌄</span></button><div class="tl-images"></div><div class="nt"></div><pre class="tl-output"></pre></div>`);
+        list.insertAdjacentHTML("beforeend",I18n.html`<div class="tl-act"><button class="hd" type="button" aria-expanded="false"><span class="nm"></span><span class="ar"></span><span class="st"></span><span class="cv" aria-hidden="true">⌄</span></button><div class="tl-images"></div><div class="nt"></div><pre class="tl-output"></pre><a class="tl-output-log" download hidden>下载原始日志</a></div>`);
         el=list.lastElementChild;el.dataset.toolKey=tool.key;
         const button=el.querySelector("button.hd");
         button.onclick=()=>{
           const open=el.classList.toggle("open");button.setAttribute("aria-expanded",String(open));
           const parameters=el.querySelector(".tl-parameters");if(parameters) parameters.open=open;
         };
-        if(!tool.missingCall) ToolParameters.attach(el,tool.call);
       }
-      if(el.dataset.version === String(tool.version)) continue;
-      el.dataset.version=String(tool.version);
-      el.querySelector(".nm").textContent=SessionObserver.toolName(tool.name);
-      el.querySelector(".ar").textContent=tool.missingCall ? I18n.t("调用参数见更早记录") : tool.call.preview || argBrief(tool.name || "",tool.call.arguments);
-      el.querySelector(".st").textContent=tool.status === "running" ? I18n.t("进行中") : tool.status === "failed" ? I18n.t("失败") : I18n.t("已返回");
-      el.querySelector(".st").className=`st ${tool.status === "failed" ? "n" : tool.status === "done" ? "y" : ""}`;
-      el.querySelector(".nt").textContent=tool.note || "";
-      const images=el.querySelector(".tl-images");
-      images.innerHTML=typeof FileCards!=="undefined" ? (tool.images || []).map(image=>FileCards.imageCard(image)).join("") : "";
-      images.hidden=!images.innerHTML;
-      el.querySelector(".tl-output").textContent=(tool.result || I18n.t("等待工具返回"))+(tool.clipped ? I18n.t("\n\n此处展示前 24,000 字，完整内容可导出审计查看。") : "");
+      shared.elements.set(el,tool);paintTool(el,tool);
     }
   }
+  /** @param {TraceTask} task */
   function executorLabel(task) {return task.singleExecutor ? I18n.t("灵枢") : actorName(task.actor);}
+  /** @param {TraceTask} task */
   function directionLabel(task) {return task.directionHints?.length ? I18n.t`用户方向：${task.directionHints.join("、")}（提示）` : "";}
   function actorLabel(actor) {return store.singleActors.has(actor) ? I18n.t("灵枢") : "";}
+  /** @type {WeakMap<Element, string>} */
+  const renderedTitles = new WeakMap();
+  /** @param {Element} root @param {string} title */
+  function renderTitle(root,title) {
+    const heading=root.querySelector(".task-heading > strong");
+    if(renderedTitles.get(heading)===title) return;
+    heading.innerHTML=mdRenderInline(title);
+    renderedTitles.set(heading,title);
+  }
+  /** @param {TraceTask} task */
   function render(task) {
+    for(const tool of task.tools.values()) sharedTool(task,tool);
     const narratives=[...task.segments.values()].filter(hasNarrative);
     const pending=[...task.segments.values()].filter(segment=>!hasNarrative(segment));
     const pendingTools=[...new Set(pending.flatMap(segment=>[...segment.toolKeys]))]
       .map(key=>task.tools.get(key)).filter(tool=>tool && !wrapper(tool.name));
     let row=rows.get(task.key);
     if(row || task.started || task.title || pendingTools.length) {
-      if(!row?.isConnected) {
+      if(!present(row)) {
         row=traceAppend(task.event,I18n.html`<details class="task-thread task-dispatch task-execution-only" aria-label="任务执行记录">
           <summary class="task-heading">${sealOf(task.actor)}<strong></strong><span class="task-status"></span></summary>
           <p class="task-context"></p><p class="task-skills" hidden></p>
@@ -585,7 +742,7 @@ const TaskTrace = (() => {
       if(task.endId != null) row.dataset.historyEnd=String(task.endId);
       row.hidden=!!narratives.length && !pendingTools.length;
       const root=row.querySelector(".task-thread");
-      root.querySelector(".task-heading strong").textContent=task.title || I18n.t("此前意图的执行明细");
+      renderTitle(root,task.title || I18n.t("此前意图的执行明细"));
       root.dataset.status=task.status;row.dataset.taskStatus=task.status;
       root.querySelector(".task-status").textContent=statuses[task.status] || I18n.t("执行中");
       root.querySelector(".task-context").textContent=[executorLabel(task),directionLabel(task),task.target || task.id].filter(Boolean).join(" · ");
@@ -595,8 +752,14 @@ const TaskTrace = (() => {
       renderRecords(new Map(pending.flatMap(segment=>[...segment.records])),root.querySelector(".task-execution-records"));
     }
     for(const segment of narratives) {
+      const animate=animatedSegments.has(segment);
+      animatedSegments.delete(segment);
       let segmentRow=segmentRows.get(segment.key);
-      if(!segmentRow?.isConnected) {
+      const context=[executorLabel(task),directionLabel(task),routeLabel(task,segment.route)].filter(Boolean).join(" · ");
+      const revision=JSON.stringify([segment.version,task.narrativeRevision || 0,task.status,context]);
+      const previous=renderedSegments.get(segment);
+      if(present(segmentRow) && previous?.row===segmentRow && previous.revision===revision) continue;
+      if(!present(segmentRow)) {
         segmentRow=traceAppend(segment.event,I18n.html`<section class="task-thread task-stage task-continuation" aria-label="意图消息">
           <p class="task-context"></p>
           <header class="task-heading">${sealOf(task.actor)}<span class="task-marker" aria-hidden="true"></span><strong></strong><span class="task-status"></span></header>
@@ -613,19 +776,20 @@ const TaskTrace = (() => {
       segmentRow.dataset.taskStatus=segment.status;
       const stage=segmentRow.querySelector(".task-stage"), group=stage.querySelector(".task-step");
       stage.dataset.status=segment.status;group.dataset.stepKey=segment.key;group.dataset.status=segment.status;
-      stage.querySelector(".task-context").textContent=[executorLabel(task),directionLabel(task),routeLabel(task,segment.route)].filter(Boolean).join(" · ");
-      stage.querySelector(".task-heading strong").textContent=segmentTitle(task,segment);
+      stage.querySelector(".task-context").textContent=context;
+      const title=segmentTitle(task,segment);
+      renderTitle(stage,title);
       stage.querySelector(".task-status").textContent=statuses[segment.status] || I18n.t("执行中");
       group.querySelector(".task-progress").textContent=segment.progress || "";
       const {notes,repeated}=narrativeOf(task,segment), text=notes.map(note=>note.text).join("\n\n");
       const target=stage.querySelector(".task-stage-summary");
-      renderNarrative(target,notes);
       const repetition=stage.querySelector(".task-repetition");
       repetition.hidden=!repeated;
       const repeatText=repeated ? I18n.t`相同说明重复出现 ${repeated} 次，已合并展示。` : "";
       if(repetition.textContent!==repeatText) repetition.textContent=repeatText;
       const normalize=value=>String(value || "").trim().replace(/[。.!！]+$/u, "");
-      target.hidden=!text || normalize(text)===normalize(segmentTitle(task,segment));
+      target.hidden=!text || normalize(text)===normalize(title);
+      renderNarrative(target,notes,animate);
       const owned=[...segment.toolKeys].map(key=>task.tools.get(key)).filter(tool=>tool && !wrapper(tool.name)), list=group.querySelector(".task-tools");
       list.hidden=!owned.length;
       group.hidden=!owned.length && !segment.records.size;
@@ -633,39 +797,57 @@ const TaskTrace = (() => {
         ? I18n.t`· ${owned.filter(tool=>tool.status!=="running").length}/${owned.length} 次返回` : I18n.t`· ${segment.records.size} 条错误信息`;
       renderTools(task,owned,list);
       renderRecords(segment.records,group.querySelector(".task-execution-records"));
+      renderedSegments.set(segment,{row:segmentRow,revision});
     }
     if(terminal.has(task.status) && outcomeText(task)) {
       let summary=summaryRows.get(task.key);
-      if(!summary?.isConnected) {
+      if(!present(summary)) {
         summary=traceAppend(task.endEvent || task.event,I18n.html`<section class="task-thread task-outcome" aria-label="子任务结论"><header class="task-heading">${sealOf(task.actor)}<span class="task-marker" aria-hidden="true"></span><strong></strong><span class="task-status"></span></header><div class="task-summary md"></div></section>`,"tl-task");
         summaryRows.set(task.key,summary);summary.dataset.taskId=task.id;summary.dataset.taskPart="summary";
       }
       if(task.endId != null) summary.dataset.historyId=summary.dataset.historyStart=String(task.endId);
       const outcome=summary.querySelector(".task-thread");outcome.dataset.status=task.status;
       summary.dataset.taskStatus=task.status;
-      outcome.querySelector("strong").textContent=I18n.t`${task.title || task.id || actorName(task.actor)} · 子任务结论`;
+      renderTitle(outcome,I18n.t`${task.title || task.id || actorName(task.actor)} · 子任务结论`);
       outcome.querySelector(".task-status").textContent=statuses[task.status];
       outcome.querySelector(".task-summary").innerHTML=mdRender(outcomeText(task));
     }
     traceScroll();
     if (S.tab === "topo" && typeof renderTopoActivity === "function") renderTopoActivity();
   }
-  function push(e, eventId = null) {
-    if(["user.message","user.attachment","master.reply","master.reply_failed","agent.reply","agent.reply_failed"].includes(e.type)) {
+  /**
+   * @param {AuditEvent} e
+   * @param {number | null} [eventId]
+   * @returns {boolean}
+   */
+  function push(e, eventId = null, {animate = false} = {}) {
+    if(e.type==="user.answered" && !textOf(e.detail?.answer).trim()) return false;
+    if(["user.message","user.answered","user.attachment","master.reply","master.reply_failed","agent.reply","agent.reply_failed"].includes(e.type)) {
       timelineEpoch++;activeIntentKey=null;return false;
     }
     const task=reduce(store,e,eventId);
     if(!task) return false;
+    if(e.type==="agent.delta" && (!e.detail?.kind || e.detail.kind==="text")) {
+      const segment=task.segments.get(task.currentSegmentKey);
+      if(segment) {
+        if(animate && e.detail?.text && hasNarrative(segment)) animatedSegments.add(segment);
+        else animatedSegments.delete(segment);
+      }
+    }
+    // 流式片段和换轮只改所属阶段；其他事件可能补全旧正文、工具或身份。
+    // 重置会撤回跨消息的旧片段，必须让所有相关阶段重新投影。
+    if(e.type!=="agent.turn" && !(e.type==="agent.delta" && e.detail?.kind!=="reset"))
+      task.narrativeRevision=(task.narrativeRevision || 0)+1;
     if(e.type === "agent.delta" && e.detail?.kind === "reasoning") {
       const rec=S.think.get(e.actor) || {chars:0,tail:""};
       const text=e.detail.text || "";
       rec.chars+=text.length;rec.tail=(rec.tail+text).slice(-6000);S.think.set(e.actor,rec);
     }
     const visible=[...task.segments.values()].filter(hasNarrative);
-    const needsTaskRow=(task.started || task.title || [...task.tools.values()].some(tool=>!wrapper(tool.name))) && !rows.get(task.key)?.isConnected;
-    if(needsTaskRow || visible.some(segment=>!segmentRows.get(segment.key)?.isConnected)
-        || terminal.has(task.status) && outcomeText(task) && !summaryRows.get(task.key)?.isConnected) render(task);
-    else if(visible.length || rows.get(task.key)?.isConnected) {
+    const needsTaskRow=(task.started || task.title || [...task.tools.values()].some(tool=>!wrapper(tool.name))) && !present(rows.get(task.key));
+    if(needsTaskRow || visible.some(segment=>!present(segmentRows.get(segment.key)))
+        || terminal.has(task.status) && outcomeText(task) && !present(summaryRows.get(task.key))) render(task);
+    else if(visible.length || present(rows.get(task.key))) {
       dirty.add(task.key);
       if(timer === null) timer=setTimeout(()=>{
         timer=null;
@@ -674,10 +856,10 @@ const TaskTrace = (() => {
       },100);
     }
     // 与历史窗口一起释放已移出页面的任务，不影响仍在阅读的折叠块。
-    if(rows.size>250) for(const [key,row] of rows) if(!row.isConnected) {
-      if([...taskSegments(key)].some(segmentRow=>segmentRow.isConnected) || summaryRows.get(key)?.isConnected) continue;
+    if(rows.size>250) for(const [key,row] of rows) if(!present(row)) {
+      if([...taskSegments(key)].some(segmentRow=>present(segmentRow)) || present(summaryRows.get(key))) continue;
       rows.delete(key);store.tasks.delete(key);
-      for(const [id,segmentRow] of segmentRows) if(!segmentRow.isConnected) segmentRows.delete(id);
+      for(const [id,segmentRow] of segmentRows) if(!present(segmentRow)) segmentRows.delete(id);
       summaryRows.delete(key);}
     return true;
   }
@@ -695,10 +877,11 @@ const TaskTrace = (() => {
       task_id:task.id, actor:task.actor, title:task.title, status:task.status,
       text:liveSummary(task), waiting:task.waitingReason || "", updated:task.updated}));
   }
-  function reset() {
+  function reset({preserveTools = false} = {}) {
     if(timer !== null) clearTimeout(timer);
-    timer=null;dirty.clear();store=create();rows.clear();segmentRows.clear();summaryRows.clear();
+    timer=null;dirty.clear();animatedSegments=new WeakSet();store=create();rows=new Map();segmentRows=new Map();summaryRows=new Map();
     timelineEpoch=0;activeIntentKey=null;
+    if(!preserveTools) sharedTools.clear();
   }
   function flush() {
     if(timer !== null) clearTimeout(timer);
@@ -706,5 +889,21 @@ const TaskTrace = (() => {
     for(const key of dirty) {const task=store.tasks.get(key);if(task) render(task);}
     dirty.clear();
   }
-  return {push,reset,flush,create,reduce,summaryOf,resolve,updatesOf,commentaryText,parsePublicProgress,narrativeOf,skillsOf,stepTitle,stageSummary,liveSummary,progressSnapshot,routeSnapshot,actorLabel};
+  function adoptRows(reused) {
+    for(const index of [rows,segmentRows,summaryRows]) for(const [key,row] of index)
+      if(reused.has(row)) index.set(key,reused.get(row));
+    for(const task of store.tasks.values()) for(const segment of task.segments.values()) {
+      const rendered=renderedSegments.get(segment);
+      if(rendered && reused.has(rendered.row)) rendered.row=reused.get(rendered.row);
+    }
+  }
+  function capture() {
+    flush();
+    const saved={store,rows,segmentRows,summaryRows,timelineEpoch,activeIntentKey};
+    return () => {
+      reset({preserveTools:true});
+      ({store,rows,segmentRows,summaryRows,timelineEpoch,activeIntentKey}=saved);
+    };
+  }
+  return {push,reset,flush,capture,adoptRows,create,reduce,summaryOf,resolve,updatesOf,commentaryText,parsePublicProgress,narrativeOf,skillsOf,stepTitle,stageSummary,liveSummary,progressSnapshot,routeSnapshot,actorLabel};
 })();

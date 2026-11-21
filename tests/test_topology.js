@@ -134,3 +134,15 @@ assert.equal(assetRelationships.assets.edges[0].references.length,2);
 assert.equal(assetRelationships.exploration.nodes.length,0,'asset relationships are edges, not exploration stages');
 assert.ok(assetRelationships.records.some(n=>n.id==='r'),'relationship provenance must remain available');
 console.log('asset relationships: coalesced edges with complete source records passed');
+
+const fileGraph=layout.reasoning({session:{title:'报告关联'},topology:{
+  process:{nodes:[{id:'report-node',kind:'report',layer:'task_report',node_type:'report',title:'任务报告',
+    task_id:'report-task',report:{path:'reports/tasks/report.md'},body:'{}'}],edges:[]},
+  dag_nodes:[{node_id:'report-dag',title:'核对任务',status:'done',depends_on:[],task_ids:['report-task']}],
+  tasks:[{task_id:'report-task',parent_dag_node:'report-dag',status:'done'}]}});
+assert.equal(fileGraph.nodes.find(n=>n.id==='report-node').view_kind,'report','报告不标注为事实');
+assert.ok(fileGraph.edges.some(e=>e.source==='__process_goal:report-dag' && e.target==='report-node' && e.kind==='task_output'),
+  '文件按实际所属 DAG 目标关联，不凭时间或并行路线猜关系');
+assert.equal(fileGraph.nodes.find(n=>n.id==='report-node').report.path,'reports/tasks/report.md');
+assert.ok(layout.reasoningSummary(fileGraph).nodes.some(n=>n.id==='report-node'),'默认简图仍展示报告引用');
+console.log('task report graph: file references, distinct report type and exact DAG ownership passed');

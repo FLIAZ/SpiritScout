@@ -10,7 +10,7 @@ const TrafficPage = (() => {
       S.view === "session" && S.tab === "traffic" && S.cur === ctx.session);
   }
   function stop() {
-    clearTimeout(timer); timer = null; ++generation; active?.proxyControls?.close(); active = null;
+    clearTimeout(timer); timer = null; ++generation; active = null;
   }
   function stats(data) {
     return I18n.html`<div class="traffic-stats"><span><b>${data.total || 0}</b> 交互记录</span>
@@ -25,7 +25,7 @@ const TrafficPage = (() => {
         <header class="traffic-head"><div><h2>${ctx.global ? I18n.t("流量") : I18n.t("会话流量")}</h2><p class="muted">任务交互 · 按会话保存</p></div>
           <button class="btn sm" data-refresh>刷新</button></header>
         <p class="traffic-coverage">${coverage}</p>
-        <div data-summary></div><div data-proxy-panel></div>
+        <div data-summary></div>
         ${ctx.global ? I18n.html('<section class="traffic-sessions" aria-label="会话流量统计"></section>') : ""}
         <section data-exchanges><div class="traffic-record-head"><h3 data-record-title>流量记录</h3><span class="muted" data-page-label></span></div>
         <form class="traffic-filter"><label>筛选请求<input name="query" type="search" maxlength="200" placeholder="地址或请求方法"></label>
@@ -146,12 +146,6 @@ const TrafficPage = (() => {
   async function loadRows(ctx) {
     if (!current(ctx)) return;
     const version = ++ctx.rowsVersion, session = ctx.session;
-    if (typeof TrafficProxy !== "undefined") {
-      if (ctx.proxyControls?.session !== session) { ctx.proxyControls?.close(); ctx.proxyControls = null; }
-      if (session && !ctx.proxyControls) ctx.proxyControls = TrafficProxy.mount(ctx.root.querySelector("[data-proxy-panel]"), session);
-      if (ctx.proxyControls) await ctx.proxyControls.refresh();
-      if (!current(ctx) || version !== ctx.rowsVersion) return;
-    }
     const records = ctx.root.querySelector("[data-records]");
     // 切会话立刻清空上一会话的行，不在网络等待期间显示错误归属。
     if (ctx.displayedSession !== session) { records.replaceChildren(); ctx.displayedSession = session; }
@@ -229,7 +223,7 @@ const TrafficPage = (() => {
   function open(global) {
     stop();
     const ctx = {root: $(global ? "#view-traffic" : "#tab-traffic"), global,
-      session: global ? null : S.cur, project:"*", selectedRecord:null, proxyControls:null, query:"", method:"", status:"", body:"", errors:false, before:null,
+      session: global ? null : S.cur, project:"*", selectedRecord:null, query:"", method:"", status:"", body:"", errors:false, before:null,
       history:[], next:null, rowsVersion:0, catalogVersion:0, detailVersion:0, refreshing:0, rowLoading:0};
     active = ctx; shell(ctx); refresh(ctx);
     const token = generation;

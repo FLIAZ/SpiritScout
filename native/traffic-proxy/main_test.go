@@ -73,3 +73,24 @@ func TestProxyAuthNeverReachesTarget(t *testing.T) {
 		t.Fatal("proxy credentials not consumed locally")
 	}
 }
+
+func TestProxyFailureMarkerAndOrigin502RemainDistinct(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(proxyErrorHeader, "UpstreamRequestError")
+		w.Header().Set(proxyTimeoutHeader, "true")
+		http.Error(w, "Upstream request failed", 502)
+	}))
+	e := &engine{conf: config{Root: t.TempDir()}, transport: http.DefaultTransport.(*http.Transport).Clone()}
+	defer e.transport.CloseIdleConnections()
+	w := httptest.NewRecorder()
+	e.forward(w, httptest.NewRequest("GET", origin.URL, nil), "", "HTTP")
+	if w.Code != 502 || w.Header().Get(proxyErrorHeader) != "" || w.Header().Get(proxyTimeoutHeader) != "" {
+		t.Fatal("origin 502 or forged attribution changed", w.Code, w.Header())
+	}
+	origin.Close()
+	w = httptest.NewRecorder()
+	e.forward(w, httptest.NewRequest("POST", origin.URL, nil), "", "HTTP")
+	if w.Code != 502 || w.Header().Get(proxyErrorHeader) != "UpstreamRequestError" {
+		t.Fatal("local upstream failure lacks attribution", w.Code, w.Header())
+	}
+}

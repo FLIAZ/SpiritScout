@@ -33,6 +33,23 @@ from spiritscout.policy.scope import ScopeGuard
 
 
 class WorldStateSnapshotTests(unittest.TestCase):
+    def test_untried_capability_alone_is_not_a_pivot(self) -> None:
+        from spiritscout.blackboard.opportunities import _opportunity_strategy
+
+        for empty in (0, 2):
+            with self.subTest(empty_attempts=empty):
+                item = {"opportunity_ref": "opportunity:test", "opportunity_revision": "v1",
+                        "attempts": {"consecutive_empty": empty}, "capability_candidates": [
+                    {"capability": "evidence_enrichment", "tactic": "TA0043", "basis": "补齐当前入口的响应证据"}]}
+                _opportunity_strategy(item, {})
+                self.assertEqual(len(item["capability_candidates"]), 1, "能力候选仍完整保留")
+                if not empty:
+                    self.assertEqual(item["pivot_recommendation"], "")
+                else:
+                    self.assertEqual(item["direction_state"], "diminishing")
+                    self.assertIn("响应证据", item["pivot_recommendation"])
+                    self.assertNotIn("evidence_enrichment", item["pivot_recommendation"])
+
     def test_expert_scorecard_reports_coverage_and_calibration_without_stop_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bb = Blackboard(Path(tmp) / "bb.db")
@@ -271,14 +288,22 @@ class WorldStateSnapshotTests(unittest.TestCase):
             })
             master.ctx = SimpleNamespace(
                 blackboard=bb, extra={}, tactic_map=None,
-                policy=SimpleNamespace(mode=RunMode.SRC),
+                policy=SimpleNamespace(
+                    mode=RunMode.SRC,
+                    guard=ScopeGuard(Scope(allowed_domains=["a.test"]))),
             )
             opportunity = world_state.snapshot(blackboard=bb)[
                 "testing_opportunities"]["prioritized"][0]
 
-            resolved = master._resolve_plan_challenges([{
+            exploratory = master._resolve_plan_challenges([{
                 "tactic": "TA0001", "opportunity_ref": opportunity["opportunity_ref"],
-                "why_now": "该机会是当前最高优先级的真实接口边界",
+                "why_now": "由 Web 角色补取请求并检验接口边界",
+            }])[0]
+            self.assertEqual(exploratory["target"], "https://a.test/api/orders")
+            resolved = master._resolve_plan_challenges([{
+                "tactic": "BUSINESS-CONTEXT",
+                "opportunity_ref": opportunity["opportunity_ref"],
+                "why_now": "先把真实接口线索转成可证伪权限边界假设",
             }])[0]
             self.assertEqual(resolved["target"], "https://a.test/api/orders")
             self.assertEqual(resolved["opportunity_revision"],
@@ -319,26 +344,40 @@ class WorldStateSnapshotTests(unittest.TestCase):
                 "attrs": {"method": "GET", "params": ["order_id"],
                           "sources": ["page_network", "target_response"]},
             })
+            bb.write(BlackboardLayer.ASSET, "observed-script", {
+                "asset_id": "observed-script", "asset_type": "script",
+                "value": "https://a.test/app.js",
+                "attrs": {"source": "recon_html", "source_page": "https://a.test/",
+                          "scope_decision": "in_scope", "verification_status": "observed"},
+            })
+            bb.write(BlackboardLayer.TOPOLOGY, "business-context", {
+                "kind": "business_context",
+                "surface_assessment": {"type": "transactional",
+                                       "business_complexity": "medium"},
+                "roles": [{"name": "buyer"}], "objects": [{"name": "order"}],
+                "workflows": [{"name": "checkout"}], "trust_boundaries": [],
+            })
             master.ctx = SimpleNamespace(
                 blackboard=bb, extra={}, tactic_map=None,
-                policy=SimpleNamespace(mode=RunMode.SRC),
+                policy=SimpleNamespace(
+                    mode=RunMode.SRC,
+                    guard=ScopeGuard(Scope(allowed_domains=["a.test"]))),
             )
 
             pool = world_state.snapshot(blackboard=bb)["testing_opportunities"]
             opportunity = pool["prioritized"][0]
             candidates = opportunity["capability_candidates"]
-            self.assertEqual(candidates[0]["tactic"], "TA0001")
-            self.assertTrue(candidates[0]["preferred"])
+            self.assertNotIn("TA0001", [item["tactic"] for item in candidates])
             self.assertIn("JS-REVERSE", [item["tactic"] for item in candidates])
 
             fallback = master._rule_plan({})["dag_nodes"][0]
-            self.assertEqual(fallback["tactic"], "TA0001")
+            self.assertEqual(fallback["tactic"], "JS-REVERSE")
             self.assertEqual(fallback["opportunity_ref"], opportunity["opportunity_ref"])
             resolved = master._resolve_plan_challenges([fallback])[0]
             self.assertEqual(resolved["selected_capability"]["capability"],
-                             "web_boundary_test")
+                             "script_and_api_extraction")
 
-    def test_scanner_and_verification_opportunities_are_not_forced_into_dag(self) -> None:
+    def test_scanner_and_verification_recommendations_allow_model_selected_supplementary_work(self) -> None:
         master = object.__new__(MasterAgent)
         with tempfile.TemporaryDirectory() as tmp:
             bb = Blackboard(Path(tmp) / "bb.db")
@@ -359,11 +398,10 @@ class WorldStateSnapshotTests(unittest.TestCase):
             scanner_candidates = scanner_opportunity["capability_candidates"]
             self.assertEqual(scanner_candidates[0]["execution"], "scanner_control")
             self.assertEqual(scanner_candidates[0]["tactic"], "SCANNER-CONTROL")
-            with self.assertRaisesRegex(SpiritScoutError, "扫描控制通道"):
-                master._resolve_plan_challenges([{
-                    "tactic": "TA0001",
-                    "opportunity_ref": scanner_opportunity["opportunity_ref"],
-                }])
+            supplementary = master._resolve_plan_challenges([{
+                "tactic": "TA0001", "opportunity_ref": scanner_opportunity["opportunity_ref"],
+            }])[0]
+            self.assertEqual(supplementary["hypothesis_ref"], hypothesis)
 
             transition(
                 bb, hypothesis, state="supported", reason="定向模板获得支持信号",
@@ -374,10 +412,10 @@ class WorldStateSnapshotTests(unittest.TestCase):
                 "testing_opportunities"]["prioritized"][0]
             self.assertEqual(review["capability_candidates"][0]["execution"],
                              "verification_queue")
-            with self.assertRaisesRegex(SpiritScoutError, "独立复核"):
-                master._resolve_plan_challenges([{
-                    "tactic": "TA0001", "opportunity_ref": review["opportunity_ref"],
-                }])
+            supplementary = master._resolve_plan_challenges([{
+                "tactic": "TA0001", "opportunity_ref": review["opportunity_ref"],
+            }])[0]
+            self.assertEqual(supplementary["opportunity_ref"], review["opportunity_ref"])
 
     def test_new_lead_evidence_changes_revision_and_clears_stall_penalty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -436,6 +474,19 @@ class WorldStateSnapshotTests(unittest.TestCase):
                 "attrs": {"method": "GET", "params": ["order_id"],
                           "sources": ["page_network", "target_response"]},
             })
+            bb.write(BlackboardLayer.ASSET, "observed-script", {
+                "asset_id": "observed-script", "asset_type": "script",
+                "value": "https://a.test/app.js",
+                "attrs": {"source": "recon_html", "source_page": "https://a.test/",
+                          "scope_decision": "in_scope", "verification_status": "observed"},
+            })
+            bb.write(BlackboardLayer.TOPOLOGY, "business-context", {
+                "kind": "business_context",
+                "surface_assessment": {"type": "transactional",
+                                       "business_complexity": "medium"},
+                "roles": [{"name": "member"}], "objects": [{"name": "profile"}],
+                "workflows": [{"name": "profile_read"}], "trust_boundaries": [],
+            })
             master = object.__new__(MasterAgent)
             master.ctx = SimpleNamespace(
                 blackboard=bb, extra={}, tactic_map=None,
@@ -459,7 +510,7 @@ class WorldStateSnapshotTests(unittest.TestCase):
                 })
 
             web = next(item for item in initial["capability_candidates"]
-                       if item["tactic"] == "TA0001")
+                       if item["tactic"] == "JS-REVERSE")
             for index in range(2):
                 empty_attempt(index, web)
 
@@ -471,16 +522,16 @@ class WorldStateSnapshotTests(unittest.TestCase):
                                   if item["capability"] == web["capability"])[
                                       "consecutive_empty"], 2)
             fallback = master._rule_plan({})["dag_nodes"][0]
-            self.assertEqual(fallback["tactic"], "JS-REVERSE")
+            self.assertEqual(fallback["tactic"], "BUSINESS-CONTEXT")
 
             js = next(item for item in pivoted["capability_candidates"]
-                      if item["tactic"] == "JS-REVERSE")
+                      if item["tactic"] == "BUSINESS-CONTEXT")
             for index in range(2):
                 empty_attempt(index, js)
             exhausted = world_state.snapshot(blackboard=bb)["testing_opportunities"][
                 "prioritized"][0]
-            self.assertTrue(exhausted["exhausted"])
-            self.assertEqual(exhausted["direction_state"], "exhausted")
+            self.assertFalse(exhausted["exhausted"])
+            self.assertEqual(exhausted["direction_state"], "diminishing")
 
     def test_portfolio_review_exposes_concentration_and_user_resolvable_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -535,10 +586,23 @@ class WorldStateSnapshotTests(unittest.TestCase):
                 "attrs": {"method": "GET", "params": ["id"],
                           "sources": ["page_network", "target_response"]},
             })
+            bb.write(BlackboardLayer.ASSET, "observed-script", {
+                "asset_id": "observed-script", "asset_type": "script",
+                "value": "https://a.test/app.js",
+                "attrs": {"source": "recon_html", "source_page": "https://a.test/",
+                          "scope_decision": "in_scope", "verification_status": "observed"},
+            })
+            bb.write(BlackboardLayer.TOPOLOGY, "business-context", {
+                "kind": "business_context",
+                "surface_assessment": {"type": "transactional",
+                                       "business_complexity": "medium"},
+                "roles": [{"name": "member"}], "objects": [{"name": "profile"}],
+                "workflows": [{"name": "profile_read"}], "trust_boundaries": [],
+            })
             initial = world_state.snapshot(blackboard=bb)["testing_opportunities"][
                 "prioritized"][0]
             capability = next(item for item in initial["capability_candidates"]
-                              if item["tactic"] == "TA0001")
+                              if item["tactic"] == "JS-REVERSE")
 
             def write(index: int, useful: bool) -> None:
                 bb.write(BlackboardLayer.TASK_STATE, f"attempt-{index}", {
@@ -566,6 +630,7 @@ class WorldStateSnapshotTests(unittest.TestCase):
                              if item["capability"] == capability["capability"])
             self.assertEqual(web_yield["consecutive_empty"], 0)
             self.assertEqual(refreshed["direction_state"], "productive")
+            self.assertEqual(refreshed["pivot_recommendation"], "", "恢复产出后撤掉换路建议")
 
     def test_resolved_blocker_is_not_kept_as_current_direction_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -649,12 +714,13 @@ class WorldStateSnapshotTests(unittest.TestCase):
             refreshed = world_state.snapshot(blackboard=bb)["testing_opportunities"]
             exhausted = next(item for item in refreshed["prioritized"]
                              if item["opportunity_ref"] == first["opportunity_ref"])
-            self.assertEqual(exhausted["direction_state"], "exhausted")
+            self.assertEqual(exhausted["direction_state"], "diminishing")
             fallback = master._rule_plan({})["dag_nodes"][0]
             self.assertNotEqual(fallback["opportunity_ref"], first["opportunity_ref"])
             selected = next(item for item in refreshed["prioritized"]
                             if item["opportunity_ref"] == fallback["opportunity_ref"])
-            self.assertEqual(fallback["tactic"], selected["capability_candidates"][0]["tactic"])
+            self.assertEqual(selected["opportunity_ref"], fallback["opportunity_ref"])
+            self.assertEqual(fallback["tactic"], "BUSINESS-CONTEXT")
 
     def test_stale_opportunity_cleanup_only_cancels_pending_nodes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -731,8 +797,8 @@ class WorldStateSnapshotTests(unittest.TestCase):
                 })
             master._cancel_stale_opportunity_nodes(dag)
 
-            self.assertEqual(stalled_node.status, TaskStatus.CANCELLED)
-            self.assertIn("连续空转", stalled_node.meta["cancel_reason"])
+            self.assertEqual(stalled_node.status, TaskStatus.PENDING)
+            self.assertNotIn("cancel_reason", stalled_node.meta)
 
     def test_plan_resolution_separates_historical_session_refs(self) -> None:
         master = object.__new__(MasterAgent)
@@ -947,7 +1013,7 @@ class WorldStateSnapshotTests(unittest.TestCase):
             self.assertEqual(signals["business_complexity"]["level"], "high")
             self.assertTrue(signals["dispatch_evidence"]["business_context_supported"])
 
-    def test_src_evidence_gate_defers_premature_attack_roles(self) -> None:
+    def test_src_model_can_dispatch_exploration_without_preexisting_surface(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bb = Blackboard(Path(tmp) / "bb.db")
             self.addCleanup(bb.close)
@@ -963,15 +1029,31 @@ class WorldStateSnapshotTests(unittest.TestCase):
                 extra={}, agents={},
             )
 
-            nodes = master._apply_src_evidence_gates([
+            nodes = master._resolve_plan_challenges([
                 {"tactic": "TA0043"}, {"tactic": "BUSINESS-CONTEXT"},
                 {"tactic": "JS-REVERSE"}, {"tactic": "TA0001"},
                 {"tactic": "TA0007"}, {"tactic": "HOST-VULN"},
             ])
             fallback = master._rule_plan({})["dag_nodes"]
 
-            self.assertEqual([node["tactic"] for node in nodes], ["TA0043"])
-            self.assertEqual([node["tactic"] for node in fallback], ["TA0043"])
+            self.assertEqual([node["tactic"] for node in nodes],
+                             ["TA0043", "BUSINESS-CONTEXT", "JS-REVERSE", "TA0001", "TA0007", "HOST-VULN"])
+            self.assertEqual([node["tactic"] for node in fallback], ["BUSINESS-CONTEXT"])
+
+    def test_src_service_mapping_fallback_uses_host_role_and_preserves_competition(self) -> None:
+        master = object.__new__(MasterAgent)
+        for mode, tactic in [(RunMode.SRC, "HOST-VULN"), (RunMode.COMPETITION, "TA0007")]:
+            master.ctx = SimpleNamespace(tactic_map=None, policy=SimpleNamespace(mode=mode))
+            for situation in [
+                {"action_signals": {"dispatch_evidence": {"port_scan_supported": True}}},
+                {"testing_opportunities": {"prioritized": [{
+                    "opportunity_ref": "service-op", "kind": "evidence_gap",
+                    "capability_candidates": [{"capability": "service_mapping", "execution": "dag", "tactic": "TA0007"}],
+                }]}},
+            ]:
+                with self.subTest(mode=mode, situation=situation):
+                    master._situation_digest = lambda: situation
+                    self.assertEqual(master._rule_plan({})["dag_nodes"][0]["tactic"], tactic)
 
     def test_rule_fallback_prefers_js_for_low_complexity_portal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1006,7 +1088,7 @@ class WorldStateSnapshotTests(unittest.TestCase):
             self.assertNotIn("BUSINESS-CONTEXT", tactics)
             self.assertNotIn("TA0007", tactics)
 
-    def test_service_evidence_unlocks_port_role_without_unlocking_web_vuln(self) -> None:
+    def test_service_evidence_does_not_restrict_model_selected_roles(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bb = Blackboard(Path(tmp) / "bb.db")
             self.addCleanup(bb.close)
@@ -1022,11 +1104,11 @@ class WorldStateSnapshotTests(unittest.TestCase):
                 extra={}, agents={},
             )
 
-            nodes = master._apply_src_evidence_gates([
+            nodes = master._resolve_plan_challenges([
                 {"tactic": "TA0001"}, {"tactic": "TA0007"}, {"tactic": "HOST-VULN"},
             ])
 
-            self.assertEqual([node["tactic"] for node in nodes], ["TA0007", "HOST-VULN"])
+            self.assertEqual([node["tactic"] for node in nodes], ["TA0001", "TA0007", "HOST-VULN"])
 
     def test_investigation_frontier_separates_observed_and_generated_leads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1179,6 +1261,26 @@ class UserBoundaryContextTests(unittest.TestCase):
         self.assertEqual(snapshot["project_rules"], project_rules)
         self.assertEqual(set(snapshot["user_context"]), {"statements"})
 
+    def test_src_project_description_remains_user_context_without_historical_observations(self):
+        description = "会员系统背景\n" * 3000 + "明确约定：禁止修改真实订单"
+        self.bb.write(BlackboardLayer.TOPOLOGY, "history-policy", {"on_demand": True, "project_id": "p1"})
+        self.bb.write(BlackboardLayer.TOPOLOGY, "project-memory", {
+            "project_id": "p1", "description": description, "assets": ["legacy-history-marker"]})
+        snapshot = world_state.snapshot(blackboard=self.bb)
+        self.assertEqual(snapshot["project_context"]["description"], description)
+        self.assertNotIn("project_rules", snapshot)
+        self.assertNotIn("legacy-history-marker", json.dumps(snapshot))
+        projected = world_state.snapshot(blackboard=self.bb, references=True)
+        ref = projected["project_context"]["description"]["blackboard_ref"]
+        record = self.bb.read(BlackboardLayer(ref["layer"]), ref["record_id"])
+        self.assertEqual(record["content"], description)
+        self.assertEqual(record["kind"], "project_description")
+
+        self.bb.write(BlackboardLayer.TOPOLOGY, "history-policy", {"on_demand": True, "project_id": ""})
+        self.assertNotIn("project_context", world_state.snapshot(blackboard=self.bb),
+                         "移出项目后不自动继承旧项目说明，旧记录保留供回查")
+        self.assertIsNotNone(self.bb.read(BlackboardLayer.TOPOLOGY, "project-memory"))
+
     def test_concurrent_user_answers_do_not_overwrite_each_other(self) -> None:
         read = self.bb.read_versioned
         barrier = threading.Barrier(2)
@@ -1301,6 +1403,17 @@ class StablePromptTests(unittest.TestCase):
         self.assertIn("expected_information", prompt)
         self.assertIn("next_minimal_experiment", prompt)
         self.assertIn("stop_condition", prompt)
+
+    def test_master_prompt_carries_user_selected_src_asset_strategy(self) -> None:
+        master = object.__new__(MasterAgent)
+        master.ctx = SimpleNamespace(
+            extra={"asset_strategy": "core_first"}, agents={},
+            policy=SimpleNamespace(mode=RunMode.SRC), blackboard=None)
+
+        prompt = master._system_prompt()
+
+        self.assertIn("核心资产优先", prompt)
+        self.assertIn("高价值核心业务", prompt)
 
     def test_role_prompt_does_not_interpolate_scope(self) -> None:
         guard = ScopeGuard(Scope(allowed_domains=["a.test"]))

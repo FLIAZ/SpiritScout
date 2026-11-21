@@ -10,9 +10,17 @@ from typing import Any
 
 from spiritscout.agents.sub.base import RoutePlan, StepResult, SubAgent
 from spiritscout.blackboard.exchange import NAMES, SCHEMAS, execute, project_rules
+from spiritscout.blackboard.hypotheses import upsert as upsert_hypothesis
 from spiritscout.core.audit import tool_preview
 from spiritscout.core.ids import new_id
-from spiritscout.core.models import AgentType, Asset, BlackboardLayer, Task
+from spiritscout.core.models import (
+    AgentType,
+    Asset,
+    BlackboardLayer,
+    RunMode,
+    Task,
+    TaskStatus,
+)
 from spiritscout.gateway.backends import extract_json
 from spiritscout.gateway.context import append_instruction_events, compact_history
 from spiritscout.gateway.progress import (
@@ -106,12 +114,14 @@ class BusinessContextAgent(SubAgent):
                 }, "required": ["url"]}}},
             {"type": "function", "function": {
                 "name": "http_probe",
-                "description": "HTTP 只读探测（结构化解析状态码/标题/响应头/指纹；"
-                               "带范围标注并遵守限速），适合裸接口与响应头层面的确认",
+                "description": "HTTP 请求与响应采集；保留真实请求方法和上下文，动作经过现有审批策略",
                 "parameters": {"type": "object", "properties": {
                     "url": {"type": "string"},
                     "method": {"type": "string"},
                     "params": {"type": "object"},
+                    "data": {"type": "string"},
+                    "action": {"type": "string", "description": "非只读方法如实声明 analysis、intrusive_write 等动作类别"},
+                    "max_redirects": {"type": "integer"},
                     "refresh": {"type": "boolean", "description": "需要新鲜响应时设 true，绕过共享记录"},
                     "headers": {"type": "object"},
                     "secret_headers": {"type": "object", "additionalProperties": {"oneOf": [
@@ -130,6 +140,10 @@ class BusinessContextAgent(SubAgent):
 
         schemas.append(JS_READ_SCHEMA)
         schemas.append(CVE_SCHEMA)
+        if getattr(getattr(self.ctx, "policy", None), "mode", None) == RunMode.SRC:
+            from spiritscout.tools.history import SCHEMA as HISTORY_SCHEMA
+
+            schemas.append(HISTORY_SCHEMA)
         from spiritscout.tools.cyberchef import SCHEMAS as CYBERCHEF_SCHEMAS
 
         schemas.extend(CYBERCHEF_SCHEMAS)
@@ -194,16 +208,10 @@ class BusinessContextAgent(SubAgent):
             "world_state": {**self._world_state(), "environment": environment(
                 workspace=workspace, artifacts=artifacts)},
             "交付要求": (
-                "以真实用户视角走访该目标的业务流程。渲染后的页面、网络请求"
-                "（XHR/fetch）都是证据；把实际观测到的接口交易用 record_endpoint "
-                "登记（方法/URL/参数名/业务语义，不要参数值）。结论只写有证据"
-                "支撑的。先判断页面是否真的存在值得深入的交易、角色权限或对象状态流："
-                "电商、账户中心、工单等交互型业务可继续走访；内容展示门户或只有公开"
-                "登录入口、当前又没有测试凭据时，只记录公开页面、表单和已发生请求，"
-                "把登录后流程列为缺口后立即收尾，不要反复尝试登录、注册或等待账号。"
-                "需要用户独有输入时至多提出当前必要问题；用户无法提供或选择未登录测试"
-                "后，不再重复询问。证据收集完成后直接输出结论文本（不再调用工具），"
-                "系统会据此归纳业务上下文。"),
+                "自主理解业务、身份、对象和状态，按当前问题决定走访深度与工具。"
+                "用 record_endpoint 登记真实交易的方法、URL、参数名和业务语义，不记录秘密值。"
+                "缺少凭据时可继续授权内匿名流程和其他可行方向；需要用户独有输入时再询问，"
+                "无法提供则说明缺口。观察、假设和未知分开；完成后输出结论，系统归纳业务上下文。"),
         }
         intent = {"mission": str(task.payload.get("mission", ""))[:600],
                   "node": str(task.payload.get("node_title", ""))[:120]}
@@ -301,7 +309,13 @@ class BusinessContextAgent(SubAgent):
             emitter.flush()
             self.ctx.audit.log("llm.step_fallback", self.agent_id, {
                 "role": "business_explorer", "error": str(exc)[:200]})
-            return StepResult(ok=False, note=f"走访决策不可用: {exc}")
+            # 前面成功的工具回合不代表走访已完成；模型不可用时保留现场，
+            # 显式终止为失败，不能由路线成功步数推导出 DONE。
+            route.status = TaskStatus.FAILED
+            return StepResult(ok=False, note=f"走访决策不可用: {exc}", blockers=[{
+                "type": "model_unavailable", "description": f"走访决策不可用: {exc}",
+                "prerequisite": "模型服务恢复后续传走访，已有观察尚不足以判定任务完成",
+            }])
 
         emitter.flush()
         # 将本次请求末尾的短提醒固化进历史，使下一轮请求完整复用上一轮前缀；
@@ -550,7 +564,8 @@ class BusinessContextAgent(SubAgent):
             and (rec["data"].get("attrs") or {}).get("kind") == "business_page"
         ]
         endpoint_records = [
-            {**record["data"], "_record_id": record["record_id"]} for record in self.ctx.blackboard.query(
+            {**record["data"], "_record_id": record["record_id"],
+             "_version": record["version"]} for record in self.ctx.blackboard.query(
                 BlackboardLayer.ASSET, limit=1000)
             if record["data"].get("asset_type") == "endpoint"
         ]
@@ -575,6 +590,7 @@ class BusinessContextAgent(SubAgent):
             evidence.append({
                 "id": f"E{len(evidence) + 1}",
                 "record_id": endpoint["_record_id"],
+                "version": endpoint["_version"],
                 "kind": ("har_transaction" if source_file
                          else "observed_transaction" if source == "model_observed"
                          else "observed_form"),
@@ -599,6 +615,7 @@ class BusinessContextAgent(SubAgent):
                 "objects:[{name,evidence_refs}], "
                 "workflows:[{name,steps,evidence_refs}], trust_boundaries:[{description,"
                 "evidence_refs}], facts:[{statement,evidence_refs}], hypotheses:[{statement,"
+                "expected_signal,counter_signal,next_minimal_experiment,stop_condition,"
                 "evidence_refs}], blockers:[{type:authentication_required|sso_required|"
                 "captcha_required|credentials_required|user_interaction_required|"
                 "environment_unavailable|other,description:str,prerequisite:str,"
@@ -606,7 +623,8 @@ class BusinessContextAgent(SubAgent):
                 "evidence_enrichment|service_mapping|business_boundary_modeling],"
                 "evidence_refs:[str]}], unknowns:[str]}。每条结论和 blocker 必须引用"
                 "evidence 中的 id；"
-                "证据不能支持时放到 unknowns，不得猜账号角色、权限或隐藏接口。"
+                "假设可来自技术常识或不完整线索，说明依据和验证方法，不得写成已观测事实。"
+                "身份、对象和权限未确认时保留不确定性；缺少必要实验条件写入 blockers 或 unknowns。"
             ),
         }, max_user_chars=12000, reasoning_effort=self.task_effort(task), task=task,
             _allow_ask=False)
@@ -646,6 +664,36 @@ class BusinessContextAgent(SubAgent):
             updated_by=self.agent_id,
             dedup_key="business|context",
         )
+        evidence_by_id = {item["id"]: item for item in evidence}
+        for item in context.get("hypotheses", [])[:12]:
+            if not isinstance(item, dict):
+                continue
+            statement = str(item.get("statement") or "").strip()
+            refs = [ref for ref in item.get("evidence_refs", []) if ref in evidence_by_id]
+            subjects = [str(evidence_by_id[ref].get("url") or "").strip() for ref in refs]
+            subject = next((value for value in subjects if value), task.target)
+            if not statement:
+                continue
+            lower = statement.lower()
+            test_type = ("idor" if any(key in lower for key in (
+                "越权", "对象权限", "idor", "归属", "跨租户")) else
+                "authorization" if any(key in lower for key in (
+                    "权限", "角色", "授权", "认证")) else "business_logic")
+            upsert_hypothesis(
+                self.ctx.blackboard, claim=statement, subject=subject,
+                test_type=test_type,
+                evidence_refs=[
+                    f"asset:{evidence_by_id[ref]['record_id']}@{evidence_by_id[ref]['version']}"
+                    for ref in refs
+                ],
+                expected_signal=str(item.get("expected_signal") or "同一业务对象在身份、角色或状态变化后出现未授权差异"),
+                counter_signal=str(item.get("counter_signal") or "服务端稳定校验对象归属、角色与状态前置条件"),
+                next_minimal_experiment=str(item.get("next_minimal_experiment") or
+                    "使用已观测请求和合法样本做单变量身份/对象/状态对照，不枚举未知对象"),
+                stop_condition=str(item.get("stop_condition") or
+                    "缺少合法对照身份或对象样本时标记阻塞；服务端校验一致时反驳当前假设"),
+                actor=self.agent_id, agent_type=self.agent_type,
+            )
         blockers = list(context.get("blockers") or [])
         assessment = context.get("surface_assessment")
         assessment = assessment if isinstance(assessment, dict) else {}
@@ -707,6 +755,12 @@ class BusinessContextAgent(SubAgent):
                 if not refs:
                     continue
                 sanitized = {k: v for k, v in item.items() if k != "evidence_refs"}
+                if key == "hypotheses":
+                    for field in ("statement", "expected_signal", "counter_signal",
+                                  "next_minimal_experiment", "stop_condition"):
+                        if field in sanitized:
+                            sanitized[field] = re.sub(
+                                r"\s+", " ", str(sanitized[field])).strip()[:500]
                 sanitized["evidence_refs"] = refs
                 clean.append(sanitized)
             out[key] = clean[:30]

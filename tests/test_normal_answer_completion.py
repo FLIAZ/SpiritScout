@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from spiritscout.agents.sub.base import SubAgentContext
 from spiritscout.blackboard import Blackboard
@@ -111,12 +111,17 @@ class NormalAnswerCompletionTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse((await self.record()).ok)
         self.assertFalse(self.flags.all())
 
-    async def test_answer_registered_to_another_challenge_is_not_shared(self):
-        self.flags.register(self.args['answer'], challenge_id='other', found_by='fixture')
-        self.agent._record_flag = Mock()
-        self.assertFalse((await self.record()).ok)
-        self.agent._record_flag.assert_not_called()
-        self.assertFalse(self.flags.completed_ids())
+    async def test_equal_answers_do_not_share_challenge_evidence(self):
+        other = self.flags.register(self.args['answer'], challenge_id='other', found_by='fixture')
+        self.assertTrue((await self.record()).ok)
+        current = self.flags.get(self.args['answer'], challenge_id='one')
+        self.assertNotEqual(current.flag_id, other.flag_id)
+        self.assertEqual(current.evidence_refs, ['observed'])
+        self.assertEqual(other.evidence_refs, [])
+        self.assertEqual(self.flags.completed_ids(), {'one'})
+        other_task = self.task.model_copy(deep=True)
+        other_task.payload['challenge']['id'] = 'other'
+        self.assertEqual(self.agent._shared_flags(other_task), [])
 
     async def test_failed_forged_and_cross_task_execution_cannot_complete(self):
         self.journal.begin('other', 'sandbox_exec', 'digest', 'never', scope=ExecutionScope(task_id='unrelated'))

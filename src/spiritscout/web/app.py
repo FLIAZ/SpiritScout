@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import copy
 import sqlite3
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -29,6 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from spiritscout import __version__
 from spiritscout.config.settings import ModelEntry, SystemConfig
 from spiritscout.core.audit import AuditLogger, read_record
+from spiritscout.core.cleanup import finish_cleanup
 from spiritscout.core.exceptions import (
     ConfigurationError,
     RuleConflictError,
@@ -76,7 +78,7 @@ def _is_public_path(path: str) -> bool:
 
 
 def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
-               max_concurrent: int = 4) -> FastAPI:
+               max_concurrent: int | None = None) -> FastAPI:
     loopback = cfg.web.host in ("127.0.0.1", "localhost", "::1")
     # 先把环境变量凭据导入管理员库，再判断是否启用登录——首次带 .env
     # 启动的非回环部署才不会误报“没有管理员”。
@@ -108,10 +110,39 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        # 监督协程在 lifespan 内启动（不隶属任何请求任务组），
-        # 关停时停掉所有未终态会话，避免孤儿任务
-        await updater.start()
-        async def start_services():
+        stopping = asyncio.Event()
+        http_started = getattr(_app.state, "_http_started", None)
+
+        async def wait_for_http() -> None:
+            # 产品入口在套接字监听后放行；直接嵌入 ASGI 时仍兼容其生命周期。
+            if http_started is not None:
+                await http_started.wait()
+
+        async def sync_history() -> None:
+            await wait_for_http()
+            for path in (Path(cfg.workspace.root) / "sessions").glob("sess-*"):
+                if stopping.is_set():
+                    break
+                try:
+                    await asyncio.to_thread(resource_store.import_session, path)
+                except (OSError, ValueError, sqlite3.Error) as exc:
+                    print(f"[spiritscout] 历史资产同步失败（{path.name}）："
+                          f"{type(exc).__name__}；原会话数据保留", file=sys.stderr)
+
+        async def prewarm_model_sdk() -> None:
+            await wait_for_http()
+            if stopping.is_set():
+                return
+            from spiritscout.gateway.litellm_runtime import load_litellm
+
+            try:
+                await load_litellm()
+            except Exception as exc:  # noqa: BLE001 — 首次调用仍保留原生错误。
+                print(f"[警告] 模型 SDK 预热失败（首次调用时重试）：{exc}",
+                      file=sys.stderr)
+
+        async def start_services() -> None:
+            await wait_for_http()
             # 候选版本健康检查完成之前不启动自动任务或恢复模型作业。
             while updater.busy():
                 await asyncio.sleep(.2)
@@ -120,28 +151,40 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             scheduler.start()
             resource_assistant.start()
             storage.start_maintenance()
+
+        manager.resource_sync_task = asyncio.create_task(
+            sync_history(), name="spiritscout-history-sync")
+        warmup = (asyncio.create_task(prewarm_model_sdk(), name="spiritscout-model-warmup")
+                  if any(model.provider not in {"mock", "ollama"} for model in models) else None)
+        _app.state.model_warmup = warmup
         startup = asyncio.create_task(start_services())
-        if not updater.busy():
-            await startup
-        # 读取已存在的资产，不启动旧会话或发起网络探测。
-        for path in (Path(cfg.workspace.root)/"sessions").glob("sess-*"):
-            try:
-                resource_store.import_session(path)
-            except (OSError,ValueError,sqlite3.Error):
-                pass
-        yield
-        startup.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await startup
-        await updater.close()
-        await scheduler.close()
-        await traffic_capture.aclose()
-        await proxy_benchmarks.close()
-        await close_manual_distills(manager)
-        await storage.close()
-        await resource_assistant.close()
-        await manager.aclose()
-        await account_browsers.aclose()
+        try:
+            await updater.start()
+            yield
+        finally:
+            stopping.set()
+            if http_started is not None:
+                http_started.set()
+            async def close_services() -> None:
+                startup.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await startup
+                await updater.close()
+                await scheduler.close()
+                await manager.aclose()
+                # 先停止任务入口；取消等待不会停止线程，当前文件/SDK 加载结束后再收尾。
+                await finish_cleanup(manager.resource_sync_task)
+                if warmup is not None:
+                    await finish_cleanup(warmup)
+                await traffic_capture.aclose()
+                await proxy_benchmarks.close()
+                await close_manual_distills(manager)
+                await storage.close()
+                await resource_assistant.close()
+                await asset_campaigns.aclose()
+                await account_browsers.aclose()
+
+            await finish_cleanup(close_services())
 
     app = FastAPI(title="灵枢 SpiritScout 控制台", version=__version__,
                   lifespan=lifespan)
@@ -170,6 +213,13 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
 
     account_browsers = mount_browser_accounts(app, cfg, resource_store)
     mount_projects(app, resource_store, manager)
+    from spiritscout.config import load_model_config
+    from spiritscout.web.asset_campaigns import mount_asset_campaigns
+
+    asset_campaigns = mount_asset_campaigns(
+        app, cfg, resource_store, models,
+        models_source=lambda: vault.apply_keys(load_model_config(cfg.models_config_path)),
+    )
     from spiritscout.web.traffic import mount_traffic
 
     traffic_capture = mount_traffic(app, resource_store, manager)
@@ -178,7 +228,9 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
         close_manual_distills,
         mount_experience_routes,
     )
+    from spiritscout.web.system_resources import mount_system_resources
 
+    mount_system_resources(app)
     mount_console_insights(app, cfg, manager)
     mount_experience_routes(app, cfg, manager)
     app.state.resources = resource_store
@@ -332,6 +384,18 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
             raise HTTPException(
                 422, "轻量本地部署仅支持 CTF 解题与 AWDP 修补模式；"
                      "SRC/智能体模式请使用正常部署")
+        from spiritscout.web.asset_handoff import resolve_handoff
+
+        await manager.wait_for_resources()
+        try:
+            snapshot = resolve_handoff(resource_store, payload)
+        except SpiritScoutError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if snapshot:
+            values = [item["value"] for item in snapshot["targets"]]
+            payload.update(target=values[0], scope=values,
+                           excluded_assets=list(dict.fromkeys([*payload["excluded_assets"], *snapshot["excluded_assets"]])),
+                           _asset_snapshot=snapshot)
         staged = resolve_staged_uploads(cfg, payload)
         if payload.get('browser_account_ids'):
             if cfg.gateway.lightweight_local:
@@ -350,10 +414,12 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
                 mode=mode,
                 target=payload.get("target") or None,
                 extra_scope=list(payload.get("scope") or []),
+                excluded_assets=list(payload.get("excluded_assets") or []),
                 platform=payload.get("platform") or None,
                 allow_sensitive=bool(payload.get("allow_sensitive", False)),
                 rps=float(payload.get("rps", 10.0)),
                 flag_format=payload.get("flag_format") or None,
+                generate_wp=payload.get("generate_wp", False),
                 multiple_answers=bool(payload.get("multiple_answers", False)),
                 ctf_type_hints=list(payload.get("ctf_type_hints") or []),
                 ctf_type_note=str(payload.get("ctf_type_note") or ""),
@@ -595,21 +661,41 @@ def create_app(cfg: SystemConfig, models: list[ModelEntry], *,
     @app.post("/api/sessions/{session_id}/questions/{question_id}")
     async def answer_question(session_id: str, question_id: str,
                               payload: QuestionAnswerPayload) -> dict[str, Any]:
-        """回答模型发起的提问：{"choice": 选项下标} 或 {"choices": [多选下标]}
-        或 {"text": 自由输入}，{"add_targets": [...]} 为用户勾选的扩围目标
-        （写入会话批准集）。"""
+        """单次答复完成选择与范围确认；add_targets 只兼容旧客户端。"""
         session = manager.get(session_id)
         if session is None:
             raise HTTPException(404, f"会话不存在: {session_id}")
-        try:
-            ok = session.questions.answer(
-                question_id, choice=payload.choice, choices=payload.choices,
-                text=payload.text, add_targets=payload.add_targets)
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
-        if not ok:
+        lock = session.questions.answer_lock(question_id)
+        if lock is None:
             raise HTTPException(409, f"待答问题不存在或已作答: {question_id}")
-        return {"question_id": question_id, "answered": True}
+        async with lock:
+            try:
+                prepared = session.questions.prepare_answer(
+                    question_id, choice=payload.choice, choices=payload.choices,
+                    text=payload.text, allow_targets=bool(payload.add_targets))
+                if prepared is None:
+                    raise HTTPException(409, f"待答问题不存在或已作答: {question_id}")
+                rec, answer, picked = prepared
+                added = payload.add_targets
+                resolved = None
+                # 新选项已有模型写出的目标关联，不增加模型请求；自由输入和旧问题
+                # 仅在真正涉及范围裁定时解释一次，不用关键词或域名出现来猜授权。
+                mapped = picked and not payload.text.strip() and all(
+                    "approved_by" in item for item in rec["targets"])
+                if rec["targets"] and not rec["secret"] and not added and not mapped:
+                    from spiritscout.web.session_assistant import _llm_answer_scope
+                    resolved = await _llm_answer_scope(cfg, session, rec, answer)
+                ok = session.questions.answer(
+                    question_id, choice=payload.choice, choices=payload.choices,
+                    text=payload.text, add_targets=added, resolved_targets=resolved,
+                    scope_resolved=resolved is not None)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+            except SpiritScoutError as exc:
+                raise HTTPException(503, f"授权答复未提交：{exc}") from exc
+            if not ok:
+                raise HTTPException(409, f"待答问题不存在或已作答: {question_id}")
+            return {"question_id": question_id, "answered": True}
 
     mount_collaboration_routes(app, cfg, manager, _require)
 
