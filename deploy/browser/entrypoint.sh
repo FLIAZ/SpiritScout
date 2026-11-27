@@ -44,12 +44,16 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 0' TERM INT
 
+# Docker Desktop 重启仍保留容器可写层；旧 X 锁和 socket 不代表显示服务存活。
+rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
 Xvfb :99 -screen 0 1440x900x24 -nolisten tcp &
+xvfb_pid=$!
 for attempt in {1..100}; do
-    [ -S /tmp/.X11-unix/X99 ] && break
+    kill -0 "$xvfb_pid" 2>/dev/null || { echo "Xvfb exited before readiness" >&2; exit 1; }
+    xdpyinfo -display :99 >/dev/null 2>&1 && break
     sleep 0.1
 done
-[ -S /tmp/.X11-unix/X99 ]
+xdpyinfo -display :99 >/dev/null 2>&1
 runuser -u browser -- openbox &
 runuser -u browser -- chromium \
     --user-data-dir=/profile --password-store=basic \
